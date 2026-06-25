@@ -1,0 +1,347 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
+#include "qemu/osdep.h"
+#include "hw/ia64/efi.h"
+
+#define PE32_MAGIC  0x10b
+#define PE32P_MAGIC 0x20b
+
+#define PE_SIGNATURE_OFFSET 0x3c
+#define PE_SIGNATURE_SIZE   4
+#define COFF_HEADER_SIZE    20
+#define SECTION_HEADER_SIZE 40
+
+#define MAX_EFI_IMAGE_SIZE (128 * 1024 * 1024)
+
+static bool range_ok(size_t size, uint64_t offset, uint64_t length)
+{
+    return offset <= size && length <= size - offset;
+}
+
+static uint16_t rd16(const uint8_t *p)
+{
+    return p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t rd32(const uint8_t *p)
+{
+    return p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static uint64_t rd64(const uint8_t *p)
+{
+    return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
+}
+
+static void efi_image_reset(VibatniumEfiImage *image)
+{
+    memset(image, 0, sizeof(*image));
+}
+
+bool vibatnium_efi_image_from_buffer(const char *path,
+                                     const uint8_t *file,
+                                     size_t file_size,
+                                     uint64_t load_base,
+                                     VibatniumEfiImage *image,
+                                     Error **errp)
+{
+    uint32_t pe_offset;
+    const uint8_t *pe;
+    const uint8_t *coff;
+    const uint8_t *optional;
+    const uint8_t *section_table;
+    uint16_t machine;
+    uint16_t sections;
+    uint16_t optional_size;
+    uint16_t optional_magic;
+    uint32_t entry_rva;
+    uint32_t size_of_image;
+    uint32_t size_of_headers;
+    uint32_t section_alignment;
+    uint64_t preferred_image_base;
+    uint8_t *memory_image;
+
+    g_return_val_if_fail(image != NULL, false);
+    efi_image_reset(image);
+
+    if (!file || file_size < 0x40) {
+        error_setg(errp, "EFI image is too small");
+        return false;
+    }
+    if (file[0] != 'M' || file[1] != 'Z') {
+        error_setg(errp, "EFI image does not have an MZ header");
+        return false;
+    }
+    if (!range_ok(file_size, PE_SIGNATURE_OFFSET, sizeof(uint32_t))) {
+        error_setg(errp, "EFI image DOS header is truncated");
+        return false;
+    }
+
+    pe_offset = rd32(file + PE_SIGNATURE_OFFSET);
+    if (!range_ok(file_size, pe_offset,
+                  PE_SIGNATURE_SIZE + COFF_HEADER_SIZE)) {
+        error_setg(errp, "EFI image PE header is outside the file");
+        return false;
+    }
+
+    pe = file + pe_offset;
+    if (memcmp(pe, "PE\0\0", PE_SIGNATURE_SIZE) != 0) {
+        error_setg(errp, "EFI image does not have a PE signature");
+        return false;
+    }
+
+    coff = pe + PE_SIGNATURE_SIZE;
+    machine = rd16(coff);
+    sections = rd16(coff + 2);
+    optional_size = rd16(coff + 16);
+
+    if (machine != VIBATNIUM_EFI_PE_MACHINE_IA64) {
+        error_setg(errp, "EFI image machine 0x%04x is not IA-64", machine);
+        return false;
+    }
+    if (sections == 0) {
+        error_setg(errp, "EFI image has no sections");
+        return false;
+    }
+    if (!range_ok(file_size, pe_offset + PE_SIGNATURE_SIZE + COFF_HEADER_SIZE,
+                  optional_size)) {
+        error_setg(errp, "EFI image optional header is truncated");
+        return false;
+    }
+
+    optional = coff + COFF_HEADER_SIZE;
+    optional_magic = rd16(optional);
+    if (optional_magic != PE32_MAGIC && optional_magic != PE32P_MAGIC) {
+        error_setg(errp, "EFI image optional header magic 0x%04x is unsupported",
+                   optional_magic);
+        return false;
+    }
+    if (optional_size < 64) {
+        error_setg(errp, "EFI image optional header is too small");
+        return false;
+    }
+
+    entry_rva = rd32(optional + 16);
+    preferred_image_base = optional_magic == PE32P_MAGIC ?
+                           rd64(optional + 24) : rd32(optional + 28);
+    section_alignment = rd32(optional + 32);
+    size_of_image = rd32(optional + 56);
+    size_of_headers = rd32(optional + 60);
+
+    if (section_alignment == 0) {
+        error_setg(errp, "EFI image has zero section alignment");
+        return false;
+    }
+    if (size_of_image == 0 || size_of_image > MAX_EFI_IMAGE_SIZE) {
+        error_setg(errp, "EFI image size 0x%x is unsupported", size_of_image);
+        return false;
+    }
+    if (size_of_headers > size_of_image) {
+        error_setg(errp, "EFI image headers exceed image size");
+        return false;
+    }
+    if (entry_rva >= size_of_image) {
+        error_setg(errp, "EFI image entry RVA 0x%x is outside image size 0x%x",
+                   entry_rva, size_of_image);
+        return false;
+    }
+    if (UINT64_MAX - load_base < size_of_image) {
+        error_setg(errp, "EFI image load address overflows");
+        return false;
+    }
+
+    section_table = optional + optional_size;
+    if (!range_ok(file_size, section_table - file,
+                  (uint64_t)sections * SECTION_HEADER_SIZE)) {
+        error_setg(errp, "EFI image section table is truncated");
+        return false;
+    }
+
+    memory_image = g_malloc0(size_of_image);
+    memcpy(memory_image, file, MIN((size_t)size_of_headers, file_size));
+
+    for (uint16_t i = 0; i < sections; i++) {
+        const uint8_t *section = section_table + i * SECTION_HEADER_SIZE;
+        uint32_t virtual_size = rd32(section + 8);
+        uint32_t virtual_address = rd32(section + 12);
+        uint32_t raw_size = rd32(section + 16);
+        uint32_t raw_pointer = rd32(section + 20);
+        uint32_t copy_size = raw_size;
+
+        if (raw_size == 0) {
+            continue;
+        }
+        if (!range_ok(file_size, raw_pointer, raw_size)) {
+            error_setg(errp, "EFI image section %u raw data is truncated", i);
+            g_free(memory_image);
+            return false;
+        }
+        if (virtual_address >= size_of_image) {
+            error_setg(errp, "EFI image section %u VA 0x%x is outside image",
+                       i, virtual_address);
+            g_free(memory_image);
+            return false;
+        }
+        if (virtual_size != 0 && virtual_size < copy_size) {
+            copy_size = virtual_size;
+        }
+        if (copy_size > size_of_image - virtual_address) {
+            error_setg(errp, "EFI image section %u exceeds image size", i);
+            g_free(memory_image);
+            return false;
+        }
+
+        memcpy(memory_image + virtual_address, file + raw_pointer, copy_size);
+    }
+
+    image->data = memory_image;
+    image->size = size_of_image;
+    image->load_base = load_base;
+    image->entry = load_base + entry_rva;
+    image->preferred_image_base = preferred_image_base;
+    image->entry_rva = entry_rva;
+    image->size_of_image = size_of_image;
+    image->section_alignment = section_alignment;
+    image->number_of_sections = sections;
+    g_strlcpy(image->source_path, path ? path : "<buffer>",
+              sizeof(image->source_path));
+    g_snprintf(image->message, sizeof(image->message),
+               "loaded IA-64 EFI image path=%s load=0x%016" PRIx64
+               " entry=0x%016" PRIx64 " size=0x%x sections=%u",
+               image->source_path, image->load_base, image->entry,
+               image->size_of_image, image->number_of_sections);
+
+    return true;
+}
+
+bool vibatnium_efi_image_from_file(const char *path,
+                                   uint64_t load_base,
+                                   VibatniumEfiImage *image,
+                                   Error **errp)
+{
+    g_autoptr(GError) gerr = NULL;
+    g_autofree gchar *contents = NULL;
+    gsize length = 0;
+
+    if (!path || !*path) {
+        error_setg(errp, "EFI image path is empty");
+        return false;
+    }
+
+    if (!g_file_get_contents(path, &contents, &length, &gerr)) {
+        error_setg(errp, "%s", gerr->message);
+        return false;
+    }
+
+    return vibatnium_efi_image_from_buffer(path, (const uint8_t *)contents,
+                                           length, load_base, image, errp);
+}
+
+void vibatnium_efi_image_destroy(VibatniumEfiImage *image)
+{
+    if (!image) {
+        return;
+    }
+
+    g_free(image->data);
+    efi_image_reset(image);
+}
+
+void vibatnium_efi_prepare_cpu(CPUIA64State *env,
+                               const VibatniumEfiImage *image)
+{
+    if (!env || !image) {
+        return;
+    }
+
+    env->ip = image->entry;
+    env->cr[IA64_CR_IIP] = image->entry;
+    env->gr[0] = 0;
+    env->gr[32] = VIBATNIUM_EFI_IMAGE_HANDLE;
+    env->gr[33] = VIBATNIUM_EFI_SYSTEM_TABLE;
+}
+
+const char *vibatnium_efi_status_name(uint64_t status)
+{
+    switch (status) {
+    case VIBATNIUM_EFI_SUCCESS:
+        return "success";
+    case VIBATNIUM_EFI_LOAD_ERROR:
+        return "load-error";
+    case VIBATNIUM_EFI_INVALID_PARAMETER:
+        return "invalid-parameter";
+    case VIBATNIUM_EFI_UNSUPPORTED:
+        return "unsupported";
+    case VIBATNIUM_EFI_NOT_FOUND:
+        return "not-found";
+    default:
+        return "unknown";
+    }
+}
+
+const char *vibatnium_efi_service_name(VibatniumEfiService service)
+{
+    switch (service) {
+    case VIBATNIUM_EFI_SERVICE_LOADED_IMAGE_PROTOCOL:
+        return "LoadedImageProtocol";
+    case VIBATNIUM_EFI_SERVICE_OUTPUT_STRING:
+        return "SimpleTextOutput.OutputString";
+    case VIBATNIUM_EFI_SERVICE_EXIT:
+        return "BootServices.Exit";
+    case VIBATNIUM_EFI_SERVICE_EXIT_BOOT_SERVICES:
+        return "BootServices.ExitBootServices";
+    case VIBATNIUM_EFI_SERVICE_GET_VARIABLE:
+        return "RuntimeServices.GetVariable";
+    case VIBATNIUM_EFI_SERVICE_SET_VARIABLE:
+        return "RuntimeServices.SetVariable";
+    case VIBATNIUM_EFI_SERVICE_UNKNOWN:
+    default:
+        return "unknown-service";
+    }
+}
+
+uint64_t vibatnium_efi_record_unimplemented_service(
+    VibatniumEfiServiceCall *call,
+    VibatniumEfiService service,
+    uint64_t guest_ip,
+    const uint64_t *args,
+    uint8_t nargs)
+{
+    size_t offset;
+    uint8_t count;
+
+    g_return_val_if_fail(call != NULL, VIBATNIUM_EFI_INVALID_PARAMETER);
+
+    memset(call, 0, sizeof(*call));
+    count = MIN(nargs, (uint8_t)G_N_ELEMENTS(call->args));
+    call->service = service;
+    call->service_name = vibatnium_efi_service_name(service);
+    call->guest_ip = guest_ip;
+    call->nargs = count;
+    call->status = VIBATNIUM_EFI_UNSUPPORTED;
+
+    for (uint8_t i = 0; i < count; i++) {
+        call->args[i] = args ? args[i] : 0;
+    }
+
+    offset = g_snprintf(call->message, sizeof(call->message),
+                        "EFI service unimplemented service=%s ip=0x%016"
+                        PRIx64 " args=[",
+                        call->service_name, call->guest_ip);
+    for (uint8_t i = 0; i < count && offset < sizeof(call->message); i++) {
+        offset += g_snprintf(call->message + offset,
+                             sizeof(call->message) - offset,
+                             "%s0x%016" PRIx64, i == 0 ? "" : ",",
+                             call->args[i]);
+    }
+    if (offset < sizeof(call->message)) {
+        g_snprintf(call->message + offset, sizeof(call->message) - offset,
+                   "] status=%s(0x%016" PRIx64 ")",
+                   vibatnium_efi_status_name(call->status), call->status);
+    }
+
+    return call->status;
+}

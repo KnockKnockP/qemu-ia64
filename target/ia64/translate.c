@@ -51,16 +51,18 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     IA64DecodedBundle bundle;
     char bundle_text[160];
+    uint64_t pc = ctx->base.pc_next;
     uint64_t lo;
     uint64_t hi;
 
-    lo = translator_ldq_end(ctx->env, &ctx->base, ctx->base.pc_next, MO_LE);
-    hi = translator_ldq_end(ctx->env, &ctx->base, ctx->base.pc_next + 8, MO_LE);
+    lo = translator_ldq_end(ctx->env, &ctx->base, pc, MO_LE);
+    hi = translator_ldq_end(ctx->env, &ctx->base, pc + 8, MO_LE);
     ia64_decode_bundle_words(lo, hi, &bundle);
     ia64_format_decoded_bundle(&bundle, bundle_text, sizeof(bundle_text));
-    trace_ia64_bundle_decode(ctx->base.pc_next, bundle_text);
+    trace_ia64_bundle_decode(pc, bundle_text);
 
-    tcg_gen_movi_i64(cpu_ip, ctx->base.pc_next);
+    ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
+    tcg_gen_movi_i64(cpu_ip, pc);
     gen_helper_raise_unimplemented(tcg_env);
     ctx->base.is_jmp = DISAS_NORETURN;
 }
