@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/ia64/efi.h"
+#include "hw/ia64/efi-storage.h"
 #include "target/ia64/bundle.h"
 #include "target/ia64/exec-smoke.h"
 
@@ -503,8 +504,15 @@ enum {
         EFI_RUNTIME_SERVICE_BASE + VIBATNIUM_EFI_RUNTIME_SERVICE_COUNT,
     EFI_CON_IN_SERVICE_BASE =
         EFI_CON_OUT_SERVICE_BASE + VIBATNIUM_EFI_CON_OUT_SERVICE_COUNT,
-    EFI_SERVICE_DESCRIPTOR_COUNT =
+    EFI_BLOCK_IO_SERVICE_BASE =
         EFI_CON_IN_SERVICE_BASE + VIBATNIUM_EFI_CON_IN_SERVICE_COUNT,
+    EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE =
+        EFI_BLOCK_IO_SERVICE_BASE + VIBATNIUM_EFI_BLOCK_IO_SERVICE_COUNT,
+    EFI_FILE_SERVICE_BASE =
+        EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE +
+        VIBATNIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT,
+    EFI_SERVICE_DESCRIPTOR_COUNT =
+        EFI_FILE_SERVICE_BASE + VIBATNIUM_EFI_FILE_SERVICE_COUNT,
 };
 
 static const uint8_t efi_loaded_image_guid[16] = {
@@ -537,6 +545,8 @@ static void write_loaded_image(uint8_t *blob, size_t size,
               VIBATNIUM_EFI_SYSTEM_TABLE);
     blob_wr64(blob, size, VIBATNIUM_EFI_LOADED_IMAGE + 24,
               VIBATNIUM_EFI_BOOT_DEVICE_HANDLE);
+    blob_wr64(blob, size, VIBATNIUM_EFI_LOADED_IMAGE + 32,
+              VIBATNIUM_EFI_DEVICE_PATH);
     blob_wr64(blob, size, VIBATNIUM_EFI_LOADED_IMAGE + 64, image_base);
     blob_wr64(blob, size, VIBATNIUM_EFI_LOADED_IMAGE + 72, image_size);
     blob_wr32(blob, size, VIBATNIUM_EFI_LOADED_IMAGE + 80, 1);
@@ -607,10 +617,66 @@ static void write_console_protocols(uint8_t *blob, size_t size)
         blob_wr64(blob, size, VIBATNIUM_EFI_CON_IN + i * sizeof(uint64_t),
                   service_descriptor_address(EFI_CON_IN_SERVICE_BASE + i));
     }
+    blob_wr64(blob, size,
+              VIBATNIUM_EFI_CON_IN +
+              VIBATNIUM_EFI_CON_IN_SERVICE_COUNT * sizeof(uint64_t),
+              VIBATNIUM_EFI_CON_IN_WAIT_EVENT);
+}
+
+static void write_device_path(uint8_t *blob, size_t size)
+{
+    uint8_t *path = blob_ptr(blob, size, VIBATNIUM_EFI_DEVICE_PATH, 4);
+
+    path[0] = 0x7f; /* End device path. */
+    path[1] = 0xff; /* End entire device path. */
+    path[2] = 4;
+    path[3] = 0;
+}
+
+static void write_media_protocols(uint8_t *blob, size_t size,
+                                  const VibatniumEfiBlockDevice *boot_media)
+{
+    uint32_t block_size = boot_media && boot_media->block_size
+        ? boot_media->block_size
+        : 2048;
+    uint64_t media_size = boot_media ? boot_media->size : 0;
+    uint64_t last_block = media_size >= block_size && block_size != 0
+        ? media_size / block_size - 1
+        : 0;
+
+    write_device_path(blob, size);
+
+    blob_wr64(blob, size, VIBATNIUM_EFI_BLOCK_IO,
+              VIBATNIUM_EFI_PROTOCOL_REVISION);
+    blob_wr64(blob, size, VIBATNIUM_EFI_BLOCK_IO + 8,
+              VIBATNIUM_EFI_BLOCK_IO_MEDIA);
+    for (unsigned i = 0; i < VIBATNIUM_EFI_BLOCK_IO_SERVICE_COUNT; i++) {
+        blob_wr64(blob, size, VIBATNIUM_EFI_BLOCK_IO + 16 + i * 8,
+                  service_descriptor_address(EFI_BLOCK_IO_SERVICE_BASE + i));
+    }
+
+    blob_wr32(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA, 1);
+    blob_ptr(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 4, 1)[0] =
+        boot_media && boot_media->removable;
+    blob_ptr(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 5, 1)[0] =
+        boot_media != NULL;
+    blob_ptr(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 6, 1)[0] = 0;
+    blob_ptr(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 7, 1)[0] =
+        !boot_media || boot_media->read_only;
+    blob_ptr(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 8, 1)[0] = 0;
+    blob_wr32(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 12, block_size);
+    blob_wr32(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 16, 1);
+    blob_wr64(blob, size, VIBATNIUM_EFI_BLOCK_IO_MEDIA + 24, last_block);
+
+    blob_wr64(blob, size, VIBATNIUM_EFI_SIMPLE_FILE_SYSTEM,
+              VIBATNIUM_EFI_PROTOCOL_REVISION);
+    blob_wr64(blob, size, VIBATNIUM_EFI_SIMPLE_FILE_SYSTEM + 8,
+              service_descriptor_address(EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE));
 }
 
 uint8_t *vibatnium_efi_build_firmware_blob(size_t *size,
-                                           const VibatniumEfiImage *image)
+                                           const VibatniumEfiImage *image,
+                                           const VibatniumEfiBlockDevice *boot_media)
 {
     uint8_t *blob;
 
@@ -627,6 +693,7 @@ uint8_t *vibatnium_efi_build_firmware_blob(size_t *size,
 
     write_loaded_image(blob, VIBATNIUM_EFI_BLOB_SIZE, image);
     write_console_protocols(blob, VIBATNIUM_EFI_BLOB_SIZE);
+    write_media_protocols(blob, VIBATNIUM_EFI_BLOB_SIZE, boot_media);
     write_service_table(blob, VIBATNIUM_EFI_BLOB_SIZE,
                         VIBATNIUM_EFI_BOOT_SERVICES,
                         0x56524553544f4f42ULL,
@@ -677,10 +744,22 @@ const char *vibatnium_efi_status_name(uint64_t status)
         return "invalid-parameter";
     case VIBATNIUM_EFI_UNSUPPORTED:
         return "unsupported";
+    case VIBATNIUM_EFI_BUFFER_TOO_SMALL:
+        return "buffer-too-small";
+    case VIBATNIUM_EFI_NOT_READY:
+        return "not-ready";
+    case VIBATNIUM_EFI_DEVICE_ERROR:
+        return "device-error";
+    case VIBATNIUM_EFI_WRITE_PROTECTED:
+        return "write-protected";
     case VIBATNIUM_EFI_OUT_OF_RESOURCES:
         return "out-of-resources";
+    case VIBATNIUM_EFI_ACCESS_DENIED:
+        return "access-denied";
     case VIBATNIUM_EFI_NOT_FOUND:
         return "not-found";
+    case VIBATNIUM_EFI_END_OF_FILE:
+        return "end-of-file";
     default:
         return "unknown";
     }

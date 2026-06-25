@@ -230,6 +230,41 @@ static void fat_short_name(const uint8_t *entry, char *out, size_t out_len)
     out[n] = '\0';
 }
 
+static void fat_lfn_entry_text(const uint8_t *entry, char *out,
+                               size_t out_len)
+{
+    static const uint8_t offsets[] = {
+        1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30,
+    };
+    size_t n = 0;
+
+    if (out_len == 0) {
+        return;
+    }
+
+    for (unsigned i = 0; i < ARRAY_SIZE(offsets) && n + 1 < out_len; i++) {
+        uint16_t ch = rd16(entry + offsets[i]);
+
+        if (ch == 0x0000 || ch == 0xffff) {
+            break;
+        }
+        out[n++] = ch < 0x80 ? g_ascii_tolower(ch) : '?';
+    }
+    out[n] = '\0';
+}
+
+static void fat_lfn_prepend(char *name, size_t name_len, const char *segment)
+{
+    char combined[260];
+
+    if (name_len == 0) {
+        return;
+    }
+
+    g_snprintf(combined, sizeof(combined), "%s%s", segment, name);
+    g_strlcpy(name, combined, name_len);
+}
+
 static uint16_t fat16_next_cluster(const FatContext *fat, uint16_t cluster)
 {
     if (cluster >= fat->cluster_count + 2) {
@@ -442,25 +477,50 @@ static bool fat_search_directory(FatContext *fat,
     g_autofree char *wanted = normalize_path_component(component);
     GByteArray *entries = NULL;
     bool found = false;
+    char pending_lfn[260];
 
     if (!fat_load_directory(fat, dir_cluster, root, &entries, report, errp)) {
         return false;
     }
 
+    pending_lfn[0] = '\0';
     for (size_t offset = 0; offset + 32 <= entries->len; offset += 32) {
         const uint8_t *entry = entries->data + offset;
         uint8_t attr = entry[11];
         char name[32];
+        g_autofree char *long_name = NULL;
 
         if (entry[0] == 0x00) {
             break;
         }
-        if (entry[0] == 0xe5 || attr == 0x0f || (attr & 0x08)) {
+        if (entry[0] == 0xe5) {
+            pending_lfn[0] = '\0';
+            continue;
+        }
+        if (attr == 0x0f) {
+            char segment[32];
+
+            fat_lfn_entry_text(entry, segment, sizeof(segment));
+            if (entry[0] & 0x40) {
+                g_strlcpy(pending_lfn, segment, sizeof(pending_lfn));
+            } else {
+                fat_lfn_prepend(pending_lfn, sizeof(pending_lfn), segment);
+            }
+            continue;
+        }
+        if (attr & 0x08) {
+            pending_lfn[0] = '\0';
             continue;
         }
 
         fat_short_name(entry, name, sizeof(name));
-        if (g_strcmp0(name, wanted) != 0) {
+        if (pending_lfn[0] != '\0') {
+            long_name = normalize_path_component(pending_lfn);
+        }
+
+        if (g_strcmp0(name, wanted) != 0 &&
+            g_strcmp0(long_name, wanted) != 0) {
+            pending_lfn[0] = '\0';
             continue;
         }
 
@@ -468,7 +528,8 @@ static bool fat_search_directory(FatContext *fat,
         match->cluster = rd16(entry + 26);
         match->size = rd32(entry + 28);
         match->attr = attr;
-        g_strlcpy(match->name, name, sizeof(match->name));
+        g_strlcpy(match->name, long_name ? long_name : name,
+                  sizeof(match->name));
         found = true;
         break;
     }

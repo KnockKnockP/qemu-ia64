@@ -31,6 +31,11 @@ typedef struct VibatniumBlockReadOpaque {
     BlockBackend *blk;
 } VibatniumBlockReadOpaque;
 
+typedef struct VibatniumCachedBlockReadOpaque {
+    uint8_t *data;
+    uint64_t size;
+} VibatniumCachedBlockReadOpaque;
+
 static int vibatnium_block_pread(void *opaque,
                                  uint64_t offset,
                                  uint32_t bytes,
@@ -49,9 +54,73 @@ static int vibatnium_block_pread(void *opaque,
     return 0;
 }
 
+static int vibatnium_cached_block_pread(void *opaque,
+                                        uint64_t offset,
+                                        uint32_t bytes,
+                                        void *buffer,
+                                        Error **errp)
+{
+    VibatniumCachedBlockReadOpaque *cache = opaque;
+
+    if (!cache || !cache->data ||
+        offset > cache->size || bytes > cache->size - offset) {
+        error_setg(errp,
+                   "cached block read beyond media offset=0x%" PRIx64
+                   " bytes=0x%x media-size=0x%" PRIx64,
+                   offset, bytes, cache ? cache->size : 0);
+        return -EINVAL;
+    }
+
+    memcpy(buffer, cache->data + offset, bytes);
+    return 0;
+}
+
+static bool vibatnium_cache_boot_media(const VibatniumEfiBlockDevice *src,
+                                       VibatniumEfiBlockDevice *cached,
+                                       Error **errp)
+{
+    const uint32_t chunk_size = 4 * MiB;
+    VibatniumCachedBlockReadOpaque *opaque;
+    uint64_t offset = 0;
+
+    if (!src || !src->read || src->size == 0) {
+        error_setg(errp, "cannot cache unavailable EFI boot media");
+        return false;
+    }
+
+    opaque = g_new0(VibatniumCachedBlockReadOpaque, 1);
+    opaque->size = src->size;
+    opaque->data = g_try_malloc(src->size);
+    if (!opaque->data) {
+        g_free(opaque);
+        error_setg(errp, "could not allocate EFI boot media cache of 0x%"
+                   PRIx64 " bytes",
+                   src->size);
+        return false;
+    }
+
+    while (offset < src->size) {
+        uint32_t todo = MIN((uint64_t)chunk_size, src->size - offset);
+
+        if (src->read(src->opaque, offset, todo, opaque->data + offset,
+                      errp) < 0) {
+            g_free(opaque->data);
+            g_free(opaque);
+            return false;
+        }
+        offset += todo;
+    }
+
+    *cached = *src;
+    cached->read = vibatnium_cached_block_pread;
+    cached->opaque = opaque;
+    return true;
+}
+
 static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
                                        MachineState *machine,
-                                       VibatniumEfiImage *image)
+                                       VibatniumEfiImage *image,
+                                       const VibatniumEfiBlockDevice *boot_media)
 {
     g_autofree uint8_t *firmware_blob = NULL;
     size_t firmware_blob_size = 0;
@@ -66,7 +135,8 @@ static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
     }
 
     firmware_blob = vibatnium_efi_build_firmware_blob(&firmware_blob_size,
-                                                      image);
+                                                      image, boot_media);
+    vibatnium_efi_register_boot_media(boot_media);
     rom_add_blob_fixed("vibatnium.efi-tables", firmware_blob,
                        firmware_blob_size, VIBATNIUM_EFI_BLOB_BASE);
     rom_add_blob_fixed("vibatnium.efi-app", image->data, image->size,
@@ -103,9 +173,13 @@ static void vibatnium_trace_boot_frontier(const VibatniumEfiImage *image)
     const char *pending =
         "pending runtime observation: unsupported bundles still report the "
         "exact execution frontier";
-    const char *media_blocked =
-        "not reached yet: ELILO currently needs guest-visible EFI media "
-        "protocols before kernel handoff";
+    const char *handoff_observed =
+        "observed in Phase 12: ELILO loads the Debian kernel/initrd and "
+        "enters Linux";
+    const char *kernel_mmu_frontier =
+        "observed in Phase 12: Linux reaches early break-vector handling; "
+        "current frontier is IA-64 translation-register/TLB-backed virtual "
+        "address translation";
 
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
                             "ready", image->source_path);
@@ -114,15 +188,18 @@ static void vibatnium_trace_boot_frontier(const VibatniumEfiImage *image)
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
                             image->entry, "dispatch-enabled", pending);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_MEMORY_MAP, image->entry,
-                            "none-observed", media_blocked);
+                            "implemented-observed", handoff_observed);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
-                            image->entry, "none-observed", media_blocked);
+                            image->entry, "implemented-observed",
+                            handoff_observed);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY, image->entry,
-                            "none-observed", media_blocked);
+                            "observed", handoff_observed);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_BOOT_PARAMETERS,
-                            image->entry, "none-observed", media_blocked);
+                            image->entry, "partially-observed",
+                            "Linux reaches boot-parameter/FPSWA probing");
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_SAL_PAL_CALL, image->entry,
-                            "none-observed", media_blocked);
+                            "blocked-after-kernel-entry",
+                            kernel_mmu_frontier);
 }
 
 static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,
@@ -143,7 +220,7 @@ static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,
         exit(1);
     }
 
-    vibatnium_commit_efi_image(vms, machine, &image);
+    vibatnium_commit_efi_image(vms, machine, &image, NULL);
     vibatnium_trace_boot_frontier(&image);
     vibatnium_efi_image_destroy(&image);
     return true;
@@ -158,6 +235,7 @@ static bool vibatnium_try_discovered_efi_app(VibatniumMachineState *vms,
     g_autofree uint8_t *file_data = NULL;
     size_t file_size = 0;
     VibatniumEfiImage image;
+    VibatniumEfiBlockDevice cached_dev;
     char source[384];
 
     if (!vibatnium_efi_cdrom_read_path(dev, VIBATNIUM_EFI_FALLBACK_PATH,
@@ -193,7 +271,24 @@ static bool vibatnium_try_discovered_efi_app(VibatniumMachineState *vms,
         return false;
     }
 
-    vibatnium_commit_efi_image(vms, machine, &image);
+    local_err = NULL;
+    if (!vibatnium_cache_boot_media(dev, &cached_dev, &local_err)) {
+        warn_report("vibatnium EFI discovery media=%s path=%s status=%s "
+                    "reason=%s",
+                    dev->name ? dev->name : "<unnamed>",
+                    VIBATNIUM_EFI_FALLBACK_PATH,
+                    vibatnium_efi_status_name(VIBATNIUM_EFI_DEVICE_ERROR),
+                    error_get_pretty(local_err));
+        error_free(local_err);
+        vibatnium_efi_image_destroy(&image);
+        return false;
+    }
+
+    warn_report("vibatnium EFI media cache name=%s bytes=%" PRIu64,
+                cached_dev.name ? cached_dev.name : "<unnamed>",
+                cached_dev.size);
+
+    vibatnium_commit_efi_image(vms, machine, &image, &cached_dev);
     vibatnium_trace_boot_frontier(&image);
     vibatnium_efi_image_destroy(&image);
     return true;
@@ -212,7 +307,7 @@ static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
         bool available = blk_is_available(blk);
         bool cdrom = dinfo && dinfo->media_cd;
         int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
-        VibatniumBlockReadOpaque read_opaque = { .blk = blk };
+        VibatniumBlockReadOpaque *read_opaque = g_new0(VibatniumBlockReadOpaque, 1);
         VibatniumEfiBlockDevice dev = {
             .name = name && *name ? name : "<unnamed>",
             .size = length > 0 ? length : 0,
@@ -221,8 +316,10 @@ static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
             .removable = cdrom,
             .cdrom = cdrom,
             .read = vibatnium_block_pread,
-            .opaque = &read_opaque,
+            .opaque = read_opaque,
         };
+
+        read_opaque->blk = blk;
 
         warn_report("vibatnium EFI media[%u] name=%s available=%s cdrom=%s "
                     "bytes=%" PRId64,
@@ -230,25 +327,30 @@ static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
                     cdrom ? "yes" : "no", length);
 
         if (!available) {
+            g_free(read_opaque);
             continue;
         }
         if (!cdrom) {
             warn_report("vibatnium EFI media %s skipped: not read-only "
                         "CD-ROM media",
                         dev.name);
+            g_free(read_opaque);
             continue;
         }
         if (length <= 0) {
             warn_report("vibatnium EFI media %s skipped: unavailable length "
                         "%" PRId64,
                         dev.name, length);
+            g_free(read_opaque);
             continue;
         }
 
         cdrom_candidates++;
         if (vibatnium_try_discovered_efi_app(vms, machine, &dev)) {
+            g_free(read_opaque);
             return true;
         }
+        g_free(read_opaque);
     }
 
     warn_report("vibatnium EFI discovery found no boot app path=%s "

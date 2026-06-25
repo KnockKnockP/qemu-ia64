@@ -84,6 +84,29 @@ static void write_fat_entry(uint8_t *dir, size_t index, const char name[11],
     store_le32(entry + 28, size);
 }
 
+static void write_fat_lfn_entry(uint8_t *dir, size_t index, const char *name)
+{
+    static const uint8_t offsets[] = {
+        1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30,
+    };
+    uint8_t *entry = dir + index * 32;
+    size_t len = strlen(name);
+
+    g_assert_cmpuint(len, <=, G_N_ELEMENTS(offsets));
+
+    memset(entry, 0xff, 32);
+    entry[0] = 0x41;
+    entry[11] = 0x0f;
+    entry[12] = 0;
+    entry[13] = 0;
+    store_le16(entry + 26, 0);
+    for (size_t i = 0; i < G_N_ELEMENTS(offsets); i++) {
+        uint16_t ch = i < len ? (uint8_t)name[i] : (i == len ? 0 : 0xffff);
+
+        store_le16(entry + offsets[i], ch);
+    }
+}
+
 static void add_dot_records(uint8_t *dir, uint32_t self, uint32_t parent)
 {
     static const uint8_t dot[] = { 0 };
@@ -208,9 +231,12 @@ static void make_eltorito_fat_iso(MemoryIso *iso)
     store_le16(fat + 2 * 2, 0xffff);
     store_le16(fat + 3 * 2, 0xffff);
     store_le16(fat + 4 * 2, 0xffff);
+    store_le16(fat + 5 * 2, 0xffff);
 
     root = image + root_offset;
     write_fat_entry(root, 0, "EFI        ", 0x10, 2, 0);
+    write_fat_lfn_entry(root, 1, "elilo.conf");
+    write_fat_entry(root, 2, "ELILO~1CON", 0x20, 5, 4);
 
     efi_dir = image + data_offset;
     write_fat_entry(efi_dir, 0, ".          ", 0x10, 2, 0);
@@ -223,6 +249,7 @@ static void make_eltorito_fat_iso(MemoryIso *iso)
     write_fat_entry(boot_dir, 2, "BOOTIA64EFI", 0x20, 4, 4);
 
     memcpy(image + data_offset + 2 * 512, "IA64", 4);
+    memcpy(image + data_offset + 3 * 512, "CONF", 4);
 }
 
 static int memory_iso_read(void *opaque, uint64_t offset, uint32_t bytes,
@@ -361,6 +388,28 @@ static void test_cdrom_read_path_uses_eltorito_fat(void)
     g_assert_nonnull(strstr(report.message, "El Torito FAT16"));
 }
 
+static void test_cdrom_read_path_uses_eltorito_fat_lfn(void)
+{
+    MemoryIso iso;
+    VibatniumEfiBlockDevice dev;
+    VibatniumEfiStorageReport report;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    char source[256];
+    Error *err = NULL;
+
+    make_eltorito_fat_iso(&iso);
+    init_device(&dev, &iso);
+
+    g_assert_true(vibatnium_efi_cdrom_read_path(
+                      &dev, "/elilo.conf", &data, &size, source,
+                      sizeof(source), &report, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(size, ==, 4);
+    g_assert_cmpmem(data, size, "CONF", 4);
+    g_assert_nonnull(strstr(source, "eltorito"));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -375,6 +424,8 @@ int main(int argc, char **argv)
                     test_rejects_non_iso9660);
     g_test_add_func("/ia64-efi-storage/cdrom-read-path-uses-eltorito-fat",
                     test_cdrom_read_path_uses_eltorito_fat);
+    g_test_add_func("/ia64-efi-storage/cdrom-read-path-uses-eltorito-fat-lfn",
+                    test_cdrom_read_path_uses_eltorito_fat_lfn);
 
     return g_test_run();
 }
