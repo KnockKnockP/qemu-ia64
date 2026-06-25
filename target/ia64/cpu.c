@@ -75,14 +75,31 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
 
-    qemu_fprintf(f, "IP  " TARGET_FMT_lx "\n", env->ip);
+    qemu_fprintf(f, "IP  %016" PRIx64 "\n", env->ip);
     qemu_fprintf(f, "PSR %016" PRIx64 "  PR %016" PRIx64
                     "  CFM %016" PRIx64 "\n",
                  env->psr, env->pr, env->cfm);
+    qemu_fprintf(f, "RSE RSC %016" PRIx64 "  BSP %016" PRIx64
+                    "  BSPSTORE %016" PRIx64 "  RNAT %016" PRIx64 "\n",
+                 env->rse.rsc, env->rse.bsp, env->rse.bspstore,
+                 env->rse.rnat);
+    qemu_fprintf(f, "NaT %016" PRIx64 ":%016" PRIx64
+                    "  UNAT %016" PRIx64 "  RNAT %016" PRIx64 "\n",
+                 env->nat.gr_nat[1], env->nat.gr_nat[0],
+                 env->nat.unat, env->nat.rnat);
+    qemu_fprintf(f, "CR.IVA %016" PRIx64 "  CR.IIP %016" PRIx64
+                    "  CR.ISR %016" PRIx64 "  CR.IFA %016" PRIx64 "\n",
+                 env->cr[IA64_CR_IVA], env->cr[IA64_CR_IIP],
+                 env->cr[IA64_CR_ISR], env->cr[IA64_CR_IFA]);
 
     for (int i = 0; i < 8; i++) {
         qemu_fprintf(f, "r%-2d %016" PRIx64 "%s",
                      i, env->gr[i], (i % 2) ? "\n" : "  ");
+    }
+
+    for (int i = 0; i < IA64_BR_COUNT; i++) {
+        qemu_fprintf(f, "b%-2d %016" PRIx64 "%s",
+                     i, env->br[i], (i % 2) ? "\n" : "  ");
     }
 }
 
@@ -107,7 +124,11 @@ int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
 
-    if (n < 128) {
+    if (n == 0) {
+        return gdb_get_reg64(mem_buf, 0);
+    }
+
+    if (n < IA64_GR_COUNT) {
         return gdb_get_reg64(mem_buf, env->gr[n]);
     }
 
@@ -128,7 +149,11 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
 
-    if (n < 128) {
+    if (n == 0) {
+        return 8;
+    }
+
+    if (n < IA64_GR_COUNT) {
         env->gr[n] = ldq_le_p(mem_buf);
         return 8;
     }
@@ -148,19 +173,52 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
     }
 }
 
+static void ia64_cpu_reset_itanium2(IA64CPU *cpu)
+{
+    CPUIA64State *env = &cpu->env;
+
+    memset(env, 0, offsetof(CPUIA64State, end_reset_fields));
+
+    /*
+     * Synthetic reset: enough for a stable placeholder CPU, not yet validated
+     * against PAL/SAL-visible Itanium 2 reset state.
+     */
+    env->pr = 1;
+    env->gr[0] = 0;
+    env->ip = 0;
+    env->psr = 0;
+    env->cfm = 0;
+
+    env->ar[IA64_AR_RSC] = env->rse.rsc;
+    env->ar[IA64_AR_BSP] = env->rse.bsp;
+    env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
+    env->ar[IA64_AR_RNAT] = env->rse.rnat;
+    env->ar[IA64_AR_UNAT] = env->nat.unat;
+    env->ar[IA64_AR_PFS] = 0;
+    env->ar[IA64_AR_FPSR] = 0;
+
+    env->cr[IA64_CR_IPSR] = env->psr;
+    env->cr[IA64_CR_IIP] = env->ip;
+    env->cr[IA64_CR_IFS] = env->cfm;
+}
+
 static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 {
     CPUState *cs = CPU(obj);
     IA64CPUClass *mcc = IA64_CPU_GET_CLASS(obj);
     IA64CPU *cpu = IA64_CPU(cs);
-    CPUIA64State *env = &cpu->env;
 
     if (mcc->parent_phases.hold) {
         mcc->parent_phases.hold(obj, type);
     }
 
-    memset(env, 0, offsetof(CPUIA64State, end_reset_fields));
-    env->pr = 1;
+    switch (cpu->model) {
+    case IA64_CPU_MODEL_ITANIUM2:
+        ia64_cpu_reset_itanium2(cpu);
+        break;
+    default:
+        g_assert_not_reached();
+    }
 }
 
 static ObjectClass *ia64_cpu_class_by_name(const char *cpu_model)
@@ -253,6 +311,13 @@ static void ia64_cpu_initfn(Object *obj)
 {
 }
 
+static void itanium2_cpu_initfn(Object *obj)
+{
+    IA64CPU *cpu = IA64_CPU(obj);
+
+    cpu->model = IA64_CPU_MODEL_ITANIUM2;
+}
+
 static const TypeInfo ia64_cpu_type_infos[] = {
     {
         .name = TYPE_IA64_CPU,
@@ -266,6 +331,7 @@ static const TypeInfo ia64_cpu_type_infos[] = {
     {
         .name = TYPE_ITANIUM2_CPU,
         .parent = TYPE_IA64_CPU,
+        .instance_init = itanium2_cpu_initfn,
     },
 };
 
