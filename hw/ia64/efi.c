@@ -345,3 +345,46 @@ uint64_t vibatnium_efi_record_unimplemented_service(
 
     return call->status;
 }
+
+const char *vibatnium_efi_frontier_name(VibatniumEfiFrontierKind kind)
+{
+    switch (kind) {
+    case VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY:
+        return "image-entry";
+    case VIBATNIUM_EFI_FRONTIER_EFI_SERVICE_CALL:
+        return "efi-service-call";
+    case VIBATNIUM_EFI_FRONTIER_FILE_READ:
+        return "file-read";
+    case VIBATNIUM_EFI_FRONTIER_MEMORY_MAP:
+        return "memory-map";
+    case VIBATNIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES:
+        return "exit-boot-services";
+    case VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY:
+        return "kernel-entry";
+    case VIBATNIUM_EFI_FRONTIER_BOOT_PARAMETERS:
+        return "boot-parameters";
+    case VIBATNIUM_EFI_FRONTIER_SAL_PAL_CALL:
+        return "sal-pal-call";
+    default:
+        return "unknown-frontier";
+    }
+}
+
+void vibatnium_efi_format_frontier(char *buffer,
+                                   size_t buffer_size,
+                                   VibatniumEfiFrontierKind kind,
+                                   uint64_t guest_ip,
+                                   const char *state,
+                                   const char *detail)
+{
+    if (!buffer || buffer_size == 0) {
+        return;
+    }
+
+    g_snprintf(buffer, buffer_size,
+               "vibatnium EFI frontier kind=%s ip=0x%016" PRIx64
+               " state=%s detail=%s",
+               vibatnium_efi_frontier_name(kind), guest_ip,
+               state ? state : "unknown",
+               detail ? detail : "none");
+}

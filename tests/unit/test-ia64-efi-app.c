@@ -163,6 +163,21 @@ static void test_unimplemented_service_log(void)
                             "status=unsupported(0x8000000000000003)"));
 }
 
+static void test_frontier_log_format(void)
+{
+    char message[384];
+
+    vibatnium_efi_format_frontier(message, sizeof(message),
+                                  VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY,
+                                  0x1043ad0, "none-observed",
+                                  "blocked before ELILO");
+
+    g_assert_nonnull(strstr(message, "kind=kernel-entry"));
+    g_assert_nonnull(strstr(message, "ip=0x0000000001043ad0"));
+    g_assert_nonnull(strstr(message, "state=none-observed"));
+    g_assert_nonnull(strstr(message, "blocked before ELILO"));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -175,6 +190,8 @@ int main(int argc, char **argv)
                     test_prepare_cpu_entry_abi);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",
                     test_unimplemented_service_log);
+    g_test_add_func("/ia64-efi-app/frontier-log-format",
+                    test_frontier_log_format);
 
     return g_test_run();
 }

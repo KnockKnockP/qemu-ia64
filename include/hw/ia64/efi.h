@@ -55,6 +55,17 @@ typedef struct VibatniumEfiServiceCall {
     char message[320];
 } VibatniumEfiServiceCall;
 
+typedef enum VibatniumEfiFrontierKind {
+    VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY,
+    VIBATNIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
+    VIBATNIUM_EFI_FRONTIER_FILE_READ,
+    VIBATNIUM_EFI_FRONTIER_MEMORY_MAP,
+    VIBATNIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
+    VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY,
+    VIBATNIUM_EFI_FRONTIER_BOOT_PARAMETERS,
+    VIBATNIUM_EFI_FRONTIER_SAL_PAL_CALL,
+} VibatniumEfiFrontierKind;
+
 bool vibatnium_efi_image_from_buffer(const char *path,
                                      const uint8_t *file,
                                      size_t file_size,
@@ -78,5 +89,12 @@ uint64_t vibatnium_efi_record_unimplemented_service(
     uint64_t guest_ip,
     const uint64_t *args,
     uint8_t nargs);
+const char *vibatnium_efi_frontier_name(VibatniumEfiFrontierKind kind);
+void vibatnium_efi_format_frontier(char *buffer,
+                                   size_t buffer_size,
+                                   VibatniumEfiFrontierKind kind,
+                                   uint64_t guest_ip,
+                                   const char *state,
+                                   const char *detail);
 
 #endif

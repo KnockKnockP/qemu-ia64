@@ -79,6 +79,42 @@ static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
                 "starting the CPU will stop at the first translated bundle");
 }
 
+static void vibatnium_warn_frontier(VibatniumEfiFrontierKind kind,
+                                    uint64_t guest_ip,
+                                    const char *state,
+                                    const char *detail)
+{
+    char message[384];
+
+    vibatnium_efi_format_frontier(message, sizeof(message), kind, guest_ip,
+                                  state, detail);
+    warn_report("%s", message);
+}
+
+static void vibatnium_trace_boot_frontier(const VibatniumEfiImage *image)
+{
+    const char *blocked =
+        "not reached: IA-64 instruction execution stops before first guest "
+        "bundle";
+
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
+                            "ready", image->source_path);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_FILE_READ, image->entry,
+                            "firmware-loader-complete", image->source_path);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
+                            image->entry, "none-observed", blocked);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_MEMORY_MAP, image->entry,
+                            "none-observed", blocked);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
+                            image->entry, "none-observed", blocked);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY, image->entry,
+                            "none-observed", blocked);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_BOOT_PARAMETERS,
+                            image->entry, "none-observed", blocked);
+    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_SAL_PAL_CALL, image->entry,
+                            "none-observed", blocked);
+}
+
 static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,
                                             MachineState *machine)
 {
@@ -98,6 +134,7 @@ static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,
     }
 
     vibatnium_commit_efi_image(vms, machine, &image);
+    vibatnium_trace_boot_frontier(&image);
     vibatnium_efi_image_destroy(&image);
     return true;
 }
@@ -147,6 +184,7 @@ static bool vibatnium_try_discovered_efi_app(VibatniumMachineState *vms,
     }
 
     vibatnium_commit_efi_image(vms, machine, &image);
+    vibatnium_trace_boot_frontier(&image);
     vibatnium_efi_image_destroy(&image);
     return true;
 }
