@@ -4,6 +4,7 @@
 #include "qemu/qemu-print.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "exec-smoke.h"
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
 #include "exec/translation-block.h"
@@ -173,35 +174,6 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
     }
 }
 
-static void ia64_cpu_reset_itanium2(IA64CPU *cpu)
-{
-    CPUIA64State *env = &cpu->env;
-
-    memset(env, 0, offsetof(CPUIA64State, end_reset_fields));
-
-    /*
-     * Synthetic reset: enough for a stable placeholder CPU, not yet validated
-     * against PAL/SAL-visible Itanium 2 reset state.
-     */
-    env->pr = 1;
-    env->gr[0] = 0;
-    env->ip = 0;
-    env->psr = 0;
-    env->cfm = 0;
-
-    env->ar[IA64_AR_RSC] = env->rse.rsc;
-    env->ar[IA64_AR_BSP] = env->rse.bsp;
-    env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
-    env->ar[IA64_AR_RNAT] = env->rse.rnat;
-    env->ar[IA64_AR_UNAT] = env->nat.unat;
-    env->ar[IA64_AR_PFS] = 0;
-    env->ar[IA64_AR_FPSR] = 0;
-
-    env->cr[IA64_CR_IPSR] = env->psr;
-    env->cr[IA64_CR_IIP] = env->ip;
-    env->cr[IA64_CR_IFS] = env->cfm;
-}
-
 static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 {
     CPUState *cs = CPU(obj);
@@ -214,7 +186,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 
     switch (cpu->model) {
     case IA64_CPU_MODEL_ITANIUM2:
-        ia64_cpu_reset_itanium2(cpu);
+        ia64_cpu_reset_synthetic_itanium2(&cpu->env);
         break;
     default:
         g_assert_not_reached();

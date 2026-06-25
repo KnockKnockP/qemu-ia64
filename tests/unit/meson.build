@@ -51,6 +51,10 @@ tests = {
   'test-fifo': [],
   'test-envlist': [],
   'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
+  'test-ia64-exec-smoke': [
+    meson.project_source_root() / 'target/ia64/bundle.c',
+    meson.project_source_root() / 'target/ia64/exec-smoke.c',
+  ],
 }
 
 if have_system or have_tools
