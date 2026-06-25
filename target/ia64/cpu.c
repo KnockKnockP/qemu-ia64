@@ -84,9 +84,10 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                     "  CFM %016" PRIx64 "\n",
                  env->psr, env->pr, env->cfm);
     qemu_fprintf(f, "RSE RSC %016" PRIx64 "  BSP %016" PRIx64
-                    "  BSPSTORE %016" PRIx64 "  RNAT %016" PRIx64 "\n",
+                    "  BSPSTORE %016" PRIx64 "  RNAT %016" PRIx64
+                    "  BASE %u\n",
                  env->rse.rsc, env->rse.bsp, env->rse.bspstore,
-                 env->rse.rnat);
+                 env->rse.rnat, env->rse.current_frame_base);
     qemu_fprintf(f, "NaT %016" PRIx64 ":%016" PRIx64
                     "  UNAT %016" PRIx64 "  RNAT %016" PRIx64 "\n",
                  env->nat.gr_nat[1], env->nat.gr_nat[0],
@@ -96,9 +97,9 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  env->cr[IA64_CR_IVA], env->cr[IA64_CR_IIP],
                  env->cr[IA64_CR_ISR], env->cr[IA64_CR_IFA]);
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < IA64_GR_COUNT; i++) {
         qemu_fprintf(f, "r%-2d %016" PRIx64 "%s",
-                     i, env->gr[i], (i % 2) ? "\n" : "  ");
+                     i, ia64_read_gr(env, i), (i % 2) ? "\n" : "  ");
     }
 
     for (int i = 0; i < IA64_BR_COUNT; i++) {
@@ -156,7 +157,7 @@ int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
     }
 
     if (n < IA64_GR_COUNT) {
-        return gdb_get_reg64(mem_buf, env->gr[n]);
+        return gdb_get_reg64(mem_buf, ia64_read_gr(env, n));
     }
 
     switch (n) {
@@ -181,7 +182,7 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
     }
 
     if (n < IA64_GR_COUNT) {
-        env->gr[n] = ldq_le_p(mem_buf);
+        ia64_write_gr(env, n, ldq_le_p(mem_buf));
         return 8;
     }
 

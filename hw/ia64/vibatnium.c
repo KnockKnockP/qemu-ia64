@@ -53,6 +53,9 @@ static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
                                        MachineState *machine,
                                        VibatniumEfiImage *image)
 {
+    g_autofree uint8_t *firmware_blob = NULL;
+    size_t firmware_blob_size = 0;
+
     if (machine->ram_size <= image->load_base ||
         image->size > machine->ram_size - image->load_base) {
         error_report("IA-64 EFI app '%s' image size 0x%" PRIx64
@@ -62,6 +65,10 @@ static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
         exit(1);
     }
 
+    firmware_blob = vibatnium_efi_build_firmware_blob(&firmware_blob_size,
+                                                      image);
+    rom_add_blob_fixed("vibatnium.efi-tables", firmware_blob,
+                       firmware_blob_size, VIBATNIUM_EFI_BLOB_BASE);
     rom_add_blob_fixed("vibatnium.efi-app", image->data, image->size,
                        image->load_base);
     vibatnium_efi_prepare_cpu(&vms->cpu->env, image);
@@ -93,26 +100,29 @@ static void vibatnium_warn_frontier(VibatniumEfiFrontierKind kind,
 
 static void vibatnium_trace_boot_frontier(const VibatniumEfiImage *image)
 {
-    const char *blocked =
-        "not reached yet: IA-64 execution reports the exact unsupported "
-        "bundle frontier before this milestone";
+    const char *pending =
+        "pending runtime observation: unsupported bundles still report the "
+        "exact execution frontier";
+    const char *media_blocked =
+        "not reached yet: ELILO currently needs guest-visible EFI media "
+        "protocols before kernel handoff";
 
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
                             "ready", image->source_path);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_FILE_READ, image->entry,
                             "firmware-loader-complete", image->source_path);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
-                            image->entry, "none-observed", blocked);
+                            image->entry, "dispatch-enabled", pending);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_MEMORY_MAP, image->entry,
-                            "none-observed", blocked);
+                            "none-observed", media_blocked);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
-                            image->entry, "none-observed", blocked);
+                            image->entry, "none-observed", media_blocked);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY, image->entry,
-                            "none-observed", blocked);
+                            "none-observed", media_blocked);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_BOOT_PARAMETERS,
-                            image->entry, "none-observed", blocked);
+                            image->entry, "none-observed", media_blocked);
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_SAL_PAL_CALL, image->entry,
-                            "none-observed", blocked);
+                            "none-observed", media_blocked);
 }
 
 static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,

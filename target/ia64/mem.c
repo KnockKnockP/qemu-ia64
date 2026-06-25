@@ -4,6 +4,8 @@
 #include "mem.h"
 #include "exec/page-protection.h"
 
+#define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
+
 const char *ia64_translate_status_name(IA64TranslateStatus status)
 {
     switch (status) {
@@ -34,27 +36,22 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
     result->mmu_idx = mmu_idx;
     result->debug = debug;
 
-    if (result->region != 0) {
-        result->status = IA64_TRANSLATE_BAD_ADDRESS;
-        snprintf(result->message, sizeof(result->message),
-                 "region %u translation is not implemented for "
-                 "address=0x%016" VADDR_PRIx,
-                 result->region, address);
-    } else {
-        result->status = IA64_TRANSLATE_OK;
-        result->paddr = address;
-        result->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-        result->identity = true;
-        snprintf(result->message, sizeof(result->message),
-                 "phase6 identity translation address=0x%016" VADDR_PRIx,
-                 address);
-    }
+    result->status = IA64_TRANSLATE_OK;
+    result->paddr = address & IA64_PHYSICAL_ADDRESS_MASK;
+    result->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+    result->identity = result->paddr == address;
+    snprintf(result->message, sizeof(result->message),
+             result->identity
+             ? "physical identity translation address=0x%016" VADDR_PRIx
+             : "physical region-alias translation address=0x%016" VADDR_PRIx
+               " paddr=0x%016" HWADDR_PRIx,
+             address, result->paddr);
 
     env->memory.last_vaddr = result->vaddr;
     env->memory.last_paddr = result->paddr;
     env->memory.last_region = result->region;
     env->memory.last_status = result->status;
-    env->memory.identity_region0_only = true;
+    env->memory.identity_region0_only = false;
 
     return result->status == IA64_TRANSLATE_OK;
 }

@@ -41,6 +41,24 @@ static void store_le64(uint8_t *p, uint64_t value)
     }
 }
 
+static uint64_t load_le64(const uint8_t *p)
+{
+    uint64_t value = 0;
+
+    for (int i = 7; i >= 0; i--) {
+        value = (value << 8) | p[i];
+    }
+    return value;
+}
+
+static const uint8_t *firmware_ptr(const uint8_t *blob, uint64_t address)
+{
+    g_assert_cmphex(address, >=, VIBATNIUM_EFI_BLOB_BASE);
+    g_assert_cmphex(address, <,
+                    VIBATNIUM_EFI_BLOB_BASE + VIBATNIUM_EFI_BLOB_SIZE);
+    return blob + (address - VIBATNIUM_EFI_BLOB_BASE);
+}
+
 static void make_synthetic_ia64_pe(uint8_t *pe,
                                    uint16_t machine,
                                    uint64_t preferred_base,
@@ -177,11 +195,72 @@ static void test_prepare_cpu_entry_abi(void)
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, env.ip);
     g_assert_cmphex(env.gr[1], ==,
                     VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
-    g_assert_cmphex(env.gr[32], ==, VIBATNIUM_EFI_IMAGE_HANDLE);
-    g_assert_cmphex(env.gr[33], ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+    g_assert_cmphex(ia64_read_gr(&env, 12), ==,
+                    VIBATNIUM_EFI_STACK_BASE +
+                    VIBATNIUM_EFI_STACK_SIZE - 16);
+    g_assert_cmphex(ia64_read_gr(&env, 32), ==, VIBATNIUM_EFI_IMAGE_HANDLE);
+    g_assert_cmphex(ia64_read_gr(&env, 33), ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+    g_assert_cmphex(env.ar[IA64_AR_BSP], ==,
+                    VIBATNIUM_EFI_BACKING_STORE_BASE);
+    g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==,
+                    VIBATNIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.gr[0], ==, 0);
 
     vibatnium_efi_image_destroy(&image);
+}
+
+static void test_builds_guest_firmware_tables(void)
+{
+    VibatniumEfiImage image = {
+        .load_base = VIBATNIUM_EFI_APP_BASE,
+        .size = 0x123450,
+    };
+    size_t blob_size = 0;
+    uint8_t *blob = vibatnium_efi_build_firmware_blob(&blob_size, &image);
+    uint64_t boot_services;
+    uint64_t handle_protocol_descriptor;
+    uint64_t handle_protocol_gate;
+
+    g_assert_cmpuint(blob_size, ==, VIBATNIUM_EFI_BLOB_SIZE);
+
+    boot_services = load_le64(firmware_ptr(
+        blob, VIBATNIUM_EFI_SYSTEM_TABLE + 96));
+    g_assert_cmphex(boot_services, ==, VIBATNIUM_EFI_BOOT_SERVICES);
+
+    handle_protocol_descriptor = load_le64(firmware_ptr(
+        blob,
+        VIBATNIUM_EFI_BOOT_SERVICES + 24 +
+        VIBATNIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 8));
+    g_assert_cmphex(handle_protocol_descriptor, ==,
+                    VIBATNIUM_EFI_DESCRIPTOR_BASE +
+                    VIBATNIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 16);
+
+    handle_protocol_gate = load_le64(firmware_ptr(
+        blob, handle_protocol_descriptor));
+    g_assert_cmphex(handle_protocol_gate, ==,
+                    VIBATNIUM_EFI_CALL_GATE_BASE +
+                    VIBATNIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 16);
+    g_assert_cmphex(load_le64(firmware_ptr(blob,
+                                           handle_protocol_descriptor + 8)),
+                    ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+
+    g_assert_cmphex(load_le64(firmware_ptr(blob,
+                                           VIBATNIUM_EFI_LOADED_IMAGE + 16)),
+                    ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+    g_assert_cmphex(load_le64(firmware_ptr(blob,
+                                           VIBATNIUM_EFI_LOADED_IMAGE + 64)),
+                    ==, VIBATNIUM_EFI_APP_BASE);
+    g_assert_cmphex(load_le64(firmware_ptr(blob,
+                                           VIBATNIUM_EFI_LOADED_IMAGE + 72)),
+                    ==, image.size);
+
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob,
+                         VIBATNIUM_EFI_BOOT_SERVICES + 24 + 17 * 8)),
+                    ==, 0);
+    g_assert_cmphex(firmware_ptr(blob, handle_protocol_gate)[0], !=, 0);
+
+    g_free(blob);
 }
 
 static void test_relocates_ia64_entry_descriptor(void)
@@ -253,6 +332,8 @@ int main(int argc, char **argv)
                     test_rejects_non_ia64_pe);
     g_test_add_func("/ia64-efi-app/prepare-cpu-entry-abi",
                     test_prepare_cpu_entry_abi);
+    g_test_add_func("/ia64-efi-app/build-guest-firmware-tables",
+                    test_builds_guest_firmware_tables);
     g_test_add_func("/ia64-efi-app/relocate-entry-descriptor",
                     test_relocates_ia64_entry_descriptor);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",

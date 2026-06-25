@@ -41,6 +41,32 @@ typedef struct IA64LdstImmediate {
     int64_t immediate;
 } IA64LdstImmediate;
 
+typedef enum IA64FloatingMemoryKind {
+    IA64_FLOAT_MEM_LOAD,
+    IA64_FLOAT_MEM_STORE,
+} IA64FloatingMemoryKind;
+
+typedef enum IA64FloatingMemoryFormat {
+    IA64_FLOAT_FMT_EXTENDED,
+    IA64_FLOAT_FMT_SIGNIFICAND,
+    IA64_FLOAT_FMT_SINGLE,
+    IA64_FLOAT_FMT_DOUBLE,
+    IA64_FLOAT_FMT_SPILL_FILL,
+} IA64FloatingMemoryFormat;
+
+typedef struct IA64FloatingMemoryInstruction {
+    IA64FloatingMemoryKind kind;
+    IA64FloatingMemoryFormat format;
+    uint8_t width;
+    uint8_t freg;
+    uint8_t base;
+    uint8_t update_source;
+    uint8_t memory_class;
+    bool base_update;
+    bool update_from_register;
+    int64_t immediate;
+} IA64FloatingMemoryInstruction;
+
 typedef enum IA64CompareRelation {
     IA64_CMP_EQ,
     IA64_CMP_NE,
@@ -74,11 +100,37 @@ typedef struct IA64CompareInstruction {
     int64_t immediate;
 } IA64CompareInstruction;
 
+typedef struct IA64ExtractInstruction {
+    uint8_t target;
+    uint8_t source3;
+    uint8_t position;
+    uint8_t length;
+    bool sign_extend;
+} IA64ExtractInstruction;
+
+typedef enum IA64IntegerExtendKind {
+    IA64_EXT_ZXT,
+    IA64_EXT_SXT,
+    IA64_EXT_CZX_LEFT,
+    IA64_EXT_CZX_RIGHT,
+} IA64IntegerExtendKind;
+
+typedef struct IA64IntegerExtendInstruction {
+    IA64IntegerExtendKind kind;
+    uint8_t target;
+    uint8_t source3;
+    uint8_t width;
+} IA64IntegerExtendInstruction;
+
 void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env);
 
 const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status);
 bool ia64_exec_smoke_slot_supported(IA64SlotType type, uint64_t raw);
 uint64_t ia64_make_cfm(uint32_t sof, uint32_t sol, uint32_t sor);
+void ia64_set_cfm(CPUIA64State *env, uint64_t cfm);
+uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg);
+void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value);
+bool ia64_return_from_call_frame(CPUIA64State *env, uint64_t target_ip);
 bool ia64_slot_is_m34_alloc(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m34_alloc(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_nop(IA64SlotType type, uint64_t raw);
@@ -90,16 +142,66 @@ bool ia64_slot_is_i_mov_to_branch(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_mov_to_branch(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_mov_from_predicate(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_mov_from_predicate(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_i_mov_to_predicate(IA64SlotType type, uint64_t raw);
+bool ia64_exec_i_mov_to_predicate(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_i_mov_to_rotating_predicate_immediate(IA64SlotType type,
+                                                        uint64_t raw);
+bool ia64_exec_i_mov_to_rotating_predicate_immediate(CPUIA64State *env,
+                                                     uint64_t raw);
+bool ia64_slot_is_mov_to_application(IA64SlotType type, uint64_t raw);
+bool ia64_exec_mov_to_application(CPUIA64State *env, IA64SlotType type,
+                                  uint64_t raw);
+bool ia64_slot_is_mov_from_application(IA64SlotType type, uint64_t raw);
+bool ia64_exec_mov_from_application(CPUIA64State *env, IA64SlotType type,
+                                    uint64_t raw);
+bool ia64_slot_is_i_mov_to_application_immediate(IA64SlotType type,
+                                                 uint64_t raw);
+bool ia64_exec_i_mov_to_application_immediate(CPUIA64State *env,
+                                              uint64_t raw);
+bool ia64_slot_is_m_check_advanced(IA64SlotType type, uint64_t raw);
+bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
+                                uint64_t bundle_ip, uint64_t *target_ip);
+bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw);
 bool ia64_slot_pair_is_lx_movl(uint64_t l_raw, uint64_t x_raw);
 uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw);
 bool ia64_exec_lx_movl(CPUIA64State *env, uint64_t l_raw, uint64_t x_raw);
 bool ia64_slot_is_alu_add(IA64SlotType type, uint64_t raw);
 bool ia64_exec_alu_add(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_alu_sub(IA64SlotType type, uint64_t raw);
+bool ia64_exec_alu_sub(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_alu_logic(IA64SlotType type, uint64_t raw);
+bool ia64_exec_alu_logic(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_alu_addp4(IA64SlotType type, uint64_t raw);
+bool ia64_exec_alu_addp4(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_alu_shladd(IA64SlotType type, uint64_t raw);
+bool ia64_exec_alu_shladd(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_addl(IA64SlotType type, uint64_t raw);
 int64_t ia64_addl_immediate(uint64_t raw);
 bool ia64_exec_addl(CPUIA64State *env, uint64_t raw);
 bool ia64_decode_ldst_immediate(IA64SlotType type, uint64_t raw,
                                 IA64LdstImmediate *decoded);
+bool ia64_slot_is_m_setf(IA64SlotType type, uint64_t raw);
+bool ia64_exec_m_setf(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_m_getf(IA64SlotType type, uint64_t raw);
+bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw);
+bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
+                                 IA64FloatingMemoryInstruction *decoded);
+bool ia64_decode_extract(IA64SlotType type, uint64_t raw,
+                         IA64ExtractInstruction *decoded);
+bool ia64_exec_extract(CPUIA64State *env,
+                       const IA64ExtractInstruction *decoded);
+bool ia64_decode_integer_extend(IA64SlotType type, uint64_t raw,
+                                IA64IntegerExtendInstruction *decoded);
+bool ia64_exec_integer_extend(CPUIA64State *env,
+                              const IA64IntegerExtendInstruction *decoded);
+bool ia64_slot_is_f_select_or_xma(IA64SlotType type, uint64_t raw);
+bool ia64_exec_f_select_or_xma(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_f_multiply_add(IA64SlotType type, uint64_t raw);
+bool ia64_exec_f_multiply_add(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_f_reciprocal_approx(IA64SlotType type, uint64_t raw);
+bool ia64_exec_f_reciprocal_approx(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_f_misc(IA64SlotType type, uint64_t raw);
+bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw);
 bool ia64_decode_compare(IA64SlotType type, uint64_t raw,
                          IA64CompareInstruction *decoded);
 bool ia64_exec_compare(CPUIA64State *env,
@@ -119,6 +221,7 @@ bool ia64_exec_b_call_relative(CPUIA64State *env,
                                uint64_t *target_ip);
 bool ia64_exec_b_indirect_branch(CPUIA64State *env,
                                  uint64_t raw,
+                                 uint64_t bundle_ip,
                                  uint64_t *target_ip);
 IA64ExecSmokeStatus
 ia64_exec_smoke_bundle(CPUIA64State *env,

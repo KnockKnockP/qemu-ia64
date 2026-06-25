@@ -7,6 +7,8 @@
 #include "exec/cpu-interrupt.h"
 
 #define IA64_GR_COUNT 128
+#define IA64_STATIC_GR_COUNT 32
+#define IA64_STACKED_GR_COUNT 4096
 #define IA64_FR_COUNT 128
 #define IA64_PR_COUNT 64
 #define IA64_BR_COUNT 8
@@ -85,6 +87,8 @@ typedef struct IA64RSEState {
     uint32_t rrb_gr;
     uint32_t rrb_fr;
     uint32_t rrb_pr;
+    uint32_t current_frame_base;
+    uint64_t stacked_gr[IA64_STACKED_GR_COUNT];
 } IA64RSEState;
 
 typedef struct IA64NaTState {
