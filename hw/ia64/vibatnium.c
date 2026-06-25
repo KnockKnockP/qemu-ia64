@@ -8,7 +8,10 @@
 #include "hw/core/cpu.h"
 #include "hw/core/loader.h"
 #include "hw/ia64/efi.h"
+#include "hw/ia64/efi-storage.h"
 #include "hw/ia64/vibatnium.h"
+#include "system/block-backend.h"
+#include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 
@@ -24,39 +27,46 @@ static void vibatnium_uart_irq(void *opaque, int n, int level)
     (void)level;
 }
 
-static void vibatnium_load_efi_app(VibatniumMachineState *vms,
-                                   MachineState *machine)
+typedef struct VibatniumBlockReadOpaque {
+    BlockBackend *blk;
+} VibatniumBlockReadOpaque;
+
+static int vibatnium_block_pread(void *opaque,
+                                 uint64_t offset,
+                                 uint32_t bytes,
+                                 void *buffer,
+                                 Error **errp)
 {
-    Error *local_err = NULL;
-    VibatniumEfiImage image;
+    VibatniumBlockReadOpaque *read_opaque = opaque;
+    int ret;
 
-    if (!machine->kernel_filename) {
-        return;
+    ret = blk_pread(read_opaque->blk, offset, bytes, buffer, 0);
+    if (ret < 0) {
+        error_setg(errp, "block read failed: %s", strerror(-ret));
+        return ret;
     }
 
-    if (!vibatnium_efi_image_from_file(machine->kernel_filename,
-                                       VIBATNIUM_EFI_APP_BASE, &image,
-                                       &local_err)) {
-        error_reportf_err(local_err, "could not load IA-64 EFI app '%s': ",
-                          machine->kernel_filename);
-        exit(1);
-    }
+    return 0;
+}
 
-    if (machine->ram_size <= image.load_base ||
-        image.size > machine->ram_size - image.load_base) {
+static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
+                                       MachineState *machine,
+                                       VibatniumEfiImage *image)
+{
+    if (machine->ram_size <= image->load_base ||
+        image->size > machine->ram_size - image->load_base) {
         error_report("IA-64 EFI app '%s' image size 0x%" PRIx64
                      " at 0x%016" PRIx64 " does not fit in RAM",
-                     machine->kernel_filename, (uint64_t)image.size,
-                     image.load_base);
-        vibatnium_efi_image_destroy(&image);
+                     image->source_path, (uint64_t)image->size,
+                     image->load_base);
         exit(1);
     }
 
-    rom_add_blob_fixed("vibatnium.efi-app", image.data, image.size,
-                       image.load_base);
-    vibatnium_efi_prepare_cpu(&vms->cpu->env, &image);
+    rom_add_blob_fixed("vibatnium.efi-app", image->data, image->size,
+                       image->load_base);
+    vibatnium_efi_prepare_cpu(&vms->cpu->env, image);
 
-    warn_report("%s", image.message);
+    warn_report("%s", image->message);
     warn_report("vibatnium EFI handoff image-handle=0x%016" PRIx64
                 " system-table=0x%016" PRIx64
                 " con-out=0x%016" PRIx64
@@ -67,8 +77,147 @@ static void vibatnium_load_efi_app(VibatniumMachineState *vms,
                 (uint64_t)VIBATNIUM_EFI_LOADED_IMAGE);
     warn_report("IA-64 instruction execution is still unimplemented; "
                 "starting the CPU will stop at the first translated bundle");
+}
 
+static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,
+                                            MachineState *machine)
+{
+    Error *local_err = NULL;
+    VibatniumEfiImage image;
+
+    if (!machine->kernel_filename) {
+        return false;
+    }
+
+    if (!vibatnium_efi_image_from_file(machine->kernel_filename,
+                                       VIBATNIUM_EFI_APP_BASE, &image,
+                                       &local_err)) {
+        error_reportf_err(local_err, "could not load IA-64 EFI app '%s': ",
+                          machine->kernel_filename);
+        exit(1);
+    }
+
+    vibatnium_commit_efi_image(vms, machine, &image);
     vibatnium_efi_image_destroy(&image);
+    return true;
+}
+
+static bool vibatnium_try_discovered_efi_app(VibatniumMachineState *vms,
+                                             MachineState *machine,
+                                             VibatniumEfiBlockDevice *dev)
+{
+    Error *local_err = NULL;
+    VibatniumEfiStorageReport report;
+    g_autofree uint8_t *file_data = NULL;
+    size_t file_size = 0;
+    VibatniumEfiImage image;
+    char source[384];
+
+    if (!vibatnium_efi_cdrom_read_path(dev, VIBATNIUM_EFI_FALLBACK_PATH,
+                                       &file_data, &file_size, source,
+                                       sizeof(source), &report, &local_err)) {
+        warn_report("vibatnium EFI discovery media=%s path=%s status=%s "
+                    "reason=%s",
+                    dev->name ? dev->name : "<unnamed>",
+                    VIBATNIUM_EFI_FALLBACK_PATH,
+                    vibatnium_efi_storage_status_name(report.status),
+                    report.message);
+        error_free(local_err);
+        return false;
+    }
+
+    warn_report("vibatnium EFI discovery media=%s path=%s status=%s %s",
+                dev->name ? dev->name : "<unnamed>",
+                VIBATNIUM_EFI_FALLBACK_PATH,
+                vibatnium_efi_storage_status_name(report.status),
+                report.message);
+
+    local_err = NULL;
+    if (!vibatnium_efi_image_from_buffer(source, file_data, file_size,
+                                         VIBATNIUM_EFI_APP_BASE, &image,
+                                         &local_err)) {
+        warn_report("vibatnium EFI discovery media=%s path=%s status=%s "
+                    "reason=%s",
+                    dev->name ? dev->name : "<unnamed>",
+                    VIBATNIUM_EFI_FALLBACK_PATH,
+                    vibatnium_efi_status_name(VIBATNIUM_EFI_LOAD_ERROR),
+                    error_get_pretty(local_err));
+        error_free(local_err);
+        return false;
+    }
+
+    vibatnium_commit_efi_image(vms, machine, &image);
+    vibatnium_efi_image_destroy(&image);
+    return true;
+}
+
+static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
+                                       MachineState *machine)
+{
+    BlockBackend *blk = NULL;
+    unsigned media_index = 0;
+    unsigned cdrom_candidates = 0;
+
+    while ((blk = blk_next(blk)) != NULL) {
+        DriveInfo *dinfo = blk_legacy_dinfo(blk);
+        const char *name = blk_name(blk);
+        bool available = blk_is_available(blk);
+        bool cdrom = dinfo && dinfo->media_cd;
+        int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
+        VibatniumBlockReadOpaque read_opaque = { .blk = blk };
+        VibatniumEfiBlockDevice dev = {
+            .name = name && *name ? name : "<unnamed>",
+            .size = length > 0 ? length : 0,
+            .block_size = 2048,
+            .read_only = true,
+            .removable = cdrom,
+            .cdrom = cdrom,
+            .read = vibatnium_block_pread,
+            .opaque = &read_opaque,
+        };
+
+        warn_report("vibatnium EFI media[%u] name=%s available=%s cdrom=%s "
+                    "bytes=%" PRId64,
+                    media_index++, dev.name, available ? "yes" : "no",
+                    cdrom ? "yes" : "no", length);
+
+        if (!available) {
+            continue;
+        }
+        if (!cdrom) {
+            warn_report("vibatnium EFI media %s skipped: not read-only "
+                        "CD-ROM media",
+                        dev.name);
+            continue;
+        }
+        if (length <= 0) {
+            warn_report("vibatnium EFI media %s skipped: unavailable length "
+                        "%" PRId64,
+                        dev.name, length);
+            continue;
+        }
+
+        cdrom_candidates++;
+        if (vibatnium_try_discovered_efi_app(vms, machine, &dev)) {
+            return true;
+        }
+    }
+
+    warn_report("vibatnium EFI discovery found no boot app path=%s "
+                "media=%u cdrom-candidates=%u",
+                VIBATNIUM_EFI_FALLBACK_PATH, media_index,
+                cdrom_candidates);
+    return false;
+}
+
+static void vibatnium_load_efi_app(VibatniumMachineState *vms,
+                                   MachineState *machine)
+{
+    if (vibatnium_load_explicit_efi_app(vms, machine)) {
+        return;
+    }
+
+    vibatnium_discover_efi_app(vms, machine);
 }
 
 static void vibatnium_init(MachineState *machine)

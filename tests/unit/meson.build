@@ -70,6 +70,9 @@ tests = {
     meson.project_source_root() / 'target/ia64/exec-smoke.c',
     meson.project_source_root() / 'target/ia64/mem.c',
   ],
+  'test-ia64-efi-storage': [
+    meson.project_source_root() / 'hw/ia64/efi-storage.c',
+  ],
 }
 
 if have_system or have_tools
