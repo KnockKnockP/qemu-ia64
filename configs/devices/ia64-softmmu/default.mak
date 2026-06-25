@@ -1,1 +1,4 @@
-# No IA-64 machines are enabled in Phase 2.
+# Default configuration for ia64-softmmu
+
+# Boards are selected by default, uncomment to keep out of the build.
+# CONFIG_VIBATNIUM=n

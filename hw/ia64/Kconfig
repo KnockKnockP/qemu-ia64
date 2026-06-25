@@ -1,0 +1,5 @@
+config VIBATNIUM
+    bool
+    default y
+    depends on IA64
+    select SERIAL_MM

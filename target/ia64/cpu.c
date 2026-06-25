@@ -276,6 +276,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .restore_state_to_opc = ia64_restore_state_to_opc,
     .mmu_index = ia64_cpu_mmu_index,
     .tlb_fill = ia64_cpu_tlb_fill,
+    .pointer_wrap = cpu_pointer_wrap_notreached,
     .cpu_exec_interrupt = ia64_cpu_exec_interrupt,
     .cpu_exec_halt = ia64_cpu_has_work,
     .cpu_exec_reset = cpu_reset,
