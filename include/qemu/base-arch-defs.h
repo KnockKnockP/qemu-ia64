@@ -33,6 +33,7 @@ enum {
     QEMU_ARCH_OR1K =        (1UL << SYS_EMU_TARGET_OR1K),
     QEMU_ARCH_TRICORE =     (1UL << SYS_EMU_TARGET_TRICORE),
     QEMU_ARCH_HPPA =        (1UL << SYS_EMU_TARGET_HPPA),
+    QEMU_ARCH_IA64 =        (1UL << SYS_EMU_TARGET_IA64),
     QEMU_ARCH_RISCV =       (1UL << SYS_EMU_TARGET_RISCV32) |
                             (1UL << SYS_EMU_TARGET_RISCV64),
     QEMU_ARCH_RX =          (1UL << SYS_EMU_TARGET_RX),

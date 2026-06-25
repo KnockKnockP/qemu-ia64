@@ -3,6 +3,7 @@ source arm/Kconfig
 source avr/Kconfig
 source hppa/Kconfig
 source i386/Kconfig
+source ia64/Kconfig
 source loongarch/Kconfig
 source m68k/Kconfig
 source microblaze/Kconfig
