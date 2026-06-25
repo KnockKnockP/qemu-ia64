@@ -144,6 +144,44 @@ static void test_format_output_stable(void)
                     "raw=00000000000,00000000000,00000000000");
 }
 
+static void test_opcode_classification_from_project_local_emulator(void)
+{
+    const IA64OpcodeClass *klass;
+
+    klass = ia64_opcode_class(IA64_SLOT_TYPE_M, 0x4);
+    g_assert_true(klass->defined);
+    g_assert_cmpstr(klass->family, ==, "integer-load-register-getf");
+    g_assert_cmpstr(klass->mnemonic_stem, ==, "ld");
+
+    klass = ia64_opcode_class(IA64_SLOT_TYPE_B, 0x4);
+    g_assert_true(klass->defined);
+    g_assert_cmpstr(klass->family, ==, "ip-relative-branch");
+    g_assert_cmpstr(klass->format_summary, ==, "B1/B2");
+
+    klass = ia64_opcode_class(IA64_SLOT_TYPE_I, 0x1);
+    g_assert_false(klass->defined);
+    g_assert_cmpstr(klass->family, ==, "reserved-or-ignored");
+}
+
+static void test_slot_class_format_includes_frontier_fields(void)
+{
+    uint8_t bundle[IA64_BUNDLE_SIZE];
+    IA64DecodedBundle decoded;
+    char text[256];
+
+    make_bundle(bundle, 0x10, 0x8000000004ULL, 0, 0);
+    g_assert_true(ia64_decode_bundle(bundle, &decoded));
+
+    ia64_format_slot_class(&decoded, 0, text, sizeof(text));
+
+    g_assert_nonnull(strstr(text, "slot=0"));
+    g_assert_nonnull(strstr(text, "type=M"));
+    g_assert_nonnull(strstr(text, "qp=p4"));
+    g_assert_nonnull(strstr(text, "major=0x4"));
+    g_assert_nonnull(strstr(text, "family=integer-load-register-getf"));
+    g_assert_nonnull(strstr(text, "defined=yes"));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -157,6 +195,10 @@ int main(int argc, char **argv)
                     test_reserved_template);
     g_test_add_func("/ia64-bundle/format-output-stable",
                     test_format_output_stable);
+    g_test_add_func("/ia64-bundle/opcode-classification",
+                    test_opcode_classification_from_project_local_emulator);
+    g_test_add_func("/ia64-bundle/slot-class-format",
+                    test_slot_class_format_includes_frontier_fields);
 
     return g_test_run();
 }

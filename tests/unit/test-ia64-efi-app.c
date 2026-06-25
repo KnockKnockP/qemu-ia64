@@ -15,7 +15,10 @@
     (SYNTHETIC_PE_OFFSET + 4 + 20 + SYNTHETIC_OPT_SIZE)
 #define SYNTHETIC_RAW_OFFSET 0x200
 #define SYNTHETIC_TEXT_RVA 0x1000
+#define SYNTHETIC_DESCRIPTOR_RVA 0x1100
+#define SYNTHETIC_RELOC_RVA 0x1180
 #define SYNTHETIC_IMAGE_SIZE 0x2000
+#define SYNTHETIC_GP_RVA 0x1800
 
 static void store_le16(uint8_t *p, uint16_t value)
 {
@@ -38,11 +41,16 @@ static void store_le64(uint8_t *p, uint64_t value)
     }
 }
 
-static void make_synthetic_ia64_pe(uint8_t *pe, uint16_t machine)
+static void make_synthetic_ia64_pe(uint8_t *pe,
+                                   uint16_t machine,
+                                   uint64_t preferred_base,
+                                   bool with_relocs)
 {
     uint8_t *coff;
     uint8_t *optional;
     uint8_t *section;
+    uint8_t *descriptor;
+    uint8_t *reloc;
 
     memset(pe, 0, SYNTHETIC_PE_SIZE);
     pe[0] = 'M';
@@ -58,22 +66,47 @@ static void make_synthetic_ia64_pe(uint8_t *pe, uint16_t machine)
 
     optional = coff + 20;
     store_le16(optional, 0x20b);
-    store_le32(optional + 16, SYNTHETIC_TEXT_RVA);
-    store_le64(optional + 24, VIBATNIUM_EFI_APP_BASE);
+    store_le32(optional + 16, SYNTHETIC_DESCRIPTOR_RVA);
+    store_le64(optional + 24, preferred_base);
     store_le32(optional + 32, 0x1000);
     store_le32(optional + 36, 0x200);
     store_le32(optional + 56, SYNTHETIC_IMAGE_SIZE);
     store_le32(optional + 60, 0x200);
+    store_le32(optional + 108, 16);
+    if (with_relocs) {
+        store_le32(optional + 112 + 5 * 8, SYNTHETIC_RELOC_RVA);
+        store_le32(optional + 112 + 5 * 8 + 4, 16);
+    }
 
     section = pe + SYNTHETIC_SECTION_OFFSET;
     memcpy(section, ".text", 5);
-    store_le32(section + 8, 0x20);
+    store_le32(section + 8, 0x200);
     store_le32(section + 12, SYNTHETIC_TEXT_RVA);
     store_le32(section + 16, 0x200);
     store_le32(section + 20, SYNTHETIC_RAW_OFFSET);
 
     pe[SYNTHETIC_RAW_OFFSET] = 0x55;
     pe[SYNTHETIC_RAW_OFFSET + 1] = 0xaa;
+
+    descriptor = pe + SYNTHETIC_RAW_OFFSET +
+                 (SYNTHETIC_DESCRIPTOR_RVA - SYNTHETIC_TEXT_RVA);
+    store_le64(descriptor, preferred_base + SYNTHETIC_TEXT_RVA);
+    store_le64(descriptor + 8, preferred_base + SYNTHETIC_GP_RVA);
+
+    if (with_relocs) {
+        reloc = pe + SYNTHETIC_RAW_OFFSET +
+                (SYNTHETIC_RELOC_RVA - SYNTHETIC_TEXT_RVA);
+        store_le32(reloc, SYNTHETIC_TEXT_RVA);
+        store_le32(reloc + 4, 16);
+        store_le16(reloc + 8,
+                   (10 << 12) |
+                   (SYNTHETIC_DESCRIPTOR_RVA - SYNTHETIC_TEXT_RVA));
+        store_le16(reloc + 10,
+                   (10 << 12) |
+                   (SYNTHETIC_DESCRIPTOR_RVA + 8 - SYNTHETIC_TEXT_RVA));
+        store_le16(reloc + 12, 0);
+        store_le16(reloc + 14, 0);
+    }
 }
 
 static void test_loads_synthetic_ia64_pe(void)
@@ -82,7 +115,8 @@ static void test_loads_synthetic_ia64_pe(void)
     VibatniumEfiImage image;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64);
+    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64,
+                           VIBATNIUM_EFI_APP_BASE, false);
 
     g_assert_true(vibatnium_efi_image_from_buffer("synthetic.efi", pe,
                                                  sizeof(pe),
@@ -90,8 +124,12 @@ static void test_loads_synthetic_ia64_pe(void)
                                                  &image, &err));
     g_assert_null(err);
     g_assert_cmphex(image.load_base, ==, VIBATNIUM_EFI_APP_BASE);
+    g_assert_cmphex(image.entry_descriptor, ==,
+                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
     g_assert_cmphex(image.entry, ==,
                     VIBATNIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+    g_assert_cmphex(image.global_pointer, ==,
+                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
     g_assert_cmpuint(image.size, ==, SYNTHETIC_IMAGE_SIZE);
     g_assert_cmphex(image.data[SYNTHETIC_TEXT_RVA], ==, 0x55);
     g_assert_cmphex(image.data[SYNTHETIC_TEXT_RVA + 1], ==, 0xaa);
@@ -106,7 +144,7 @@ static void test_rejects_non_ia64_pe(void)
     VibatniumEfiImage image;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, 0x8664);
+    make_synthetic_ia64_pe(pe, 0x8664, VIBATNIUM_EFI_APP_BASE, false);
 
     g_assert_false(vibatnium_efi_image_from_buffer("x64.efi", pe, sizeof(pe),
                                                   VIBATNIUM_EFI_APP_BASE,
@@ -123,7 +161,8 @@ static void test_prepare_cpu_entry_abi(void)
     CPUIA64State env;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64);
+    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64,
+                           VIBATNIUM_EFI_APP_BASE, false);
     g_assert_true(vibatnium_efi_image_from_buffer("synthetic.efi", pe,
                                                  sizeof(pe),
                                                  VIBATNIUM_EFI_APP_BASE,
@@ -136,9 +175,35 @@ static void test_prepare_cpu_entry_abi(void)
     g_assert_cmphex(env.ip, ==,
                     VIBATNIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, env.ip);
+    g_assert_cmphex(env.gr[1], ==,
+                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
     g_assert_cmphex(env.gr[32], ==, VIBATNIUM_EFI_IMAGE_HANDLE);
     g_assert_cmphex(env.gr[33], ==, VIBATNIUM_EFI_SYSTEM_TABLE);
     g_assert_cmphex(env.gr[0], ==, 0);
+
+    vibatnium_efi_image_destroy(&image);
+}
+
+static void test_relocates_ia64_entry_descriptor(void)
+{
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    VibatniumEfiImage image;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64, 0, true);
+
+    g_assert_true(vibatnium_efi_image_from_buffer("synthetic-reloc.efi", pe,
+                                                 sizeof(pe),
+                                                 VIBATNIUM_EFI_APP_BASE,
+                                                 &image, &err));
+    g_assert_null(err);
+    g_assert_cmphex(image.preferred_image_base, ==, 0);
+    g_assert_cmphex(image.entry_descriptor, ==,
+                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
+    g_assert_cmphex(image.entry, ==,
+                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+    g_assert_cmphex(image.global_pointer, ==,
+                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
 
     vibatnium_efi_image_destroy(&image);
 }
@@ -188,6 +253,8 @@ int main(int argc, char **argv)
                     test_rejects_non_ia64_pe);
     g_test_add_func("/ia64-efi-app/prepare-cpu-entry-abi",
                     test_prepare_cpu_entry_abi);
+    g_test_add_func("/ia64-efi-app/relocate-entry-descriptor",
+                    test_relocates_ia64_entry_descriptor);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",
                     test_unimplemented_service_log);
     g_test_add_func("/ia64-efi-app/frontier-log-format",

@@ -54,6 +54,124 @@ static const IA64TemplateInfo ia64_template_table[32] = {
     [0x1f] = RESERVED,
 };
 
+#define OPCLASS(_family, _stem, _summary, _defined) \
+    {                                               \
+        .family = (_family),                        \
+        .mnemonic_stem = (_stem),                   \
+        .format_summary = (_summary),               \
+        .defined = (_defined),                      \
+    }
+
+#define RESERVED_OP OPCLASS("reserved-or-ignored", "reserved", \
+                            "reserved/ignored major opcode", false)
+
+static const IA64OpcodeClass ia64_iunit_opcode_table[16] = {
+    [0x0] = OPCLASS("misc-0", "misc0", "I18/I19/I20+", true),
+    [0x1] = RESERVED_OP,
+    [0x2] = RESERVED_OP,
+    [0x3] = RESERVED_OP,
+    [0x4] = OPCLASS("deposit", "deposit", "I15", true),
+    [0x5] = OPCLASS("shift-test-bit", "shift", "I10-I17/I30", true),
+    [0x6] = RESERVED_OP,
+    [0x7] = OPCLASS("mm-multiply-shift", "mm", "I1-I9", true),
+    [0x8] = OPCLASS("alu-mm-alu", "alu", "A1-A4/A9-A10", true),
+    [0x9] = OPCLASS("add-imm22", "addl", "A5", true),
+    [0xa] = RESERVED_OP,
+    [0xb] = RESERVED_OP,
+    [0xc] = OPCLASS("compare", "cmp", "A6-A8", true),
+    [0xd] = OPCLASS("compare", "cmp", "A6-A8", true),
+    [0xe] = OPCLASS("compare", "cmp", "A6-A8", true),
+    [0xf] = RESERVED_OP,
+};
+
+static const IA64OpcodeClass ia64_munit_opcode_table[16] = {
+    [0x0] = OPCLASS("sys-mem-mgmt-0", "sysmem0",
+                    "M22-M28/M30/M37/M44/M48", true),
+    [0x1] = OPCLASS("sys-mem-mgmt-1", "sysmem1",
+                    "M20-M21/M29/M31-M36/M38-M43/M45-M47", true),
+    [0x2] = RESERVED_OP,
+    [0x3] = RESERVED_OP,
+    [0x4] = OPCLASS("integer-load-register-getf", "ld",
+                    "M1/M2/M4/M16/M17/M19", true),
+    [0x5] = OPCLASS("integer-load-store-immediate", "ldst", "M3/M5", true),
+    [0x6] = OPCLASS("fp-load-store-register-setf", "fldst",
+                    "M6/M7/M9/M11-M13/M18", true),
+    [0x7] = OPCLASS("fp-load-store-immediate", "fldst",
+                    "M8/M10/M14/M15", true),
+    [0x8] = OPCLASS("alu-mm-alu", "alu", "A1-A4/A9-A10", true),
+    [0x9] = OPCLASS("add-imm22", "addl", "A5", true),
+    [0xa] = RESERVED_OP,
+    [0xb] = RESERVED_OP,
+    [0xc] = OPCLASS("compare", "cmp", "A6-A8", true),
+    [0xd] = OPCLASS("compare", "cmp", "A6-A8", true),
+    [0xe] = OPCLASS("compare", "cmp", "A6-A8", true),
+    [0xf] = RESERVED_OP,
+};
+
+static const IA64OpcodeClass ia64_funit_opcode_table[16] = {
+    [0x0] = OPCLASS("fp-misc-0", "fpmisc0", "F6-F16", true),
+    [0x1] = OPCLASS("fp-misc-1", "fpmisc1", "F6-F16", true),
+    [0x2] = RESERVED_OP,
+    [0x3] = RESERVED_OP,
+    [0x4] = OPCLASS("fp-compare", "fcmp", "F4", true),
+    [0x5] = OPCLASS("fp-class", "fclass", "F5", true),
+    [0x6] = RESERVED_OP,
+    [0x7] = RESERVED_OP,
+    [0x8] = OPCLASS("fma", "fma", "F1", true),
+    [0x9] = OPCLASS("fma", "fma", "F1", true),
+    [0xa] = OPCLASS("fms", "fms", "F1", true),
+    [0xb] = OPCLASS("fms", "fms", "F1", true),
+    [0xc] = OPCLASS("fnma", "fnma", "F1", true),
+    [0xd] = OPCLASS("fnma", "fnma", "F1", true),
+    [0xe] = OPCLASS("fselect-xma", "fselect", "F2/F3", true),
+    [0xf] = RESERVED_OP,
+};
+
+static const IA64OpcodeClass ia64_bunit_opcode_table[16] = {
+    [0x0] = OPCLASS("misc-indirect-branch", "br", "B4/B8/B9", true),
+    [0x1] = OPCLASS("indirect-call", "br.call", "B5", true),
+    [0x2] = OPCLASS("indirect-predict-nop", "brp", "B7/B9", true),
+    [0x3] = RESERVED_OP,
+    [0x4] = OPCLASS("ip-relative-branch", "br", "B1/B2", true),
+    [0x5] = OPCLASS("ip-relative-call", "br.call", "B3", true),
+    [0x6] = RESERVED_OP,
+    [0x7] = OPCLASS("ip-relative-predict", "brp", "B6", true),
+    [0x8] = OPCLASS("extended-branch-8", "e8", "branch extension", true),
+    [0x9] = OPCLASS("extended-branch-9", "e9", "branch extension", true),
+    [0xa] = OPCLASS("extended-branch-a", "eA", "branch extension", true),
+    [0xb] = OPCLASS("extended-branch-b", "eB", "branch extension", true),
+    [0xc] = OPCLASS("extended-branch-c", "eC", "branch extension", true),
+    [0xd] = OPCLASS("extended-branch-d", "eD", "branch extension", true),
+    [0xe] = OPCLASS("extended-branch-e", "eE", "branch extension", true),
+    [0xf] = OPCLASS("extended-branch-f", "eF", "branch extension", true),
+};
+
+static const IA64OpcodeClass ia64_lxunit_opcode_table[16] = {
+    [0x0] = OPCLASS("extended-misc-0", "lx.misc0", "X1/X5", true),
+    [0x1] = RESERVED_OP,
+    [0x2] = RESERVED_OP,
+    [0x3] = RESERVED_OP,
+    [0x4] = RESERVED_OP,
+    [0x5] = RESERVED_OP,
+    [0x6] = OPCLASS("move-imm64", "movl", "X2", true),
+    [0x7] = RESERVED_OP,
+    [0x8] = RESERVED_OP,
+    [0x9] = RESERVED_OP,
+    [0xa] = RESERVED_OP,
+    [0xb] = RESERVED_OP,
+    [0xc] = OPCLASS("long-branch", "brl", "X3", true),
+    [0xd] = OPCLASS("long-call", "brl.call", "X4", true),
+    [0xe] = RESERVED_OP,
+    [0xf] = RESERVED_OP,
+};
+
+static const IA64OpcodeClass ia64_xunit_opcode_class =
+    OPCLASS("extended-continuation", "xdata",
+            "second half of L+X instruction", true);
+
+static const IA64OpcodeClass ia64_illegal_slot_opcode_class =
+    OPCLASS("illegal-template-slot", "illegal", "reserved template", false);
+
 static uint64_t ia64_load_le64(const uint8_t *p)
 {
     uint64_t value = 0;
@@ -88,6 +206,40 @@ const char *ia64_slot_type_name(IA64SlotType type)
     case IA64_SLOT_TYPE_INVALID:
     default:
         return "?";
+    }
+}
+
+uint8_t ia64_slot_predicate(uint64_t raw)
+{
+    return raw & 0x3f;
+}
+
+uint8_t ia64_slot_major_opcode(uint64_t raw)
+{
+    return (raw >> 37) & 0x0f;
+}
+
+const IA64OpcodeClass *ia64_opcode_class(IA64SlotType type,
+                                         uint8_t major_opcode)
+{
+    major_opcode &= 0x0f;
+
+    switch (type) {
+    case IA64_SLOT_TYPE_M:
+        return &ia64_munit_opcode_table[major_opcode];
+    case IA64_SLOT_TYPE_I:
+        return &ia64_iunit_opcode_table[major_opcode];
+    case IA64_SLOT_TYPE_F:
+        return &ia64_funit_opcode_table[major_opcode];
+    case IA64_SLOT_TYPE_B:
+        return &ia64_bunit_opcode_table[major_opcode];
+    case IA64_SLOT_TYPE_L:
+        return &ia64_lxunit_opcode_table[major_opcode];
+    case IA64_SLOT_TYPE_X:
+        return &ia64_xunit_opcode_class;
+    case IA64_SLOT_TYPE_INVALID:
+    default:
+        return &ia64_illegal_slot_opcode_class;
     }
 }
 
@@ -137,4 +289,35 @@ void ia64_format_decoded_bundle(const IA64DecodedBundle *decoded,
              ia64_slot_type_name(info->slot_type[2]),
              stops, info->long_immediate ? "yes" : "no",
              decoded->slot[0], decoded->slot[1], decoded->slot[2]);
+}
+
+void ia64_format_slot_class(const IA64DecodedBundle *decoded,
+                            int slot,
+                            char *buf,
+                            size_t buflen)
+{
+    IA64SlotType type;
+    uint64_t raw;
+    uint8_t major;
+    const IA64OpcodeClass *opclass;
+
+    if (slot < 0 || slot >= IA64_SLOT_COUNT || buflen == 0) {
+        if (buf && buflen) {
+            buf[0] = '\0';
+        }
+        return;
+    }
+
+    type = decoded->valid ? decoded->info->slot_type[slot] :
+           IA64_SLOT_TYPE_INVALID;
+    raw = decoded->slot[slot];
+    major = ia64_slot_major_opcode(raw);
+    opclass = ia64_opcode_class(type, major);
+
+    snprintf(buf, buflen,
+             "slot=%d type=%s qp=p%u major=0x%x raw=0x%011" PRIx64
+             " family=%s mnemonic=%s format=%s defined=%s",
+             slot, ia64_slot_type_name(type), ia64_slot_predicate(raw), major,
+             raw, opclass->family, opclass->mnemonic_stem,
+             opclass->format_summary, opclass->defined ? "yes" : "no");
 }

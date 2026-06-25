@@ -19,6 +19,8 @@ typedef struct DisasContext {
     CPUIA64State *env;
 } DisasContext;
 
+#define DISAS_EXIT DISAS_TARGET_0
+
 static TCGv_i64 cpu_ip;
 
 void ia64_translate_init(void)
@@ -63,12 +65,31 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
 
     ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
     tcg_gen_movi_i64(cpu_ip, pc);
-    gen_helper_raise_unimplemented(tcg_env);
-    ctx->base.is_jmp = DISAS_NORETURN;
+    gen_helper_exec_bundle(tcg_env,
+                           tcg_constant_i32(bundle.tmpl),
+                           tcg_constant_i64(bundle.slot[0]),
+                           tcg_constant_i64(bundle.slot[1]),
+                           tcg_constant_i64(bundle.slot[2]));
+    ctx->base.is_jmp = DISAS_EXIT;
 }
 
 static void ia64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
 {
+    DisasContext *ctx = container_of(dcbase, DisasContext, base);
+
+    switch (ctx->base.is_jmp) {
+    case DISAS_TOO_MANY:
+        tcg_gen_movi_i64(cpu_ip, ctx->base.pc_next);
+        tcg_gen_exit_tb(NULL, 0);
+        break;
+    case DISAS_EXIT:
+        tcg_gen_exit_tb(NULL, 0);
+        break;
+    case DISAS_NORETURN:
+        break;
+    default:
+        g_assert_not_reached();
+    }
 }
 
 static const TranslatorOps ia64_tr_ops = {

@@ -35,7 +35,9 @@ typedef struct VibatniumEfiImage {
     uint8_t *data;
     size_t size;
     uint64_t load_base;
+    uint64_t entry_descriptor;
     uint64_t entry;
+    uint64_t global_pointer;
     uint64_t preferred_image_base;
     uint32_t entry_rva;
     uint32_t size_of_image;

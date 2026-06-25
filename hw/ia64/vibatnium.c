@@ -75,8 +75,8 @@ static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
                 (uint64_t)VIBATNIUM_EFI_SYSTEM_TABLE,
                 (uint64_t)VIBATNIUM_EFI_CON_OUT,
                 (uint64_t)VIBATNIUM_EFI_LOADED_IMAGE);
-    warn_report("IA-64 instruction execution is still unimplemented; "
-                "starting the CPU will stop at the first translated bundle");
+    warn_report("IA-64 instruction execution is minimal; unsupported "
+                "bundles report the current execution frontier");
 }
 
 static void vibatnium_warn_frontier(VibatniumEfiFrontierKind kind,
@@ -94,8 +94,8 @@ static void vibatnium_warn_frontier(VibatniumEfiFrontierKind kind,
 static void vibatnium_trace_boot_frontier(const VibatniumEfiImage *image)
 {
     const char *blocked =
-        "not reached: IA-64 instruction execution stops before first guest "
-        "bundle";
+        "not reached yet: IA-64 execution reports the exact unsupported "
+        "bundle frontier before this milestone";
 
     vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
                             "ready", image->source_path);

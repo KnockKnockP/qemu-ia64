@@ -32,8 +32,19 @@ typedef struct IA64DecodedBundle {
     bool valid;
 } IA64DecodedBundle;
 
+typedef struct IA64OpcodeClass {
+    const char *family;
+    const char *mnemonic_stem;
+    const char *format_summary;
+    bool defined;
+} IA64OpcodeClass;
+
 const IA64TemplateInfo *ia64_template_info(uint8_t tmpl);
 const char *ia64_slot_type_name(IA64SlotType type);
+uint8_t ia64_slot_predicate(uint64_t raw);
+uint8_t ia64_slot_major_opcode(uint64_t raw);
+const IA64OpcodeClass *ia64_opcode_class(IA64SlotType type,
+                                         uint8_t major_opcode);
 
 bool ia64_decode_bundle(const uint8_t bundle[IA64_BUNDLE_SIZE],
                         IA64DecodedBundle *decoded);
@@ -41,5 +52,9 @@ bool ia64_decode_bundle_words(uint64_t lo, uint64_t hi,
                               IA64DecodedBundle *decoded);
 void ia64_format_decoded_bundle(const IA64DecodedBundle *decoded,
                                 char *buf, size_t buflen);
+void ia64_format_slot_class(const IA64DecodedBundle *decoded,
+                            int slot,
+                            char *buf,
+                            size_t buflen);
 
 #endif

@@ -10,6 +10,11 @@
 #define PE_SIGNATURE_SIZE   4
 #define COFF_HEADER_SIZE    20
 #define SECTION_HEADER_SIZE 40
+#define PE32_DATA_DIRECTORY_OFFSET  96
+#define PE32P_DATA_DIRECTORY_OFFSET 112
+#define PE_DIRECTORY_BASE_RELOCATION 5
+#define PE_BASE_RELOCATION_ABSOLUTE 0
+#define PE_BASE_RELOCATION_DIR64    10
 
 #define MAX_EFI_IMAGE_SIZE (128 * 1024 * 1024)
 
@@ -36,9 +41,87 @@ static uint64_t rd64(const uint8_t *p)
     return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
 }
 
+static void wr64(uint8_t *p, uint64_t value)
+{
+    for (int i = 0; i < 8; i++) {
+        p[i] = value >> (i * 8);
+    }
+}
+
 static void efi_image_reset(VibatniumEfiImage *image)
 {
     memset(image, 0, sizeof(*image));
+}
+
+static bool apply_base_relocations(uint8_t *memory_image,
+                                   uint32_t size_of_image,
+                                   uint64_t delta,
+                                   uint32_t reloc_rva,
+                                   uint32_t reloc_size,
+                                   Error **errp)
+{
+    uint32_t offset;
+    uint32_t end;
+
+    if (delta == 0) {
+        return true;
+    }
+    if (reloc_rva == 0 || reloc_size == 0) {
+        error_setg(errp,
+                   "EFI image relocation required but no relocation "
+                   "directory is present");
+        return false;
+    }
+    if (reloc_rva > size_of_image || reloc_size > size_of_image - reloc_rva) {
+        error_setg(errp, "EFI image relocation directory is outside image");
+        return false;
+    }
+
+    offset = reloc_rva;
+    end = reloc_rva + reloc_size;
+    while (offset + 8 <= end) {
+        uint32_t page_rva = rd32(memory_image + offset);
+        uint32_t block_size = rd32(memory_image + offset + 4);
+        uint32_t count;
+
+        if (block_size < 8 || block_size > end - offset) {
+            error_setg(errp, "EFI image relocation block is malformed");
+            return false;
+        }
+
+        count = (block_size - 8) / 2;
+        for (uint32_t i = 0; i < count; i++) {
+            uint16_t entry = rd16(memory_image + offset + 8 + i * 2);
+            uint16_t type = entry >> 12;
+            uint32_t fixup_rva = page_rva + (entry & 0x0fff);
+            uint64_t value;
+
+            switch (type) {
+            case PE_BASE_RELOCATION_ABSOLUTE:
+                break;
+            case PE_BASE_RELOCATION_DIR64:
+                if (fixup_rva > size_of_image ||
+                    8 > size_of_image - fixup_rva) {
+                    error_setg(errp,
+                               "EFI image DIR64 relocation target 0x%x is "
+                               "outside image",
+                               fixup_rva);
+                    return false;
+                }
+                value = rd64(memory_image + fixup_rva);
+                wr64(memory_image + fixup_rva, value + delta);
+                break;
+            default:
+                error_setg(errp, "unsupported EFI image relocation type %u",
+                           type);
+                return false;
+            }
+        }
+
+        offset += block_size;
+    }
+
+    return true;
 }
 
 bool vibatnium_efi_image_from_buffer(const char *path,
@@ -61,7 +144,14 @@ bool vibatnium_efi_image_from_buffer(const char *path,
     uint32_t size_of_image;
     uint32_t size_of_headers;
     uint32_t section_alignment;
+    uint32_t number_of_rva_and_sizes = 0;
+    uint32_t data_directory_offset;
+    uint32_t reloc_rva = 0;
+    uint32_t reloc_size = 0;
     uint64_t preferred_image_base;
+    uint64_t entry_descriptor;
+    uint64_t code_entry;
+    uint64_t global_pointer;
     uint8_t *memory_image;
 
     g_return_val_if_fail(image != NULL, false);
@@ -130,6 +220,24 @@ bool vibatnium_efi_image_from_buffer(const char *path,
     section_alignment = rd32(optional + 32);
     size_of_image = rd32(optional + 56);
     size_of_headers = rd32(optional + 60);
+    data_directory_offset = optional_magic == PE32P_MAGIC ?
+                            PE32P_DATA_DIRECTORY_OFFSET :
+                            PE32_DATA_DIRECTORY_OFFSET;
+    if (optional_size >= data_directory_offset) {
+        uint32_t number_offset = data_directory_offset - 4;
+
+        number_of_rva_and_sizes = rd32(optional + number_offset);
+        if (number_of_rva_and_sizes > PE_DIRECTORY_BASE_RELOCATION &&
+            optional_size >= data_directory_offset +
+                             (PE_DIRECTORY_BASE_RELOCATION + 1) * 8) {
+            const uint8_t *reloc_dir =
+                optional + data_directory_offset +
+                PE_DIRECTORY_BASE_RELOCATION * 8;
+
+            reloc_rva = rd32(reloc_dir);
+            reloc_size = rd32(reloc_dir + 4);
+        }
+    }
 
     if (section_alignment == 0) {
         error_setg(errp, "EFI image has zero section alignment");
@@ -146,6 +254,12 @@ bool vibatnium_efi_image_from_buffer(const char *path,
     if (entry_rva >= size_of_image) {
         error_setg(errp, "EFI image entry RVA 0x%x is outside image size 0x%x",
                    entry_rva, size_of_image);
+        return false;
+    }
+    if (entry_rva > size_of_image || 16 > size_of_image - entry_rva) {
+        error_setg(errp,
+                   "EFI image IA-64 entry descriptor RVA 0x%x is truncated",
+                   entry_rva);
         return false;
     }
     if (UINT64_MAX - load_base < size_of_image) {
@@ -197,10 +311,28 @@ bool vibatnium_efi_image_from_buffer(const char *path,
         memcpy(memory_image + virtual_address, file + raw_pointer, copy_size);
     }
 
+    if (!apply_base_relocations(memory_image, size_of_image,
+                                load_base - preferred_image_base,
+                                reloc_rva, reloc_size, errp)) {
+        g_free(memory_image);
+        return false;
+    }
+
+    entry_descriptor = load_base + entry_rva;
+    code_entry = rd64(memory_image + entry_rva);
+    global_pointer = rd64(memory_image + entry_rva + 8);
+    if (code_entry == 0) {
+        error_setg(errp, "EFI image IA-64 entry descriptor has zero entry");
+        g_free(memory_image);
+        return false;
+    }
+
     image->data = memory_image;
     image->size = size_of_image;
     image->load_base = load_base;
-    image->entry = load_base + entry_rva;
+    image->entry_descriptor = entry_descriptor;
+    image->entry = code_entry;
+    image->global_pointer = global_pointer;
     image->preferred_image_base = preferred_image_base;
     image->entry_rva = entry_rva;
     image->size_of_image = size_of_image;
@@ -210,9 +342,11 @@ bool vibatnium_efi_image_from_buffer(const char *path,
               sizeof(image->source_path));
     g_snprintf(image->message, sizeof(image->message),
                "loaded IA-64 EFI image path=%s load=0x%016" PRIx64
-               " entry=0x%016" PRIx64 " size=0x%x sections=%u",
-               image->source_path, image->load_base, image->entry,
-               image->size_of_image, image->number_of_sections);
+               " descriptor=0x%016" PRIx64 " entry=0x%016" PRIx64
+               " gp=0x%016" PRIx64 " size=0x%x sections=%u",
+               image->source_path, image->load_base, image->entry_descriptor,
+               image->entry, image->global_pointer, image->size_of_image,
+               image->number_of_sections);
 
     return true;
 }
@@ -260,6 +394,7 @@ void vibatnium_efi_prepare_cpu(CPUIA64State *env,
     env->ip = image->entry;
     env->cr[IA64_CR_IIP] = image->entry;
     env->gr[0] = 0;
+    env->gr[1] = image->global_pointer;
     env->gr[32] = VIBATNIUM_EFI_IMAGE_HANDLE;
     env->gr[33] = VIBATNIUM_EFI_SYSTEM_TABLE;
 }
