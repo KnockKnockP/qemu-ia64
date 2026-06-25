@@ -50,6 +50,7 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-envlist': [],
+  'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
 }
 
 if have_system or have_tools

@@ -1,0 +1,4 @@
+# See docs/devel/tracing.rst for syntax documentation.
+
+# translate.c
+disable ia64_bundle_decode(uint64_t ip, const char *bundle) "ip=0x%016" PRIx64 " %s"

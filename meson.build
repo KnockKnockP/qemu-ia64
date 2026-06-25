@@ -3663,6 +3663,7 @@ if have_system or have_user
     'target/i386',
     'target/i386/kvm',
     'target/i386/whpx',
+    'target/ia64',
     'target/loongarch',
     'target/mips/tcg',
     'target/ppc',
