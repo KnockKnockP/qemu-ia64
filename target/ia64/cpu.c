@@ -4,7 +4,10 @@
 #include "qemu/qemu-print.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "exception.h"
 #include "exec-smoke.h"
+#include "mem.h"
+#include "accel/tcg/cpu-loop.h"
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
 #include "exec/translation-block.h"
@@ -106,17 +109,40 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 
 hwaddr ia64_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
 {
-    return addr;
+    IA64CPU *cpu = IA64_CPU(cs);
+    IA64TranslateResult result;
+
+    if (!ia64_translate_address(&cpu->env, addr, MMU_DATA_LOAD,
+                                ia64_cpu_mmu_index(cs, false), true,
+                                &result)) {
+        return -1;
+    }
+
+    return result.paddr;
 }
 
 bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        MMUAccessType access_type, int mmu_idx,
                        bool probe, uintptr_t retaddr)
 {
-    hwaddr page = address & TARGET_PAGE_MASK;
+    IA64CPU *cpu = IA64_CPU(cs);
+    IA64TranslateResult result;
 
-    tlb_set_page(cs, page, page, PAGE_READ | PAGE_WRITE | PAGE_EXEC,
-                 mmu_idx, TARGET_PAGE_SIZE);
+    if (ia64_translate_address(&cpu->env, address, access_type, mmu_idx,
+                               false, &result)) {
+        tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                     result.paddr & TARGET_PAGE_MASK, result.prot,
+                     mmu_idx, TARGET_PAGE_SIZE);
+        return true;
+    }
+
+    if (probe) {
+        return false;
+    }
+
+    ia64_record_exception(&cpu->env, IA64_EXCEPTION_PAGE_FAULT, address,
+                          access_type, result.message);
+    cpu_loop_exit_restore(cs, retaddr);
     return true;
 }
 

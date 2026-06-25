@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "exception.h"
 #include "exec-smoke.h"
+#include "mem.h"
 
 void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
 {
@@ -28,6 +30,8 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
     env->cr[IA64_CR_IPSR] = env->psr;
     env->cr[IA64_CR_IIP] = env->ip;
     env->cr[IA64_CR_IFS] = env->cfm;
+    env->memory.identity_region0_only = true;
+    ia64_clear_exception(env);
 }
 
 const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status)

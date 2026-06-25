@@ -53,7 +53,15 @@ tests = {
   'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
   'test-ia64-exec-smoke': [
     meson.project_source_root() / 'target/ia64/bundle.c',
+    meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/exec-smoke.c',
+    meson.project_source_root() / 'target/ia64/mem.c',
+  ],
+  'test-ia64-memory-exceptions': [
+    meson.project_source_root() / 'target/ia64/bundle.c',
+    meson.project_source_root() / 'target/ia64/exception.c',
+    meson.project_source_root() / 'target/ia64/exec-smoke.c',
+    meson.project_source_root() / 'target/ia64/mem.c',
   ],
 }
 

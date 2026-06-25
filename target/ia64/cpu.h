@@ -107,6 +107,38 @@ typedef struct IA64InterruptState {
     uint8_t pending;
 } IA64InterruptState;
 
+typedef struct IA64MemorySkeletonState {
+    /*
+     * Phase 6 accepts region-0 identity translations only. Region registers,
+     * VHPT, inserted TLB entries, privilege checks, page rights, and NaT load
+     * behavior are intentionally left for later phases.
+     */
+    uint64_t last_vaddr;
+    uint64_t last_paddr;
+    uint8_t last_region;
+    uint8_t last_status;
+    bool identity_region0_only;
+} IA64MemorySkeletonState;
+
+typedef enum IA64ExceptionKind {
+    IA64_EXCEPTION_NONE,
+    IA64_EXCEPTION_ILLEGAL_OPERATION,
+    IA64_EXCEPTION_PAGE_FAULT,
+    IA64_EXCEPTION_GENERAL_EXCEPTION,
+    IA64_EXCEPTION_BREAK,
+    IA64_EXCEPTION_EXTERNAL_INTERRUPT,
+} IA64ExceptionKind;
+
+typedef struct IA64ExceptionRecord {
+    IA64ExceptionKind kind;
+    vaddr ip;
+    vaddr address;
+    MMUAccessType access_type;
+    uint64_t vector;
+    bool pending;
+    char message[160];
+} IA64ExceptionRecord;
+
 typedef enum IA64CPUModel {
     IA64_CPU_MODEL_ITANIUM2,
 } IA64CPUModel;
@@ -143,6 +175,8 @@ typedef struct CPUArchState {
     IA64RSEState rse;
     IA64NaTState nat;
     IA64InterruptState interrupt;
+    IA64MemorySkeletonState memory;
+    IA64ExceptionRecord exception;
 
     struct {} end_reset_fields;
 } CPUIA64State;
