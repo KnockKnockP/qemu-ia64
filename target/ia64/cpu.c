@@ -145,11 +145,15 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     if (ia64_translate_address(&cpu->env, address, access_type, mmu_idx,
                                false, &result)) {
-        target_ulong mask = (target_ulong)-1 << result.page_size;
-        target_ulong page_size = (target_ulong)1 << result.page_size;
-
-        tlb_set_page(cs, address & mask,
-                     result.paddr & mask, result.prot, mmu_idx, page_size);
+        /*
+         * QEMU's softmmu TLB maps one TARGET_PAGE_SIZE page per fill.  IA-64
+         * page size remains part of the target-side lookup; split it here so
+         * region-tagged large virtual pages do not leak into QEMU's dirty
+         * RAM bookkeeping.
+         */
+        tlb_set_page(cs, address & TARGET_PAGE_MASK,
+                     result.paddr & TARGET_PAGE_MASK, result.prot, mmu_idx,
+                     TARGET_PAGE_SIZE);
         return true;
     }
 
@@ -157,8 +161,16 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         return false;
     }
 
-    ia64_record_exception(&cpu->env, IA64_EXCEPTION_PAGE_FAULT, address,
-                          access_type, result.message);
+    if (result.status == IA64_TRANSLATE_TLB_MISS) {
+        ia64_deliver_exception(&cpu->env,
+                               access_type == MMU_INST_FETCH ?
+                               IA64_EXCEPTION_INSTRUCTION_TLB_MISS :
+                               IA64_EXCEPTION_DATA_TLB_MISS,
+                               address, access_type, result.message);
+    } else {
+        ia64_deliver_exception(&cpu->env, IA64_EXCEPTION_PAGE_FAULT, address,
+                               access_type, result.message);
+    }
     cpu_loop_exit_restore(cs, retaddr);
     return true;
 }

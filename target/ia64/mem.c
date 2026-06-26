@@ -282,7 +282,6 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
         tr[slot] = entry;
     } else {
         ia64_invalidate_overlapping_entries(tc, IA64_TC_COUNT, &entry);
-        ia64_invalidate_overlapping_entries(tr, IA64_ITR_COUNT, &entry);
         tc[*next_tc % IA64_TC_COUNT] = entry;
         *next_tc = (*next_tc + 1) % IA64_TC_COUNT;
     }

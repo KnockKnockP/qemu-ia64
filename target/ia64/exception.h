@@ -9,6 +9,9 @@ void ia64_clear_exception(CPUIA64State *env);
 void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
                            vaddr address, MMUAccessType access_type,
                            const char *detail);
+void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
+                            vaddr address, MMUAccessType access_type,
+                            const char *detail);
 void ia64_format_exception(const IA64ExceptionRecord *record,
                            char *buf, size_t buflen);
 
