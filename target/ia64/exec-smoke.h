@@ -341,10 +341,17 @@ bool ia64_slot_is_f_misc(IA64SlotType type, uint64_t raw);
 bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw);
 bool ia64_decode_compare(IA64SlotType type, uint64_t raw,
                          IA64CompareInstruction *decoded);
+bool ia64_exec_compare_qualified(CPUIA64State *env,
+                                 const IA64CompareInstruction *decoded,
+                                 bool qualifying_predicate);
 bool ia64_exec_compare(CPUIA64State *env,
                        const IA64CompareInstruction *decoded);
 bool ia64_decode_predicate_test(IA64SlotType type, uint64_t raw,
                                 IA64PredicateTestInstruction *decoded);
+bool ia64_exec_predicate_test_qualified(
+    CPUIA64State *env,
+    const IA64PredicateTestInstruction *decoded,
+    bool qualifying_predicate);
 bool ia64_exec_predicate_test(CPUIA64State *env,
                               const IA64PredicateTestInstruction *decoded);
 bool ia64_slot_is_b_branch_relative(IA64SlotType type, uint64_t raw);

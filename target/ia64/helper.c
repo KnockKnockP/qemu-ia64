@@ -467,6 +467,7 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
             "[ia64-state] count=%" PRIu64 " ip=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
             " pr=0x%016" PRIx64 " b0=0x%016" PRIx64
+            " r8=0x%016" PRIx64
             " r12=0x%016" PRIx64
             " r13=0x%016" PRIx64
             " r14=0x%016" PRIx64 " r15=0x%016" PRIx64
@@ -479,12 +480,18 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
             " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
             " r36=0x%016" PRIx64 " r37=0x%016" PRIx64
             " r38=0x%016" PRIx64 " r39=0x%016" PRIx64
+            " r40=0x%016" PRIx64 " r41=0x%016" PRIx64
+            " r42=0x%016" PRIx64 " r43=0x%016" PRIx64
+            " r44=0x%016" PRIx64 " r45=0x%016" PRIx64
+            " r46=0x%016" PRIx64 " r47=0x%016" PRIx64
+            " r48=0x%016" PRIx64 " r49=0x%016" PRIx64
             " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64
             " ifa=0x%016" PRIx64 " itir=0x%016" PRIx64
             " iha=0x%016" PRIx64 " ipsr=0x%016" PRIx64
             " iip=0x%016" PRIx64 " ifs=0x%016" PRIx64
             " isr=0x%016" PRIx64 "\n",
             count, env->ip, env->psr, env->cfm, env->pr, env->br[0],
+            ia64_read_gr(env, 8),
             ia64_read_gr(env, 12),
             ia64_read_gr(env, 13),
             ia64_read_gr(env, 14), ia64_read_gr(env, 15),
@@ -497,6 +504,11 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
             ia64_read_gr(env, 34), ia64_read_gr(env, 35),
             ia64_read_gr(env, 36), ia64_read_gr(env, 37),
             ia64_read_gr(env, 38), ia64_read_gr(env, 39),
+            ia64_read_gr(env, 40), ia64_read_gr(env, 41),
+            ia64_read_gr(env, 42), ia64_read_gr(env, 43),
+            ia64_read_gr(env, 44), ia64_read_gr(env, 45),
+            ia64_read_gr(env, 46), ia64_read_gr(env, 47),
+            ia64_read_gr(env, 48), ia64_read_gr(env, 49),
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
             env->cr[IA64_CR_IFA], env->cr[IA64_CR_ITIR],
             env->cr[IA64_CR_IHA], env->cr[IA64_CR_IPSR],
@@ -3728,6 +3740,34 @@ static bool exec_counted_store_loop(CPUIA64State *env,
     return true;
 }
 
+static bool exec_false_predicated_side_effect(CPUIA64State *env,
+                                              const IA64DecodedBundle *decoded,
+                                              int slot)
+{
+    IA64SlotType type = decoded->info->slot_type[slot];
+    uint64_t raw = decoded->slot[slot];
+    IA64CompareInstruction cmp;
+    IA64PredicateTestInstruction pred_test;
+
+    if (ia64_decode_compare(type, raw, &cmp) &&
+        cmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+        if (!ia64_exec_compare_qualified(env, &cmp, false)) {
+            abort_unsupported_slot(env, decoded, slot);
+        }
+        return true;
+    }
+
+    if (ia64_decode_predicate_test(type, raw, &pred_test) &&
+        pred_test.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+        if (!ia64_exec_predicate_test_qualified(env, &pred_test, false)) {
+            abort_unsupported_slot(env, decoded, slot);
+        }
+        return true;
+    }
+
+    return false;
+}
+
 void HELPER(exec_bundle)(CPUIA64State *env,
                          uint32_t tmpl,
                          uint64_t slot0,
@@ -3813,10 +3853,15 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             continue;
         }
 
-        if (!ia64_read_pr(env, qp) &&
-            !(type == IA64_SLOT_TYPE_B && ia64_slot_major_opcode(raw) == 0x4 &&
-              (((raw >> 6) & 0x7) == 2 || ((raw >> 6) & 0x7) == 3))) {
-            continue;
+        if (!ia64_read_pr(env, qp)) {
+            if (exec_false_predicated_side_effect(env, &decoded, slot)) {
+                continue;
+            }
+            if (!(type == IA64_SLOT_TYPE_B &&
+                  ia64_slot_major_opcode(raw) == 0x4 &&
+                  (((raw >> 6) & 0x7) == 2 || ((raw >> 6) & 0x7) == 3))) {
+                continue;
+            }
         }
         if (ia64_exec_smoke_slot_supported(type, raw)) {
             continue;

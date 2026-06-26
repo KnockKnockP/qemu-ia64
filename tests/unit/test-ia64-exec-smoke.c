@@ -1436,6 +1436,59 @@ static void test_compare_parallel_predicate_completers(void)
     assert_p6_p7(&env, true, false);
 }
 
+static void test_unc_compare_clears_targets_when_false_predicated(void)
+{
+    const uint64_t linux_strncpy_cmp_ne_unc_p8_p0_r33_r10_raw =
+        (0xeULL << 37) | (1ULL << 12) | (8ULL << 27) |
+        (10ULL << 20) | (33ULL << 13) | 6ULL;
+    IA64CompareInstruction decoded;
+    CPUIA64State env;
+
+    g_assert_true(ia64_decode_compare(
+                      IA64_SLOT_TYPE_I,
+                      linux_strncpy_cmp_ne_unc_p8_p0_r33_r10_raw,
+                      &decoded));
+    g_assert_cmpint(decoded.relation, ==, IA64_CMP_EQ);
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_UNCONDITIONAL);
+    g_assert_cmpuint(decoded.p1, ==, 0);
+    g_assert_cmpuint(decoded.p2, ==, 8);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 8, true);
+    ia64_write_gr(&env, 33, 0x1000);
+    ia64_write_gr(&env, 10, 0x2000);
+
+    g_assert_true(ia64_exec_compare_qualified(&env, &decoded, false));
+    g_assert_cmphex(env.pr & (1ULL << 8), ==, 0);
+    g_assert_cmphex(env.pr & 1, ==, 1);
+}
+
+static void test_unc_predicate_test_clears_targets_when_false_predicated(void)
+{
+    const uint64_t tbit_z_unc_p8_p9_r33_0_raw =
+        (0x5ULL << 37) | (1ULL << 12) | (9ULL << 27) |
+        (33ULL << 20) | (8ULL << 6);
+    IA64PredicateTestInstruction decoded;
+    CPUIA64State env;
+
+    g_assert_true(ia64_decode_predicate_test(
+                      IA64_SLOT_TYPE_I,
+                      tbit_z_unc_p8_p9_r33_0_raw,
+                      &decoded));
+    g_assert_cmpint(decoded.write_kind, ==,
+                    IA64_PRED_WRITE_UNCONDITIONAL);
+    g_assert_cmpuint(decoded.p1, ==, 8);
+    g_assert_cmpuint(decoded.p2, ==, 9);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 8, true);
+    ia64_write_pr(&env, 9, true);
+
+    g_assert_true(ia64_exec_predicate_test_qualified(&env, &decoded, false));
+    g_assert_cmphex(env.pr & (1ULL << 8), ==, 0);
+    g_assert_cmphex(env.pr & (1ULL << 9), ==, 0);
+}
+
 static void test_predicate_test_bit_updates_predicates(void)
 {
     const uint64_t elilo_tbit_z_p0_p6_r32_0_raw = 0x0a032000000ULL;
@@ -2003,6 +2056,10 @@ int main(int argc, char **argv)
                     test_compare_immediate_updates_predicates);
     g_test_add_func("/ia64-exec-smoke/compare-parallel-predicate-write",
                     test_compare_parallel_predicate_completers);
+    g_test_add_func("/ia64-exec-smoke/unc-compare-false-predicate-clear",
+                    test_unc_compare_clears_targets_when_false_predicated);
+    g_test_add_func("/ia64-exec-smoke/unc-predicate-test-false-predicate-clear",
+                    test_unc_predicate_test_clears_targets_when_false_predicated);
     g_test_add_func("/ia64-exec-smoke/predicate-test-bit",
                     test_predicate_test_bit_updates_predicates);
     g_test_add_func("/ia64-exec-smoke/rotating-predicate-access",

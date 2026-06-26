@@ -3999,8 +3999,10 @@ static void ia64_apply_predicate_pair_write(CPUIA64State *env,
     }
 }
 
-bool ia64_exec_predicate_test(CPUIA64State *env,
-                              const IA64PredicateTestInstruction *decoded)
+bool ia64_exec_predicate_test_qualified(
+    CPUIA64State *env,
+    const IA64PredicateTestInstruction *decoded,
+    bool qualifying_predicate)
 {
     bool source_unavailable = false;
     bool result = false;
@@ -4008,6 +4010,14 @@ bool ia64_exec_predicate_test(CPUIA64State *env,
     if (!env || !decoded || decoded->p1 == decoded->p2 ||
         decoded->immediate >= 64) {
         return false;
+    }
+
+    if (!qualifying_predicate) {
+        if (decoded->write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+            ia64_write_pr(env, decoded->p1, false);
+            ia64_write_pr(env, decoded->p2, false);
+        }
+        return true;
     }
 
     if (decoded->kind == IA64_PRED_TEST_BIT &&
@@ -4043,8 +4053,15 @@ bool ia64_exec_predicate_test(CPUIA64State *env,
     return true;
 }
 
-bool ia64_exec_compare(CPUIA64State *env,
-                       const IA64CompareInstruction *decoded)
+bool ia64_exec_predicate_test(CPUIA64State *env,
+                              const IA64PredicateTestInstruction *decoded)
+{
+    return ia64_exec_predicate_test_qualified(env, decoded, true);
+}
+
+bool ia64_exec_compare_qualified(CPUIA64State *env,
+                                 const IA64CompareInstruction *decoded,
+                                 bool qualifying_predicate)
 {
     uint64_t left;
     uint64_t right;
@@ -4052,6 +4069,14 @@ bool ia64_exec_compare(CPUIA64State *env,
 
     if (!env || !decoded || decoded->p1 == decoded->p2) {
         return false;
+    }
+
+    if (!qualifying_predicate) {
+        if (decoded->write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+            ia64_write_pr(env, decoded->p1, false);
+            ia64_write_pr(env, decoded->p2, false);
+        }
+        return true;
     }
 
     left = ia64_compare_left_operand(env, decoded);
@@ -4063,6 +4088,12 @@ bool ia64_exec_compare(CPUIA64State *env,
                                     decoded->p1, decoded->p2,
                                     result, false);
     return true;
+}
+
+bool ia64_exec_compare(CPUIA64State *env,
+                       const IA64CompareInstruction *decoded)
+{
+    return ia64_exec_compare_qualified(env, decoded, true);
 }
 
 bool ia64_slot_is_b_branch_relative(IA64SlotType type, uint64_t raw)
