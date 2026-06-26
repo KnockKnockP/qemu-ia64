@@ -7,8 +7,10 @@
 #include "exception.h"
 #include "exec-smoke.h"
 #include "exec/helper-proto.h"
+#include "hw/core/cpu.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
+#include "mem.h"
 #include "qemu/error-report.h"
 #include "trace-target_ia64.h"
 
@@ -370,6 +372,108 @@ static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
             " value=0x%016" PRIx64 " next=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64 "\n",
             event, env->ip, value, next_ip, env->psr, env->cfm);
+}
+
+static bool ia64_state_trace_matches(uint64_t ip)
+{
+    static int initialized;
+    static bool enabled;
+    static uint64_t filter_start;
+    static uint64_t filter_end;
+
+    if (!initialized) {
+        const char *addr = g_getenv("VIBTANIUM_STATE_TRACE_IP");
+        const char *size = g_getenv("VIBTANIUM_STATE_TRACE_SIZE");
+
+        if (addr != NULL && *addr != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed_size = IA64_BUNDLE_SIZE;
+
+            filter_start = g_ascii_strtoull(addr, &endptr, 0);
+            enabled = endptr != addr;
+            if (size != NULL && *size != '\0') {
+                endptr = NULL;
+                parsed_size = g_ascii_strtoull(size, &endptr, 0);
+                if (endptr == size || parsed_size == 0) {
+                    parsed_size = IA64_BUNDLE_SIZE;
+                }
+            }
+            filter_end = filter_start + parsed_size - 1;
+        }
+        initialized = 1;
+    }
+
+    return enabled && ip >= filter_start && ip <= filter_end;
+}
+
+static uint64_t ia64_state_trace_limit(void)
+{
+    static int initialized;
+    static uint64_t limit;
+
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_STATE_TRACE_LIMIT");
+
+        limit = 512;
+        if (value != NULL && *value != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed = g_ascii_strtoull(value, &endptr, 0);
+
+            if (endptr != value) {
+                limit = parsed;
+            }
+        }
+        initialized = 1;
+    }
+
+    return limit;
+}
+
+static void ia64_state_trace_bundle(CPUIA64State *env)
+{
+    static uint64_t count;
+
+    if (!ia64_state_trace_matches(env->ip)) {
+        return;
+    }
+    if (count >= ia64_state_trace_limit()) {
+        return;
+    }
+    count++;
+
+    fprintf(stderr,
+            "[ia64-state] count=%" PRIu64 " ip=0x%016" PRIx64
+            " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
+            " pr=0x%016" PRIx64 " b0=0x%016" PRIx64
+            " r16=0x%016" PRIx64 " r17=0x%016" PRIx64
+            " r18=0x%016" PRIx64 " r19=0x%016" PRIx64
+            " r20=0x%016" PRIx64 " r21=0x%016" PRIx64
+            " r22=0x%016" PRIx64 " r29=0x%016" PRIx64
+            " r30=0x%016" PRIx64 " r31=0x%016" PRIx64
+            " ifa=0x%016" PRIx64 " itir=0x%016" PRIx64
+            " iha=0x%016" PRIx64 " ipsr=0x%016" PRIx64
+            " iip=0x%016" PRIx64 " ifs=0x%016" PRIx64
+            " isr=0x%016" PRIx64 "\n",
+            count, env->ip, env->psr, env->cfm, env->pr, env->br[0],
+            ia64_read_gr(env, 16), ia64_read_gr(env, 17),
+            ia64_read_gr(env, 18), ia64_read_gr(env, 19),
+            ia64_read_gr(env, 20), ia64_read_gr(env, 21),
+            ia64_read_gr(env, 22), ia64_read_gr(env, 29),
+            ia64_read_gr(env, 30), ia64_read_gr(env, 31),
+            env->cr[IA64_CR_IFA], env->cr[IA64_CR_ITIR],
+            env->cr[IA64_CR_IHA], env->cr[IA64_CR_IPSR],
+            env->cr[IA64_CR_IIP], env->cr[IA64_CR_IFS],
+            env->cr[IA64_CR_ISR]);
+}
+
+static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip)
+{
+    env->ip = next_ip;
+    ia64_advance_itc(env, 1);
+    if (ia64_timer_interrupt_due(env)) {
+        ia64_latch_timer_interrupt(env);
+        cpu_interrupt(env_cpu(env), CPU_INTERRUPT_HARD);
+    }
 }
 
 void vibtanium_efi_set_linux_cmdline_append(const char *append)
@@ -2796,6 +2900,106 @@ static uint64_t ia64_ld_le_unaligned(CPUIA64State *env, uint64_t address,
     return value;
 }
 
+static bool ia64_trace_range_matches(uint64_t address, uint8_t width,
+                                     uint64_t filter_start,
+                                     uint64_t filter_end)
+{
+    uint64_t access_end = address + width - 1;
+
+    return address <= filter_end && access_end >= filter_start;
+}
+
+static bool ia64_ldst_trace_matches(uint64_t vaddr, uint64_t paddr,
+                                    bool has_paddr, uint8_t width)
+{
+    static int initialized;
+    static bool enabled;
+    static bool has_vaddr_filter;
+    static bool has_paddr_filter;
+    static uint64_t vaddr_filter_start;
+    static uint64_t vaddr_filter_end;
+    static uint64_t paddr_filter_start;
+    static uint64_t paddr_filter_end;
+
+    if (!initialized) {
+        const char *trace = g_getenv("VIBTANIUM_LDST_TRACE");
+        const char *addr = g_getenv("VIBTANIUM_LDST_TRACE_ADDR");
+        const char *size = g_getenv("VIBTANIUM_LDST_TRACE_SIZE");
+        const char *paddr_env = g_getenv("VIBTANIUM_LDST_TRACE_PADDR");
+        const char *psize = g_getenv("VIBTANIUM_LDST_TRACE_PSIZE");
+
+        enabled = trace != NULL || addr != NULL || paddr_env != NULL;
+        if (addr != NULL && *addr != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed_size = 1;
+
+            vaddr_filter_start = g_ascii_strtoull(addr, &endptr, 0);
+            has_vaddr_filter = endptr != addr;
+            if (size != NULL && *size != '\0') {
+                endptr = NULL;
+                parsed_size = g_ascii_strtoull(size, &endptr, 0);
+                if (endptr == size || parsed_size == 0) {
+                    parsed_size = 1;
+                }
+            }
+            vaddr_filter_end = vaddr_filter_start + parsed_size - 1;
+        }
+        if (paddr_env != NULL && *paddr_env != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed_size = 1;
+
+            paddr_filter_start = g_ascii_strtoull(paddr_env, &endptr, 0);
+            has_paddr_filter = endptr != paddr_env;
+            if (psize != NULL && *psize != '\0') {
+                endptr = NULL;
+                parsed_size = g_ascii_strtoull(psize, &endptr, 0);
+                if (endptr == psize || parsed_size == 0) {
+                    parsed_size = 1;
+                }
+            }
+            paddr_filter_end = paddr_filter_start + parsed_size - 1;
+        }
+        initialized = 1;
+    }
+
+    if (!enabled) {
+        return false;
+    }
+    if (!has_vaddr_filter && !has_paddr_filter) {
+        return true;
+    }
+    if (has_vaddr_filter &&
+        ia64_trace_range_matches(vaddr, width, vaddr_filter_start,
+                                 vaddr_filter_end)) {
+        return true;
+    }
+
+    return has_paddr && has_paddr_filter &&
+           ia64_trace_range_matches(paddr, width, paddr_filter_start,
+                                    paddr_filter_end);
+}
+
+static void ia64_trace_ldst(CPUIA64State *env, const char *op,
+                            uint64_t address, uint8_t width, uint64_t value)
+{
+    IA64TranslateResult result;
+    MMUAccessType access_type = g_str_equal(op, "store") ? MMU_DATA_STORE
+                                                         : MMU_DATA_LOAD;
+    bool has_paddr = ia64_translate_address(env, address, access_type, 0,
+                                            true, &result);
+    uint64_t paddr = has_paddr ? result.paddr : 0;
+
+    if (!ia64_ldst_trace_matches(address, paddr, has_paddr, width)) {
+        return;
+    }
+
+    trace_ia64_ldst_memory(env->ip, op, address, width, value);
+    fprintf(stderr,
+            "[ia64-ldst] ip=0x%016" PRIx64 " op=%s vaddr=0x%016" PRIx64
+            " paddr=%s0x%016" PRIx64 " width=%u value=0x%016" PRIx64 "\n",
+            env->ip, op, address, has_paddr ? "" : "?", paddr, width, value);
+}
+
 static void ia64_st_le_unaligned(CPUIA64State *env, uint64_t address,
                                  uint8_t width, uint64_t value)
 {
@@ -2808,27 +3012,40 @@ static void ia64_st_le_unaligned(CPUIA64State *env, uint64_t address,
 static uint64_t ia64_ldst_read(CPUIA64State *env, uint64_t address,
                                uint8_t width)
 {
+    uint64_t value;
+
     if (width > 1 && (address & (width - 1)) != 0) {
-        return ia64_ld_le_unaligned(env, address, width);
+        value = ia64_ld_le_unaligned(env, address, width);
+        ia64_trace_ldst(env, "load", address, width, value);
+        return value;
     }
 
     switch (width) {
     case 1:
-        return cpu_ldub_data_ra(env, address, GETPC());
+        value = cpu_ldub_data_ra(env, address, GETPC());
+        break;
     case 2:
-        return cpu_lduw_le_data_ra(env, address, GETPC());
+        value = cpu_lduw_le_data_ra(env, address, GETPC());
+        break;
     case 4:
-        return cpu_ldl_le_data_ra(env, address, GETPC());
+        value = cpu_ldl_le_data_ra(env, address, GETPC());
+        break;
     case 8:
-        return cpu_ldq_le_data_ra(env, address, GETPC());
+        value = cpu_ldq_le_data_ra(env, address, GETPC());
+        break;
     default:
         g_assert_not_reached();
     }
+
+    ia64_trace_ldst(env, "load", address, width, value);
+    return value;
 }
 
 static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
                             uint8_t width, uint64_t value)
 {
+    ia64_trace_ldst(env, "store", address, width, value);
+
     if (width > 1 && (address & (width - 1)) != 0) {
         ia64_st_le_unaligned(env, address, width, value);
         return;
@@ -3013,6 +3230,8 @@ static void exec_floating_load(CPUIA64State *env,
                                const IA64FloatingMemoryInstruction *decoded,
                                uint64_t address)
 {
+    IA64FloatReg spill;
+
     switch (decoded->format) {
     case IA64_FLOAT_FMT_SINGLE:
         helper_write_fr_raw(env, decoded->freg,
@@ -3026,10 +3245,15 @@ static void exec_floating_load(CPUIA64State *env,
                             0x1003e);
         break;
     case IA64_FLOAT_FMT_EXTENDED:
-    case IA64_FLOAT_FMT_SPILL_FILL:
         helper_write_fr_raw(env, decoded->freg,
                             ia64_ldst_read(env, address, 8),
                             ia64_ldst_read(env, address + 8, 8));
+        break;
+    case IA64_FLOAT_FMT_SPILL_FILL:
+        ia64_float_reg_from_spill(ia64_ldst_read(env, address, 8),
+                                  ia64_ldst_read(env, address + 8, 8),
+                                  &spill);
+        helper_write_fr_raw(env, decoded->freg, spill.raw[0], spill.raw[1]);
         break;
     default:
         g_assert_not_reached();
@@ -3043,6 +3267,8 @@ static void exec_floating_store(CPUIA64State *env,
     uint32_t mapped = helper_map_fr(env, decoded->freg);
     uint64_t low = env->fr[mapped].raw[0];
     uint64_t high = env->fr[mapped].raw[1];
+    uint64_t sign_exponent;
+    uint64_t mantissa;
 
     switch (decoded->format) {
     case IA64_FLOAT_FMT_SINGLE:
@@ -3053,9 +3279,13 @@ static void exec_floating_store(CPUIA64State *env,
         ia64_ldst_write(env, address, 8, low);
         break;
     case IA64_FLOAT_FMT_EXTENDED:
-    case IA64_FLOAT_FMT_SPILL_FILL:
         ia64_ldst_write(env, address, 8, low);
         ia64_ldst_write(env, address + 8, 8, high);
+        break;
+    case IA64_FLOAT_FMT_SPILL_FILL:
+        ia64_float_reg_to_spill(&env->fr[mapped], &sign_exponent, &mantissa);
+        ia64_ldst_write(env, address, 8, sign_exponent);
+        ia64_ldst_write(env, address + 8, 8, mantissa);
         break;
     default:
         g_assert_not_reached();
@@ -3153,6 +3383,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     }
 
     ia64_progress_trace_bundle(env);
+    ia64_state_trace_bundle(env);
 
     if (vibtanium_efi_dispatch_gate(env, env->ip)) {
         return;
@@ -3163,7 +3394,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
 
         if (ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
-            env->ip = next_ip;
+            ia64_finish_bundle(env, next_ip);
             return;
         }
     }
@@ -3302,6 +3533,14 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             ia64_exec_m_mov_from_processor_identifier(env, raw)) {
             continue;
         }
+        if (ia64_slot_is_m_mov_to_indexed_system_register(type, raw) &&
+            ia64_exec_m_mov_to_indexed_system_register(env, raw)) {
+            continue;
+        }
+        if (ia64_slot_is_m_mov_from_indexed_system_register(type, raw) &&
+            ia64_exec_m_mov_from_indexed_system_register(env, raw)) {
+            continue;
+        }
         if (ia64_slot_is_m_insert_translation(type, raw) &&
             ia64_exec_m_insert_translation(env, raw)) {
             continue;
@@ -3408,11 +3647,14 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_b_branch_relative(type, raw)) {
-            ia64_exec_b_branch_relative(env, raw, env->ip, &next_ip);
+            bool branch_taken = false;
+
+            ia64_exec_b_branch_relative(env, raw, env->ip, &next_ip,
+                                        &branch_taken);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
-            if (next_ip != env->ip + IA64_BUNDLE_SIZE) {
+            if (branch_taken || next_ip != env->ip + IA64_BUNDLE_SIZE) {
                 break;
             }
             continue;
@@ -3441,5 +3683,5 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         abort_unsupported_slot(env, &decoded, slot);
     }
 
-    env->ip = next_ip;
+    ia64_finish_bundle(env, next_ip);
 }

@@ -14,18 +14,61 @@
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
+#include "target/ia64/exec-smoke.h"
 
 static void vibtanium_uart_irq(void *opaque, int n, int level)
 {
     /*
-     * Phase 7 wires the UART to a stable interrupt sink, but deliberately
-     * leaves IA-64 interrupt-controller and external-interrupt delivery for a
-     * later phase.
+     * The local SAPIC IPI path exists, but UART/IOSAPIC routing is still a
+     * later platform step.
      */
     (void)opaque;
     (void)n;
     (void)level;
 }
+
+static uint64_t vibtanium_local_sapic_ipi_read(void *opaque, hwaddr offset,
+                                               unsigned size)
+{
+    (void)opaque;
+    (void)offset;
+    (void)size;
+    return 0;
+}
+
+static void vibtanium_local_sapic_ipi_write(void *opaque, hwaddr offset,
+                                            uint64_t value, unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    CPUIA64State *env = &vms->cpu->env;
+    uint64_t delivery_mode = (value >> 8) & 0x7;
+    uint64_t vector = value & 0xff;
+
+    (void)offset;
+    (void)size;
+
+    if (delivery_mode != 0) {
+        return;
+    }
+
+    if (ia64_queue_external_interrupt(env, vector)) {
+        cpu_interrupt(CPU(vms->cpu), CPU_INTERRUPT_HARD);
+    }
+}
+
+static const MemoryRegionOps vibtanium_local_sapic_ipi_ops = {
+    .read = vibtanium_local_sapic_ipi_read,
+    .write = vibtanium_local_sapic_ipi_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+};
 
 typedef struct VibtaniumBlockReadOpaque {
     BlockBackend *blk;
@@ -394,6 +437,13 @@ static void vibtanium_init(MachineState *machine)
                              kernel_alias_size);
     memory_region_add_subregion(sysmem, VIBTANIUM_KERNEL_ALIAS_BASE,
                                 &vms->kernel_alias);
+
+    memory_region_init_io(&vms->local_sapic_ipi, OBJECT(machine),
+                          &vibtanium_local_sapic_ipi_ops, vms,
+                          "vibtanium.local-sapic-ipi",
+                          VIBTANIUM_LOCAL_SAPIC_IPI_SIZE);
+    memory_region_add_subregion(sysmem, VIBTANIUM_LOCAL_SAPIC_IPI_BASE,
+                                &vms->local_sapic_ipi);
 
     qemu_init_irq_child(OBJECT(machine), "uart-irq", &vms->uart_irq,
                         vibtanium_uart_irq, vms, 0);

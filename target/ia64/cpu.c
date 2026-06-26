@@ -69,7 +69,10 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 
 static bool ia64_cpu_has_work(CPUState *cs)
 {
-    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
+    IA64CPU *cpu = IA64_CPU(cs);
+
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) ||
+           ia64_external_interrupt_enabled(&cpu->env);
 }
 
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
@@ -85,7 +88,27 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 
 static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    return false;
+    IA64CPU *cpu = IA64_CPU(cs);
+    CPUIA64State *env = &cpu->env;
+
+    if ((interrupt_request & CPU_INTERRUPT_HARD) == 0 &&
+        !ia64_external_interrupt_pending(env)) {
+        return false;
+    }
+
+    if (!ia64_external_interrupt_pending(env)) {
+        cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+        return false;
+    }
+
+    if (!ia64_external_interrupt_enabled(env)) {
+        return false;
+    }
+
+    cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    ia64_deliver_exception(env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env->ip,
+                           MMU_DATA_LOAD, "external interrupt");
+    return true;
 }
 
 void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)

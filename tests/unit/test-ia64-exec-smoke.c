@@ -9,7 +9,6 @@
 #include "target/ia64/mem.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
-
 static void store_le64(uint8_t *p, uint64_t value)
 {
     for (int i = 0; i < 8; i++) {
@@ -317,6 +316,25 @@ static void test_m_unit_system_memory_management(void)
     const uint64_t kernel_ttag_r5_r2_raw =
         (1ULL << 37) | (0x1bULL << 27) | (2ULL << 20) | (5ULL << 6);
     const uint64_t kernel_mov_r15_cpuid_r0_raw = 0x020b80003c0ULL;
+    const uint64_t linux_mov_pmc_r2_r15_raw = 0x0202021e000ULL;
+    const uint64_t mov_r16_pmc_r2_raw =
+        (1ULL << 37) | (0x14ULL << 27) | (2ULL << 20) | (16ULL << 6);
+    const uint64_t mov_pmd_r3_r17_raw =
+        (1ULL << 37) | (0x05ULL << 27) | (3ULL << 20) | (17ULL << 13);
+    const uint64_t mov_r18_pmd_r3_raw =
+        (1ULL << 37) | (0x15ULL << 27) | (3ULL << 20) | (18ULL << 6);
+    const uint64_t mov_dbr_r4_r19_raw =
+        (1ULL << 37) | (0x01ULL << 27) | (4ULL << 20) | (19ULL << 13);
+    const uint64_t mov_r20_dbr_r4_raw =
+        (1ULL << 37) | (0x11ULL << 27) | (4ULL << 20) | (20ULL << 6);
+    const uint64_t mov_ibr_r5_r21_raw =
+        (1ULL << 37) | (0x02ULL << 27) | (5ULL << 20) | (21ULL << 13);
+    const uint64_t mov_r22_ibr_r5_raw =
+        (1ULL << 37) | (0x12ULL << 27) | (5ULL << 20) | (22ULL << 6);
+    const uint64_t mov_pkr_r6_r23_raw =
+        (1ULL << 37) | (0x03ULL << 27) | (6ULL << 20) | (23ULL << 13);
+    const uint64_t mov_r24_pkr_r6_raw =
+        (1ULL << 37) | (0x13ULL << 27) | (6ULL << 20) | (24ULL << 6);
     const uint64_t kernel_mov_m_ar_rsc_0_raw = 0x00141000000ULL;
     const uint64_t kernel_loadrs_raw = 0x00050000000ULL;
     CPUIA64State env;
@@ -448,6 +466,56 @@ static void test_m_unit_system_memory_management(void)
     g_assert_cmphex(ia64_read_gr(&env, 16), ==,
                     0x000000006c65746eULL);
 
+    ia64_write_gr(&env, 2, 2);
+    ia64_write_gr(&env, 15, 0x123456789abcdef0ULL);
+    g_assert_true(ia64_slot_is_m_mov_to_indexed_system_register(
+        IA64_SLOT_TYPE_M, linux_mov_pmc_r2_r15_raw));
+    g_assert_true(ia64_exec_m_mov_to_indexed_system_register(
+        &env, linux_mov_pmc_r2_r15_raw));
+    g_assert_cmphex(env.pmc[2], ==, 0x123456789abcdef0ULL);
+    g_assert_true(ia64_slot_is_m_mov_from_indexed_system_register(
+        IA64_SLOT_TYPE_M, mov_r16_pmc_r2_raw));
+    g_assert_true(ia64_exec_m_mov_from_indexed_system_register(
+        &env, mov_r16_pmc_r2_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 16), ==, 0x123456789abcdef0ULL);
+
+    ia64_write_gr(&env, 3, 4);
+    ia64_write_gr(&env, 17, 0xfeedfaceULL);
+    g_assert_true(ia64_exec_m_mov_to_indexed_system_register(
+        &env, mov_pmd_r3_r17_raw));
+    g_assert_true(ia64_exec_m_mov_from_indexed_system_register(
+        &env, mov_r18_pmd_r3_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 18), ==, 0xfeedfaceULL);
+
+    ia64_write_gr(&env, 4, 7);
+    ia64_write_gr(&env, 19, 0xd0d0ULL);
+    g_assert_true(ia64_exec_m_mov_to_indexed_system_register(
+        &env, mov_dbr_r4_r19_raw));
+    g_assert_true(ia64_exec_m_mov_from_indexed_system_register(
+        &env, mov_r20_dbr_r4_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 20), ==, 0xd0d0ULL);
+
+    ia64_write_gr(&env, 5, 6);
+    ia64_write_gr(&env, 21, 0x1b1bULL);
+    g_assert_true(ia64_exec_m_mov_to_indexed_system_register(
+        &env, mov_ibr_r5_r21_raw));
+    g_assert_true(ia64_exec_m_mov_from_indexed_system_register(
+        &env, mov_r22_ibr_r5_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 22), ==, 0x1b1bULL);
+
+    ia64_write_gr(&env, 6, 12);
+    ia64_write_gr(&env, 23, 0x0badf00dULL);
+    g_assert_true(ia64_exec_m_mov_to_indexed_system_register(
+        &env, mov_pkr_r6_r23_raw));
+    g_assert_true(ia64_exec_m_mov_from_indexed_system_register(
+        &env, mov_r24_pkr_r6_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 24), ==, 0x0badf00dULL);
+
+    ia64_write_gr(&env, 2, IA64_PMC_COUNT);
+    g_assert_true(ia64_exec_m_mov_from_indexed_system_register(
+        &env, mov_r16_pmc_r2_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 16), ==, 0);
+
     env.ar[IA64_AR_RSC] = 0x3;
     env.rse.rsc = 0x3;
     g_assert_true(ia64_slot_is_mov_to_application_immediate(
@@ -458,6 +526,49 @@ static void test_m_unit_system_memory_management(void)
     g_assert_cmphex(env.rse.rsc, ==, 0);
     g_assert_true(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,
                                              kernel_loadrs_raw));
+}
+
+static void test_interrupt_control_registers(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x0f);
+
+    env.cr[IA64_CR_ITV] = 0xef;
+    env.cr[IA64_CR_ITM] = 10;
+    env.ar[IA64_AR_ITC] = 9;
+    g_assert_false(ia64_timer_interrupt_due(&env));
+
+    ia64_advance_itc(&env, 1);
+    g_assert_true(ia64_timer_interrupt_due(&env));
+    ia64_latch_timer_interrupt(&env);
+    g_assert_true(ia64_external_interrupt_pending(&env));
+    g_assert_false(ia64_external_interrupt_enabled(&env));
+
+    env.psr |= 0x4000;
+    g_assert_true(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IRR3) &
+                    (1ULL << (0xef & 63)), !=, 0);
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IRR3) &
+                    (1ULL << (0xef & 63)), ==, 0);
+    g_assert_false(ia64_external_interrupt_pending(&env));
+
+    ia64_write_control_register(&env, IA64_CR_EOI, 0);
+    g_assert_false(ia64_external_interrupt_pending(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x0f);
+
+    g_assert_true(ia64_queue_external_interrupt(&env, 0xef));
+    g_assert_true(ia64_external_interrupt_pending(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IRR3) &
+                    (1ULL << (0xef & 63)), !=, 0);
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
+    ia64_write_control_register(&env, IA64_CR_EOI, 0);
+
+    env.cr[IA64_CR_ITV] = (1ULL << 16) | 0xef;
+    g_assert_false(ia64_timer_interrupt_due(&env));
 }
 
 static void test_lx_movl_reconstructs_immediate(void)
@@ -693,6 +804,32 @@ static void test_m_unit_getf_significand(void)
                                       getf_sig_r21_f10_raw));
     g_assert_true(ia64_exec_m_getf(&env, getf_sig_r21_f10_raw));
     g_assert_cmphex(ia64_read_gr(&env, 21), ==, 0x1234);
+}
+
+static void test_floating_spill_format_constants(void)
+{
+    IA64FloatReg reg;
+    CPUIA64State env;
+    uint64_t sign_exponent;
+    uint64_t mantissa;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    ia64_float_reg_to_spill(&env.fr[0], &sign_exponent, &mantissa);
+    g_assert_cmphex(sign_exponent, ==, 0);
+    g_assert_cmphex(mantissa, ==, 0);
+
+    ia64_float_reg_to_spill(&env.fr[1], &sign_exponent, &mantissa);
+    g_assert_cmphex(sign_exponent, ==, 0xffff);
+    g_assert_cmphex(mantissa, ==, 0x8000000000000000ULL);
+
+    ia64_float_reg_from_spill(0, 0, &reg);
+    g_assert_cmphex(reg.raw[0], ==, 0);
+    g_assert_cmphex(reg.raw[1], ==, 0x1ffff);
+
+    ia64_float_reg_from_spill(0xffff, 0x8000000000000000ULL, &reg);
+    g_assert_cmphex(reg.raw[0], ==, 0x8000000000000000ULL);
+    g_assert_cmphex(reg.raw[1], ==, 0xffff);
 }
 
 static void test_extract_zero_extends_bitfield(void)
@@ -957,6 +1094,7 @@ static void test_floating_memory_decode(void)
 {
     const uint64_t stf_spill_f2_r17_raw = 0x0cec1104000ULL;
     const uint64_t elilo_stf_spill_f4_r8_imm32_raw = 0x0eef0808800ULL;
+    const uint64_t linux_stf_spill_f0_r27_imm32_raw = 0x0eec1b00800ULL;
     const uint64_t linux_lfetch_r32_raw = 0x0cb12000000ULL;
     IA64FloatingMemoryInstruction decoded;
 
@@ -980,6 +1118,18 @@ static void test_floating_memory_decode(void)
     g_assert_cmpuint(decoded.freg, ==, 4);
     g_assert_cmpuint(decoded.base, ==, 8);
     g_assert_cmpuint(decoded.memory_class, ==, 0x0e);
+    g_assert_true(decoded.base_update);
+    g_assert_false(decoded.update_from_register);
+    g_assert_cmpint(decoded.immediate, ==, 32);
+
+    g_assert_true(ia64_decode_floating_memory(IA64_SLOT_TYPE_M,
+                                              linux_stf_spill_f0_r27_imm32_raw,
+                                              &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_FLOAT_MEM_STORE);
+    g_assert_cmpint(decoded.format, ==, IA64_FLOAT_FMT_SPILL_FILL);
+    g_assert_cmpuint(decoded.width, ==, 16);
+    g_assert_cmpuint(decoded.freg, ==, 0);
+    g_assert_cmpuint(decoded.base, ==, 27);
     g_assert_true(decoded.base_update);
     g_assert_false(decoded.update_from_register);
     g_assert_cmpint(decoded.immediate, ==, 32);
@@ -1023,6 +1173,92 @@ static void test_compare_immediate_updates_predicates(void)
     g_assert_true(ia64_exec_compare(&env, &decoded));
     g_assert_cmphex(env.pr & (1ULL << 6), ==, 0);
     g_assert_cmphex(env.pr & 1, ==, 1);
+}
+
+static uint64_t make_cmp_eq_parallel_p6_p7_r20_r21(uint8_t major)
+{
+    return ((uint64_t)major << 37) | (1ULL << 33) | (7ULL << 27) |
+           (21ULL << 20) | (20ULL << 13) | (6ULL << 6);
+}
+
+static void assert_p6_p7(CPUIA64State *env, bool p6, bool p7)
+{
+    g_assert_cmphex(env->pr & (1ULL << 6), ==, p6 ? 1ULL << 6 : 0);
+    g_assert_cmphex(env->pr & (1ULL << 7), ==, p7 ? 1ULL << 7 : 0);
+}
+
+static void test_compare_parallel_predicate_completers(void)
+{
+    IA64CompareInstruction decoded;
+    CPUIA64State env;
+
+    g_assert_true(ia64_decode_compare(
+                      IA64_SLOT_TYPE_I,
+                      make_cmp_eq_parallel_p6_p7_r20_r21(0xc),
+                      &decoded));
+    g_assert_cmpint(decoded.relation, ==, IA64_CMP_EQ);
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_AND);
+    g_assert_false(decoded.source_immediate);
+    g_assert_cmpuint(decoded.p1, ==, 6);
+    g_assert_cmpuint(decoded.p2, ==, 7);
+    g_assert_cmpuint(decoded.source2, ==, 20);
+    g_assert_cmpuint(decoded.source3, ==, 21);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 6, true);
+    ia64_write_pr(&env, 7, true);
+    ia64_write_gr(&env, 20, 0x1234);
+    ia64_write_gr(&env, 21, 0x1234);
+    g_assert_true(ia64_exec_compare(&env, &decoded));
+    assert_p6_p7(&env, true, true);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 6, true);
+    ia64_write_pr(&env, 7, true);
+    ia64_write_gr(&env, 20, 0x1234);
+    ia64_write_gr(&env, 21, 0x5678);
+    g_assert_true(ia64_exec_compare(&env, &decoded));
+    assert_p6_p7(&env, false, false);
+
+    g_assert_true(ia64_decode_compare(
+                      IA64_SLOT_TYPE_I,
+                      make_cmp_eq_parallel_p6_p7_r20_r21(0xd),
+                      &decoded));
+    g_assert_cmpint(decoded.relation, ==, IA64_CMP_EQ);
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_OR);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_gr(&env, 20, 0x1234);
+    ia64_write_gr(&env, 21, 0x1234);
+    g_assert_true(ia64_exec_compare(&env, &decoded));
+    assert_p6_p7(&env, true, true);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_gr(&env, 20, 0x1234);
+    ia64_write_gr(&env, 21, 0x5678);
+    g_assert_true(ia64_exec_compare(&env, &decoded));
+    assert_p6_p7(&env, false, false);
+
+    g_assert_true(ia64_decode_compare(
+                      IA64_SLOT_TYPE_I,
+                      make_cmp_eq_parallel_p6_p7_r20_r21(0xe),
+                      &decoded));
+    g_assert_cmpint(decoded.relation, ==, IA64_CMP_EQ);
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_OR_ANDCM);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 7, true);
+    ia64_write_gr(&env, 20, 0x1234);
+    ia64_write_gr(&env, 21, 0x5678);
+    g_assert_true(ia64_exec_compare(&env, &decoded));
+    assert_p6_p7(&env, false, true);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 7, true);
+    ia64_write_gr(&env, 20, 0x1234);
+    ia64_write_gr(&env, 21, 0x1234);
+    g_assert_true(ia64_exec_compare(&env, &decoded));
+    assert_p6_p7(&env, true, false);
 }
 
 static void test_predicate_test_bit_updates_predicates(void)
@@ -1117,9 +1353,11 @@ static void test_b_unit_relative_call_updates_link_and_frame(void)
 static void test_b_unit_relative_branch(void)
 {
     const uint64_t br_cond_raw = 0x0800001a006ULL;
+    const uint64_t br_cond_to_fallthrough_raw = 0x08600002006ULL;
     const uint64_t br_cloop_raw = 0x091ffffc140ULL;
     CPUIA64State env;
     uint64_t target = 0;
+    bool taken = false;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
 
@@ -1127,26 +1365,44 @@ static void test_b_unit_relative_branch(void)
                                                  br_cond_raw));
     g_assert_cmpint(ia64_branch_displacement(br_cond_raw), ==, 208);
     g_assert_true(ia64_exec_b_branch_relative(&env, br_cond_raw, 0x1036da0,
-                                              &target));
+                                              &target, &taken));
 
     g_assert_cmphex(target, ==, 0x1036e70);
+    g_assert_true(taken);
+
+    target = 0;
+    taken = false;
+    g_assert_true(ia64_slot_is_b_branch_relative(IA64_SLOT_TYPE_B,
+                                                 br_cond_to_fallthrough_raw));
+    g_assert_cmpint(ia64_branch_displacement(br_cond_to_fallthrough_raw),
+                    ==, 16);
+    g_assert_true(ia64_exec_b_branch_relative(
+                  &env, br_cond_to_fallthrough_raw, 0xa0000001003e9700ULL,
+                  &target, &taken));
+
+    g_assert_cmphex(target, ==, 0xa0000001003e9710ULL);
+    g_assert_true(taken);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.ar[IA64_AR_LC] = 2;
     target = 0;
+    taken = false;
     g_assert_true(ia64_slot_is_b_branch_relative(IA64_SLOT_TYPE_B,
                                                  br_cloop_raw));
     g_assert_cmpint(ia64_branch_displacement(br_cloop_raw), ==, -32);
     g_assert_true(ia64_exec_b_branch_relative(&env, br_cloop_raw, 0x100a120,
-                                              &target));
+                                              &target, &taken));
     g_assert_cmphex(target, ==, 0x100a100);
     g_assert_cmphex(env.ar[IA64_AR_LC], ==, 1);
+    g_assert_true(taken);
 
     env.ar[IA64_AR_LC] = 0;
     target = 0;
+    taken = true;
     g_assert_true(ia64_exec_b_branch_relative(&env, br_cloop_raw, 0x100a120,
-                                              &target));
+                                              &target, &taken));
     g_assert_cmphex(target, ==, 0x100a130);
+    g_assert_false(taken);
 }
 
 static void test_counted_store_loop_decode_from_decompressor(void)
@@ -1212,7 +1468,7 @@ static void test_b_unit_return_from_interruption(void)
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
     env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
-    env.cr[IA64_CR_IFS] = ia64_make_cfm(8, 3, 0);
+    env.cr[IA64_CR_IFS] = ia64_make_cfm(8, 3, 0) | IA64_IFS_VALID_BIT;
 
     g_assert_true(ia64_slot_is_b_indirect_branch(IA64_SLOT_TYPE_B, rfi_raw));
     g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
@@ -1233,6 +1489,7 @@ static void test_rfi_staged_control_registers(void)
     const uint64_t rfi_raw = 0x00040000000ULL;
     const uint64_t old_cfm = ia64_make_cfm(2, 1, 0);
     const uint64_t new_cfm = ia64_make_cfm(8, 3, 0);
+    const uint64_t new_ifs = new_cfm | IA64_IFS_VALID_BIT;
     CPUIA64State env;
     uint64_t target = 0;
 
@@ -1242,14 +1499,14 @@ static void test_rfi_staged_control_registers(void)
     ia64_set_cfm(&env, old_cfm);
     ia64_write_gr(&env, 16, 0x001010084a2008ULL);
     ia64_write_gr(&env, 17, 0xa0000001007f7e57ULL);
-    ia64_write_gr(&env, 18, new_cfm);
+    ia64_write_gr(&env, 18, new_ifs);
 
     g_assert_true(ia64_exec_m_mov_to_control(&env, mov_cr_ipsr_r16_raw));
     g_assert_true(ia64_exec_m_mov_to_control(&env, mov_cr_iip_r17_raw));
     g_assert_true(ia64_exec_m_mov_to_control(&env, mov_cr_ifs_r18_raw));
     g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, 0x001010084a2008ULL);
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, 0xa0000001007f7e57ULL);
-    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, new_cfm);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, new_ifs);
     g_assert_cmphex(env.ip, ==, 0x47f7e40);
     g_assert_cmphex(env.psr, ==, 0);
     g_assert_cmphex(env.cfm, ==, old_cfm);
@@ -1259,6 +1516,46 @@ static void test_rfi_staged_control_registers(void)
     g_assert_cmphex(target, ==, 0xa0000001007f7e50ULL);
     g_assert_cmphex(env.psr, ==, 0x001010084a2008ULL);
     g_assert_cmphex(env.cfm, ==, new_cfm);
+}
+
+static void test_rfi_uncovers_valid_interruption_frame(void)
+{
+    const uint64_t rfi_raw = 0x00040000000ULL;
+    const uint64_t interrupted_cfm = ia64_make_cfm(8, 3, 0);
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
+    env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
+    env.rse.current_frame_base = 19;
+    ia64_set_cfm(&env, 0);
+    env.cr[IA64_CR_IFS] = interrupted_cfm | IA64_IFS_VALID_BIT;
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
+                                              &target));
+    g_assert_cmphex(env.cfm, ==, interrupted_cfm);
+    g_assert_cmpuint(env.rse.current_frame_base, ==, 11);
+}
+
+static void test_rfi_ignores_invalid_ifs(void)
+{
+    const uint64_t rfi_raw = 0x00040000000ULL;
+    const uint64_t handler_cfm = ia64_make_cfm(2, 1, 0);
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
+    env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
+    ia64_set_cfm(&env, handler_cfm);
+    env.cr[IA64_CR_IFS] = ia64_make_cfm(8, 3, 0);
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
+                                              &target));
+    g_assert_cmphex(target, ==, 0xa0000001007f7e50ULL);
+    g_assert_cmphex(env.psr, ==, 0x001010084a2008ULL);
+    g_assert_cmphex(env.cfm, ==, handler_cfm);
 }
 
 static void test_b_unit_system_branch_extensions(void)
@@ -1284,7 +1581,7 @@ static void test_b_unit_system_branch_extensions(void)
                                               &target));
     g_assert_cmphex(target, ==, 0x2010);
     g_assert_cmphex(env.cr[IA64_CR_IFS], ==,
-                    cfm_with_rrb | (UINT64_C(1) << 63));
+                    cfm_with_rrb | IA64_IFS_VALID_BIT);
     g_assert_cmphex(env.cfm, ==, 0);
     g_assert_cmpuint(env.rse.current_frame_base, ==, 19);
 
@@ -1417,6 +1714,8 @@ int main(int argc, char **argv)
                     test_application_register_moves);
     g_test_add_func("/ia64-exec-smoke/m-unit-system-memory-management",
                     test_m_unit_system_memory_management);
+    g_test_add_func("/ia64-exec-smoke/interrupt-control-registers",
+                    test_interrupt_control_registers);
     g_test_add_func("/ia64-exec-smoke/lx-movl-reconstructs-immediate",
                     test_lx_movl_reconstructs_immediate);
     g_test_add_func("/ia64-exec-smoke/lx-nop-hint-pair",
@@ -1439,6 +1738,8 @@ int main(int argc, char **argv)
                     test_m_unit_setf_significand);
     g_test_add_func("/ia64-exec-smoke/m-unit-getf-significand",
                     test_m_unit_getf_significand);
+    g_test_add_func("/ia64-exec-smoke/floating-spill-format-constants",
+                    test_floating_spill_format_constants);
     g_test_add_func("/ia64-exec-smoke/extract-zero-extends-bitfield",
                     test_extract_zero_extends_bitfield);
     g_test_add_func("/ia64-exec-smoke/deposit-zero-elilo-frontier",
@@ -1465,6 +1766,8 @@ int main(int argc, char **argv)
                     test_floating_memory_decode);
     g_test_add_func("/ia64-exec-smoke/compare-immediate-predicate-write",
                     test_compare_immediate_updates_predicates);
+    g_test_add_func("/ia64-exec-smoke/compare-parallel-predicate-write",
+                    test_compare_parallel_predicate_completers);
     g_test_add_func("/ia64-exec-smoke/predicate-test-bit",
                     test_predicate_test_bit_updates_predicates);
     g_test_add_func("/ia64-exec-smoke/rotating-predicate-access",
@@ -1481,6 +1784,10 @@ int main(int argc, char **argv)
                     test_b_unit_return_from_interruption);
     g_test_add_func("/ia64-exec-smoke/rfi-staged-control-registers",
                     test_rfi_staged_control_registers);
+    g_test_add_func("/ia64-exec-smoke/rfi-valid-ifs-uncovers-frame",
+                    test_rfi_uncovers_valid_interruption_frame);
+    g_test_add_func("/ia64-exec-smoke/rfi-invalid-ifs",
+                    test_rfi_ignores_invalid_ifs);
     g_test_add_func("/ia64-exec-smoke/b-unit-system-branch-extensions",
                     test_b_unit_system_branch_extensions);
     g_test_add_func("/ia64-exec-smoke/b-unit-indirect-call",

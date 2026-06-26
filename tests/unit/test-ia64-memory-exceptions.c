@@ -200,6 +200,7 @@ static void test_tlb_miss_delivery_vectors_to_iva(void)
     env.ip = miss;
     env.psr = psr;
     env.cr[IA64_CR_IVA] = 0x100000;
+    env.cr[IA64_CR_IFS] = 0x8000000000003333ULL;
 
     ia64_deliver_exception(&env, IA64_EXCEPTION_INSTRUCTION_TLB_MISS,
                            miss, MMU_INST_FETCH, "test itlb miss");
@@ -210,6 +211,7 @@ static void test_tlb_miss_delivery_vectors_to_iva(void)
     g_assert_cmphex(env.exception.vector, ==, 0x0400);
     g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, psr);
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, miss);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, 0);
     g_assert_cmphex(env.cr[IA64_CR_IFA], ==, miss);
     g_assert_cmphex(env.cr[IA64_CR_ITIR], ==, ia64_default_itir(&env, miss));
     g_assert_cmphex(env.cr[IA64_CR_IHA], ==,

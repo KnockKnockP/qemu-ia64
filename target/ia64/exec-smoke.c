@@ -17,8 +17,12 @@
 #define IA64_FR_TWO_TO_64_L 0x1.0p64L
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
+#define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_INTERRUPT_VECTOR_MASK UINT64_C(0xff)
+#define IA64_INTERRUPT_SPURIOUS_VECTOR UINT64_C(0x0f)
+#define IA64_LOCAL_VECTOR_MASK_BIT UINT64_C(0x0000000000010000)
 
 static uint64_t ia64_default_region_register(unsigned index)
 {
@@ -264,6 +268,37 @@ static bool ia64_fr_is_zero(const IA64FloatReg *reg)
 {
     return reg->raw[0] == 0 &&
            ia64_fr_exponent(reg) == IA64_FR_SPECIAL_EXPONENT;
+}
+
+void ia64_float_reg_to_spill(const IA64FloatReg *reg,
+                             uint64_t *sign_exponent,
+                             uint64_t *mantissa)
+{
+    uint64_t sign = reg->raw[1] & (UINT64_C(1) << 17);
+
+    if (ia64_fr_is_zero(reg)) {
+        *sign_exponent = sign;
+        *mantissa = 0;
+        return;
+    }
+
+    *sign_exponent = reg->raw[1] & 0x3ffff;
+    *mantissa = reg->raw[0];
+}
+
+void ia64_float_reg_from_spill(uint64_t sign_exponent, uint64_t mantissa,
+                               IA64FloatReg *reg)
+{
+    sign_exponent &= 0x3ffff;
+    if ((sign_exponent & 0x1ffff) == 0 && mantissa == 0) {
+        reg->raw[0] = 0;
+        reg->raw[1] = (sign_exponent & (UINT64_C(1) << 17)) |
+                      IA64_FR_SPECIAL_EXPONENT;
+        return;
+    }
+
+    reg->raw[0] = mantissa;
+    reg->raw[1] = sign_exponent;
 }
 
 static bool ia64_fr_is_infinity(const IA64FloatReg *reg)
@@ -1023,13 +1058,183 @@ bool ia64_exec_m_mov_from_region_register(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
-static void ia64_write_cr(CPUIA64State *env, uint32_t reg, uint64_t value)
+static bool ia64_time_after_eq(uint64_t lhs, uint64_t rhs)
 {
+    return (int64_t)(lhs - rhs) >= 0;
+}
+
+static uint64_t ia64_timer_vector(CPUIA64State *env)
+{
+    return env->cr[IA64_CR_ITV] & IA64_INTERRUPT_VECTOR_MASK;
+}
+
+static bool ia64_timer_vector_masked(CPUIA64State *env)
+{
+    return (env->cr[IA64_CR_ITV] & IA64_LOCAL_VECTOR_MASK_BIT) != 0;
+}
+
+static bool ia64_valid_external_interrupt_vector(uint64_t vector)
+{
+    return vector == 0 || vector == 2 ||
+           (vector > IA64_INTERRUPT_SPURIOUS_VECTOR && vector <= 0xff);
+}
+
+static void ia64_refresh_pending_external_interrupt(CPUIA64State *env)
+{
+    for (int reg = IA64_CR_IRR3; reg >= IA64_CR_IRR0; reg--) {
+        uint64_t pending = env->cr[reg];
+
+        while (pending != 0) {
+            unsigned bit = 63 - clz64(pending);
+            uint64_t vector = (uint64_t)(reg - IA64_CR_IRR0) * 64 + bit;
+
+            if (ia64_valid_external_interrupt_vector(vector)) {
+                env->interrupt.pending = true;
+                env->interrupt.pending_vector = vector;
+                return;
+            }
+            pending &= ~(UINT64_C(1) << bit);
+        }
+    }
+
+    env->interrupt.pending = false;
+    env->interrupt.pending_vector = 0;
+}
+
+static void ia64_clear_pending_external_interrupt(CPUIA64State *env,
+                                                  uint64_t vector)
+{
+    if (vector <= 0xff) {
+        env->cr[IA64_CR_IRR0 + vector / 64] &= ~(UINT64_C(1) << (vector & 63));
+    }
+    ia64_refresh_pending_external_interrupt(env);
+}
+
+static bool ia64_interrupt_vector_active(CPUIA64State *env, uint64_t vector)
+{
+    return env->interrupt.pending_interruption &&
+           (env->cr[IA64_CR_IVR] & IA64_INTERRUPT_VECTOR_MASK) == vector;
+}
+
+void ia64_advance_itc(CPUIA64State *env, uint64_t ticks)
+{
+    if (!env) {
+        return;
+    }
+
+    env->ar[IA64_AR_ITC] += ticks;
+}
+
+bool ia64_timer_interrupt_due(CPUIA64State *env)
+{
+    uint64_t vector;
+
+    if (!env || ia64_timer_vector_masked(env)) {
+        return false;
+    }
+
+    vector = ia64_timer_vector(env);
+    if (vector <= IA64_INTERRUPT_SPURIOUS_VECTOR ||
+        !ia64_valid_external_interrupt_vector(vector) ||
+        ia64_interrupt_vector_active(env, vector) ||
+        (env->cr[IA64_CR_IRR0 + vector / 64] & (UINT64_C(1) << (vector & 63)))) {
+        return false;
+    }
+
+    return ia64_time_after_eq(env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM]);
+}
+
+void ia64_latch_timer_interrupt(CPUIA64State *env)
+{
+    ia64_queue_external_interrupt(env, ia64_timer_vector(env));
+}
+
+bool ia64_queue_external_interrupt(CPUIA64State *env, uint64_t vector)
+{
+    if (!env || !ia64_valid_external_interrupt_vector(vector)) {
+        return false;
+    }
+
+    env->cr[IA64_CR_IRR0 + vector / 64] |= UINT64_C(1) << (vector & 63);
+    ia64_refresh_pending_external_interrupt(env);
+    return true;
+}
+
+bool ia64_external_interrupt_pending(CPUIA64State *env)
+{
+    return env && env->interrupt.pending;
+}
+
+bool ia64_external_interrupt_enabled(CPUIA64State *env)
+{
+    return ia64_external_interrupt_pending(env) &&
+           (env->psr & IA64_PSR_I_BIT) != 0;
+}
+
+uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
+{
+    if (!env || reg >= IA64_CR_COUNT) {
+        return 0;
+    }
+
+    switch (reg) {
+    case IA64_CR_IVR:
+        if (env->interrupt.pending_interruption) {
+            return env->cr[IA64_CR_IVR] & IA64_INTERRUPT_VECTOR_MASK;
+        }
+        if (env->interrupt.pending) {
+            uint64_t vector = env->interrupt.pending_vector;
+
+            ia64_clear_pending_external_interrupt(env, vector);
+            env->interrupt.pending_interruption = 1;
+            env->cr[IA64_CR_IVR] = vector;
+            return vector;
+        }
+        env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
+        return IA64_INTERRUPT_SPURIOUS_VECTOR;
+    case IA64_CR_IRR0:
+    case IA64_CR_IRR1:
+    case IA64_CR_IRR2:
+    case IA64_CR_IRR3:
+        ia64_refresh_pending_external_interrupt(env);
+        return env->cr[reg];
+    default:
+        return env->cr[reg];
+    }
+}
+
+void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
+                                 uint64_t value)
+{
+    uint64_t old;
+
     if (!env || reg >= IA64_CR_COUNT) {
         return;
     }
 
+    old = env->cr[reg];
     env->cr[reg] = value;
+    switch (reg) {
+    case IA64_CR_EOI:
+        env->interrupt.pending_interruption = 0;
+        env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
+        break;
+    case IA64_CR_IRR0:
+    case IA64_CR_IRR1:
+    case IA64_CR_IRR2:
+    case IA64_CR_IRR3:
+        env->cr[reg] = old;
+        break;
+    case IA64_CR_ITV:
+        if (ia64_timer_vector_masked(env)) {
+            ia64_clear_pending_external_interrupt(env,
+                                                  value &
+                                                  IA64_INTERRUPT_VECTOR_MASK);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 bool ia64_slot_is_m_mov_to_control(IA64SlotType type, uint64_t raw)
@@ -1051,7 +1256,7 @@ bool ia64_exec_m_mov_to_control(CPUIA64State *env, uint64_t raw)
 
     source = (raw >> 13) & 0x7f;
     control = (raw >> 20) & 0x7f;
-    ia64_write_cr(env, control, ia64_read_gr(env, source));
+    ia64_write_control_register(env, control, ia64_read_gr(env, source));
     return true;
 }
 
@@ -1074,8 +1279,7 @@ bool ia64_exec_m_mov_from_control(CPUIA64State *env, uint64_t raw)
 
     target = (raw >> 6) & 0x7f;
     control = (raw >> 20) & 0x7f;
-    ia64_write_gr(env, target,
-                  control < IA64_CR_COUNT ? env->cr[control] : 0);
+    ia64_write_gr(env, target, ia64_read_control_register(env, control));
     return true;
 }
 
@@ -1105,6 +1309,116 @@ bool ia64_exec_m_mov_from_processor_identifier(CPUIA64State *env,
     selector = ia64_read_gr(env, selector_reg);
     ia64_write_gr(env, target,
                   selector < IA64_CPUID_COUNT ? env->cpuid[selector] : 0);
+    return true;
+}
+
+static uint64_t *ia64_indexed_system_register_bank(CPUIA64State *env,
+                                                   uint8_t x6,
+                                                   unsigned *count)
+{
+    switch (x6 & 0x0f) {
+    case 0x01:
+        *count = IA64_DBR_COUNT;
+        return env->dbr;
+    case 0x02:
+        *count = IA64_IBR_COUNT;
+        return env->ibr;
+    case 0x03:
+        *count = IA64_PKR_COUNT;
+        return env->pkr;
+    case 0x04:
+        *count = IA64_PMC_COUNT;
+        return env->pmc;
+    case 0x05:
+        *count = IA64_PMD_COUNT;
+        return env->pmd;
+    default:
+        *count = 0;
+        return NULL;
+    }
+}
+
+bool ia64_slot_is_m_mov_to_indexed_system_register(IA64SlotType type,
+                                                   uint64_t raw)
+{
+    uint8_t x6;
+
+    if (type != IA64_SLOT_TYPE_M ||
+        ia64_slot_major_opcode(raw) != 0x1 ||
+        ((raw >> 33) & 0x7) != 0) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    return x6 >= 0x01 && x6 <= 0x05;
+}
+
+bool ia64_exec_m_mov_to_indexed_system_register(CPUIA64State *env,
+                                                uint64_t raw)
+{
+    uint8_t x6;
+    uint32_t source;
+    uint32_t selector_reg;
+    uint64_t selector;
+    uint64_t *bank;
+    unsigned count;
+
+    if (!env || !ia64_slot_is_m_mov_to_indexed_system_register(
+            IA64_SLOT_TYPE_M, raw)) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    source = (raw >> 13) & 0x7f;
+    selector_reg = (raw >> 20) & 0x7f;
+    selector = ia64_read_gr(env, selector_reg);
+    bank = ia64_indexed_system_register_bank(env, x6, &count);
+    if (bank != NULL && selector < count) {
+        bank[selector] = ia64_read_gr(env, source);
+    }
+    return true;
+}
+
+bool ia64_slot_is_m_mov_from_indexed_system_register(IA64SlotType type,
+                                                     uint64_t raw)
+{
+    uint8_t x6;
+
+    if (type != IA64_SLOT_TYPE_M ||
+        ia64_slot_major_opcode(raw) != 0x1 ||
+        ((raw >> 33) & 0x7) != 0) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    return x6 >= 0x11 && x6 <= 0x15;
+}
+
+bool ia64_exec_m_mov_from_indexed_system_register(CPUIA64State *env,
+                                                  uint64_t raw)
+{
+    uint8_t x6;
+    uint32_t target;
+    uint32_t selector_reg;
+    uint64_t selector;
+    uint64_t *bank;
+    unsigned count;
+    uint64_t value = 0;
+
+    if (!env || !ia64_slot_is_m_mov_from_indexed_system_register(
+            IA64_SLOT_TYPE_M, raw)) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    target = (raw >> 6) & 0x7f;
+    selector_reg = (raw >> 20) & 0x7f;
+    selector = ia64_read_gr(env, selector_reg);
+    bank = ia64_indexed_system_register_bank(env, x6, &count);
+    if (bank != NULL && selector < count) {
+        value = bank[selector];
+    }
+    ia64_write_gr(env, target, value);
     return true;
 }
 
@@ -3244,7 +3558,17 @@ static void ia64_cover_stack_frame(CPUIA64State *env)
     env->rse.current_frame_base =
         (env->rse.current_frame_base + covered_sof) % IA64_STACKED_GR_COUNT;
     ia64_set_cfm(env, 0);
-    env->cr[IA64_CR_IFS] = covered_cfm | (UINT64_C(1) << 63);
+    env->cr[IA64_CR_IFS] = covered_cfm | IA64_IFS_VALID_BIT;
+}
+
+static void ia64_uncover_stack_frame(CPUIA64State *env, uint64_t restored_cfm)
+{
+    uint32_t restored_sof = restored_cfm & 0x7f;
+
+    env->rse.current_frame_base =
+        (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
+         restored_sof) % IA64_STACKED_GR_COUNT;
+    ia64_set_cfm(env, restored_cfm);
 }
 
 static void ia64_clear_register_rename_bases(CPUIA64State *env,
@@ -3261,11 +3585,16 @@ static void ia64_clear_register_rename_bases(CPUIA64State *env,
 bool ia64_exec_b_branch_relative(CPUIA64State *env,
                                  uint64_t raw,
                                  uint64_t bundle_ip,
-                                 uint64_t *target_ip)
+                                 uint64_t *target_ip,
+                                 bool *taken_out)
 {
     uint8_t btype;
     int64_t displacement;
     bool taken = true;
+
+    if (taken_out) {
+        *taken_out = false;
+    }
 
     if (!env || !target_ip ||
         !ia64_slot_is_b_branch_relative(IA64_SLOT_TYPE_B, raw)) {
@@ -3339,6 +3668,9 @@ bool ia64_exec_b_branch_relative(CPUIA64State *env,
         *target_ip = bundle_ip + displacement;
     } else {
         *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+    }
+    if (taken_out) {
+        *taken_out = taken;
     }
     if (ia64_loop_trace_enabled() && (btype == 2 || btype == 3 ||
                                       btype == 5 || btype == 6 ||
@@ -3487,7 +3819,10 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
                     env->cr[IA64_CR_IFS], env->psr, env->cfm);
         }
         env->psr = env->cr[IA64_CR_IPSR];
-        ia64_set_cfm(env, env->cr[IA64_CR_IFS]);
+        if (env->cr[IA64_CR_IFS] & IA64_IFS_VALID_BIT) {
+            ia64_uncover_stack_frame(env,
+                                     env->cr[IA64_CR_IFS] & IA64_CFM_MASK);
+        }
         *target_ip = target;
         return true;
     }

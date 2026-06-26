@@ -15,11 +15,17 @@
 #define IA64_AR_COUNT 128
 #define IA64_CR_COUNT 128
 #define IA64_RR_COUNT 8
+#define IA64_DBR_COUNT 8
+#define IA64_IBR_COUNT 8
 #define IA64_PKR_COUNT 16
 #define IA64_CPUID_COUNT 5
 #define IA64_ITR_COUNT 8
 #define IA64_DTR_COUNT 8
 #define IA64_TC_COUNT 32
+#define IA64_PMC_COUNT 256
+#define IA64_PMD_COUNT 256
+#define IA64_CFM_MASK UINT64_C(0x0000003fffffffff)
+#define IA64_IFS_VALID_BIT UINT64_C(0x8000000000000000)
 
 enum IA64ApplicationRegister {
     IA64_AR_RSC = 16,
@@ -105,8 +111,9 @@ typedef struct IA64NaTState {
 
 typedef struct IA64InterruptState {
     /*
-     * Interrupt delivery is not implemented. These fields reserve a stable
-     * home for pending-interruption bookkeeping and future CR side effects.
+     * Minimal local-SAPIC-facing state. Pending external interrupts are
+     * reflected through CR.IRR*, accepted through CR.IVR, and completed through
+     * CR.EOI; pending_interruption tracks the currently accepted vector.
      */
     uint64_t pending_interruption;
     uint64_t pending_vector;
@@ -201,12 +208,16 @@ typedef struct CPUArchState {
     uint64_t ar[IA64_AR_COUNT];
     uint64_t cr[IA64_CR_COUNT];
 
-    /* Region, protection-key, and translation-register placeholders. */
+    /* Indexed system-register placeholders. */
     uint64_t rr[IA64_RR_COUNT];
+    uint64_t dbr[IA64_DBR_COUNT];
+    uint64_t ibr[IA64_IBR_COUNT];
     uint64_t pkr[IA64_PKR_COUNT];
     uint64_t cpuid[IA64_CPUID_COUNT];
     uint64_t itr[IA64_ITR_COUNT];
     uint64_t dtr[IA64_DTR_COUNT];
+    uint64_t pmc[IA64_PMC_COUNT];
+    uint64_t pmd[IA64_PMD_COUNT];
 
     uint64_t ip;
     uint64_t psr;

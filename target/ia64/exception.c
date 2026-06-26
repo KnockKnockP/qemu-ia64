@@ -167,6 +167,9 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
     }
 
     env->cr[IA64_CR_IPSR] = env->psr;
+    if (old_psr & IA64_PSR_IC_BIT) {
+        env->cr[IA64_CR_IFS] = 0;
+    }
     env->cr[IA64_CR_IIP] = access_type == MMU_INST_FETCH ?
                            (address & ~0xfULL) : env->ip;
     env->cr[IA64_CR_IFA] = address;
