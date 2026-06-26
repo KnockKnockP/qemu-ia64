@@ -19,7 +19,7 @@ typedef struct IsoRecord {
 } IsoRecord;
 
 typedef struct FatContext {
-    VibatniumEfiBlockDevice *dev;
+    VibtaniumEfiBlockDevice *dev;
     uint64_t image_offset;
     uint16_t bytes_per_sector;
     uint8_t sectors_per_cluster;
@@ -57,19 +57,19 @@ static uint32_t rd32(const uint8_t *p)
            ((uint32_t)p[3] << 24);
 }
 
-static uint32_t dev_block_size(const VibatniumEfiBlockDevice *dev)
+static uint32_t dev_block_size(const VibtaniumEfiBlockDevice *dev)
 {
     return dev->block_size ? dev->block_size : ISO_SECTOR_SIZE;
 }
 
 static char *normalize_path_component(const char *component);
 
-static void report_set(VibatniumEfiStorageReport *report,
-                       VibatniumEfiStorageStatus status,
+static void report_set(VibtaniumEfiStorageReport *report,
+                       VibtaniumEfiStorageStatus status,
                        const char *fmt, ...) G_GNUC_PRINTF(3, 4);
 
-static void report_set(VibatniumEfiStorageReport *report,
-                       VibatniumEfiStorageStatus status,
+static void report_set(VibtaniumEfiStorageReport *report,
+                       VibtaniumEfiStorageStatus status,
                        const char *fmt, ...)
 {
     va_list ap;
@@ -84,25 +84,25 @@ static void report_set(VibatniumEfiStorageReport *report,
     va_end(ap);
 }
 
-static bool dev_read(VibatniumEfiBlockDevice *dev,
+static bool dev_read(VibtaniumEfiBlockDevice *dev,
                      uint64_t offset,
                      uint32_t bytes,
                      void *buffer,
-                     VibatniumEfiStorageReport *report,
+                     VibtaniumEfiStorageReport *report,
                      Error **errp)
 {
     int ret;
 
     if (!dev || !dev->read) {
         error_setg(errp, "missing EFI block read callback");
-        report_set(report, VIBATNIUM_EFI_STORAGE_READ_ERROR,
+        report_set(report, VIBTANIUM_EFI_STORAGE_READ_ERROR,
                    "missing EFI block read callback");
         return false;
     }
 
     if (dev->size && (offset > dev->size || bytes > dev->size - offset)) {
         error_setg(errp, "read beyond end of media");
-        report_set(report, VIBATNIUM_EFI_STORAGE_READ_ERROR,
+        report_set(report, VIBTANIUM_EFI_STORAGE_READ_ERROR,
                    "read beyond end of media offset=0x%" PRIx64
                    " bytes=0x%x media-size=0x%" PRIx64,
                    offset, bytes, dev->size);
@@ -111,7 +111,7 @@ static bool dev_read(VibatniumEfiBlockDevice *dev,
 
     ret = dev->read(dev->opaque, offset, bytes, buffer, errp);
     if (ret < 0) {
-        report_set(report, VIBATNIUM_EFI_STORAGE_READ_ERROR,
+        report_set(report, VIBTANIUM_EFI_STORAGE_READ_ERROR,
                    "media read failed offset=0x%" PRIx64 " bytes=0x%x",
                    offset, bytes);
         return false;
@@ -120,10 +120,10 @@ static bool dev_read(VibatniumEfiBlockDevice *dev,
     return true;
 }
 
-static bool find_eltorito_boot_image(VibatniumEfiBlockDevice *dev,
+static bool find_eltorito_boot_image(VibtaniumEfiBlockDevice *dev,
                                      uint64_t *image_offset,
                                      uint32_t *sector_count,
-                                     VibatniumEfiStorageReport *report,
+                                     VibtaniumEfiStorageReport *report,
                                      Error **errp)
 {
     uint8_t sector[ISO_SECTOR_SIZE];
@@ -154,7 +154,7 @@ static bool find_eltorito_boot_image(VibatniumEfiBlockDevice *dev,
 
     if (catalog_lba == 0) {
         error_setg(errp, "ISO9660 media has no El Torito boot catalog");
-        report_set(report, VIBATNIUM_EFI_STORAGE_NOT_FOUND,
+        report_set(report, VIBTANIUM_EFI_STORAGE_NOT_FOUND,
                    "ISO9660 media has no El Torito boot catalog");
         return false;
     }
@@ -167,7 +167,7 @@ static bool find_eltorito_boot_image(VibatniumEfiBlockDevice *dev,
     if (catalog[0] != 0x01 || catalog[0x1e] != 0x55 ||
         catalog[0x1f] != 0xaa) {
         error_setg(errp, "El Torito validation entry is invalid");
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "El Torito validation entry is invalid");
         return false;
     }
@@ -175,14 +175,14 @@ static bool find_eltorito_boot_image(VibatniumEfiBlockDevice *dev,
     entry = catalog + 0x20;
     if (entry[0] != 0x88) {
         error_setg(errp, "El Torito default entry is not bootable");
-        report_set(report, VIBATNIUM_EFI_STORAGE_NOT_FOUND,
+        report_set(report, VIBTANIUM_EFI_STORAGE_NOT_FOUND,
                    "El Torito default entry is not bootable");
         return false;
     }
     if (entry[1] != 0x00) {
         error_setg(errp, "El Torito boot media type 0x%02x is unsupported",
                    entry[1]);
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "El Torito boot media type 0x%02x is unsupported",
                    entry[1]);
         return false;
@@ -191,14 +191,14 @@ static bool find_eltorito_boot_image(VibatniumEfiBlockDevice *dev,
     image_lba = rd32(entry + 8);
     if (image_lba == 0) {
         error_setg(errp, "El Torito default entry has zero image LBA");
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "El Torito default entry has zero image LBA");
         return false;
     }
 
     *image_offset = (uint64_t)image_lba * ISO_SECTOR_SIZE;
     *sector_count = rd16(entry + 6);
-    report_set(report, VIBATNIUM_EFI_STORAGE_OK,
+    report_set(report, VIBTANIUM_EFI_STORAGE_OK,
                "found El Torito no-emulation image catalog-lba=%u image-lba=%u "
                "sectors=%u",
                catalog_lba, image_lba, *sector_count);
@@ -285,7 +285,7 @@ static bool fat_read_bytes(FatContext *fat,
                            uint64_t offset,
                            uint32_t bytes,
                            void *buffer,
-                           VibatniumEfiStorageReport *report,
+                           VibtaniumEfiStorageReport *report,
                            Error **errp)
 {
     return dev_read(fat->dev, fat->image_offset + offset, bytes, buffer,
@@ -293,9 +293,9 @@ static bool fat_read_bytes(FatContext *fat,
 }
 
 static bool fat_init(FatContext *fat,
-                     VibatniumEfiBlockDevice *dev,
+                     VibtaniumEfiBlockDevice *dev,
                      uint64_t image_offset,
-                     VibatniumEfiStorageReport *report,
+                     VibtaniumEfiStorageReport *report,
                      Error **errp)
 {
     uint8_t bpb[512];
@@ -324,7 +324,7 @@ static bool fat_init(FatContext *fat,
         fat->root_entries == 0 || fat->sectors_per_fat == 0 ||
         fat->total_sectors == 0) {
         error_setg(errp, "El Torito image is not a supported FAT16 volume");
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "El Torito image is not a supported FAT16 volume");
         return false;
     }
@@ -337,7 +337,7 @@ static bool fat_init(FatContext *fat,
                              fat->root_dir_sectors;
     if (fat->total_sectors <= fat->first_data_sector) {
         error_setg(errp, "FAT16 data area is empty");
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "FAT16 data area is empty");
         return false;
     }
@@ -348,7 +348,7 @@ static bool fat_init(FatContext *fat,
     if (fat->cluster_count < 4085 || fat->cluster_count >= 65525) {
         error_setg(errp, "FAT cluster count %u is not FAT16",
                    fat->cluster_count);
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "FAT cluster count %u is not FAT16", fat->cluster_count);
         return false;
     }
@@ -362,7 +362,7 @@ static bool fat_init(FatContext *fat,
     fat_bytes = (uint32_t)fat->sectors_per_fat * fat->bytes_per_sector;
     if (fat_bytes > 4 * MiB) {
         error_setg(errp, "FAT16 table is too large");
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "FAT16 table is too large");
         return false;
     }
@@ -388,7 +388,7 @@ static bool fat_read_cluster_chain(FatContext *fat,
                                    uint16_t start_cluster,
                                    size_t limit,
                                    GByteArray *out,
-                                   VibatniumEfiStorageReport *report,
+                                   VibtaniumEfiStorageReport *report,
                                    Error **errp)
 {
     uint16_t cluster = start_cluster;
@@ -402,14 +402,14 @@ static bool fat_read_cluster_chain(FatContext *fat,
         if (cluster >= fat->cluster_count + 2) {
             error_setg(errp, "FAT16 cluster %u is outside the data area",
                        cluster);
-            report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+            report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                        "FAT16 cluster %u is outside the data area", cluster);
             return false;
         }
         if (out->len + cluster_bytes > limit ||
             out->len + cluster_bytes > FAT_MAX_CLUSTER_CHAIN_BYTES) {
             error_setg(errp, "FAT16 cluster chain exceeds limit");
-            report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+            report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                        "FAT16 cluster chain exceeds limit");
             return false;
         }
@@ -426,7 +426,7 @@ static bool fat_read_cluster_chain(FatContext *fat,
         }
         if (next == 0 || next == cluster) {
             error_setg(errp, "FAT16 cluster chain is invalid at %u", cluster);
-            report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+            report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                        "FAT16 cluster chain is invalid at %u", cluster);
             return false;
         }
@@ -440,7 +440,7 @@ static bool fat_load_directory(FatContext *fat,
                                uint16_t cluster,
                                bool root,
                                GByteArray **entries,
-                               VibatniumEfiStorageReport *report,
+                               VibtaniumEfiStorageReport *report,
                                Error **errp)
 {
     *entries = g_byte_array_new();
@@ -471,7 +471,7 @@ static bool fat_search_directory(FatContext *fat,
                                  bool root,
                                  const char *component,
                                  FatEntry *match,
-                                 VibatniumEfiStorageReport *report,
+                                 VibtaniumEfiStorageReport *report,
                                  Error **errp)
 {
     g_autofree char *wanted = normalize_path_component(component);
@@ -538,12 +538,12 @@ static bool fat_search_directory(FatContext *fat,
 
     if (!found) {
         error_setg(errp, "FAT16 component '%s' was not found", component);
-        report_set(report, VIBATNIUM_EFI_STORAGE_NOT_FOUND,
+        report_set(report, VIBTANIUM_EFI_STORAGE_NOT_FOUND,
                    "FAT16 component '%s' was not found", component);
         return false;
     }
 
-    report_set(report, VIBATNIUM_EFI_STORAGE_OK,
+    report_set(report, VIBTANIUM_EFI_STORAGE_OK,
                "found FAT16 component '%s' cluster=%u size=0x%x",
                component, match->cluster, match->size);
     return true;
@@ -552,7 +552,7 @@ static bool fat_search_directory(FatContext *fat,
 static bool fat_find_path(FatContext *fat,
                           const char *path,
                           FatEntry *entry,
-                          VibatniumEfiStorageReport *report,
+                          VibtaniumEfiStorageReport *report,
                           Error **errp)
 {
     char **components = g_strsplit(path, "/", -1);
@@ -587,7 +587,7 @@ static bool fat_find_path(FatContext *fat,
         if (!last && !(next.attr & 0x10)) {
             error_setg(errp, "FAT16 component '%s' is not a directory",
                        *component);
-            report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+            report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                        "FAT16 component '%s' is not a directory", *component);
             goto out;
         }
@@ -604,11 +604,11 @@ out:
     return ok;
 }
 
-static bool eltorito_fat_read_path(VibatniumEfiBlockDevice *dev,
+static bool eltorito_fat_read_path(VibtaniumEfiBlockDevice *dev,
                                    const char *path,
                                    uint8_t **data,
                                    size_t *size,
-                                   VibatniumEfiStorageReport *report,
+                                   VibtaniumEfiStorageReport *report,
                                    Error **errp)
 {
     FatContext fat;
@@ -631,13 +631,13 @@ static bool eltorito_fat_read_path(VibatniumEfiBlockDevice *dev,
     }
     if (entry.attr & 0x10) {
         error_setg(errp, "FAT16 path '%s' is a directory", path);
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "FAT16 path '%s' is a directory", path);
         goto out;
     }
     if (entry.size > ISO_MAX_FILE_BYTES) {
         error_setg(errp, "FAT16 file '%s' is too large", path);
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "FAT16 file '%s' is too large", path);
         goto out;
     }
@@ -653,7 +653,7 @@ static bool eltorito_fat_read_path(VibatniumEfiBlockDevice *dev,
     *data = g_malloc(MAX(*size, 1));
     memcpy(*data, contents->data, *size);
     g_byte_array_free(contents, true);
-    report_set(report, VIBATNIUM_EFI_STORAGE_OK,
+    report_set(report, VIBTANIUM_EFI_STORAGE_OK,
                "read El Torito FAT16 file '%s' size 0x%zx", path, *size);
     ok = true;
 
@@ -716,7 +716,7 @@ static char *normalize_path_component(const char *component)
 
 static bool parse_record(const uint8_t *record, size_t available,
                          IsoRecord *out,
-                         VibatniumEfiStorageReport *report,
+                         VibtaniumEfiStorageReport *report,
                          Error **errp)
 {
     uint8_t length;
@@ -724,7 +724,7 @@ static bool parse_record(const uint8_t *record, size_t available,
 
     if (available < 1) {
         error_setg(errp, "ISO9660 directory record is truncated");
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "ISO9660 directory record is truncated");
         return false;
     }
@@ -732,7 +732,7 @@ static bool parse_record(const uint8_t *record, size_t available,
     length = record[0];
     if (length < 34 || length > available) {
         error_setg(errp, "invalid ISO9660 directory record length %u", length);
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "invalid ISO9660 directory record length %u", length);
         return false;
     }
@@ -740,7 +740,7 @@ static bool parse_record(const uint8_t *record, size_t available,
     name_len = record[32];
     if (33 + name_len > length) {
         error_setg(errp, "invalid ISO9660 file identifier length %u", name_len);
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "invalid ISO9660 file identifier length %u", name_len);
         return false;
     }
@@ -753,11 +753,11 @@ static bool parse_record(const uint8_t *record, size_t available,
     return true;
 }
 
-static bool read_directory(VibatniumEfiBlockDevice *dev,
+static bool read_directory(VibtaniumEfiBlockDevice *dev,
                            const IsoRecord *dir,
                            uint8_t **data,
                            size_t *size,
-                           VibatniumEfiStorageReport *report,
+                           VibtaniumEfiStorageReport *report,
                            Error **errp)
 {
     uint32_t block_size = dev_block_size(dev);
@@ -765,13 +765,13 @@ static bool read_directory(VibatniumEfiBlockDevice *dev,
 
     if (!(dir->flags & 0x02)) {
         error_setg(errp, "ISO9660 record is not a directory");
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "ISO9660 record is not a directory");
         return false;
     }
     if (dir->size == 0 || dir->size > ISO_MAX_DIRECTORY_BYTES) {
         error_setg(errp, "unsupported ISO9660 directory size 0x%x", dir->size);
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "unsupported ISO9660 directory size 0x%x", dir->size);
         return false;
     }
@@ -788,11 +788,11 @@ static bool read_directory(VibatniumEfiBlockDevice *dev,
     return true;
 }
 
-static bool search_directory(VibatniumEfiBlockDevice *dev,
+static bool search_directory(VibtaniumEfiBlockDevice *dev,
                              const IsoRecord *dir,
                              const char *component,
                              IsoRecord *match,
-                             VibatniumEfiStorageReport *report,
+                             VibtaniumEfiStorageReport *report,
                              Error **errp)
 {
     g_autofree char *wanted = normalize_path_component(component);
@@ -823,7 +823,7 @@ static bool search_directory(VibatniumEfiBlockDevice *dev,
 
         if (g_strcmp0(record.name, wanted) == 0) {
             *match = record;
-            report_set(report, VIBATNIUM_EFI_STORAGE_OK,
+            report_set(report, VIBTANIUM_EFI_STORAGE_OK,
                        "found ISO9660 component '%s' at LBA %u size 0x%x",
                        component, match->extent_lba, match->size);
             return true;
@@ -833,36 +833,36 @@ static bool search_directory(VibatniumEfiBlockDevice *dev,
     }
 
     error_setg(errp, "ISO9660 component '%s' was not found", component);
-    report_set(report, VIBATNIUM_EFI_STORAGE_NOT_FOUND,
+    report_set(report, VIBTANIUM_EFI_STORAGE_NOT_FOUND,
                "ISO9660 component '%s' was not found", component);
     return false;
 }
 
-const char *vibatnium_efi_storage_status_name(
-    VibatniumEfiStorageStatus status)
+const char *vibtanium_efi_storage_status_name(
+    VibtaniumEfiStorageStatus status)
 {
     switch (status) {
-    case VIBATNIUM_EFI_STORAGE_OK:
+    case VIBTANIUM_EFI_STORAGE_OK:
         return "ok";
-    case VIBATNIUM_EFI_STORAGE_READ_ERROR:
+    case VIBTANIUM_EFI_STORAGE_READ_ERROR:
         return "read-error";
-    case VIBATNIUM_EFI_STORAGE_NO_ISO9660:
+    case VIBTANIUM_EFI_STORAGE_NO_ISO9660:
         return "no-iso9660";
-    case VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM:
+    case VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM:
         return "invalid-filesystem";
-    case VIBATNIUM_EFI_STORAGE_NOT_FOUND:
+    case VIBTANIUM_EFI_STORAGE_NOT_FOUND:
         return "not-found";
-    case VIBATNIUM_EFI_STORAGE_UNSUPPORTED:
+    case VIBTANIUM_EFI_STORAGE_UNSUPPORTED:
         return "unsupported";
     default:
         return "unknown";
     }
 }
 
-bool vibatnium_efi_iso9660_find_path(VibatniumEfiBlockDevice *dev,
+bool vibtanium_efi_iso9660_find_path(VibtaniumEfiBlockDevice *dev,
                                      const char *path,
-                                     VibatniumEfiFile *file,
-                                     VibatniumEfiStorageReport *report,
+                                     VibtaniumEfiFile *file,
+                                     VibtaniumEfiStorageReport *report,
                                      Error **errp)
 {
     uint8_t sector[ISO_SECTOR_SIZE];
@@ -875,12 +875,12 @@ bool vibatnium_efi_iso9660_find_path(VibatniumEfiBlockDevice *dev,
     g_return_val_if_fail(file != NULL, false);
 
     memset(file, 0, sizeof(*file));
-    report_set(report, VIBATNIUM_EFI_STORAGE_NOT_FOUND,
+    report_set(report, VIBTANIUM_EFI_STORAGE_NOT_FOUND,
                "path '%s' has not been searched", path);
 
     if (dev_block_size(dev) != ISO_SECTOR_SIZE) {
         error_setg(errp, "unsupported EFI block size %u", dev_block_size(dev));
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "unsupported EFI block size %u", dev_block_size(dev));
         return false;
     }
@@ -893,7 +893,7 @@ bool vibatnium_efi_iso9660_find_path(VibatniumEfiBlockDevice *dev,
     if (sector[0] != 1 || memcmp(sector + 1, "CD001", 5) != 0 ||
         sector[6] != 1) {
         error_setg(errp, "media does not expose an ISO9660 primary volume");
-        report_set(report, VIBATNIUM_EFI_STORAGE_NO_ISO9660,
+        report_set(report, VIBTANIUM_EFI_STORAGE_NO_ISO9660,
                    "media does not expose an ISO9660 primary volume");
         return false;
     }
@@ -926,7 +926,7 @@ bool vibatnium_efi_iso9660_find_path(VibatniumEfiBlockDevice *dev,
     g_strlcpy(file->path, path, sizeof(file->path));
     g_strlcpy(file->device_name, dev->name ? dev->name : "<unnamed>",
               sizeof(file->device_name));
-    report_set(report, VIBATNIUM_EFI_STORAGE_OK,
+    report_set(report, VIBTANIUM_EFI_STORAGE_OK,
                "found ISO9660 path '%s' on '%s' at LBA %u size 0x%x",
                file->path, file->device_name, file->extent_lba, file->size);
     ok = true;
@@ -936,11 +936,11 @@ out:
     return ok;
 }
 
-bool vibatnium_efi_iso9660_read_file(VibatniumEfiBlockDevice *dev,
-                                     const VibatniumEfiFile *file,
+bool vibtanium_efi_iso9660_read_file(VibtaniumEfiBlockDevice *dev,
+                                     const VibtaniumEfiFile *file,
                                      uint8_t **data,
                                      size_t *size,
-                                     VibatniumEfiStorageReport *report,
+                                     VibtaniumEfiStorageReport *report,
                                      Error **errp)
 {
     uint32_t block_size;
@@ -956,13 +956,13 @@ bool vibatnium_efi_iso9660_read_file(VibatniumEfiBlockDevice *dev,
 
     if (file->is_directory) {
         error_setg(errp, "ISO9660 path '%s' is a directory", file->path);
-        report_set(report, VIBATNIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+        report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
                    "ISO9660 path '%s' is a directory", file->path);
         return false;
     }
     if (file->size > ISO_MAX_FILE_BYTES) {
         error_setg(errp, "unsupported ISO9660 file size 0x%x", file->size);
-        report_set(report, VIBATNIUM_EFI_STORAGE_UNSUPPORTED,
+        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
                    "unsupported ISO9660 file size 0x%x", file->size);
         return false;
     }
@@ -980,26 +980,26 @@ bool vibatnium_efi_iso9660_read_file(VibatniumEfiBlockDevice *dev,
         return false;
     }
 
-    report_set(report, VIBATNIUM_EFI_STORAGE_OK,
+    report_set(report, VIBTANIUM_EFI_STORAGE_OK,
                "read ISO9660 file '%s' from '%s' size 0x%zx",
                file->path, file->device_name, *size);
     return true;
 }
 
-bool vibatnium_efi_cdrom_read_path(VibatniumEfiBlockDevice *dev,
+bool vibtanium_efi_cdrom_read_path(VibtaniumEfiBlockDevice *dev,
                                    const char *path,
                                    uint8_t **data,
                                    size_t *size,
                                    char *source,
                                    size_t source_size,
-                                   VibatniumEfiStorageReport *report,
+                                   VibtaniumEfiStorageReport *report,
                                    Error **errp)
 {
-    VibatniumEfiFile iso_file;
+    VibtaniumEfiFile iso_file;
     Error *iso_err = NULL;
     Error *fat_err = NULL;
-    VibatniumEfiStorageReport iso_report;
-    VibatniumEfiStorageReport fat_report;
+    VibtaniumEfiStorageReport iso_report;
+    VibtaniumEfiStorageReport fat_report;
 
     g_return_val_if_fail(data != NULL, false);
     g_return_val_if_fail(size != NULL, false);
@@ -1010,9 +1010,9 @@ bool vibatnium_efi_cdrom_read_path(VibatniumEfiBlockDevice *dev,
         source[0] = '\0';
     }
 
-    if (vibatnium_efi_iso9660_find_path(dev, path, &iso_file, &iso_report,
+    if (vibtanium_efi_iso9660_find_path(dev, path, &iso_file, &iso_report,
                                         &iso_err) &&
-        vibatnium_efi_iso9660_read_file(dev, &iso_file, data, size,
+        vibtanium_efi_iso9660_read_file(dev, &iso_file, data, size,
                                         &iso_report, &iso_err)) {
         if (source && source_size) {
             g_snprintf(source, source_size, "%s:%s",
@@ -1042,7 +1042,7 @@ bool vibatnium_efi_cdrom_read_path(VibatniumEfiBlockDevice *dev,
                path,
                iso_err ? error_get_pretty(iso_err) : iso_report.message,
                fat_err ? error_get_pretty(fat_err) : fat_report.message);
-    report_set(report, VIBATNIUM_EFI_STORAGE_NOT_FOUND,
+    report_set(report, VIBTANIUM_EFI_STORAGE_NOT_FOUND,
                "CD-ROM path '%s' not found; ISO9660: %s; El Torito FAT16: %s",
                path, iso_report.message, fat_report.message);
     error_free(iso_err);

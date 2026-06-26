@@ -64,10 +64,10 @@ static uint32_t load_le32(const uint8_t *p)
 
 static const uint8_t *firmware_ptr(const uint8_t *blob, uint64_t address)
 {
-    g_assert_cmphex(address, >=, VIBATNIUM_EFI_BLOB_BASE);
+    g_assert_cmphex(address, >=, VIBTANIUM_EFI_BLOB_BASE);
     g_assert_cmphex(address, <,
-                    VIBATNIUM_EFI_BLOB_BASE + VIBATNIUM_EFI_BLOB_SIZE);
-    return blob + (address - VIBATNIUM_EFI_BLOB_BASE);
+                    VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE);
+    return blob + (address - VIBTANIUM_EFI_BLOB_BASE);
 }
 
 static void make_synthetic_ia64_pe(uint8_t *pe,
@@ -141,42 +141,42 @@ static void make_synthetic_ia64_pe(uint8_t *pe,
 static void test_loads_synthetic_ia64_pe(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
-    VibatniumEfiImage image;
+    VibtaniumEfiImage image;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64,
-                           VIBATNIUM_EFI_APP_BASE, false);
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64,
+                           VIBTANIUM_EFI_APP_BASE, false);
 
-    g_assert_true(vibatnium_efi_image_from_buffer("synthetic.efi", pe,
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic.efi", pe,
                                                  sizeof(pe),
-                                                 VIBATNIUM_EFI_APP_BASE,
+                                                 VIBTANIUM_EFI_APP_BASE,
                                                  &image, &err));
     g_assert_null(err);
-    g_assert_cmphex(image.load_base, ==, VIBATNIUM_EFI_APP_BASE);
+    g_assert_cmphex(image.load_base, ==, VIBTANIUM_EFI_APP_BASE);
     g_assert_cmphex(image.entry_descriptor, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
     g_assert_cmphex(image.entry, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
     g_assert_cmphex(image.global_pointer, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
     g_assert_cmpuint(image.size, ==, SYNTHETIC_IMAGE_SIZE);
     g_assert_cmphex(image.data[SYNTHETIC_TEXT_RVA], ==, 0x55);
     g_assert_cmphex(image.data[SYNTHETIC_TEXT_RVA + 1], ==, 0xaa);
     g_assert_nonnull(strstr(image.message, "loaded IA-64 EFI image"));
 
-    vibatnium_efi_image_destroy(&image);
+    vibtanium_efi_image_destroy(&image);
 }
 
 static void test_rejects_non_ia64_pe(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
-    VibatniumEfiImage image;
+    VibtaniumEfiImage image;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, 0x8664, VIBATNIUM_EFI_APP_BASE, false);
+    make_synthetic_ia64_pe(pe, 0x8664, VIBTANIUM_EFI_APP_BASE, false);
 
-    g_assert_false(vibatnium_efi_image_from_buffer("x64.efi", pe, sizeof(pe),
-                                                  VIBATNIUM_EFI_APP_BASE,
+    g_assert_false(vibtanium_efi_image_from_buffer("x64.efi", pe, sizeof(pe),
+                                                  VIBTANIUM_EFI_APP_BASE,
                                                   &image, &err));
     g_assert_nonnull(err);
     g_assert_nonnull(strstr(error_get_pretty(err), "not IA-64"));
@@ -186,47 +186,47 @@ static void test_rejects_non_ia64_pe(void)
 static void test_prepare_cpu_entry_abi(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
-    VibatniumEfiImage image;
+    VibtaniumEfiImage image;
     CPUIA64State env;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64,
-                           VIBATNIUM_EFI_APP_BASE, false);
-    g_assert_true(vibatnium_efi_image_from_buffer("synthetic.efi", pe,
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64,
+                           VIBTANIUM_EFI_APP_BASE, false);
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic.efi", pe,
                                                  sizeof(pe),
-                                                 VIBATNIUM_EFI_APP_BASE,
+                                                 VIBTANIUM_EFI_APP_BASE,
                                                  &image, &err));
     g_assert_null(err);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
-    vibatnium_efi_prepare_cpu(&env, &image);
+    vibtanium_efi_prepare_cpu(&env, &image);
 
     g_assert_cmphex(env.ip, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, env.ip);
     g_assert_cmphex(env.gr[1], ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
     g_assert_cmphex(ia64_read_gr(&env, 12), ==,
-                    VIBATNIUM_EFI_STACK_BASE +
-                    VIBATNIUM_EFI_STACK_SIZE - 16);
-    g_assert_cmphex(ia64_read_gr(&env, 32), ==, VIBATNIUM_EFI_IMAGE_HANDLE);
-    g_assert_cmphex(ia64_read_gr(&env, 33), ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+                    VIBTANIUM_EFI_STACK_BASE +
+                    VIBTANIUM_EFI_STACK_SIZE - 16);
+    g_assert_cmphex(ia64_read_gr(&env, 32), ==, VIBTANIUM_EFI_IMAGE_HANDLE);
+    g_assert_cmphex(ia64_read_gr(&env, 33), ==, VIBTANIUM_EFI_SYSTEM_TABLE);
     g_assert_cmphex(env.ar[IA64_AR_BSP], ==,
-                    VIBATNIUM_EFI_BACKING_STORE_BASE);
+                    VIBTANIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==,
-                    VIBATNIUM_EFI_BACKING_STORE_BASE);
+                    VIBTANIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.gr[0], ==, 0);
 
-    vibatnium_efi_image_destroy(&image);
+    vibtanium_efi_image_destroy(&image);
 }
 
 static void test_builds_guest_firmware_tables(void)
 {
-    VibatniumEfiImage image = {
-        .load_base = VIBATNIUM_EFI_APP_BASE,
+    VibtaniumEfiImage image = {
+        .load_base = VIBTANIUM_EFI_APP_BASE,
         .size = 0x123450,
     };
-    VibatniumEfiBlockDevice boot_media = {
+    VibtaniumEfiBlockDevice boot_media = {
         .size = 2048 * 10,
         .block_size = 2048,
         .read_only = true,
@@ -234,7 +234,7 @@ static void test_builds_guest_firmware_tables(void)
         .cdrom = true,
     };
     size_t blob_size = 0;
-    uint8_t *blob = vibatnium_efi_build_firmware_blob(&blob_size, &image,
+    uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
                                                       &boot_media);
     uint64_t boot_services;
     uint64_t handle_protocol_descriptor;
@@ -242,79 +242,79 @@ static void test_builds_guest_firmware_tables(void)
     unsigned block_io_base;
     unsigned simplefs_base;
 
-    g_assert_cmpuint(blob_size, ==, VIBATNIUM_EFI_BLOB_SIZE);
+    g_assert_cmpuint(blob_size, ==, VIBTANIUM_EFI_BLOB_SIZE);
 
     boot_services = load_le64(firmware_ptr(
-        blob, VIBATNIUM_EFI_SYSTEM_TABLE + 96));
-    g_assert_cmphex(boot_services, ==, VIBATNIUM_EFI_BOOT_SERVICES);
+        blob, VIBTANIUM_EFI_SYSTEM_TABLE + 96));
+    g_assert_cmphex(boot_services, ==, VIBTANIUM_EFI_BOOT_SERVICES);
 
     handle_protocol_descriptor = load_le64(firmware_ptr(
         blob,
-        VIBATNIUM_EFI_BOOT_SERVICES + 24 +
-        VIBATNIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 8));
+        VIBTANIUM_EFI_BOOT_SERVICES + 24 +
+        VIBTANIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 8));
     g_assert_cmphex(handle_protocol_descriptor, ==,
-                    VIBATNIUM_EFI_DESCRIPTOR_BASE +
-                    VIBATNIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 16);
+                    VIBTANIUM_EFI_DESCRIPTOR_BASE +
+                    VIBTANIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 16);
 
     handle_protocol_gate = load_le64(firmware_ptr(
         blob, handle_protocol_descriptor));
     g_assert_cmphex(handle_protocol_gate, ==,
-                    VIBATNIUM_EFI_CALL_GATE_BASE +
-                    VIBATNIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 16);
+                    VIBTANIUM_EFI_CALL_GATE_BASE +
+                    VIBTANIUM_EFI_BOOT_HANDLE_PROTOCOL_INDEX * 16);
     g_assert_cmphex(load_le64(firmware_ptr(blob,
                                            handle_protocol_descriptor + 8)),
-                    ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+                    ==, VIBTANIUM_EFI_SYSTEM_TABLE);
 
     g_assert_cmphex(load_le64(firmware_ptr(blob,
-                                           VIBATNIUM_EFI_LOADED_IMAGE + 16)),
-                    ==, VIBATNIUM_EFI_SYSTEM_TABLE);
+                                           VIBTANIUM_EFI_LOADED_IMAGE + 16)),
+                    ==, VIBTANIUM_EFI_SYSTEM_TABLE);
     g_assert_cmphex(load_le64(firmware_ptr(blob,
-                                           VIBATNIUM_EFI_LOADED_IMAGE + 32)),
-                    ==, VIBATNIUM_EFI_DEVICE_PATH);
+                                           VIBTANIUM_EFI_LOADED_IMAGE + 32)),
+                    ==, VIBTANIUM_EFI_DEVICE_PATH);
     g_assert_cmphex(load_le64(firmware_ptr(blob,
-                                           VIBATNIUM_EFI_LOADED_IMAGE + 64)),
-                    ==, VIBATNIUM_EFI_APP_BASE);
+                                           VIBTANIUM_EFI_LOADED_IMAGE + 64)),
+                    ==, VIBTANIUM_EFI_APP_BASE);
     g_assert_cmphex(load_le64(firmware_ptr(blob,
-                                           VIBATNIUM_EFI_LOADED_IMAGE + 72)),
+                                           VIBTANIUM_EFI_LOADED_IMAGE + 72)),
                     ==, image.size);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob,
-                         VIBATNIUM_EFI_CON_IN +
-                         VIBATNIUM_EFI_CON_IN_SERVICE_COUNT * 8)),
-                    ==, VIBATNIUM_EFI_CON_IN_WAIT_EVENT);
+                         VIBTANIUM_EFI_CON_IN +
+                         VIBTANIUM_EFI_CON_IN_SERVICE_COUNT * 8)),
+                    ==, VIBTANIUM_EFI_CON_IN_WAIT_EVENT);
 
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob,
-                         VIBATNIUM_EFI_BOOT_SERVICES + 24 + 17 * 8)),
+                         VIBTANIUM_EFI_BOOT_SERVICES + 24 + 17 * 8)),
                     ==, 0);
     g_assert_cmphex(firmware_ptr(blob, handle_protocol_gate)[0], !=, 0);
 
-    block_io_base = VIBATNIUM_EFI_BOOT_SERVICE_COUNT +
-                    VIBATNIUM_EFI_RUNTIME_SERVICE_COUNT +
-                    VIBATNIUM_EFI_CON_OUT_SERVICE_COUNT +
-                    VIBATNIUM_EFI_CON_IN_SERVICE_COUNT;
-    simplefs_base = block_io_base + VIBATNIUM_EFI_BLOCK_IO_SERVICE_COUNT;
+    block_io_base = VIBTANIUM_EFI_BOOT_SERVICE_COUNT +
+                    VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT +
+                    VIBTANIUM_EFI_CON_OUT_SERVICE_COUNT +
+                    VIBTANIUM_EFI_CON_IN_SERVICE_COUNT;
+    simplefs_base = block_io_base + VIBTANIUM_EFI_BLOCK_IO_SERVICE_COUNT;
 
-    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBATNIUM_EFI_BLOCK_IO)),
-                    ==, VIBATNIUM_EFI_PROTOCOL_REVISION);
-    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBATNIUM_EFI_BLOCK_IO + 8)),
-                    ==, VIBATNIUM_EFI_BLOCK_IO_MEDIA);
-    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBATNIUM_EFI_BLOCK_IO + 24)),
-                    ==, VIBATNIUM_EFI_DESCRIPTOR_BASE +
+    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_BLOCK_IO)),
+                    ==, VIBTANIUM_EFI_PROTOCOL_REVISION);
+    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_BLOCK_IO + 8)),
+                    ==, VIBTANIUM_EFI_BLOCK_IO_MEDIA);
+    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_BLOCK_IO + 24)),
+                    ==, VIBTANIUM_EFI_DESCRIPTOR_BASE +
                     (block_io_base + 1) * 16);
     g_assert_cmpuint(load_le32(firmware_ptr(blob,
-                                            VIBATNIUM_EFI_BLOCK_IO_MEDIA + 12)),
+                                            VIBTANIUM_EFI_BLOCK_IO_MEDIA + 12)),
                      ==, 2048);
     g_assert_cmphex(load_le64(firmware_ptr(blob,
-                                           VIBATNIUM_EFI_BLOCK_IO_MEDIA + 24)),
+                                           VIBTANIUM_EFI_BLOCK_IO_MEDIA + 24)),
                     ==, 9);
 
     g_assert_cmphex(load_le64(firmware_ptr(
-                         blob, VIBATNIUM_EFI_SIMPLE_FILE_SYSTEM)),
-                    ==, VIBATNIUM_EFI_PROTOCOL_REVISION);
+                         blob, VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM)),
+                    ==, VIBTANIUM_EFI_PROTOCOL_REVISION);
     g_assert_cmphex(load_le64(firmware_ptr(
-                         blob, VIBATNIUM_EFI_SIMPLE_FILE_SYSTEM + 8)),
-                    ==, VIBATNIUM_EFI_DESCRIPTOR_BASE + simplefs_base * 16);
+                         blob, VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM + 8)),
+                    ==, VIBTANIUM_EFI_DESCRIPTOR_BASE + simplefs_base * 16);
 
     g_free(blob);
 }
@@ -322,36 +322,36 @@ static void test_builds_guest_firmware_tables(void)
 static void test_relocates_ia64_entry_descriptor(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
-    VibatniumEfiImage image;
+    VibtaniumEfiImage image;
     Error *err = NULL;
 
-    make_synthetic_ia64_pe(pe, VIBATNIUM_EFI_PE_MACHINE_IA64, 0, true);
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64, 0, true);
 
-    g_assert_true(vibatnium_efi_image_from_buffer("synthetic-reloc.efi", pe,
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic-reloc.efi", pe,
                                                  sizeof(pe),
-                                                 VIBATNIUM_EFI_APP_BASE,
+                                                 VIBTANIUM_EFI_APP_BASE,
                                                  &image, &err));
     g_assert_null(err);
     g_assert_cmphex(image.preferred_image_base, ==, 0);
     g_assert_cmphex(image.entry_descriptor, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
     g_assert_cmphex(image.entry, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
     g_assert_cmphex(image.global_pointer, ==,
-                    VIBATNIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
 
-    vibatnium_efi_image_destroy(&image);
+    vibtanium_efi_image_destroy(&image);
 }
 
 static void test_unimplemented_service_log(void)
 {
-    VibatniumEfiServiceCall call;
+    VibtaniumEfiServiceCall call;
     uint64_t args[] = { 0x1111, 0x2222, 0x3333 };
 
-    g_assert_cmphex(vibatnium_efi_record_unimplemented_service(
-                        &call, VIBATNIUM_EFI_SERVICE_OUTPUT_STRING,
+    g_assert_cmphex(vibtanium_efi_record_unimplemented_service(
+                        &call, VIBTANIUM_EFI_SERVICE_OUTPUT_STRING,
                         0x4444, args, G_N_ELEMENTS(args)),
-                    ==, VIBATNIUM_EFI_UNSUPPORTED);
+                    ==, VIBTANIUM_EFI_UNSUPPORTED);
 
     g_assert_cmpstr(call.service_name, ==,
                     "SimpleTextOutput.OutputString");
@@ -367,8 +367,8 @@ static void test_frontier_log_format(void)
 {
     char message[384];
 
-    vibatnium_efi_format_frontier(message, sizeof(message),
-                                  VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY,
+    vibtanium_efi_format_frontier(message, sizeof(message),
+                                  VIBTANIUM_EFI_FRONTIER_KERNEL_ENTRY,
                                   0x1043ad0, "none-observed",
                                   "blocked before ELILO");
 

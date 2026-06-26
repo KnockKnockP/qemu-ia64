@@ -9,13 +9,13 @@
 #include "hw/core/loader.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
-#include "hw/ia64/vibatnium.h"
+#include "hw/ia64/vibtanium.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 
-static void vibatnium_uart_irq(void *opaque, int n, int level)
+static void vibtanium_uart_irq(void *opaque, int n, int level)
 {
     /*
      * Phase 7 wires the UART to a stable interrupt sink, but deliberately
@@ -27,22 +27,22 @@ static void vibatnium_uart_irq(void *opaque, int n, int level)
     (void)level;
 }
 
-typedef struct VibatniumBlockReadOpaque {
+typedef struct VibtaniumBlockReadOpaque {
     BlockBackend *blk;
-} VibatniumBlockReadOpaque;
+} VibtaniumBlockReadOpaque;
 
-typedef struct VibatniumCachedBlockReadOpaque {
+typedef struct VibtaniumCachedBlockReadOpaque {
     uint8_t *data;
     uint64_t size;
-} VibatniumCachedBlockReadOpaque;
+} VibtaniumCachedBlockReadOpaque;
 
-static int vibatnium_block_pread(void *opaque,
+static int vibtanium_block_pread(void *opaque,
                                  uint64_t offset,
                                  uint32_t bytes,
                                  void *buffer,
                                  Error **errp)
 {
-    VibatniumBlockReadOpaque *read_opaque = opaque;
+    VibtaniumBlockReadOpaque *read_opaque = opaque;
     int ret;
 
     ret = blk_pread(read_opaque->blk, offset, bytes, buffer, 0);
@@ -54,13 +54,13 @@ static int vibatnium_block_pread(void *opaque,
     return 0;
 }
 
-static int vibatnium_cached_block_pread(void *opaque,
+static int vibtanium_cached_block_pread(void *opaque,
                                         uint64_t offset,
                                         uint32_t bytes,
                                         void *buffer,
                                         Error **errp)
 {
-    VibatniumCachedBlockReadOpaque *cache = opaque;
+    VibtaniumCachedBlockReadOpaque *cache = opaque;
 
     if (!cache || !cache->data ||
         offset > cache->size || bytes > cache->size - offset) {
@@ -75,12 +75,12 @@ static int vibatnium_cached_block_pread(void *opaque,
     return 0;
 }
 
-static bool vibatnium_cache_boot_media(const VibatniumEfiBlockDevice *src,
-                                       VibatniumEfiBlockDevice *cached,
+static bool vibtanium_cache_boot_media(const VibtaniumEfiBlockDevice *src,
+                                       VibtaniumEfiBlockDevice *cached,
                                        Error **errp)
 {
     const uint32_t chunk_size = 4 * MiB;
-    VibatniumCachedBlockReadOpaque *opaque;
+    VibtaniumCachedBlockReadOpaque *opaque;
     uint64_t offset = 0;
 
     if (!src || !src->read || src->size == 0) {
@@ -88,7 +88,7 @@ static bool vibatnium_cache_boot_media(const VibatniumEfiBlockDevice *src,
         return false;
     }
 
-    opaque = g_new0(VibatniumCachedBlockReadOpaque, 1);
+    opaque = g_new0(VibtaniumCachedBlockReadOpaque, 1);
     opaque->size = src->size;
     opaque->data = g_try_malloc(src->size);
     if (!opaque->data) {
@@ -112,18 +112,19 @@ static bool vibatnium_cache_boot_media(const VibatniumEfiBlockDevice *src,
     }
 
     *cached = *src;
-    cached->read = vibatnium_cached_block_pread;
+    cached->read = vibtanium_cached_block_pread;
     cached->opaque = opaque;
     return true;
 }
 
-static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
+static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                                        MachineState *machine,
-                                       VibatniumEfiImage *image,
-                                       const VibatniumEfiBlockDevice *boot_media)
+                                       VibtaniumEfiImage *image,
+                                       const VibtaniumEfiBlockDevice *boot_media)
 {
     g_autofree uint8_t *firmware_blob = NULL;
     size_t firmware_blob_size = 0;
+    const char *linux_append = machine->kernel_cmdline;
 
     if (machine->ram_size <= image->load_base ||
         image->size > machine->ram_size - image->load_base) {
@@ -134,167 +135,160 @@ static void vibatnium_commit_efi_image(VibatniumMachineState *vms,
         exit(1);
     }
 
-    firmware_blob = vibatnium_efi_build_firmware_blob(&firmware_blob_size,
+    firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
                                                       image, boot_media);
-    vibatnium_efi_register_boot_media(boot_media);
-    rom_add_blob_fixed("vibatnium.efi-tables", firmware_blob,
-                       firmware_blob_size, VIBATNIUM_EFI_BLOB_BASE);
-    rom_add_blob_fixed("vibatnium.efi-app", image->data, image->size,
+    vibtanium_efi_register_boot_media(boot_media);
+    vibtanium_efi_set_linux_cmdline_append(
+        linux_append && linux_append[0] ? linux_append : NULL);
+    rom_add_blob_fixed("vibtanium.efi-tables", firmware_blob,
+                       firmware_blob_size, VIBTANIUM_EFI_BLOB_BASE);
+    rom_add_blob_fixed("vibtanium.efi-app", image->data, image->size,
                        image->load_base);
-    vibatnium_efi_prepare_cpu(&vms->cpu->env, image);
+    vibtanium_efi_prepare_cpu(&vms->cpu->env, image);
 
     warn_report("%s", image->message);
-    warn_report("vibatnium EFI handoff image-handle=0x%016" PRIx64
+    warn_report("vibtanium EFI handoff image-handle=0x%016" PRIx64
                 " system-table=0x%016" PRIx64
                 " con-out=0x%016" PRIx64
                 " loaded-image=0x%016" PRIx64,
-                (uint64_t)VIBATNIUM_EFI_IMAGE_HANDLE,
-                (uint64_t)VIBATNIUM_EFI_SYSTEM_TABLE,
-                (uint64_t)VIBATNIUM_EFI_CON_OUT,
-                (uint64_t)VIBATNIUM_EFI_LOADED_IMAGE);
+                (uint64_t)VIBTANIUM_EFI_IMAGE_HANDLE,
+                (uint64_t)VIBTANIUM_EFI_SYSTEM_TABLE,
+                (uint64_t)VIBTANIUM_EFI_CON_OUT,
+                (uint64_t)VIBTANIUM_EFI_LOADED_IMAGE);
     warn_report("IA-64 instruction execution is minimal; unsupported "
                 "bundles report the current execution frontier");
 }
 
-static void vibatnium_warn_frontier(VibatniumEfiFrontierKind kind,
+static void vibtanium_warn_frontier(VibtaniumEfiFrontierKind kind,
                                     uint64_t guest_ip,
                                     const char *state,
                                     const char *detail)
 {
     char message[384];
 
-    vibatnium_efi_format_frontier(message, sizeof(message), kind, guest_ip,
+    vibtanium_efi_format_frontier(message, sizeof(message), kind, guest_ip,
                                   state, detail);
     warn_report("%s", message);
 }
 
-static void vibatnium_trace_boot_frontier(const VibatniumEfiImage *image)
+static void vibtanium_trace_loader_frontier(const VibtaniumEfiImage *image)
 {
     const char *pending =
-        "pending runtime observation: unsupported bundles still report the "
-        "exact execution frontier";
-    const char *handoff_observed =
-        "observed in Phase 12: ELILO loads the Debian kernel/initrd and "
-        "enters Linux";
-    const char *kernel_mmu_frontier =
-        "observed in Phase 12: Linux reaches early break-vector handling; "
-        "current frontier is IA-64 translation-register/TLB-backed virtual "
-        "address translation";
+        "pending runtime observation; use QEMU trace-events or "
+        "VIBTANIUM_EFI_TRACE/VIBTANIUM_IA64_PROGRESS";
 
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
                             "ready", image->source_path);
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_FILE_READ, image->entry,
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_FILE_READ, image->entry,
                             "firmware-loader-complete", image->source_path);
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
                             image->entry, "dispatch-enabled", pending);
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_MEMORY_MAP, image->entry,
-                            "implemented-observed", handoff_observed);
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
-                            image->entry, "implemented-observed",
-                            handoff_observed);
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_KERNEL_ENTRY, image->entry,
-                            "observed", handoff_observed);
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_BOOT_PARAMETERS,
-                            image->entry, "partially-observed",
-                            "Linux reaches boot-parameter/FPSWA probing");
-    vibatnium_warn_frontier(VIBATNIUM_EFI_FRONTIER_SAL_PAL_CALL, image->entry,
-                            "blocked-after-kernel-entry",
-                            kernel_mmu_frontier);
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_MEMORY_MAP, image->entry,
+                            "runtime-tracepoint-ready", pending);
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
+                            image->entry, "runtime-tracepoint-ready",
+                            pending);
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_KERNEL_ENTRY, image->entry,
+                            "not-observed-at-loader", pending);
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_BOOT_PARAMETERS,
+                            image->entry, "not-observed-at-loader", pending);
+    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_SAL_PAL_CALL, image->entry,
+                            "not-observed-at-loader", pending);
 }
 
-static bool vibatnium_load_explicit_efi_app(VibatniumMachineState *vms,
+static bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
                                             MachineState *machine)
 {
     Error *local_err = NULL;
-    VibatniumEfiImage image;
+    VibtaniumEfiImage image;
 
     if (!machine->kernel_filename) {
         return false;
     }
 
-    if (!vibatnium_efi_image_from_file(machine->kernel_filename,
-                                       VIBATNIUM_EFI_APP_BASE, &image,
+    if (!vibtanium_efi_image_from_file(machine->kernel_filename,
+                                       VIBTANIUM_EFI_APP_BASE, &image,
                                        &local_err)) {
         error_reportf_err(local_err, "could not load IA-64 EFI app '%s': ",
                           machine->kernel_filename);
         exit(1);
     }
 
-    vibatnium_commit_efi_image(vms, machine, &image, NULL);
-    vibatnium_trace_boot_frontier(&image);
-    vibatnium_efi_image_destroy(&image);
+    vibtanium_commit_efi_image(vms, machine, &image, NULL);
+    vibtanium_trace_loader_frontier(&image);
+    vibtanium_efi_image_destroy(&image);
     return true;
 }
 
-static bool vibatnium_try_discovered_efi_app(VibatniumMachineState *vms,
+static bool vibtanium_try_discovered_efi_app(VibtaniumMachineState *vms,
                                              MachineState *machine,
-                                             VibatniumEfiBlockDevice *dev)
+                                             VibtaniumEfiBlockDevice *dev)
 {
     Error *local_err = NULL;
-    VibatniumEfiStorageReport report;
+    VibtaniumEfiStorageReport report;
     g_autofree uint8_t *file_data = NULL;
     size_t file_size = 0;
-    VibatniumEfiImage image;
-    VibatniumEfiBlockDevice cached_dev;
+    VibtaniumEfiImage image;
+    VibtaniumEfiBlockDevice cached_dev;
     char source[384];
 
-    if (!vibatnium_efi_cdrom_read_path(dev, VIBATNIUM_EFI_FALLBACK_PATH,
+    if (!vibtanium_efi_cdrom_read_path(dev, VIBTANIUM_EFI_FALLBACK_PATH,
                                        &file_data, &file_size, source,
                                        sizeof(source), &report, &local_err)) {
-        warn_report("vibatnium EFI discovery media=%s path=%s status=%s "
+        warn_report("vibtanium EFI discovery media=%s path=%s status=%s "
                     "reason=%s",
                     dev->name ? dev->name : "<unnamed>",
-                    VIBATNIUM_EFI_FALLBACK_PATH,
-                    vibatnium_efi_storage_status_name(report.status),
+                    VIBTANIUM_EFI_FALLBACK_PATH,
+                    vibtanium_efi_storage_status_name(report.status),
                     report.message);
         error_free(local_err);
         return false;
     }
 
-    warn_report("vibatnium EFI discovery media=%s path=%s status=%s %s",
+    warn_report("vibtanium EFI discovery media=%s path=%s status=%s %s",
                 dev->name ? dev->name : "<unnamed>",
-                VIBATNIUM_EFI_FALLBACK_PATH,
-                vibatnium_efi_storage_status_name(report.status),
+                VIBTANIUM_EFI_FALLBACK_PATH,
+                vibtanium_efi_storage_status_name(report.status),
                 report.message);
 
     local_err = NULL;
-    if (!vibatnium_efi_image_from_buffer(source, file_data, file_size,
-                                         VIBATNIUM_EFI_APP_BASE, &image,
+    if (!vibtanium_efi_image_from_buffer(source, file_data, file_size,
+                                         VIBTANIUM_EFI_APP_BASE, &image,
                                          &local_err)) {
-        warn_report("vibatnium EFI discovery media=%s path=%s status=%s "
+        warn_report("vibtanium EFI discovery media=%s path=%s status=%s "
                     "reason=%s",
                     dev->name ? dev->name : "<unnamed>",
-                    VIBATNIUM_EFI_FALLBACK_PATH,
-                    vibatnium_efi_status_name(VIBATNIUM_EFI_LOAD_ERROR),
+                    VIBTANIUM_EFI_FALLBACK_PATH,
+                    vibtanium_efi_status_name(VIBTANIUM_EFI_LOAD_ERROR),
                     error_get_pretty(local_err));
         error_free(local_err);
         return false;
     }
 
     local_err = NULL;
-    if (!vibatnium_cache_boot_media(dev, &cached_dev, &local_err)) {
-        warn_report("vibatnium EFI discovery media=%s path=%s status=%s "
+    if (!vibtanium_cache_boot_media(dev, &cached_dev, &local_err)) {
+        warn_report("vibtanium EFI discovery media=%s path=%s status=%s "
                     "reason=%s",
                     dev->name ? dev->name : "<unnamed>",
-                    VIBATNIUM_EFI_FALLBACK_PATH,
-                    vibatnium_efi_status_name(VIBATNIUM_EFI_DEVICE_ERROR),
+                    VIBTANIUM_EFI_FALLBACK_PATH,
+                    vibtanium_efi_status_name(VIBTANIUM_EFI_DEVICE_ERROR),
                     error_get_pretty(local_err));
         error_free(local_err);
-        vibatnium_efi_image_destroy(&image);
+        vibtanium_efi_image_destroy(&image);
         return false;
     }
 
-    warn_report("vibatnium EFI media cache name=%s bytes=%" PRIu64,
+    warn_report("vibtanium EFI media cache name=%s bytes=%" PRIu64,
                 cached_dev.name ? cached_dev.name : "<unnamed>",
                 cached_dev.size);
 
-    vibatnium_commit_efi_image(vms, machine, &image, &cached_dev);
-    vibatnium_trace_boot_frontier(&image);
-    vibatnium_efi_image_destroy(&image);
+    vibtanium_commit_efi_image(vms, machine, &image, &cached_dev);
+    vibtanium_trace_loader_frontier(&image);
+    vibtanium_efi_image_destroy(&image);
     return true;
 }
 
-static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
+static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
                                        MachineState *machine)
 {
     BlockBackend *blk = NULL;
@@ -307,21 +301,21 @@ static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
         bool available = blk_is_available(blk);
         bool cdrom = dinfo && dinfo->media_cd;
         int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
-        VibatniumBlockReadOpaque *read_opaque = g_new0(VibatniumBlockReadOpaque, 1);
-        VibatniumEfiBlockDevice dev = {
+        VibtaniumBlockReadOpaque *read_opaque = g_new0(VibtaniumBlockReadOpaque, 1);
+        VibtaniumEfiBlockDevice dev = {
             .name = name && *name ? name : "<unnamed>",
             .size = length > 0 ? length : 0,
             .block_size = 2048,
             .read_only = true,
             .removable = cdrom,
             .cdrom = cdrom,
-            .read = vibatnium_block_pread,
+            .read = vibtanium_block_pread,
             .opaque = read_opaque,
         };
 
         read_opaque->blk = blk;
 
-        warn_report("vibatnium EFI media[%u] name=%s available=%s cdrom=%s "
+        warn_report("vibtanium EFI media[%u] name=%s available=%s cdrom=%s "
                     "bytes=%" PRId64,
                     media_index++, dev.name, available ? "yes" : "no",
                     cdrom ? "yes" : "no", length);
@@ -331,14 +325,14 @@ static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
             continue;
         }
         if (!cdrom) {
-            warn_report("vibatnium EFI media %s skipped: not read-only "
+            warn_report("vibtanium EFI media %s skipped: not read-only "
                         "CD-ROM media",
                         dev.name);
             g_free(read_opaque);
             continue;
         }
         if (length <= 0) {
-            warn_report("vibatnium EFI media %s skipped: unavailable length "
+            warn_report("vibtanium EFI media %s skipped: unavailable length "
                         "%" PRId64,
                         dev.name, length);
             g_free(read_opaque);
@@ -346,90 +340,90 @@ static bool vibatnium_discover_efi_app(VibatniumMachineState *vms,
         }
 
         cdrom_candidates++;
-        if (vibatnium_try_discovered_efi_app(vms, machine, &dev)) {
+        if (vibtanium_try_discovered_efi_app(vms, machine, &dev)) {
             g_free(read_opaque);
             return true;
         }
         g_free(read_opaque);
     }
 
-    warn_report("vibatnium EFI discovery found no boot app path=%s "
+    warn_report("vibtanium EFI discovery found no boot app path=%s "
                 "media=%u cdrom-candidates=%u",
-                VIBATNIUM_EFI_FALLBACK_PATH, media_index,
+                VIBTANIUM_EFI_FALLBACK_PATH, media_index,
                 cdrom_candidates);
     return false;
 }
 
-static void vibatnium_load_efi_app(VibatniumMachineState *vms,
+static void vibtanium_load_efi_app(VibtaniumMachineState *vms,
                                    MachineState *machine)
 {
-    if (vibatnium_load_explicit_efi_app(vms, machine)) {
+    if (vibtanium_load_explicit_efi_app(vms, machine)) {
         return;
     }
 
-    vibatnium_discover_efi_app(vms, machine);
+    vibtanium_discover_efi_app(vms, machine);
 }
 
-static void vibatnium_init(MachineState *machine)
+static void vibtanium_init(MachineState *machine)
 {
-    VibatniumMachineState *vms = VIBATNIUM_MACHINE(machine);
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
 
-    if (machine->ram_size > VIBATNIUM_RAM_LIMIT) {
-        error_report("vibatnium RAM must fit below the placeholder MMIO window "
+    if (machine->ram_size > VIBTANIUM_RAM_LIMIT) {
+        error_report("vibtanium RAM must fit below the placeholder MMIO window "
                      "(maximum %" PRIu64 " bytes)",
-                     (uint64_t)VIBATNIUM_RAM_LIMIT);
+                     (uint64_t)VIBTANIUM_RAM_LIMIT);
         exit(1);
     }
 
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
 
-    memory_region_add_subregion(sysmem, VIBATNIUM_RAM_BASE, machine->ram);
+    memory_region_add_subregion(sysmem, VIBTANIUM_RAM_BASE, machine->ram);
 
     qemu_init_irq_child(OBJECT(machine), "uart-irq", &vms->uart_irq,
-                        vibatnium_uart_irq, vms, 0);
-    serial_mm_init(sysmem, VIBATNIUM_UART_BASE, 0, &vms->uart_irq, 115200,
+                        vibtanium_uart_irq, vms, 0);
+    serial_mm_init(sysmem, VIBTANIUM_UART_BASE, 0, &vms->uart_irq, 115200,
                    serial_hd(0), DEVICE_LITTLE_ENDIAN);
 
-    memory_region_init_ram(&vms->nvram, NULL, "vibatnium.nvram",
-                           VIBATNIUM_NVRAM_SIZE, &error_fatal);
-    memory_region_add_subregion(sysmem, VIBATNIUM_NVRAM_BASE, &vms->nvram);
+    memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
+                           VIBTANIUM_NVRAM_SIZE, &error_fatal);
+    memory_region_add_subregion(sysmem, VIBTANIUM_NVRAM_BASE, &vms->nvram);
 
-    memory_region_init_ram(&vms->firmware, NULL, "vibatnium.firmware",
-                           VIBATNIUM_FIRMWARE_SIZE,
+    memory_region_init_ram(&vms->firmware, NULL, "vibtanium.firmware",
+                           VIBTANIUM_FIRMWARE_SIZE,
                            &error_fatal);
     memory_region_set_readonly(&vms->firmware, true);
-    memory_region_add_subregion(sysmem, VIBATNIUM_FIRMWARE_BASE,
+    memory_region_add_subregion(sysmem, VIBTANIUM_FIRMWARE_BASE,
                                 &vms->firmware);
 
-    vibatnium_load_efi_app(vms, machine);
+    vibtanium_load_efi_app(vms, machine);
 }
 
-static void vibatnium_machine_class_init(ObjectClass *oc, const void *data)
+static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
     mc->desc = "Synthetic IA-64 machine skeleton";
-    mc->init = vibatnium_init;
+    mc->init = vibtanium_init;
     mc->max_cpus = 1;
     mc->default_cpu_type = TYPE_ITANIUM2_CPU;
     mc->default_ram_size = 512 * MiB;
-    mc->default_ram_id = "vibatnium.ram";
+    mc->default_ram_id = "vibtanium.ram";
     mc->no_cdrom = 1;
     mc->no_floppy = 1;
     mc->no_parallel = 1;
 }
 
-static const TypeInfo vibatnium_machine_typeinfo = {
-    .name = TYPE_VIBATNIUM_MACHINE,
+static const TypeInfo vibtanium_machine_typeinfo = {
+    .name = TYPE_VIBTANIUM_MACHINE,
     .parent = TYPE_MACHINE,
-    .instance_size = sizeof(VibatniumMachineState),
-    .class_init = vibatnium_machine_class_init,
+    .instance_size = sizeof(VibtaniumMachineState),
+    .class_init = vibtanium_machine_class_init,
 };
 
-static void vibatnium_machine_register_types(void)
+static void vibtanium_machine_register_types(void)
 {
-    type_register_static(&vibatnium_machine_typeinfo);
+    type_register_static(&vibtanium_machine_typeinfo);
 }
 
-type_init(vibatnium_machine_register_types)
+type_init(vibtanium_machine_register_types)

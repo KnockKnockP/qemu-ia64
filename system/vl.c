@@ -2506,13 +2506,16 @@ static void configure_accelerators(const char *progname)
 
 static void qemu_validate_options(const QDict *machine_opts)
 {
+    const char *machine_type = qdict_get_try_str(machine_opts, "type");
     const char *kernel_filename = qdict_get_try_str(machine_opts, "kernel");
     const char *shim_filename = qdict_get_try_str(machine_opts, "shim");
     const char *initrd_filename = qdict_get_try_str(machine_opts, "initrd");
     const char *kernel_cmdline = qdict_get_try_str(machine_opts, "append");
+    bool vibtanium_machine = machine_type &&
+                             g_str_has_prefix(machine_type, "vibtanium");
 
     if (kernel_filename == NULL) {
-        if (kernel_cmdline != NULL) {
+        if (kernel_cmdline != NULL && !vibtanium_machine) {
             error_report("-append only allowed with -kernel option");
             exit(1);
         }

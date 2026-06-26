@@ -1,4 +1,4 @@
-config VIBATNIUM
+config VIBTANIUM
     bool
     default y
     depends on IA64

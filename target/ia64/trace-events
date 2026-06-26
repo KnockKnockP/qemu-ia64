@@ -2,3 +2,14 @@
 
 # translate.c
 disable ia64_bundle_decode(uint64_t ip, const char *bundle) "ip=0x%016" PRIx64 " %s"
+
+# helper.c
+disable ia64_efi_service(uint64_t ip, const char *group, uint32_t index, const char *status, uint64_t r32, uint64_t r33, uint64_t r34, uint64_t r35) "ip=0x%016" PRIx64 " service=%s[%" PRIu32 "] status=%s r32=0x%016" PRIx64 " r33=0x%016" PRIx64 " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
+disable ia64_efi_file_open_request(uint64_t ip, uint64_t this_ptr, uint64_t out, const char *name, uint64_t mode, const char *parent, const char *path) "ip=0x%016" PRIx64 " this=0x%016" PRIx64 " out=0x%016" PRIx64 " name='%s' mode=0x%" PRIx64 " parent='%s' path='%s'"
+disable ia64_efi_file_open_result(uint64_t ip, const char *path, const char *status, uint64_t handle, uint64_t size, const char *source) "ip=0x%016" PRIx64 " path='%s' status=%s handle=0x%016" PRIx64 " size=0x%" PRIx64 " source=%s"
+disable ia64_efi_file_read(uint64_t ip, const char *path, uint64_t requested, uint64_t actual, uint64_t position) "ip=0x%016" PRIx64 " path='%s' requested=0x%" PRIx64 " actual=0x%" PRIx64 " position=0x%" PRIx64
+disable ia64_efi_memory_map(uint64_t ip, uint64_t provided, uint64_t required, uint64_t map_key, const char *status) "ip=0x%016" PRIx64 " provided=0x%" PRIx64 " required=0x%" PRIx64 " key=0x%" PRIx64 " status=%s"
+disable ia64_efi_exit_boot_services(uint64_t ip, uint64_t image_handle, uint64_t map_key, uint64_t expected_key, const char *status) "ip=0x%016" PRIx64 " image=0x%016" PRIx64 " key=0x%" PRIx64 " expected=0x%" PRIx64 " status=%s"
+disable ia64_linux_cmdline_append(uint64_t ip, uint64_t boot_param, uint64_t command_line, const char *status, const char *cmdline) "ip=0x%016" PRIx64 " boot_param=0x%016" PRIx64 " command_line=0x%016" PRIx64 " status=%s cmdline=\"%s\""
+disable ia64_progress_bundle(uint64_t count, uint64_t ip, uint64_t psr, uint64_t cfm, uint64_t lc, uint64_t ec, uint64_t bspstore, uint64_t b0) "bundles=%" PRIu64 " ip=0x%016" PRIx64 " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64 " lc=0x%016" PRIx64 " ec=0x%016" PRIx64 " bspstore=0x%016" PRIx64 " b0=0x%016" PRIx64
+disable ia64_progress_event(const char *event, uint64_t ip, uint64_t value, uint64_t next_ip, uint64_t psr, uint64_t cfm) "event=%s ip=0x%016" PRIx64 " value=0x%016" PRIx64 " next=0x%016" PRIx64 " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64

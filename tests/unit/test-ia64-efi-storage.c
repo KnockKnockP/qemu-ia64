@@ -266,9 +266,9 @@ static int memory_iso_read(void *opaque, uint64_t offset, uint32_t bytes,
     return 0;
 }
 
-static void init_device(VibatniumEfiBlockDevice *dev, MemoryIso *iso)
+static void init_device(VibtaniumEfiBlockDevice *dev, MemoryIso *iso)
 {
-    *dev = (VibatniumEfiBlockDevice) {
+    *dev = (VibtaniumEfiBlockDevice) {
         .name = "memory.iso",
         .size = iso->size,
         .block_size = ISO_SECTOR_SIZE,
@@ -283,18 +283,18 @@ static void init_device(VibatniumEfiBlockDevice *dev, MemoryIso *iso)
 static void test_find_fallback_path(void)
 {
     MemoryIso iso;
-    VibatniumEfiBlockDevice dev;
-    VibatniumEfiStorageReport report;
-    VibatniumEfiFile file;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    VibtaniumEfiFile file;
     Error *err = NULL;
 
     make_iso(&iso);
     init_device(&dev, &iso);
 
-    g_assert_true(vibatnium_efi_iso9660_find_path(
+    g_assert_true(vibtanium_efi_iso9660_find_path(
                       &dev, "/EFI/BOOT/bootia64.efi", &file, &report, &err));
     g_assert_null(err);
-    g_assert_cmpint(report.status, ==, VIBATNIUM_EFI_STORAGE_OK);
+    g_assert_cmpint(report.status, ==, VIBTANIUM_EFI_STORAGE_OK);
     g_assert_cmphex(file.extent_lba, ==, APP_SECTOR);
     g_assert_cmpuint(file.size, ==, 4);
     g_assert_false(file.is_directory);
@@ -304,9 +304,9 @@ static void test_find_fallback_path(void)
 static void test_read_fallback_file(void)
 {
     MemoryIso iso;
-    VibatniumEfiBlockDevice dev;
-    VibatniumEfiStorageReport report;
-    VibatniumEfiFile file;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    VibtaniumEfiFile file;
     g_autofree uint8_t *data = NULL;
     size_t size = 0;
     Error *err = NULL;
@@ -314,10 +314,10 @@ static void test_read_fallback_file(void)
     make_iso(&iso);
     init_device(&dev, &iso);
 
-    g_assert_true(vibatnium_efi_iso9660_find_path(
-                      &dev, VIBATNIUM_EFI_FALLBACK_PATH, &file, &report,
+    g_assert_true(vibtanium_efi_iso9660_find_path(
+                      &dev, VIBTANIUM_EFI_FALLBACK_PATH, &file, &report,
                       &err));
-    g_assert_true(vibatnium_efi_iso9660_read_file(&dev, &file, &data, &size,
+    g_assert_true(vibtanium_efi_iso9660_read_file(&dev, &file, &data, &size,
                                                  &report, &err));
     g_assert_null(err);
     g_assert_cmpuint(size, ==, 4);
@@ -328,18 +328,18 @@ static void test_read_fallback_file(void)
 static void test_missing_path_reports_component(void)
 {
     MemoryIso iso;
-    VibatniumEfiBlockDevice dev;
-    VibatniumEfiStorageReport report;
-    VibatniumEfiFile file;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    VibtaniumEfiFile file;
     Error *err = NULL;
 
     make_iso(&iso);
     init_device(&dev, &iso);
 
-    g_assert_false(vibatnium_efi_iso9660_find_path(
+    g_assert_false(vibtanium_efi_iso9660_find_path(
                        &dev, "/efi/boot/missing.efi", &file, &report, &err));
     g_assert_nonnull(err);
-    g_assert_cmpint(report.status, ==, VIBATNIUM_EFI_STORAGE_NOT_FOUND);
+    g_assert_cmpint(report.status, ==, VIBTANIUM_EFI_STORAGE_NOT_FOUND);
     g_assert_nonnull(strstr(report.message, "missing.efi"));
     error_free(err);
 }
@@ -347,20 +347,20 @@ static void test_missing_path_reports_component(void)
 static void test_rejects_non_iso9660(void)
 {
     MemoryIso iso;
-    VibatniumEfiBlockDevice dev;
-    VibatniumEfiStorageReport report;
-    VibatniumEfiFile file;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    VibtaniumEfiFile file;
     Error *err = NULL;
 
     make_iso(&iso);
     memset(iso.bytes + PVD_SECTOR * ISO_SECTOR_SIZE, 0, ISO_SECTOR_SIZE);
     init_device(&dev, &iso);
 
-    g_assert_false(vibatnium_efi_iso9660_find_path(
-                       &dev, VIBATNIUM_EFI_FALLBACK_PATH, &file, &report,
+    g_assert_false(vibtanium_efi_iso9660_find_path(
+                       &dev, VIBTANIUM_EFI_FALLBACK_PATH, &file, &report,
                        &err));
     g_assert_nonnull(err);
-    g_assert_cmpint(report.status, ==, VIBATNIUM_EFI_STORAGE_NO_ISO9660);
+    g_assert_cmpint(report.status, ==, VIBTANIUM_EFI_STORAGE_NO_ISO9660);
     g_assert_nonnull(strstr(report.message, "primary volume"));
     error_free(err);
 }
@@ -368,8 +368,8 @@ static void test_rejects_non_iso9660(void)
 static void test_cdrom_read_path_uses_eltorito_fat(void)
 {
     MemoryIso iso;
-    VibatniumEfiBlockDevice dev;
-    VibatniumEfiStorageReport report;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
     g_autofree uint8_t *data = NULL;
     size_t size = 0;
     char source[256];
@@ -378,8 +378,8 @@ static void test_cdrom_read_path_uses_eltorito_fat(void)
     make_eltorito_fat_iso(&iso);
     init_device(&dev, &iso);
 
-    g_assert_true(vibatnium_efi_cdrom_read_path(
-                      &dev, VIBATNIUM_EFI_FALLBACK_PATH, &data, &size,
+    g_assert_true(vibtanium_efi_cdrom_read_path(
+                      &dev, VIBTANIUM_EFI_FALLBACK_PATH, &data, &size,
                       source, sizeof(source), &report, &err));
     g_assert_null(err);
     g_assert_cmpuint(size, ==, 4);
@@ -391,8 +391,8 @@ static void test_cdrom_read_path_uses_eltorito_fat(void)
 static void test_cdrom_read_path_uses_eltorito_fat_lfn(void)
 {
     MemoryIso iso;
-    VibatniumEfiBlockDevice dev;
-    VibatniumEfiStorageReport report;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
     g_autofree uint8_t *data = NULL;
     size_t size = 0;
     char source[256];
@@ -401,7 +401,7 @@ static void test_cdrom_read_path_uses_eltorito_fat_lfn(void)
     make_eltorito_fat_iso(&iso);
     init_device(&dev, &iso);
 
-    g_assert_true(vibatnium_efi_cdrom_read_path(
+    g_assert_true(vibtanium_efi_cdrom_read_path(
                       &dev, "/elilo.conf", &data, &size, source,
                       sizeof(source), &report, &err));
     g_assert_null(err);

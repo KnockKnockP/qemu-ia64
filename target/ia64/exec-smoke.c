@@ -473,7 +473,7 @@ static bool ia64_ar_trace_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0) {
-        enabled = g_getenv("VIBATNIUM_AR_TRACE") != NULL;
+        enabled = g_getenv("VIBTANIUM_AR_TRACE") != NULL;
     }
     return enabled != 0;
 }
@@ -2950,7 +2950,7 @@ static bool ia64_loop_trace_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0) {
-        enabled = g_getenv("VIBATNIUM_LOOP_TRACE") != NULL;
+        enabled = g_getenv("VIBTANIUM_LOOP_TRACE") != NULL;
     }
     return enabled != 0;
 }
