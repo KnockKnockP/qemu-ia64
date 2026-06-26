@@ -579,6 +579,18 @@ static void test_interrupt_control_registers(void)
 
     env.cr[IA64_CR_ITV] = (1ULL << 16) | 0xef;
     g_assert_false(ia64_timer_interrupt_due(&env));
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ar[IA64_AR_ITC] = 1000;
+    env.cr[IA64_CR_ITM] = 0;
+    ia64_write_control_register(&env, IA64_CR_ITV, 0xef);
+    g_assert_true(ia64_timer_interrupt_due(&env));
+    ia64_latch_timer_interrupt(&env);
+    g_assert_true(ia64_external_interrupt_pending(&env));
+
+    ia64_write_control_register(&env, IA64_CR_ITM, 2000);
+    g_assert_false(ia64_timer_interrupt_due(&env));
+    g_assert_false(ia64_external_interrupt_pending(&env));
 }
 
 static void test_lx_movl_reconstructs_immediate(void)

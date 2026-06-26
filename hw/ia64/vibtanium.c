@@ -16,10 +16,7 @@
 #include "system/system.h"
 #include "target/ia64/exec-smoke.h"
 
-#define VIBTANIUM_DEFAULT_LINUX_APPEND \
-    "earlycon=uart8250,io,0x3f8,115200n8"
-#define VIBTANIUM_LEGACY_COM1_BASE 0x3f8
-#define VIBTANIUM_LEGACY_COM1_SIZE 8
+#define VIBTANIUM_DEFAULT_LINUX_APPEND ""
 
 static void vibtanium_uart_irq(void *opaque, int n, int level)
 {

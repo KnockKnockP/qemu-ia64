@@ -1171,6 +1171,30 @@ static bool ia64_interrupt_vector_active(CPUIA64State *env, uint64_t vector)
            (env->cr[IA64_CR_IVR] & IA64_INTERRUPT_VECTOR_MASK) == vector;
 }
 
+static bool ia64_interrupt_vector_pending(CPUIA64State *env, uint64_t vector)
+{
+    return vector <= 0xff &&
+           (env->cr[IA64_CR_IRR0 + vector / 64] &
+            (UINT64_C(1) << (vector & 63))) != 0;
+}
+
+static bool ia64_timer_compare_due(CPUIA64State *env)
+{
+    uint64_t vector;
+
+    if (!env || ia64_timer_vector_masked(env)) {
+        return false;
+    }
+
+    vector = ia64_timer_vector(env);
+    if (vector <= IA64_INTERRUPT_SPURIOUS_VECTOR ||
+        !ia64_valid_external_interrupt_vector(vector)) {
+        return false;
+    }
+
+    return ia64_time_after_eq(env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM]);
+}
+
 void ia64_advance_itc(CPUIA64State *env, uint64_t ticks)
 {
     if (!env) {
@@ -1184,19 +1208,17 @@ bool ia64_timer_interrupt_due(CPUIA64State *env)
 {
     uint64_t vector;
 
-    if (!env || ia64_timer_vector_masked(env)) {
+    if (!ia64_timer_compare_due(env)) {
         return false;
     }
 
     vector = ia64_timer_vector(env);
-    if (vector <= IA64_INTERRUPT_SPURIOUS_VECTOR ||
-        !ia64_valid_external_interrupt_vector(vector) ||
-        ia64_interrupt_vector_active(env, vector) ||
-        (env->cr[IA64_CR_IRR0 + vector / 64] & (UINT64_C(1) << (vector & 63)))) {
+    if (ia64_interrupt_vector_active(env, vector) ||
+        ia64_interrupt_vector_pending(env, vector)) {
         return false;
     }
 
-    return ia64_time_after_eq(env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM]);
+    return true;
 }
 
 void ia64_latch_timer_interrupt(CPUIA64State *env)
@@ -1273,6 +1295,15 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
     case IA64_CR_EOI:
         env->interrupt.pending_interruption = 0;
         env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
+        break;
+    case IA64_CR_ITM:
+        if (!ia64_timer_compare_due(env)) {
+            uint64_t vector = ia64_timer_vector(env);
+
+            if (!ia64_interrupt_vector_active(env, vector)) {
+                ia64_clear_pending_external_interrupt(env, vector);
+            }
+        }
         break;
     case IA64_CR_IRR0:
     case IA64_CR_IRR1:

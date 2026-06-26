@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
+#include "hw/ia64/vibtanium.h"
 #include "target/ia64/bundle.h"
 #include "target/ia64/exec-smoke.h"
 
@@ -24,6 +25,12 @@
 #define SAL_SYSTEM_TABLE_LENGTH 144
 #define SAL_SYSTEM_TABLE_HEADER_LENGTH 96
 #define SAL_SYSTEM_TABLE_ENTRY_COUNT 1
+#define HCDP_TABLE_LENGTH 88
+#define HCDP_UART_OFFSET 40
+#define HCDP_UART_LENGTH 48
+#define ACPI_ADR_SPACE_SYSTEM_IO 1
+#define PCDP_CONSOLE_UART 0
+#define PCDP_UART_PRIMARY_CONSOLE (1 << 2)
 
 static bool range_ok(size_t size, uint64_t offset, uint64_t length)
 {
@@ -550,6 +557,11 @@ static const uint8_t efi_sal_system_table_guid[16] = {
     0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
 };
 
+static const uint8_t efi_hcdp_table_guid[16] = {
+    0x8d, 0x93, 0x51, 0xf9, 0x0b, 0x62, 0xef, 0x42,
+    0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98,
+};
+
 static void write_utf16_ascii(uint8_t *blob, size_t size, uint64_t address,
                               const char *text)
 {
@@ -589,6 +601,10 @@ static void write_configuration_table(uint8_t *blob, size_t size)
                efi_sal_system_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 16,
               VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+    write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 24,
+               efi_hcdp_table_guid);
+    blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 40,
+              VIBTANIUM_EFI_HCDP_TABLE);
 }
 
 static void write_sal_system_table(uint8_t *blob, size_t size)
@@ -621,6 +637,39 @@ static void write_sal_system_table(uint8_t *blob, size_t size)
     blob_wr64(blob, size, VIBTANIUM_EFI_SAL_GP, 0);
 }
 
+static void write_hcdp_table(uint8_t *blob, size_t size)
+{
+    uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_HCDP_TABLE,
+                              HCDP_TABLE_LENGTH);
+    uint8_t *uart = table + HCDP_UART_OFFSET;
+
+    memcpy(table, "HCDP", 4);
+    wr32(table + 4, HCDP_TABLE_LENGTH);
+    table[8] = 3; /* PCDP 2.0 / HCDP revision. */
+    memcpy(table + 10, "VIBTAN", 6);
+    memcpy(table + 16, "VIBHCDP ", 8);
+    wr32(table + 24, 1);
+    memcpy(table + 28, "VIBT", 4);
+    wr32(table + 32, 1);
+    wr32(table + 36, 1);
+
+    uart[0] = PCDP_CONSOLE_UART;
+    uart[1] = 8;
+    uart[2] = 0;
+    uart[3] = 1;
+    wr64(uart + 8, 115200);
+    uart[16] = ACPI_ADR_SPACE_SYSTEM_IO;
+    uart[17] = 8;
+    uart[18] = 0;
+    uart[19] = 1;
+    wr64(uart + 20, VIBTANIUM_LEGACY_COM1_BASE);
+    wr32(uart + 32, 0);
+    wr32(uart + 36, 1843200);
+    uart[41] = PCDP_UART_PRIMARY_CONSOLE;
+
+    table[9] = sal_checksum(table, HCDP_TABLE_LENGTH);
+}
+
 static void write_system_table(uint8_t *blob, size_t size)
 {
     uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE, 120);
@@ -644,7 +693,7 @@ static void write_system_table(uint8_t *blob, size_t size)
               VIBTANIUM_EFI_RUNTIME_SERVICES);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 96,
               VIBTANIUM_EFI_BOOT_SERVICES);
-    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 1);
+    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 2);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 112,
               VIBTANIUM_EFI_CONFIGURATION_TABLE);
     write_table_header(table, 120, 0x5453595320494249ULL);
@@ -774,6 +823,7 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                         VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT, -1);
     write_configuration_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_sal_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
 
     return blob;
