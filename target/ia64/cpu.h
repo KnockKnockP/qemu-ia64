@@ -114,6 +114,12 @@ typedef struct IA64RSEState {
     uint32_t rrb_fr;
     uint32_t rrb_pr;
     uint32_t current_frame_base;
+    /*
+     * Transient simplified clean-partition marker. It is reconstructed by
+     * executing flushrs/mov ar.bspstore, so keep snapshots compatible by not
+     * serializing it in vmstate_rse.
+     */
+    uint32_t clean_count;
     uint64_t stacked_gr[IA64_STACKED_GR_COUNT];
 } IA64RSEState;
 
