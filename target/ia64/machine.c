@@ -5,6 +5,8 @@
 #include "exec/cputlb.h"
 #include "migration/vmstate.h"
 
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+
 static const VMStateDescription vmstate_float_reg = {
     .name = "float-reg",
     .version_id = 1,
@@ -129,12 +131,26 @@ static const VMStateDescription vmstate_exception = {
     }
 };
 
+static int ia64_env_post_load(void *opaque, int version_id)
+{
+    CPUIA64State *env = opaque;
+
+    if (version_id < 2 && (env->psr & IA64_PSR_BN_BIT)) {
+        memcpy(env->banked_gr, &env->gr[16], sizeof(env->banked_gr));
+    }
+    env->gr[0] = 0;
+    env->pr |= 1;
+    return 0;
+}
+
 static const VMStateDescription vmstate_env = {
     .name = "env",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = ia64_env_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT64_ARRAY(gr, CPUIA64State, IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY_V(banked_gr, CPUIA64State, 16, 2),
         VMSTATE_STRUCT_ARRAY(fr, CPUIA64State, IA64_FR_COUNT, 0,
                              vmstate_float_reg, IA64FloatReg),
         VMSTATE_UINT64(pr, CPUIA64State),

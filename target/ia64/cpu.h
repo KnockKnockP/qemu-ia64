@@ -156,6 +156,9 @@ typedef enum IA64ExceptionKind {
     IA64_EXCEPTION_NONE,
     IA64_EXCEPTION_INSTRUCTION_TLB_MISS,
     IA64_EXCEPTION_DATA_TLB_MISS,
+    IA64_EXCEPTION_DATA_NESTED_TLB,
+    IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS,
+    IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS,
     IA64_EXCEPTION_ILLEGAL_OPERATION,
     IA64_EXCEPTION_PAGE_FAULT,
     IA64_EXCEPTION_GENERAL_EXCEPTION,
@@ -180,6 +183,7 @@ typedef enum IA64CPUModel {
 typedef struct CPUArchState {
     /* r0 is architecturally hardwired to zero; writes must be ignored. */
     uint64_t gr[IA64_GR_COUNT];
+    uint64_t banked_gr[16];
 
     /* Raw placeholder storage for f0..f127. f0/f1 constants are not modeled. */
     IA64FloatReg fr[IA64_FR_COUNT];

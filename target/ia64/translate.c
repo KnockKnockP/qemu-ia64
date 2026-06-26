@@ -88,7 +88,7 @@ static bool ia64_slot_may_change_flow(IA64SlotType type, uint64_t raw)
         if (major == 0x0) {
             uint8_t x6 = (raw >> 27) & 0x3f;
 
-            return x6 == 0x20 || x6 == 0x21;
+            return x6 == 0x08 || x6 == 0x20 || x6 == 0x21;
         }
     } else if (type == IA64_SLOT_TYPE_M && ia64_slot_major_opcode(raw) == 0x0) {
         uint8_t x3 = (raw >> 33) & 0x7;

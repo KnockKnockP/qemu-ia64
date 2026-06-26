@@ -161,17 +161,27 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         return false;
     }
 
+    cpu_restore_state(cs, retaddr);
+
     if (result.status == IA64_TRANSLATE_TLB_MISS) {
-        ia64_deliver_exception(&cpu->env,
-                               access_type == MMU_INST_FETCH ?
-                               IA64_EXCEPTION_INSTRUCTION_TLB_MISS :
-                               IA64_EXCEPTION_DATA_TLB_MISS,
-                               address, access_type, result.message);
+        IA64ExceptionKind kind;
+
+        if (access_type == MMU_INST_FETCH) {
+            kind = result.vhpt_enabled ?
+                   IA64_EXCEPTION_INSTRUCTION_TLB_MISS :
+                   IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS;
+        } else {
+            kind = result.vhpt_enabled ?
+                   IA64_EXCEPTION_DATA_TLB_MISS :
+                   IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS;
+        }
+        ia64_deliver_exception(&cpu->env, kind, address, access_type,
+                               result.message);
     } else {
         ia64_deliver_exception(&cpu->env, IA64_EXCEPTION_PAGE_FAULT, address,
                                access_type, result.message);
     }
-    cpu_loop_exit_restore(cs, retaddr);
+    cpu_loop_exit(cs);
     return true;
 }
 

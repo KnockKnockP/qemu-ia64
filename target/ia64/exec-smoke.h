@@ -41,6 +41,22 @@ typedef struct IA64LdstImmediate {
     int64_t immediate;
 } IA64LdstImmediate;
 
+typedef enum IA64AtomicKind {
+    IA64_ATOMIC_CMPXCHG,
+    IA64_ATOMIC_XCHG,
+    IA64_ATOMIC_FETCHADD,
+} IA64AtomicKind;
+
+typedef struct IA64AtomicInstruction {
+    IA64AtomicKind kind;
+    uint8_t width;
+    uint8_t target;
+    uint8_t source;
+    uint8_t base;
+    bool release;
+    int64_t immediate;
+} IA64AtomicInstruction;
+
 typedef struct IA64CountedStoreLoop {
     IA64LdstImmediate store;
     uint64_t fallthrough_ip;
@@ -49,6 +65,7 @@ typedef struct IA64CountedStoreLoop {
 typedef enum IA64FloatingMemoryKind {
     IA64_FLOAT_MEM_LOAD,
     IA64_FLOAT_MEM_STORE,
+    IA64_FLOAT_MEM_PREFETCH,
 } IA64FloatingMemoryKind;
 
 typedef enum IA64FloatingMemoryFormat {
@@ -232,6 +249,9 @@ bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw);
 bool ia64_slot_pair_is_lx_movl(uint64_t l_raw, uint64_t x_raw);
 uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw);
 bool ia64_exec_lx_movl(CPUIA64State *env, uint64_t l_raw, uint64_t x_raw);
+bool ia64_slot_pair_is_lx_nop_or_hint(uint64_t l_raw, uint64_t x_raw);
+bool ia64_exec_lx_nop_or_hint(CPUIA64State *env, uint64_t l_raw,
+                              uint64_t x_raw);
 bool ia64_slot_is_alu_add(IA64SlotType type, uint64_t raw);
 bool ia64_exec_alu_add(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_alu_sub(IA64SlotType type, uint64_t raw);
@@ -244,6 +264,8 @@ bool ia64_slot_is_alu_shladd(IA64SlotType type, uint64_t raw);
 bool ia64_exec_alu_shladd(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_mux(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_mux(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_i_bit_count(IA64SlotType type, uint64_t raw);
+bool ia64_exec_i_bit_count(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_variable_shift(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_variable_shift(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_addl(IA64SlotType type, uint64_t raw);
@@ -258,6 +280,8 @@ bool ia64_slot_is_m_setf(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_setf(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_getf(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw);
+bool ia64_decode_m_atomic(IA64SlotType type, uint64_t raw,
+                          IA64AtomicInstruction *decoded);
 bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
                                  IA64FloatingMemoryInstruction *decoded);
 bool ia64_decode_extract(IA64SlotType type, uint64_t raw,

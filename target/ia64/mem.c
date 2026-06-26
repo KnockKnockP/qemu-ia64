@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "mem.h"
 #include "exec/page-protection.h"
+#include "trace-target_ia64.h"
 
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_REGIONLESS_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
@@ -11,6 +12,9 @@
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
+#define IA64_VHPT_REGION_BITS_MASK UINT64_C(0xe000000000000000)
+#define IA64_VHPT_BASE_ADDRESS_MASK UINT64_C(0x1fffffffffff8000)
+#define IA64_VHPT_VA_HASH_MASK UINT64_C(0x0007ffffffffffff)
 
 const char *ia64_translate_status_name(IA64TranslateStatus status)
 {
@@ -42,6 +46,90 @@ uint32_t ia64_region_id(uint64_t rr)
     return (rr >> 8) & 0x00ffffff;
 }
 
+bool ia64_region_vhpt_enabled(uint64_t rr)
+{
+    return (rr & 1) != 0;
+}
+
+uint8_t ia64_region_page_size(uint64_t rr)
+{
+    return (rr >> 2) & 0x3f;
+}
+
+static uint64_t ia64_mask_for_shift(unsigned shift)
+{
+    return shift >= 64 ? UINT64_MAX : ((UINT64_C(1) << shift) - 1);
+}
+
+uint64_t ia64_default_itir(CPUIA64State *env, vaddr address)
+{
+    uint64_t rr;
+    uint8_t page_size;
+
+    if (!env) {
+        return 0;
+    }
+
+    rr = env->rr[ia64_va_region(address)];
+    page_size = ia64_region_page_size(rr);
+    return ((uint64_t)ia64_region_id(rr) << 8) | ((uint64_t)page_size << 2);
+}
+
+static bool ia64_pta_is_long_format(uint64_t pta)
+{
+    return ((pta >> 8) & 1) != 0;
+}
+
+uint64_t ia64_vhpt_hash_address(CPUIA64State *env, vaddr address)
+{
+    uint64_t pta;
+    uint64_t rr;
+    bool long_format;
+    uint8_t pta_size;
+    uint8_t page_size;
+    uint64_t hpn;
+    uint64_t hash_index;
+    uint64_t offset;
+    uint64_t mask;
+    uint64_t region_bits;
+    uint64_t base;
+
+    if (!env) {
+        return 0;
+    }
+
+    pta = env->cr[IA64_CR_PTA];
+    rr = env->rr[ia64_va_region(address)];
+    long_format = ia64_pta_is_long_format(pta);
+    pta_size = (pta >> 2) & 0x3f;
+    page_size = ia64_region_page_size(rr);
+    hpn = page_size >= 64 ? 0 :
+          (address & IA64_VHPT_VA_HASH_MASK) >> page_size;
+    hash_index = long_format ? hpn ^ (ia64_region_id(rr) & 0x3ffff) : hpn;
+    offset = hash_index << (long_format ? 5 : 3);
+    mask = ia64_mask_for_shift(pta_size);
+    region_bits = long_format ? pta & IA64_VHPT_REGION_BITS_MASK
+                              : address & IA64_VHPT_REGION_BITS_MASK;
+    base = pta & IA64_VHPT_BASE_ADDRESS_MASK;
+
+    return region_bits | (base & ~mask) | (offset & mask);
+}
+
+uint64_t ia64_vhpt_tag(CPUIA64State *env, vaddr address)
+{
+    uint64_t rr;
+    uint64_t hpn;
+
+    if (!env) {
+        return 0;
+    }
+
+    rr = env->rr[ia64_va_region(address)];
+    hpn = ia64_region_page_size(rr) >= 64 ? 0 :
+          (address & IA64_VHPT_VA_HASH_MASK) >> ia64_region_page_size(rr);
+    return hpn ^ ((uint64_t)(ia64_region_id(rr) & 0x3ffff) << 39);
+}
+
 bool ia64_page_size_supported(uint8_t page_size)
 {
     switch (page_size) {
@@ -71,6 +159,29 @@ static uint64_t ia64_page_base(vaddr address, uint8_t page_size)
 {
     return (address & IA64_REGIONLESS_ADDRESS_MASK) &
            ~ia64_page_mask(page_size);
+}
+
+static bool ia64_mmu_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_MMU_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static const char *ia64_translation_kind(bool instruction, bool pinned)
+{
+    if (pinned) {
+        return instruction ? "itr" : "dtr";
+    }
+    return instruction ? "itc" : "dtc";
+}
+
+static const char *ia64_access_kind(bool instruction)
+{
+    return instruction ? "instruction" : "data";
 }
 
 static bool ia64_translation_required(uint64_t psr, MMUAccessType access_type)
@@ -130,6 +241,75 @@ static const IA64TranslationEntry *ia64_lookup_translation(CPUIA64State *env,
         best = ia64_pick_best_entry(best, &tc[i], address, rid);
     }
     return best;
+}
+
+static void ia64_trace_translation_candidate(const char *kind,
+                                             unsigned index,
+                                             const IA64TranslationEntry *entry)
+{
+    trace_ia64_translation_candidate(kind, index, entry->valid,
+                                     entry->vaddr_base, entry->paddr_base,
+                                     entry->raw, entry->itir, entry->rid,
+                                     entry->page_size, entry->access_rights);
+    if (ia64_mmu_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-translation-entry] kind=%s index=%u valid=%u"
+                " vbase=0x%016" PRIx64 " pbase=0x%016" PRIx64
+                " raw=0x%016" PRIx64 " itir=0x%016" PRIx64
+                " rid=0x%x ps=%u ar=%u pl=%u present=%u"
+                " accessed=%u dirty=%u\n",
+                kind, index, entry->valid, entry->vaddr_base,
+                entry->paddr_base, entry->raw, entry->itir, entry->rid,
+                entry->page_size, entry->access_rights,
+                entry->privilege_level, entry->present, entry->accessed,
+                entry->dirty);
+    }
+}
+
+static void ia64_trace_translation_miss(CPUIA64State *env,
+                                        bool instruction,
+                                        vaddr address,
+                                        uint64_t rr)
+{
+    uint8_t region = ia64_va_region(address);
+    uint32_t rid = ia64_region_id(rr);
+    uint8_t page_size = ia64_region_page_size(rr);
+    uint64_t itir = ia64_default_itir(env, address);
+    uint64_t iha = ia64_region_vhpt_enabled(rr) ?
+                   ia64_vhpt_hash_address(env, address) : 0;
+    uint64_t page_base = ia64_page_base(address, page_size);
+    const IA64TranslationEntry *tr = instruction ? env->memory.itr
+                                                 : env->memory.dtr;
+    const IA64TranslationEntry *tc = instruction ? env->memory.itc
+                                                 : env->memory.dtc;
+    const char *tr_kind = ia64_translation_kind(instruction, true);
+    const char *tc_kind = ia64_translation_kind(instruction, false);
+
+    trace_ia64_translation_miss(ia64_access_kind(instruction), address,
+                                page_base, rr, rid, page_size, env->psr,
+                                env->cr[IA64_CR_PTA], itir, iha);
+    if (ia64_mmu_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-translation-miss] kind=%s address=0x%016" VADDR_PRIx
+                " page-base=0x%016" PRIx64 " region=%u rid=0x%x"
+                " rr=0x%016" PRIx64 " ps=%u psr=0x%016" PRIx64
+                " pta=0x%016" PRIx64 " itir=0x%016" PRIx64
+                " iha=0x%016" PRIx64 "\n",
+                ia64_access_kind(instruction), address, page_base, region,
+                rid, rr, page_size, env->psr, env->cr[IA64_CR_PTA],
+                itir, iha);
+    }
+
+    for (unsigned i = 0; i < IA64_ITR_COUNT; i++) {
+        if (tr[i].valid) {
+            ia64_trace_translation_candidate(tr_kind, i, &tr[i]);
+        }
+    }
+    for (unsigned i = 0; i < IA64_TC_COUNT; i++) {
+        if (tc[i].valid) {
+            ia64_trace_translation_candidate(tc_kind, i, &tc[i]);
+        }
+    }
 }
 
 static bool ia64_translation_allows(const IA64TranslationEntry *entry,
@@ -286,6 +466,24 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
         *next_tc = (*next_tc + 1) % IA64_TC_COUNT;
     }
 
+    trace_ia64_translation_install(ia64_translation_kind(instruction, pinned),
+                                   slot, virtual_address, entry.vaddr_base,
+                                   entry.paddr_base, entry.raw, entry.itir,
+                                   entry.rid, entry.page_size,
+                                   entry.access_rights);
+    if (ia64_mmu_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-translation-install] kind=%s slot=%u"
+                " va=0x%016" VADDR_PRIx " vbase=0x%016" PRIx64
+                " pbase=0x%016" PRIx64 " raw=0x%016" PRIx64
+                " itir=0x%016" PRIx64 " rid=0x%x ps=%u ar=%u"
+                " pl=%u present=%u accessed=%u dirty=%u\n",
+                ia64_translation_kind(instruction, pinned), slot,
+                virtual_address, entry.vaddr_base, entry.paddr_base,
+                entry.raw, entry.itir, entry.rid, entry.page_size,
+                entry.access_rights, entry.privilege_level, entry.present,
+                entry.accessed, entry.dirty);
+    }
     return true;
 }
 
@@ -311,10 +509,13 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
     bool instruction = access_type == MMU_INST_FETCH;
     bool needs_translation = ia64_translation_required(env->psr, access_type);
     const IA64TranslationEntry *entry;
+    uint64_t rr;
 
     memset(result, 0, sizeof(*result));
     result->vaddr = address;
     result->region = ia64_va_region(address);
+    rr = env->rr[result->region];
+    result->vhpt_enabled = ia64_region_vhpt_enabled(rr);
     result->access_type = access_type;
     result->mmu_idx = mmu_idx;
     result->debug = debug;
@@ -337,10 +538,13 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
     entry = ia64_lookup_translation(env, instruction, address);
     if (!entry) {
         result->status = IA64_TRANSLATE_TLB_MISS;
+        ia64_trace_translation_miss(env, instruction, address, rr);
         snprintf(result->message, sizeof(result->message),
-                 "%s TLB miss address=0x%016" VADDR_PRIx " region=%u rid=0x%x",
-                 instruction ? "instruction" : "data", address,
-                 result->region, ia64_region_id(env->rr[result->region]));
+                 "%s %s TLB miss address=0x%016" VADDR_PRIx
+                 " region=%u rid=0x%x",
+                 instruction ? "instruction" : "data",
+                 result->vhpt_enabled ? "VHPT" : "alternate", address,
+                 result->region, ia64_region_id(rr));
         goto record;
     }
 

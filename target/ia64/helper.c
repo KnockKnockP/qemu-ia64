@@ -2317,6 +2317,108 @@ static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
     }
 }
 
+static const char *ia64_atomic_name(IA64AtomicKind kind, bool release)
+{
+    switch (kind) {
+    case IA64_ATOMIC_CMPXCHG:
+        return release ? "cmpxchg.rel" : "cmpxchg.acq";
+    case IA64_ATOMIC_XCHG:
+        return "xchg";
+    case IA64_ATOMIC_FETCHADD:
+        return release ? "fetchadd.rel" : "fetchadd.acq";
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static uint64_t ia64_width_mask(uint8_t width)
+{
+    switch (width) {
+    case 1:
+        return UINT64_C(0xff);
+    case 2:
+        return UINT64_C(0xffff);
+    case 4:
+        return UINT64_C(0xffffffff);
+    case 8:
+        return UINT64_MAX;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static bool ia64_atomic_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_ATOMIC_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static void ia64_trace_atomic(CPUIA64State *env,
+                              const IA64AtomicInstruction *decoded,
+                              uint64_t address, uint64_t old_value,
+                              uint64_t store_value, uint64_t compare_value)
+{
+    const char *op = ia64_atomic_name(decoded->kind, decoded->release);
+
+    trace_ia64_atomic_memory(env->ip, op, address, decoded->width,
+                             old_value, store_value, compare_value,
+                             decoded->target, decoded->source,
+                             decoded->base);
+    if (ia64_atomic_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-atomic] ip=0x%016" PRIx64 " op=%s"
+                " addr=0x%016" PRIx64 " width=%u old=0x%016" PRIx64
+                " store=0x%016" PRIx64 " compare=0x%016" PRIx64
+                " target=r%u source=r%u base=r%u\n",
+                env->ip, op, address, decoded->width, old_value, store_value,
+                compare_value, decoded->target, decoded->source,
+                decoded->base);
+    }
+}
+
+static bool exec_m_atomic(CPUIA64State *env,
+                          const IA64AtomicInstruction *decoded)
+{
+    uint64_t address = ia64_read_gr(env, decoded->base);
+    uint64_t old_value = ia64_ldst_read(env, address, decoded->width);
+    uint64_t store_value = 0;
+    uint64_t compare_value = 0;
+    uint64_t mask = ia64_width_mask(decoded->width);
+    bool write_memory = false;
+
+    switch (decoded->kind) {
+    case IA64_ATOMIC_CMPXCHG:
+        store_value = ia64_read_gr(env, decoded->source);
+        compare_value = env->ar[IA64_AR_CCV] & mask;
+        write_memory = (old_value & mask) == compare_value;
+        break;
+    case IA64_ATOMIC_XCHG:
+        store_value = ia64_read_gr(env, decoded->source);
+        write_memory = true;
+        break;
+    case IA64_ATOMIC_FETCHADD:
+        store_value = old_value + (uint64_t)decoded->immediate;
+        compare_value = (uint64_t)decoded->immediate;
+        write_memory = true;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    if (write_memory) {
+        ia64_ldst_write(env, address, decoded->width, store_value);
+    }
+
+    ia64_write_gr(env, decoded->target, old_value);
+    ia64_trace_atomic(env, decoded, address, old_value, store_value,
+                      compare_value);
+    return true;
+}
+
 static bool exec_ldst_immediate(CPUIA64State *env,
                                 const IA64LdstImmediate *decoded)
 {
@@ -2438,6 +2540,8 @@ static bool exec_floating_memory(CPUIA64State *env,
     case IA64_FLOAT_MEM_STORE:
         exec_floating_store(env, decoded, address);
         break;
+    case IA64_FLOAT_MEM_PREFETCH:
+        break;
     default:
         g_assert_not_reached();
     }
@@ -2491,7 +2595,6 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     CPUState *cpu = env_cpu(env);
     IA64DecodedBundle decoded;
     uint64_t next_ip = env->ip + IA64_BUNDLE_SIZE;
-    bool exception_taken = false;
 
     /*
      * This target still interprets complete IA-64 bundles inside one C helper.
@@ -2526,7 +2629,6 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         if (ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
             env->ip = next_ip;
-            env->cr[IA64_CR_IIP] = env->ip;
             return;
         }
     }
@@ -2537,6 +2639,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         uint8_t qp = ia64_slot_predicate(raw);
         IA64LdstImmediate ldst;
         IA64FloatingMemoryInstruction fldst;
+        IA64AtomicInstruction atomic;
         IA64CompareInstruction cmp;
         IA64PredicateTestInstruction pred_test;
         IA64ExtractInstruction extract;
@@ -2548,7 +2651,9 @@ void HELPER(exec_bundle)(CPUIA64State *env,
 
             if (ia64_read_pr(env, x_qp)) {
                 if (!ia64_exec_lx_movl(env, decoded.slot[1],
-                                       decoded.slot[2])) {
+                                       decoded.slot[2]) &&
+                    !ia64_exec_lx_nop_or_hint(env, decoded.slot[1],
+                                              decoded.slot[2])) {
                     abort_unsupported_slot(env, &decoded, 1);
                 }
             }
@@ -2640,7 +2745,6 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             env->cr[IA64_CR_IIM] = iim;
             next_ip = env->cr[IA64_CR_IVA] + UINT64_C(0x2c00);
             ia64_progress_trace_event(env, "break.m", iim, next_ip);
-            exception_taken = true;
             break;
         }
         if (ia64_slot_is_m_mov_to_region_register(type, raw) &&
@@ -2674,6 +2778,10 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_m_getf(type, raw) && ia64_exec_m_getf(env, raw)) {
+            continue;
+        }
+        if (ia64_decode_m_atomic(type, raw, &atomic) &&
+            exec_m_atomic(env, &atomic)) {
             continue;
         }
         if (ia64_decode_extract(type, raw, &extract) &&
@@ -2748,6 +2856,10 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             ia64_exec_i_mux(env, raw);
             continue;
         }
+        if (ia64_slot_is_i_bit_count(type, raw)) {
+            ia64_exec_i_bit_count(env, raw);
+            continue;
+        }
         if (ia64_slot_is_i_variable_shift(type, raw)) {
             ia64_exec_i_variable_shift(env, raw);
             continue;
@@ -2791,7 +2903,4 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     }
 
     env->ip = next_ip;
-    if (!exception_taken) {
-        env->cr[IA64_CR_IIP] = env->ip;
-    }
 }

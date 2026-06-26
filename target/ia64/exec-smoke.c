@@ -5,6 +5,7 @@
 #include "exception.h"
 #include "exec-smoke.h"
 #include "mem.h"
+#include "qemu/host-utils.h"
 #include "trace-target_ia64.h"
 
 #define IA64_FR_EXPONENT_BIAS 0xffff
@@ -16,6 +17,8 @@
 #define IA64_FR_TWO_TO_64_L 0x1.0p64L
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+#define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 
 static uint64_t ia64_default_region_register(unsigned index)
 {
@@ -125,6 +128,9 @@ uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg)
         return 0;
     }
     if (reg < IA64_STATIC_GR_COUNT) {
+        if (reg >= 16 && reg < 32 && (env->psr & IA64_PSR_BN_BIT)) {
+            return env->banked_gr[reg - 16];
+        }
         return env->gr[reg];
     }
     return env->rse.stacked_gr[ia64_stacked_gr_slot(env, reg)];
@@ -139,7 +145,11 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
         return;
     }
     if (reg < IA64_STATIC_GR_COUNT) {
-        env->gr[reg] = value;
+        if (reg >= 16 && reg < 32 && (env->psr & IA64_PSR_BN_BIT)) {
+            env->banked_gr[reg - 16] = value;
+        } else {
+            env->gr[reg] = value;
+        }
     } else {
         env->rse.stacked_gr[ia64_stacked_gr_slot(env, reg)] = value;
     }
@@ -805,6 +815,16 @@ bool ia64_slot_is_m_processor_mask(IA64SlotType type, uint64_t raw)
     return x4 >= 4 && x4 <= 7;
 }
 
+static bool ia64_psr_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_PSR_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
 uint64_t ia64_processor_mask_immediate(uint64_t raw)
 {
     return (((raw >> 36) & 0x1) << 23) |
@@ -816,6 +836,7 @@ bool ia64_exec_m_processor_mask(CPUIA64State *env, uint64_t raw)
 {
     uint8_t x4;
     uint64_t mask;
+    uint64_t old_psr;
 
     if (!env || !ia64_slot_is_m_processor_mask(IA64_SLOT_TYPE_M, raw)) {
         return false;
@@ -824,10 +845,21 @@ bool ia64_exec_m_processor_mask(CPUIA64State *env, uint64_t raw)
     x4 = (raw >> 27) & 0xf;
     mask = ia64_processor_mask_immediate(raw);
     mask &= x4 == 4 || x4 == 5 ? UINT64_C(0x3f) : UINT64_C(0x00ffffff);
+    old_psr = env->psr;
     if (x4 == 4 || x4 == 6) {
         env->psr |= mask;
     } else {
         env->psr &= ~mask;
+    }
+    trace_ia64_processor_mask(env->ip, x4 == 4 || x4 == 6 ? "ssm" : "rsm",
+                              mask, old_psr, env->psr);
+    if (ia64_psr_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-psr-mask] ip=0x%016" PRIx64 " op=%s"
+                " mask=0x%016" PRIx64 " old=0x%016" PRIx64
+                " new=0x%016" PRIx64 "\n",
+                env->ip, x4 == 4 || x4 == 6 ? "ssm" : "rsm",
+                mask, old_psr, env->psr);
     }
     return true;
 }
@@ -984,19 +1016,6 @@ static void ia64_write_cr(CPUIA64State *env, uint32_t reg, uint64_t value)
     }
 
     env->cr[reg] = value;
-    switch (reg) {
-    case IA64_CR_IPSR:
-        env->psr = value;
-        break;
-    case IA64_CR_IIP:
-        env->ip = value;
-        break;
-    case IA64_CR_IFS:
-        ia64_set_cfm(env, value);
-        break;
-    default:
-        break;
-    }
 }
 
 bool ia64_slot_is_m_mov_to_control(IA64SlotType type, uint64_t raw)
@@ -1146,7 +1165,11 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
         value = 0;
         break;
     case 0x1a: /* thash */
+        value = ia64_vhpt_hash_address(env, address);
+        break;
     case 0x1b: /* ttag */
+        value = ia64_vhpt_tag(env, address);
+        break;
     default:
         value = 0;
         break;
@@ -1208,6 +1231,16 @@ bool ia64_slot_pair_is_lx_movl(uint64_t l_raw, uint64_t x_raw)
     return ia64_slot_major_opcode(x_raw) == 0x6;
 }
 
+static bool ia64_movl_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_MOVL_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
 uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw)
 {
     return (((x_raw >> 36) & 0x1) << 63) |
@@ -1221,13 +1254,42 @@ uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw)
 bool ia64_exec_lx_movl(CPUIA64State *env, uint64_t l_raw, uint64_t x_raw)
 {
     uint32_t r1;
+    uint64_t value;
 
     if (!env || !ia64_slot_pair_is_lx_movl(l_raw, x_raw)) {
         return false;
     }
 
     r1 = (x_raw >> 6) & 0x7f;
-    ia64_write_gr(env, r1, ia64_lx_movl_imm64(l_raw, x_raw));
+    value = ia64_lx_movl_imm64(l_raw, x_raw);
+    trace_ia64_movl(env->ip, r1, value, l_raw, x_raw);
+    if (ia64_movl_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-movl] ip=0x%016" PRIx64 " r%" PRIu32
+                "=0x%016" PRIx64 " l_raw=0x%011" PRIx64
+                " x_raw=0x%011" PRIx64 "\n",
+                env->ip, r1, value, l_raw, x_raw);
+    }
+    ia64_write_gr(env, r1, value);
+    return true;
+}
+
+bool ia64_slot_pair_is_lx_nop_or_hint(uint64_t l_raw, uint64_t x_raw)
+{
+    (void)l_raw;
+
+    return ia64_slot_major_opcode(x_raw) == 0x0 &&
+           ((x_raw >> 33) & 0x7) == 0 &&
+           ((x_raw >> 27) & 0x3f) == 1;
+}
+
+bool ia64_exec_lx_nop_or_hint(CPUIA64State *env, uint64_t l_raw,
+                              uint64_t x_raw)
+{
+    if (!env || !ia64_slot_pair_is_lx_nop_or_hint(l_raw, x_raw)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -1624,6 +1686,51 @@ bool ia64_exec_i_mux(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
+bool ia64_slot_is_i_bit_count(IA64SlotType type, uint64_t raw)
+{
+    uint8_t za;
+    uint8_t x2a;
+    uint8_t zb;
+    uint8_t ve;
+    uint8_t x2b;
+    uint8_t x2c;
+
+    if (type != IA64_SLOT_TYPE_I || ia64_slot_major_opcode(raw) != 0x7) {
+        return false;
+    }
+
+    za = (raw >> 36) & 0x1;
+    x2a = (raw >> 34) & 0x3;
+    zb = (raw >> 33) & 0x1;
+    ve = (raw >> 32) & 0x1;
+    x2c = (raw >> 30) & 0x3;
+    x2b = (raw >> 28) & 0x3;
+
+    return za == 0 && x2a == 1 && zb == 1 && ve == 0 &&
+           x2b == 1 && (x2c == 2 || x2c == 3);
+}
+
+bool ia64_exec_i_bit_count(CPUIA64State *env, uint64_t raw)
+{
+    uint32_t r1;
+    uint32_t r3;
+    uint8_t x2c;
+    uint64_t value;
+    uint64_t result;
+
+    if (!env || !ia64_slot_is_i_bit_count(IA64_SLOT_TYPE_I, raw)) {
+        return false;
+    }
+
+    r1 = (raw >> 6) & 0x7f;
+    r3 = (raw >> 20) & 0x7f;
+    x2c = (raw >> 30) & 0x3;
+    value = ia64_read_gr(env, r3);
+    result = x2c == 2 ? ctpop64(value) : clz64(value);
+    ia64_write_gr(env, r1, result);
+    return true;
+}
+
 bool ia64_slot_is_i_variable_shift(IA64SlotType type, uint64_t raw)
 {
     uint8_t za;
@@ -1822,6 +1929,71 @@ bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
+static int64_t ia64_fetchadd_increment(uint8_t encoded)
+{
+    int64_t magnitude;
+
+    switch (encoded & 0x3) {
+    case 0:
+        magnitude = 16;
+        break;
+    case 1:
+        magnitude = 8;
+        break;
+    case 2:
+        magnitude = 4;
+        break;
+    case 3:
+        magnitude = 1;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    return (encoded & 0x4) == 0 ? magnitude : -magnitude;
+}
+
+bool ia64_decode_m_atomic(IA64SlotType type, uint64_t raw,
+                          IA64AtomicInstruction *decoded)
+{
+    uint8_t x6;
+
+    if (!decoded || type != IA64_SLOT_TYPE_M ||
+        ia64_slot_major_opcode(raw) != 0x4 ||
+        ((raw >> 27) & 0x1) == 0) {
+        return false;
+    }
+
+    memset(decoded, 0, sizeof(*decoded));
+    x6 = (raw >> 30) & 0x3f;
+    decoded->target = (raw >> 6) & 0x7f;
+    decoded->source = (raw >> 13) & 0x7f;
+    decoded->base = (raw >> 20) & 0x7f;
+
+    if (x6 <= 0x07) {
+        decoded->kind = IA64_ATOMIC_CMPXCHG;
+        decoded->width = 1u << (x6 & 0x3);
+        decoded->release = (x6 & 0x4) != 0;
+        return true;
+    }
+
+    if (x6 >= 0x08 && x6 <= 0x0b) {
+        decoded->kind = IA64_ATOMIC_XCHG;
+        decoded->width = 1u << (x6 - 0x08);
+        return true;
+    }
+
+    if (x6 == 0x12 || x6 == 0x13 || x6 == 0x16 || x6 == 0x17) {
+        decoded->kind = IA64_ATOMIC_FETCHADD;
+        decoded->width = (x6 & 0x1) == 0 ? 4 : 8;
+        decoded->release = (x6 & 0x4) != 0;
+        decoded->immediate = ia64_fetchadd_increment((raw >> 13) & 0x7);
+        return true;
+    }
+
+    return false;
+}
+
 static bool ia64_floating_memory_format(uint8_t size_code,
                                         uint8_t memory_class,
                                         IA64FloatingMemoryFormat *format,
@@ -1908,7 +2080,10 @@ bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
         decoded->update_source = (raw >> 13) & 0x7f;
     }
 
-    if (memory_class == 0x0c || memory_class == 0x0e) {
+    if (memory_class == 0x0b) {
+        decoded->kind = IA64_FLOAT_MEM_PREFETCH;
+        decoded->freg = (raw >> 6) & 0x7f;
+    } else if (memory_class == 0x0c || memory_class == 0x0e) {
         decoded->kind = IA64_FLOAT_MEM_STORE;
         decoded->freg = (raw >> 13) & 0x7f;
         if (base_update_with_immediate) {
@@ -2949,7 +3124,9 @@ bool ia64_slot_is_b_indirect_branch(IA64SlotType type, uint64_t raw)
 
     return type == IA64_SLOT_TYPE_B &&
            (major == 0x1 ||
-            (major == 0x0 && (x6 == 0x08 || x6 == 0x20 || x6 == 0x21)));
+            (major == 0x0 && (x6 == 0x02 || x6 == 0x04 || x6 == 0x05 ||
+                              x6 == 0x08 || x6 == 0x0c || x6 == 0x0d ||
+                              x6 == 0x10 || x6 == 0x20 || x6 == 0x21)));
 }
 
 bool ia64_slot_is_b_predict_or_nop(IA64SlotType type, uint64_t raw)
@@ -3013,6 +3190,28 @@ static void ia64_rotate_modulo_scheduled_registers(CPUIA64State *env)
     }
     env->rse.rrb_fr = (env->rse.rrb_fr + 95) % 96;
     env->rse.rrb_pr = (env->rse.rrb_pr + 47) % 48;
+    ia64_update_cfm_rename_bases(env);
+}
+
+static void ia64_cover_stack_frame(CPUIA64State *env)
+{
+    uint64_t covered_cfm = env->cfm;
+    uint32_t covered_sof = env->rse.sof;
+
+    env->rse.current_frame_base =
+        (env->rse.current_frame_base + covered_sof) % IA64_STACKED_GR_COUNT;
+    ia64_set_cfm(env, 0);
+    env->cr[IA64_CR_IFS] = covered_cfm | (UINT64_C(1) << 63);
+}
+
+static void ia64_clear_register_rename_bases(CPUIA64State *env,
+                                             bool predicate_only)
+{
+    if (!predicate_only) {
+        env->rse.rrb_gr = 0;
+        env->rse.rrb_fr = 0;
+    }
+    env->rse.rrb_pr = 0;
     ia64_update_cfm_rename_bases(env);
 }
 
@@ -3203,6 +3402,33 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
     x6 = (raw >> 27) & 0x3f;
     b1 = (raw >> 6) & 0x7;
     b2 = (raw >> 13) & 0x7;
+    if (major == 0x0) {
+        switch (x6) {
+        case 0x02: /* cover */
+            ia64_cover_stack_frame(env);
+            *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+            return true;
+        case 0x04: /* clrrrb */
+        case 0x05: /* clrrrb.pr */
+            ia64_clear_register_rename_bases(env, x6 == 0x05);
+            *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+            return true;
+        case 0x0c: /* bsw.0 */
+            env->psr &= ~IA64_PSR_BN_BIT;
+            *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+            return true;
+        case 0x0d: /* bsw.1 */
+            env->psr |= IA64_PSR_BN_BIT;
+            *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+            return true;
+        case 0x10: /* epc */
+            env->psr &= ~IA64_PSR_CPL_MASK;
+            *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+            return true;
+        default:
+            break;
+        }
+    }
     if (major == 0x0 && x6 == 0x08) {
         uint64_t target = env->cr[IA64_CR_IIP] & ~0xfULL;
 
