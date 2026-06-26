@@ -35,23 +35,60 @@ static void test_identity_debug_memory_path(void)
     g_assert_nonnull(strstr(text, "identity=yes"));
 }
 
-static void test_bad_address_failure_path(void)
+static void test_physical_region_alias_path(void)
 {
     CPUIA64State env;
     IA64TranslateResult result;
-    vaddr bad = 0xe000000000001000ULL;
+    vaddr alias = 0xe000000000001000ULL;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
 
-    g_assert_false(ia64_translate_address(&env, bad, MMU_DATA_LOAD, 0,
-                                          false, &result));
-    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_BAD_ADDRESS);
+    g_assert_true(ia64_translate_address(&env, alias, MMU_DATA_LOAD, 0,
+                                         false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
     g_assert_cmpint(result.region, ==, 7);
-    g_assert_cmphex(result.paddr, ==, 0);
-    g_assert_nonnull(strstr(result.message,
-                           "region 7 translation is not implemented"));
-    g_assert_cmphex(env.memory.last_vaddr, ==, bad);
-    g_assert_cmpint(env.memory.last_status, ==, IA64_TRANSLATE_BAD_ADDRESS);
+    g_assert_cmphex(result.paddr, ==, 0x1000);
+    g_assert_nonnull(strstr(result.message, "physical mode region-bit strip"));
+    g_assert_cmphex(env.memory.last_vaddr, ==, alias);
+    g_assert_cmpint(env.memory.last_status, ==, IA64_TRANSLATE_OK);
+}
+
+static void test_translated_address_misses_without_entry(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr address = 0xa000000100002c00ULL;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= UINT64_C(0x0000001000000000);
+
+    g_assert_false(ia64_translate_address(&env, address, MMU_INST_FETCH, 2,
+                                          false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+    g_assert_cmpint(result.region, ==, 5);
+    g_assert_nonnull(strstr(result.message, "instruction TLB miss"));
+}
+
+static void test_instruction_translation_register_lookup(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t translation = 0x0010000004000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= UINT64_C(0x0000001000000000);
+
+    g_assert_true(ia64_install_translation(&env, true, true, 2, base,
+                                           translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH, 2,
+                                         false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
+    g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+    g_assert_cmpuint(result.page_size, ==, 26);
+    g_assert_nonnull(strstr(result.message, "instruction translation"));
 }
 
 static void test_exception_reporting(void)
@@ -105,8 +142,12 @@ int main(int argc, char **argv)
 
     g_test_add_func("/ia64-memory/identity-debug-path",
                     test_identity_debug_memory_path);
-    g_test_add_func("/ia64-memory/bad-address-failure",
-                    test_bad_address_failure_path);
+    g_test_add_func("/ia64-memory/physical-region-alias",
+                    test_physical_region_alias_path);
+    g_test_add_func("/ia64-memory/translated-miss",
+                    test_translated_address_misses_without_entry);
+    g_test_add_func("/ia64-memory/instruction-translation-register",
+                    test_instruction_translation_register_lookup);
     g_test_add_func("/ia64-exception/reporting", test_exception_reporting);
 
     return g_test_run();

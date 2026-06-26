@@ -1063,6 +1063,9 @@ bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw)
     uint8_t x6;
     uint32_t source;
     uint64_t translation;
+    bool instruction;
+    bool pinned;
+    uint8_t slot = 0;
 
     if (!env || !ia64_slot_is_m_insert_translation(IA64_SLOT_TYPE_M, raw)) {
         return false;
@@ -1071,22 +1074,30 @@ bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw)
     x6 = (raw >> 27) & 0x3f;
     source = (raw >> 13) & 0x7f;
     translation = ia64_read_gr(env, source);
+    instruction = x6 == 0x0f || x6 == 0x2f;
+    pinned = x6 == 0x0e || x6 == 0x0f;
 
-    if (x6 == 0x0e || x6 == 0x0f) {
+    if (pinned) {
         uint32_t slot_reg = (raw >> 20) & 0x7f;
-        uint64_t slot = ia64_read_gr(env, slot_reg);
+        uint64_t slot_value = ia64_read_gr(env, slot_reg);
 
-        if (slot < IA64_ITR_COUNT) {
-            if (x6 == 0x0f) {
-                env->itr[slot] = translation;
-            } else {
-                env->dtr[slot] = translation;
-            }
+        if (slot_value >= IA64_ITR_COUNT) {
+            return true;
         }
+        slot = slot_value;
+    }
+
+    if (!ia64_install_translation(env, instruction, pinned, slot,
+                                  env->cr[IA64_CR_IFA], translation,
+                                  env->cr[IA64_CR_ITIR])) {
         return true;
     }
 
-    if (x6 == 0x2f) {
+    if (pinned && instruction) {
+        env->itr[slot] = translation;
+    } else if (pinned) {
+        env->dtr[slot] = translation;
+    } else if (instruction) {
         env->itr[0] = translation;
     } else {
         env->dtr[0] = translation;
@@ -1126,7 +1137,9 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
 
     switch (x6) {
     case 0x1e: /* tpa */
-        value = address & IA64_PHYSICAL_ADDRESS_MASK;
+        if (!ia64_translate_data_non_access(env, address, &value)) {
+            value = address & IA64_PHYSICAL_ADDRESS_MASK;
+        }
         break;
     case 0x1f: /* tak */
         value = 0;

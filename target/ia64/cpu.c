@@ -52,10 +52,18 @@ static void ia64_restore_state_to_opc(CPUState *cs,
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = IA64_CPU(cs);
+    uint32_t flags = 0;
+
+    if (cpu->env.psr & UINT64_C(0x0000000000020000)) {
+        flags |= 1;
+    }
+    if (cpu->env.psr & UINT64_C(0x0000001000000000)) {
+        flags |= 2;
+    }
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
-        .flags = 0,
+        .flags = flags,
     };
 }
 
@@ -66,7 +74,13 @@ static bool ia64_cpu_has_work(CPUState *cs)
 
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
-    return 0;
+    IA64CPU *cpu = IA64_CPU(cs);
+    CPUIA64State *env = &cpu->env;
+    bool translated = ifetch
+        ? (env->psr & UINT64_C(0x0000001000000000)) != 0
+        : (env->psr & UINT64_C(0x0000000000020000)) != 0;
+
+    return translated ? (ifetch ? 2 : 1) : 0;
 }
 
 static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
@@ -131,9 +145,11 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     if (ia64_translate_address(&cpu->env, address, access_type, mmu_idx,
                                false, &result)) {
-        tlb_set_page(cs, address & TARGET_PAGE_MASK,
-                     result.paddr & TARGET_PAGE_MASK, result.prot,
-                     mmu_idx, TARGET_PAGE_SIZE);
+        target_ulong mask = (target_ulong)-1 << result.page_size;
+        target_ulong page_size = (target_ulong)1 << result.page_size;
+
+        tlb_set_page(cs, address & mask,
+                     result.paddr & mask, result.prot, mmu_idx, page_size);
         return true;
     }
 

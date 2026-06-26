@@ -18,6 +18,7 @@
 #define IA64_PKR_COUNT 16
 #define IA64_ITR_COUNT 8
 #define IA64_DTR_COUNT 8
+#define IA64_TC_COUNT 32
 
 enum IA64ApplicationRegister {
     IA64_AR_RSC = 16,
@@ -111,17 +112,44 @@ typedef struct IA64InterruptState {
     uint8_t pending;
 } IA64InterruptState;
 
+typedef struct IA64TranslationEntry {
+    bool valid;
+    bool instruction;
+    bool pinned;
+    uint64_t vaddr_base;
+    uint64_t paddr_base;
+    uint64_t raw;
+    uint64_t itir;
+    uint32_t rid;
+    uint32_t key;
+    uint8_t page_size;
+    uint8_t memory_attribute;
+    uint8_t privilege_level;
+    uint8_t access_rights;
+    bool present;
+    bool accessed;
+    bool dirty;
+    bool exception_deferral;
+} IA64TranslationEntry;
+
 typedef struct IA64MemorySkeletonState {
     /*
-     * Phase 6 accepts region-0 identity translations only. Region registers,
-     * VHPT, inserted TLB entries, privilege checks, page rights, and NaT load
-     * behavior are intentionally left for later phases.
+     * Frontier-oriented MMU state. QEMU owns the host TLB; this target state
+     * stores IA-64 translation registers/cache entries built by itr/itc so the
+     * target can resolve guest virtual pages before calling tlb_set_page().
      */
     uint64_t last_vaddr;
     uint64_t last_paddr;
     uint8_t last_region;
     uint8_t last_status;
+    uint8_t last_page_size;
     bool identity_region0_only;
+    IA64TranslationEntry itr[IA64_ITR_COUNT];
+    IA64TranslationEntry dtr[IA64_DTR_COUNT];
+    IA64TranslationEntry itc[IA64_TC_COUNT];
+    IA64TranslationEntry dtc[IA64_TC_COUNT];
+    uint8_t next_itc;
+    uint8_t next_dtc;
 } IA64MemorySkeletonState;
 
 typedef enum IA64ExceptionKind {
