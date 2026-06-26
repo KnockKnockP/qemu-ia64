@@ -5,6 +5,7 @@
 #include "exception.h"
 #include "exec-smoke.h"
 #include "mem.h"
+#include "trace-target_ia64.h"
 
 #define IA64_FR_EXPONENT_BIAS 0xffff
 #define IA64_FR_INTEGER_EXPONENT 0x1003e
@@ -2968,6 +2969,16 @@ static bool ia64_loop_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool ia64_exception_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_EXCEPTION_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
 int64_t ia64_branch_displacement(uint64_t raw)
 {
     uint64_t encoded = (((raw >> 36) & 0x1) << 20) |
@@ -3193,9 +3204,22 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
     b1 = (raw >> 6) & 0x7;
     b2 = (raw >> 13) & 0x7;
     if (major == 0x0 && x6 == 0x08) {
+        uint64_t target = env->cr[IA64_CR_IIP] & ~0xfULL;
+
+        trace_ia64_rfi(bundle_ip, target, env->cr[IA64_CR_IPSR],
+                       env->cr[IA64_CR_IFS], env->psr, env->cfm);
+        if (ia64_exception_trace_enabled()) {
+            fprintf(stderr,
+                    "[ia64-rfi] ip=0x%016" PRIx64
+                    " target=0x%016" PRIx64 " ipsr=0x%016" PRIx64
+                    " ifs=0x%016" PRIx64 " psr=0x%016" PRIx64
+                    " cfm=0x%016" PRIx64 "\n",
+                    bundle_ip, target, env->cr[IA64_CR_IPSR],
+                    env->cr[IA64_CR_IFS], env->psr, env->cfm);
+        }
         env->psr = env->cr[IA64_CR_IPSR];
         ia64_set_cfm(env, env->cr[IA64_CR_IFS]);
-        *target_ip = env->cr[IA64_CR_IIP] & ~0xfULL;
+        *target_ip = target;
         return true;
     }
 

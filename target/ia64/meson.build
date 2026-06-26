@@ -5,6 +5,7 @@ ia64_ss.add(files(
   'exception.c',
   'exec-smoke.c',
   'helper.c',
+  'machine.c',
   'mem.c',
   'translate.c',
 ))

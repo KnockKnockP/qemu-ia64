@@ -164,13 +164,13 @@ typedef enum IA64ExceptionKind {
 } IA64ExceptionKind;
 
 typedef struct IA64ExceptionRecord {
-    IA64ExceptionKind kind;
+    uint32_t kind;
     vaddr ip;
     vaddr address;
-    MMUAccessType access_type;
+    int32_t access_type;
     uint64_t vector;
     bool pending;
-    char message[160];
+    uint8_t message[160];
 } IA64ExceptionRecord;
 
 typedef enum IA64CPUModel {
@@ -235,5 +235,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                        bool probe, uintptr_t retaddr);
 int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n);
 int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n);
+
+extern const VMStateDescription vmstate_ia64_cpu;
 
 #endif

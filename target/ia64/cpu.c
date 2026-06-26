@@ -327,6 +327,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->dump_state = ia64_cpu_dump_state;
     cc->set_pc = ia64_cpu_set_pc;
     cc->get_pc = ia64_cpu_get_pc;
+    dc->vmsd = &vmstate_ia64_cpu;
     cc->sysemu_ops = &ia64_sysemu_ops;
     cc->gdb_read_register = ia64_cpu_gdb_read_register;
     cc->gdb_write_register = ia64_cpu_gdb_write_register;

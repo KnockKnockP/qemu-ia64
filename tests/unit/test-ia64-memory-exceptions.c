@@ -131,7 +131,7 @@ static void test_exception_reporting(void)
     g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_ILLEGAL_OPERATION);
     g_assert_cmphex(env.exception.vector, ==, 0x5400);
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, 0x4000);
-    g_assert_nonnull(strstr(env.exception.message,
+    g_assert_nonnull(strstr((const char *)env.exception.message,
                            "phase6 illegal-op placeholder"));
 
     ia64_record_exception(&env, IA64_EXCEPTION_PAGE_FAULT,
