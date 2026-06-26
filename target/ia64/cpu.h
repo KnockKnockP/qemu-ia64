@@ -16,6 +16,7 @@
 #define IA64_CR_COUNT 128
 #define IA64_RR_COUNT 8
 #define IA64_PKR_COUNT 16
+#define IA64_CPUID_COUNT 5
 #define IA64_ITR_COUNT 8
 #define IA64_DTR_COUNT 8
 #define IA64_TC_COUNT 32
@@ -203,6 +204,7 @@ typedef struct CPUArchState {
     /* Region, protection-key, and translation-register placeholders. */
     uint64_t rr[IA64_RR_COUNT];
     uint64_t pkr[IA64_PKR_COUNT];
+    uint64_t cpuid[IA64_CPUID_COUNT];
     uint64_t itr[IA64_ITR_COUNT];
     uint64_t dtr[IA64_DTR_COUNT];
 

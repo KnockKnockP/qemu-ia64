@@ -24,6 +24,8 @@ typedef struct DisasContext {
 
 static TCGv_i64 cpu_ip;
 
+#define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
+
 enum {
     IA64_EFI_SERVICE_DESCRIPTOR_COUNT =
         VIBTANIUM_EFI_BOOT_SERVICE_COUNT +
@@ -63,6 +65,11 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
 static bool ia64_pc_is_efi_call_gate(uint64_t pc)
 {
     uint64_t offset;
+
+    pc &= IA64_REGION_OFFSET_MASK;
+    if (pc == VIBTANIUM_EFI_PAL_PROC || pc == VIBTANIUM_EFI_SAL_PROC) {
+        return true;
+    }
 
     if (pc < VIBTANIUM_EFI_CALL_GATE_BASE) {
         return false;

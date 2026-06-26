@@ -20,6 +20,10 @@
 #define PE_BASE_RELOCATION_DIR64    10
 
 #define MAX_EFI_IMAGE_SIZE (128 * 1024 * 1024)
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+#define SAL_SYSTEM_TABLE_LENGTH 144
+#define SAL_SYSTEM_TABLE_HEADER_LENGTH 96
+#define SAL_SYSTEM_TABLE_ENTRY_COUNT 1
 
 static bool range_ok(size_t size, uint64_t offset, uint64_t length)
 {
@@ -132,6 +136,14 @@ static void write_return_gate(uint8_t *blob, size_t size, uint64_t address)
     write_ia64_bundle(blob, size, address, 0x11, nop, nop, br_ret_b0);
 }
 
+static void write_branch_gate(uint8_t *blob, size_t size, uint64_t address)
+{
+    const uint64_t nop = 1ULL << 27;
+    const uint64_t br_b0 = 0x20ULL << 27;
+
+    write_ia64_bundle(blob, size, address, 0x11, nop, nop, br_b0);
+}
+
 static uint64_t service_descriptor_address(unsigned service_index)
 {
     return VIBTANIUM_EFI_DESCRIPTOR_BASE + service_index * 16;
@@ -158,6 +170,24 @@ static void write_guid(uint8_t *blob, size_t size, uint64_t address,
                        const uint8_t guid[16])
 {
     memcpy(blob_ptr(blob, size, address, 16), guid, 16);
+}
+
+static void write_fixed_ascii(uint8_t *p, size_t size, const char *text)
+{
+    size_t text_len = strlen(text);
+
+    memset(p, ' ', size);
+    memcpy(p, text, MIN(size, text_len));
+}
+
+static uint8_t sal_checksum(const uint8_t *table, size_t size)
+{
+    uint32_t sum = 0;
+
+    for (size_t i = 0; i < size; i++) {
+        sum = (sum + table[i]) & 0xff;
+    }
+    return (uint8_t)((0x100 - sum) & 0xff);
 }
 
 static void efi_image_reset(VibtaniumEfiImage *image)
@@ -515,9 +545,9 @@ enum {
         EFI_FILE_SERVICE_BASE + VIBTANIUM_EFI_FILE_SERVICE_COUNT,
 };
 
-static const uint8_t efi_loaded_image_guid[16] = {
-    0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11,
-    0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
+static const uint8_t efi_sal_system_table_guid[16] = {
+    0x32, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11,
+    0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
 };
 
 static void write_utf16_ascii(uint8_t *blob, size_t size, uint64_t address,
@@ -553,6 +583,44 @@ static void write_loaded_image(uint8_t *blob, size_t size,
     blob_wr32(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 84, 2);
 }
 
+static void write_configuration_table(uint8_t *blob, size_t size)
+{
+    write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE,
+               efi_sal_system_table_guid);
+    blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 16,
+              VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+}
+
+static void write_sal_system_table(uint8_t *blob, size_t size)
+{
+    uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_SAL_SYSTEM_TABLE,
+                              SAL_SYSTEM_TABLE_LENGTH);
+    uint8_t *entry = table + SAL_SYSTEM_TABLE_HEADER_LENGTH;
+
+    wr32(table, 0x5f545353); /* "SST_" */
+    wr32(table + 4, SAL_SYSTEM_TABLE_LENGTH);
+    table[8] = 1; /* SAL revision minor. */
+    table[9] = 0; /* SAL revision major. */
+    table[10] = SAL_SYSTEM_TABLE_ENTRY_COUNT;
+    table[11] = 0;
+    write_fixed_ascii(table + 24, 32, "Vibtanium");
+    write_fixed_ascii(table + 56, 32, "Vibtanium IA-64");
+
+    entry[0] = 0; /* SAL_DESC_ENTRY_POINT */
+    wr64(entry + 8, VIBTANIUM_EFI_PAL_PROC);
+    wr64(entry + 16, VIBTANIUM_EFI_SAL_PROC);
+    wr64(entry + 24, VIBTANIUM_EFI_SAL_GP);
+    table[12] = sal_checksum(table, SAL_SYSTEM_TABLE_LENGTH);
+
+    /*
+     * PAL/SAL procedure entry points may be reached through PAL's static
+     * br.cond calling convention, which does not allocate a stacked frame.
+     */
+    write_branch_gate(blob, size, VIBTANIUM_EFI_PAL_PROC);
+    write_branch_gate(blob, size, VIBTANIUM_EFI_SAL_PROC);
+    blob_wr64(blob, size, VIBTANIUM_EFI_SAL_GP, 0);
+}
+
 static void write_system_table(uint8_t *blob, size_t size)
 {
     uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE, 120);
@@ -576,7 +644,7 @@ static void write_system_table(uint8_t *blob, size_t size)
               VIBTANIUM_EFI_RUNTIME_SERVICES);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 96,
               VIBTANIUM_EFI_BOOT_SERVICES);
-    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 0);
+    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 1);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 112,
               VIBTANIUM_EFI_CONFIGURATION_TABLE);
     write_table_header(table, 120, 0x5453595320494249ULL);
@@ -704,9 +772,9 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                         0x56524553544e5552ULL,
                         EFI_RUNTIME_SERVICE_BASE,
                         VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT, -1);
+    write_configuration_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    write_sal_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
-    write_guid(blob, VIBTANIUM_EFI_BLOB_SIZE, VIBTANIUM_EFI_CONFIGURATION_TABLE,
-               efi_loaded_image_guid);
 
     return blob;
 }
@@ -720,6 +788,11 @@ void vibtanium_efi_prepare_cpu(CPUIA64State *env,
 
     env->ip = image->entry;
     env->cr[IA64_CR_IIP] = image->entry;
+    /*
+     * EFI/SAL hand off to OS loaders in the OS register bank. Linux/ia64
+     * preserves ELILO's boot-parameter pointer through banked r28.
+     */
+    env->psr |= IA64_PSR_BN_BIT;
     ia64_write_gr(env, 0, 0);
     ia64_write_gr(env, 1, image->global_pointer);
     ia64_write_gr(env, 12,

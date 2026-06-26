@@ -177,6 +177,7 @@ typedef struct IA64IntegerExtendInstruction {
 } IA64IntegerExtendInstruction;
 
 void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env);
+void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env);
 
 const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status);
 bool ia64_exec_smoke_slot_supported(IA64SlotType type, uint64_t raw);
@@ -241,6 +242,10 @@ bool ia64_slot_is_m_mov_to_control(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_mov_to_control(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_mov_from_control(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_mov_from_control(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_m_mov_from_processor_identifier(IA64SlotType type,
+                                                  uint64_t raw);
+bool ia64_exec_m_mov_from_processor_identifier(CPUIA64State *env,
+                                               uint64_t raw);
 bool ia64_slot_is_m_insert_translation(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw);

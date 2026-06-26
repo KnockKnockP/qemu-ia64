@@ -25,6 +25,19 @@ static uint64_t ia64_default_region_register(unsigned index)
     return ((uint64_t)(index & 0x00ffffff) << 8) | (UINT64_C(12) << 2);
 }
 
+void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env)
+{
+    if (!env) {
+        return;
+    }
+
+    env->cpuid[0] = UINT64_C(0x49656e69756e6547);
+    env->cpuid[1] = UINT64_C(0x000000006c65746e);
+    env->cpuid[2] = 0;
+    env->cpuid[3] = (UINT64_C(2) << 32) | 4;
+    env->cpuid[4] = (UINT64_C(1) << 32) | (UINT64_C(1) << 33);
+}
+
 void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
 {
     memset(env, 0, offsetof(CPUIA64State, end_reset_fields));
@@ -53,6 +66,7 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
     for (unsigned i = 0; i < IA64_RR_COUNT; i++) {
         env->rr[i] = ia64_default_region_register(i);
     }
+    ia64_cpu_init_synthetic_cpuid(env);
 
     env->cr[IA64_CR_IPSR] = env->psr;
     env->cr[IA64_CR_IIP] = env->ip;
@@ -1062,6 +1076,35 @@ bool ia64_exec_m_mov_from_control(CPUIA64State *env, uint64_t raw)
     control = (raw >> 20) & 0x7f;
     ia64_write_gr(env, target,
                   control < IA64_CR_COUNT ? env->cr[control] : 0);
+    return true;
+}
+
+bool ia64_slot_is_m_mov_from_processor_identifier(IA64SlotType type,
+                                                  uint64_t raw)
+{
+    return type == IA64_SLOT_TYPE_M &&
+           ia64_slot_major_opcode(raw) == 0x1 &&
+           ((raw >> 33) & 0x7) == 0 &&
+           ((raw >> 27) & 0x3f) == 0x17;
+}
+
+bool ia64_exec_m_mov_from_processor_identifier(CPUIA64State *env,
+                                               uint64_t raw)
+{
+    uint32_t target;
+    uint32_t selector_reg;
+    uint64_t selector;
+
+    if (!env || !ia64_slot_is_m_mov_from_processor_identifier(
+            IA64_SLOT_TYPE_M, raw)) {
+        return false;
+    }
+
+    target = (raw >> 6) & 0x7f;
+    selector_reg = (raw >> 20) & 0x7f;
+    selector = ia64_read_gr(env, selector_reg);
+    ia64_write_gr(env, target,
+                  selector < IA64_CPUID_COUNT ? env->cpuid[selector] : 0);
     return true;
 }
 

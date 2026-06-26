@@ -368,6 +368,7 @@ static void vibtanium_init(MachineState *machine)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
+    uint64_t kernel_alias_size;
 
     if (machine->ram_size > VIBTANIUM_RAM_LIMIT) {
         error_report("vibtanium RAM must fit below the placeholder MMIO window "
@@ -375,10 +376,24 @@ static void vibtanium_init(MachineState *machine)
                      (uint64_t)VIBTANIUM_RAM_LIMIT);
         exit(1);
     }
+    if (machine->ram_size <= VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET) {
+        error_report("vibtanium RAM must be larger than the IA-64 kernel "
+                     "alias offset 0x%" PRIx64,
+                     (uint64_t)VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET);
+        exit(1);
+    }
 
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
 
     memory_region_add_subregion(sysmem, VIBTANIUM_RAM_BASE, machine->ram);
+    kernel_alias_size = machine->ram_size - VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET;
+    memory_region_init_alias(&vms->kernel_alias, OBJECT(machine),
+                             "vibtanium.kernel-region-offset-alias",
+                             machine->ram,
+                             VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET,
+                             kernel_alias_size);
+    memory_region_add_subregion(sysmem, VIBTANIUM_KERNEL_ALIAS_BASE,
+                                &vms->kernel_alias);
 
     qemu_init_irq_child(OBJECT(machine), "uart-irq", &vms->uart_irq,
                         vibtanium_uart_irq, vms, 0);

@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/cputlb.h"
+#include "exec-smoke.h"
 #include "migration/vmstate.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
@@ -138,6 +139,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     if (version_id < 2 && (env->psr & IA64_PSR_BN_BIT)) {
         memcpy(env->banked_gr, &env->gr[16], sizeof(env->banked_gr));
     }
+    ia64_cpu_init_synthetic_cpuid(env);
     env->gr[0] = 0;
     env->pr |= 1;
     return 0;

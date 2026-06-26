@@ -20,6 +20,7 @@
 #define SYNTHETIC_RELOC_RVA 0x1180
 #define SYNTHETIC_IMAGE_SIZE 0x2000
 #define SYNTHETIC_GP_RVA 0x1800
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 
 static void store_le16(uint8_t *p, uint16_t value)
 {
@@ -62,6 +63,16 @@ static uint32_t load_le32(const uint8_t *p)
     return value;
 }
 
+static uint8_t byte_sum(const uint8_t *p, size_t size)
+{
+    uint32_t sum = 0;
+
+    for (size_t i = 0; i < size; i++) {
+        sum = (sum + p[i]) & 0xff;
+    }
+    return sum;
+}
+
 static const uint8_t *firmware_ptr(const uint8_t *blob, uint64_t address)
 {
     g_assert_cmphex(address, >=, VIBTANIUM_EFI_BLOB_BASE);
@@ -69,6 +80,11 @@ static const uint8_t *firmware_ptr(const uint8_t *blob, uint64_t address)
                     VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE);
     return blob + (address - VIBTANIUM_EFI_BLOB_BASE);
 }
+
+static const uint8_t efi_sal_system_table_guid[16] = {
+    0x32, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11,
+    0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
+};
 
 static void make_synthetic_ia64_pe(uint8_t *pe,
                                    uint16_t machine,
@@ -211,6 +227,12 @@ static void test_prepare_cpu_entry_abi(void)
                     VIBTANIUM_EFI_STACK_SIZE - 16);
     g_assert_cmphex(ia64_read_gr(&env, 32), ==, VIBTANIUM_EFI_IMAGE_HANDLE);
     g_assert_cmphex(ia64_read_gr(&env, 33), ==, VIBTANIUM_EFI_SYSTEM_TABLE);
+    g_assert_cmphex(env.psr & IA64_PSR_BN_BIT, ==, IA64_PSR_BN_BIT);
+    ia64_write_gr(&env, 28, 0x123456789abcdef0ULL);
+    env.psr &= ~IA64_PSR_BN_BIT;
+    g_assert_cmphex(ia64_read_gr(&env, 28), ==, 0);
+    env.psr |= IA64_PSR_BN_BIT;
+    g_assert_cmphex(ia64_read_gr(&env, 28), ==, 0x123456789abcdef0ULL);
     g_assert_cmphex(env.ar[IA64_AR_BSP], ==,
                     VIBTANIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==,
@@ -239,6 +261,9 @@ static void test_builds_guest_firmware_tables(void)
     uint64_t boot_services;
     uint64_t handle_protocol_descriptor;
     uint64_t handle_protocol_gate;
+    const uint8_t *config_entry;
+    const uint8_t *sal_table;
+    const uint8_t *sal_entry;
     unsigned block_io_base;
     unsigned simplefs_base;
 
@@ -247,6 +272,12 @@ static void test_builds_guest_firmware_tables(void)
     boot_services = load_le64(firmware_ptr(
         blob, VIBTANIUM_EFI_SYSTEM_TABLE + 96));
     g_assert_cmphex(boot_services, ==, VIBTANIUM_EFI_BOOT_SERVICES);
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob, VIBTANIUM_EFI_SYSTEM_TABLE + 104)),
+                    ==, 1);
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob, VIBTANIUM_EFI_SYSTEM_TABLE + 112)),
+                    ==, VIBTANIUM_EFI_CONFIGURATION_TABLE);
 
     handle_protocol_descriptor = load_le64(firmware_ptr(
         blob,
@@ -288,6 +319,34 @@ static void test_builds_guest_firmware_tables(void)
                          VIBTANIUM_EFI_BOOT_SERVICES + 24 + 17 * 8)),
                     ==, 0);
     g_assert_cmphex(firmware_ptr(blob, handle_protocol_gate)[0], !=, 0);
+
+    config_entry = firmware_ptr(blob, VIBTANIUM_EFI_CONFIGURATION_TABLE);
+    g_assert_cmpmem(config_entry, 16, efi_sal_system_table_guid, 16);
+    g_assert_cmphex(load_le64(config_entry + 16),
+                    ==, VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+
+    sal_table = firmware_ptr(blob, VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+    g_assert_cmphex(load_le32(sal_table), ==, 0x5f545353);
+    g_assert_cmphex(load_le32(sal_table + 4), ==, 144);
+    g_assert_cmpuint(sal_table[8], ==, 1);
+    g_assert_cmpuint(sal_table[9], ==, 0);
+    g_assert_cmpuint(sal_table[10] | (sal_table[11] << 8), ==, 1);
+    g_assert_cmphex(byte_sum(sal_table, 144), ==, 0);
+    sal_entry = sal_table + 96;
+    g_assert_cmpuint(sal_entry[0], ==, 0);
+    g_assert_cmphex(load_le64(sal_entry + 8), ==, VIBTANIUM_EFI_PAL_PROC);
+    g_assert_cmphex(load_le64(sal_entry + 16), ==, VIBTANIUM_EFI_SAL_PROC);
+    g_assert_cmphex(load_le64(sal_entry + 24), ==, VIBTANIUM_EFI_SAL_GP);
+    g_assert_cmphex(firmware_ptr(blob, VIBTANIUM_EFI_PAL_PROC)[0], !=, 0);
+    g_assert_cmphex(firmware_ptr(blob, VIBTANIUM_EFI_SAL_PROC)[0], !=, 0);
+    g_assert_cmpint(memcmp(firmware_ptr(blob, VIBTANIUM_EFI_PAL_PROC),
+                           firmware_ptr(blob, VIBTANIUM_EFI_SAL_PROC), 16),
+                    ==, 0);
+    g_assert_cmpint(memcmp(firmware_ptr(blob, VIBTANIUM_EFI_PAL_PROC),
+                           firmware_ptr(blob, handle_protocol_gate), 16),
+                    !=, 0);
+    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_SAL_GP)),
+                    ==, 0);
 
     block_io_base = VIBTANIUM_EFI_BOOT_SERVICE_COUNT +
                     VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT +

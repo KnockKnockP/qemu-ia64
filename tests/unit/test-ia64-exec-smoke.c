@@ -61,6 +61,10 @@ static void test_reset(void)
     g_assert_cmphex(env.fr[0].raw[1], ==, 0x1ffff);
     g_assert_cmphex(env.fr[1].raw[0], ==, 0x8000000000000000ULL);
     g_assert_cmphex(env.fr[1].raw[1], ==, 0xffff);
+    g_assert_cmphex(env.cpuid[0], ==, 0x49656e69756e6547ULL);
+    g_assert_cmphex(env.cpuid[1], ==, 0x000000006c65746eULL);
+    g_assert_cmphex(env.cpuid[3], ==, 0x0000000200000004ULL);
+    g_assert_cmphex(env.cpuid[4], ==, 0x0000000300000000ULL);
 }
 
 static void test_banked_static_general_registers(void)
@@ -312,6 +316,7 @@ static void test_m_unit_system_memory_management(void)
         (1ULL << 37) | (0x1aULL << 27) | (2ULL << 20) | (4ULL << 6);
     const uint64_t kernel_ttag_r5_r2_raw =
         (1ULL << 37) | (0x1bULL << 27) | (2ULL << 20) | (5ULL << 6);
+    const uint64_t kernel_mov_r15_cpuid_r0_raw = 0x020b80003c0ULL;
     const uint64_t kernel_mov_m_ar_rsc_0_raw = 0x00141000000ULL;
     const uint64_t kernel_loadrs_raw = 0x00050000000ULL;
     CPUIA64State env;
@@ -428,6 +433,20 @@ static void test_m_unit_system_memory_management(void)
                                                   kernel_ttag_r5_r2_raw));
     g_assert_cmphex(ia64_read_gr(&env, 5),
                     ==, ia64_vhpt_tag(&env, 0xa000000100bc0000ULL));
+
+    g_assert_true(ia64_slot_is_m_mov_from_processor_identifier(
+        IA64_SLOT_TYPE_M, kernel_mov_r15_cpuid_r0_raw));
+    g_assert_true(ia64_exec_m_mov_from_processor_identifier(
+        &env, kernel_mov_r15_cpuid_r0_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 15), ==,
+                    0x49656e69756e6547ULL);
+
+    ia64_write_gr(&env, 19, 1);
+    g_assert_true(ia64_exec_m_mov_from_processor_identifier(
+        &env, (1ULL << 37) | (0x17ULL << 27) | (19ULL << 20) |
+              (16ULL << 6)));
+    g_assert_cmphex(ia64_read_gr(&env, 16), ==,
+                    0x000000006c65746eULL);
 
     env.ar[IA64_AR_RSC] = 0x3;
     env.rse.rsc = 0x3;
