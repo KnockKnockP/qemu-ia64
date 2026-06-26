@@ -16,6 +16,11 @@
 #include "system/system.h"
 #include "target/ia64/exec-smoke.h"
 
+#define VIBTANIUM_DEFAULT_LINUX_APPEND \
+    "earlycon=uart8250,io,0x3f8,115200n8"
+#define VIBTANIUM_LEGACY_COM1_BASE 0x3f8
+#define VIBTANIUM_LEGACY_COM1_SIZE 8
+
 static void vibtanium_uart_irq(void *opaque, int n, int level)
 {
     /*
@@ -26,6 +31,99 @@ static void vibtanium_uart_irq(void *opaque, int n, int level)
     (void)n;
     (void)level;
 }
+
+static unsigned vibtanium_sparse_io_port(hwaddr offset)
+{
+    return ((unsigned)(offset >> 12) << 2) | (offset & 0x3);
+}
+
+static hwaddr vibtanium_sparse_io_offset(unsigned port)
+{
+    return (((hwaddr)port >> 2) << 12) | (port & 0xfff);
+}
+
+static uint64_t vibtanium_io_port_default_read(unsigned size)
+{
+    switch (size) {
+    case 1:
+        return UINT8_MAX;
+    case 2:
+        return UINT16_MAX;
+    case 4:
+        return UINT32_MAX;
+    default:
+        return UINT64_MAX;
+    }
+}
+
+static bool vibtanium_sparse_io_offset_valid(hwaddr offset, unsigned size)
+{
+    unsigned port;
+
+    if (offset >= VIBTANIUM_IO_PORT_SIZE || size == 0 || size > 4) {
+        return false;
+    }
+
+    port = vibtanium_sparse_io_port(offset);
+    if (vibtanium_sparse_io_offset(port) != offset ||
+        port + size > UINT16_MAX + 1) {
+        return false;
+    }
+
+    return true;
+}
+
+static uint64_t vibtanium_io_port_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    unsigned port;
+
+    if (!vibtanium_sparse_io_offset_valid(offset, size)) {
+        return vibtanium_io_port_default_read(size);
+    }
+
+    port = vibtanium_sparse_io_port(offset);
+    if (size == 1 && port >= VIBTANIUM_LEGACY_COM1_BASE &&
+        port < VIBTANIUM_LEGACY_COM1_BASE + VIBTANIUM_LEGACY_COM1_SIZE) {
+        return serial_io_ops.read(&vms->uart->serial,
+                                  port - VIBTANIUM_LEGACY_COM1_BASE, size);
+    }
+
+    return vibtanium_io_port_default_read(size);
+}
+
+static void vibtanium_io_port_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    unsigned port;
+
+    if (!vibtanium_sparse_io_offset_valid(offset, size)) {
+        return;
+    }
+
+    port = vibtanium_sparse_io_port(offset);
+    if (size == 1 && port >= VIBTANIUM_LEGACY_COM1_BASE &&
+        port < VIBTANIUM_LEGACY_COM1_BASE + VIBTANIUM_LEGACY_COM1_SIZE) {
+        serial_io_ops.write(&vms->uart->serial,
+                            port - VIBTANIUM_LEGACY_COM1_BASE, value, size);
+    }
+}
+
+static const MemoryRegionOps vibtanium_io_port_ops = {
+    .read = vibtanium_io_port_read,
+    .write = vibtanium_io_port_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
 
 static uint64_t vibtanium_local_sapic_ipi_read(void *opaque, hwaddr offset,
                                                unsigned size)
@@ -169,6 +267,10 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     size_t firmware_blob_size = 0;
     const char *linux_append = machine->kernel_cmdline;
 
+    if (!linux_append || !linux_append[0]) {
+        linux_append = VIBTANIUM_DEFAULT_LINUX_APPEND;
+    }
+
     if (machine->ram_size <= image->load_base ||
         image->size > machine->ram_size - image->load_base) {
         error_report("IA-64 EFI app '%s' image size 0x%" PRIx64
@@ -181,8 +283,7 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
                                                       image, boot_media);
     vibtanium_efi_register_boot_media(boot_media);
-    vibtanium_efi_set_linux_cmdline_append(
-        linux_append && linux_append[0] ? linux_append : NULL);
+    vibtanium_efi_set_linux_cmdline_append(linux_append);
     rom_add_blob_fixed("vibtanium.efi-tables", firmware_blob,
                        firmware_blob_size, VIBTANIUM_EFI_BLOB_BASE);
     rom_add_blob_fixed("vibtanium.efi-app", image->data, image->size,
@@ -447,8 +548,14 @@ static void vibtanium_init(MachineState *machine)
 
     qemu_init_irq_child(OBJECT(machine), "uart-irq", &vms->uart_irq,
                         vibtanium_uart_irq, vms, 0);
-    serial_mm_init(sysmem, VIBTANIUM_UART_BASE, 0, &vms->uart_irq, 115200,
-                   serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    vms->uart = serial_mm_init(sysmem, VIBTANIUM_UART_BASE, 0, &vms->uart_irq,
+                               115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    memory_region_init_io(&vms->io_port_space, OBJECT(machine),
+                          &vibtanium_io_port_ops, vms,
+                          "vibtanium.io-port-space",
+                          VIBTANIUM_IO_PORT_SIZE);
+    memory_region_add_subregion(sysmem, VIBTANIUM_IO_PORT_BASE,
+                                &vms->io_port_space);
 
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);

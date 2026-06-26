@@ -41,6 +41,16 @@ static void make_nop_mii_bundle(uint8_t *bundle)
                 IA64_SMOKE_NOP_RAW);
 }
 
+static uint64_t make_i2_packed_raw(uint8_t za, uint8_t zb,
+                                   uint8_t x2b, uint8_t x2c,
+                                   uint8_t r1, uint8_t r2, uint8_t r3)
+{
+    return (7ULL << 37) | ((uint64_t)za << 36) | (2ULL << 34) |
+           ((uint64_t)zb << 33) | ((uint64_t)x2c << 30) |
+           ((uint64_t)x2b << 28) | ((uint64_t)r3 << 20) |
+           ((uint64_t)r2 << 13) | ((uint64_t)r1 << 6);
+}
+
 static void test_reset(void)
 {
     CPUIA64State env;
@@ -699,6 +709,99 @@ static void test_i_unit_mux_permutations(void)
                                      elilo_mux1_r33_r33_bcast0_raw));
     g_assert_true(ia64_exec_i_mux(&env, elilo_mux1_r33_r33_bcast0_raw));
     g_assert_cmphex(ia64_read_gr(&env, 33), ==, 0x8888888888888888ULL);
+}
+
+static void test_i_unit_packed_i2_frontier_mix4r(void)
+{
+    const uint64_t linux_mix4r_r2_r8_r8_raw = 0x0f880810080ULL;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_gr(&env, 8, 0x1122334455667788ULL);
+
+    g_assert_true(ia64_slot_is_i_packed_i2(IA64_SLOT_TYPE_I,
+                                           linux_mix4r_r2_r8_r8_raw));
+    g_assert_false(ia64_slot_is_i_mux(IA64_SLOT_TYPE_I,
+                                      linux_mix4r_r2_r8_r8_raw));
+    g_assert_true(ia64_exec_i_packed_i2(&env, linux_mix4r_r2_r8_r8_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 2), ==, 0x1122334411223344ULL);
+}
+
+typedef struct PackedI2Case {
+    const char *name;
+    uint8_t za;
+    uint8_t zb;
+    uint8_t x2b;
+    uint8_t x2c;
+    uint64_t source2;
+    uint64_t source3;
+    uint64_t expected;
+} PackedI2Case;
+
+static void test_i_unit_packed_i2_operations(void)
+{
+    static const PackedI2Case cases[] = {
+        { "mix1.r", 0, 0, 0, 2, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf707f505f303f101ULL },
+        { "mix1.l", 0, 0, 2, 2, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf606f404f202f000ULL },
+        { "mix2.r", 0, 1, 0, 2, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf7f60706f3f20302ULL },
+        { "mix2.l", 0, 1, 2, 2, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf5f40504f1f00100ULL },
+        { "mix4.r", 1, 0, 0, 2, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf7f6f5f407060504ULL },
+        { "mix4.l", 1, 0, 2, 2, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf3f2f1f003020100ULL },
+        { "pack2.uss", 0, 1, 0, 0, 0x00ff007f0000ffffULL,
+          0x01900080ff7fff38ULL, 0xff7f0000ff800000ULL },
+        { "pack2.sss", 0, 1, 2, 0, 0x00ff007f0000ffffULL,
+          0x01900080ff7fff38ULL, 0x7f7f00ff7f7f8080ULL },
+        { "pack4.sss", 1, 0, 2, 0, 0x00007fffffff63c0ULL,
+          0xffff7fff00009c40ULL, 0x7fff800080007fffULL },
+        { "unpack1.h", 0, 0, 0, 1, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf303f202f101f000ULL },
+        { "unpack1.l", 0, 0, 2, 1, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf707f606f505f404ULL },
+        { "unpack2.h", 0, 1, 0, 1, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf3f20302f1f00100ULL },
+        { "unpack2.l", 0, 1, 2, 1, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf7f60706f5f40504ULL },
+        { "unpack4.h", 1, 0, 0, 1, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf3f2f1f003020100ULL },
+        { "unpack4.l", 1, 0, 2, 1, 0x0706050403020100ULL,
+          0xf7f6f5f4f3f2f1f0ULL, 0xf7f6f5f407060504ULL },
+        { "pmin1.u", 0, 0, 1, 0, 0x80017f00ff105522ULL,
+          0x7f0180ffff001133ULL, 0x7f017f00ff001122ULL },
+        { "pmax1.u", 0, 0, 1, 1, 0x80017f00ff105522ULL,
+          0x7f0180ffff001133ULL, 0x800180ffff105533ULL },
+        { "pmin2", 0, 1, 3, 0, 0xfe70012c000afffdULL,
+          0x01f4fed40014fffcULL, 0xfe70fed4000afffcULL },
+        { "pmax2", 0, 1, 3, 1, 0xfe70012c000afffdULL,
+          0x01f4fed40014fffcULL, 0x01f4012c0014fffdULL },
+        { "pmpy2.r", 0, 1, 1, 3, 0xfffb0004fffd0002ULL,
+          0xfff7fff800070006ULL, 0x0000002dffffffebULL },
+        { "pmpy2.l", 0, 1, 3, 3, 0xfffb0004fffd0002ULL,
+          0xfff7fff800070006ULL, 0xffffffe00000000cULL },
+        { "psad1", 0, 0, 3, 2, 0x0001020304050607ULL,
+          0x0706050403020100ULL, 0x20ULL },
+    };
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(cases); i++) {
+        const PackedI2Case *tc = &cases[i];
+        uint64_t raw = make_i2_packed_raw(tc->za, tc->zb, tc->x2b, tc->x2c,
+                                          10, 8, 9);
+        CPUIA64State env;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        ia64_write_gr(&env, 8, tc->source2);
+        ia64_write_gr(&env, 9, tc->source3);
+
+        g_test_message("checking %s", tc->name);
+        g_assert_true(ia64_slot_is_i_packed_i2(IA64_SLOT_TYPE_I, raw));
+        g_assert_true(ia64_exec_i_packed_i2(&env, raw));
+        g_assert_cmphex(ia64_read_gr(&env, 10), ==, tc->expected);
+    }
 }
 
 static void test_i_unit_variable_shifts(void)
@@ -1730,6 +1833,10 @@ int main(int argc, char **argv)
                     test_alu_logic_addp4_and_shladd);
     g_test_add_func("/ia64-exec-smoke/i-unit-mux-permutations",
                     test_i_unit_mux_permutations);
+    g_test_add_func("/ia64-exec-smoke/i-unit-packed-i2-frontier-mix4r",
+                    test_i_unit_packed_i2_frontier_mix4r);
+    g_test_add_func("/ia64-exec-smoke/i-unit-packed-i2-operations",
+                    test_i_unit_packed_i2_operations);
     g_test_add_func("/ia64-exec-smoke/i-unit-variable-shifts",
                     test_i_unit_variable_shifts);
     g_test_add_func("/ia64-exec-smoke/i-unit-bit-count",

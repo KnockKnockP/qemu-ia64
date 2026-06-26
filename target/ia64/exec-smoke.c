@@ -1997,6 +1997,371 @@ bool ia64_exec_alu_shladd(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
+typedef enum IA64PackedI2Op {
+    IA64_PACKED_I2_INVALID = 0,
+    IA64_PACKED_I2_MIX1_R,
+    IA64_PACKED_I2_MIX2_R,
+    IA64_PACKED_I2_MIX4_R,
+    IA64_PACKED_I2_MIX1_L,
+    IA64_PACKED_I2_MIX2_L,
+    IA64_PACKED_I2_MIX4_L,
+    IA64_PACKED_I2_PACK2_USS,
+    IA64_PACKED_I2_PACK2_SSS,
+    IA64_PACKED_I2_PACK4_SSS,
+    IA64_PACKED_I2_UNPACK1_H,
+    IA64_PACKED_I2_UNPACK2_H,
+    IA64_PACKED_I2_UNPACK4_H,
+    IA64_PACKED_I2_UNPACK1_L,
+    IA64_PACKED_I2_UNPACK2_L,
+    IA64_PACKED_I2_UNPACK4_L,
+    IA64_PACKED_I2_PMIN1_U,
+    IA64_PACKED_I2_PMAX1_U,
+    IA64_PACKED_I2_PMIN2,
+    IA64_PACKED_I2_PMAX2,
+    IA64_PACKED_I2_PMPY2_R,
+    IA64_PACKED_I2_PMPY2_L,
+    IA64_PACKED_I2_PSAD1,
+} IA64PackedI2Op;
+
+#define IA64_PACKED_I2_KEY(za, zb, x2b, x2c) \
+    ((((za) & 0x1) << 5) | (((zb) & 0x1) << 4) | \
+     (((x2b) & 0x3) << 2) | ((x2c) & 0x3))
+
+static IA64PackedI2Op ia64_decode_i_packed_i2_op(IA64SlotType type,
+                                                  uint64_t raw)
+{
+    uint8_t za;
+    uint8_t x2a;
+    uint8_t zb;
+    uint8_t ve;
+    uint8_t x2b;
+    uint8_t x2c;
+
+    if (type != IA64_SLOT_TYPE_I || ia64_slot_major_opcode(raw) != 0x7) {
+        return IA64_PACKED_I2_INVALID;
+    }
+
+    za = (raw >> 36) & 0x1;
+    x2a = (raw >> 34) & 0x3;
+    zb = (raw >> 33) & 0x1;
+    ve = (raw >> 32) & 0x1;
+    x2c = (raw >> 30) & 0x3;
+    x2b = (raw >> 28) & 0x3;
+
+    if (ve != 0 || x2a != 2) {
+        return IA64_PACKED_I2_INVALID;
+    }
+
+    switch (IA64_PACKED_I2_KEY(za, zb, x2b, x2c)) {
+    case IA64_PACKED_I2_KEY(0, 0, 0, 2):
+        return IA64_PACKED_I2_MIX1_R;
+    case IA64_PACKED_I2_KEY(0, 1, 0, 2):
+        return IA64_PACKED_I2_MIX2_R;
+    case IA64_PACKED_I2_KEY(1, 0, 0, 2):
+        return IA64_PACKED_I2_MIX4_R;
+    case IA64_PACKED_I2_KEY(0, 0, 2, 2):
+        return IA64_PACKED_I2_MIX1_L;
+    case IA64_PACKED_I2_KEY(0, 1, 2, 2):
+        return IA64_PACKED_I2_MIX2_L;
+    case IA64_PACKED_I2_KEY(1, 0, 2, 2):
+        return IA64_PACKED_I2_MIX4_L;
+    case IA64_PACKED_I2_KEY(0, 1, 0, 0):
+        return IA64_PACKED_I2_PACK2_USS;
+    case IA64_PACKED_I2_KEY(0, 1, 2, 0):
+        return IA64_PACKED_I2_PACK2_SSS;
+    case IA64_PACKED_I2_KEY(1, 0, 2, 0):
+        return IA64_PACKED_I2_PACK4_SSS;
+    case IA64_PACKED_I2_KEY(0, 0, 0, 1):
+        return IA64_PACKED_I2_UNPACK1_H;
+    case IA64_PACKED_I2_KEY(0, 1, 0, 1):
+        return IA64_PACKED_I2_UNPACK2_H;
+    case IA64_PACKED_I2_KEY(1, 0, 0, 1):
+        return IA64_PACKED_I2_UNPACK4_H;
+    case IA64_PACKED_I2_KEY(0, 0, 2, 1):
+        return IA64_PACKED_I2_UNPACK1_L;
+    case IA64_PACKED_I2_KEY(0, 1, 2, 1):
+        return IA64_PACKED_I2_UNPACK2_L;
+    case IA64_PACKED_I2_KEY(1, 0, 2, 1):
+        return IA64_PACKED_I2_UNPACK4_L;
+    case IA64_PACKED_I2_KEY(0, 0, 1, 0):
+        return IA64_PACKED_I2_PMIN1_U;
+    case IA64_PACKED_I2_KEY(0, 0, 1, 1):
+        return IA64_PACKED_I2_PMAX1_U;
+    case IA64_PACKED_I2_KEY(0, 1, 3, 0):
+        return IA64_PACKED_I2_PMIN2;
+    case IA64_PACKED_I2_KEY(0, 1, 3, 1):
+        return IA64_PACKED_I2_PMAX2;
+    case IA64_PACKED_I2_KEY(0, 1, 1, 3):
+        return IA64_PACKED_I2_PMPY2_R;
+    case IA64_PACKED_I2_KEY(0, 1, 3, 3):
+        return IA64_PACKED_I2_PMPY2_L;
+    case IA64_PACKED_I2_KEY(0, 0, 3, 2):
+        return IA64_PACKED_I2_PSAD1;
+    default:
+        return IA64_PACKED_I2_INVALID;
+    }
+}
+
+bool ia64_slot_is_i_packed_i2(IA64SlotType type, uint64_t raw)
+{
+    return ia64_decode_i_packed_i2_op(type, raw) != IA64_PACKED_I2_INVALID;
+}
+
+static uint8_t ia64_packed_u8(uint64_t value, unsigned lane)
+{
+    return (value >> (lane * 8)) & 0xff;
+}
+
+static uint16_t ia64_packed_u16(uint64_t value, unsigned lane)
+{
+    return (value >> (lane * 16)) & 0xffff;
+}
+
+static uint32_t ia64_packed_u32(uint64_t value, unsigned lane)
+{
+    return (value >> (lane * 32)) & 0xffffffffU;
+}
+
+static uint64_t ia64_packed_set_u8(uint64_t result, unsigned lane,
+                                   uint8_t value)
+{
+    return result | ((uint64_t)value << (lane * 8));
+}
+
+static uint64_t ia64_packed_set_u16(uint64_t result, unsigned lane,
+                                    uint16_t value)
+{
+    return result | ((uint64_t)value << (lane * 16));
+}
+
+static uint64_t ia64_packed_set_u32(uint64_t result, unsigned lane,
+                                    uint32_t value)
+{
+    return result | ((uint64_t)value << (lane * 32));
+}
+
+static uint8_t ia64_saturate_signed_i8(int64_t value)
+{
+    if (value > 127) {
+        return 0x7f;
+    }
+    if (value < -128) {
+        return 0x80;
+    }
+    return (uint8_t)(int8_t)value;
+}
+
+static uint8_t ia64_saturate_unsigned_i8(int64_t value)
+{
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 255) {
+        return 0xff;
+    }
+    return value;
+}
+
+static uint16_t ia64_saturate_signed_i16(int64_t value)
+{
+    if (value > 32767) {
+        return 0x7fff;
+    }
+    if (value < -32768) {
+        return 0x8000;
+    }
+    return (uint16_t)(int16_t)value;
+}
+
+bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
+{
+    IA64PackedI2Op op;
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint64_t source2;
+    uint64_t source3;
+    uint64_t result = 0;
+
+    if (!env) {
+        return false;
+    }
+
+    op = ia64_decode_i_packed_i2_op(IA64_SLOT_TYPE_I, raw);
+    if (op == IA64_PACKED_I2_INVALID) {
+        return false;
+    }
+
+    r1 = (raw >> 6) & 0x7f;
+    r2 = (raw >> 13) & 0x7f;
+    r3 = (raw >> 20) & 0x7f;
+    source2 = ia64_read_gr(env, r2);
+    source3 = ia64_read_gr(env, r3);
+
+    switch (op) {
+    case IA64_PACKED_I2_MIX1_R:
+    case IA64_PACKED_I2_MIX1_L: {
+        unsigned first_lane = op == IA64_PACKED_I2_MIX1_R ? 1 : 0;
+
+        for (unsigned pair = 0; pair < 4; pair++) {
+            unsigned source_lane = first_lane + pair * 2;
+
+            result = ia64_packed_set_u8(
+                result, pair * 2, ia64_packed_u8(source2, source_lane));
+            result = ia64_packed_set_u8(
+                result, pair * 2 + 1, ia64_packed_u8(source3, source_lane));
+        }
+        break;
+    }
+    case IA64_PACKED_I2_MIX2_R:
+    case IA64_PACKED_I2_MIX2_L: {
+        unsigned first_lane = op == IA64_PACKED_I2_MIX2_R ? 1 : 0;
+
+        for (unsigned pair = 0; pair < 2; pair++) {
+            unsigned source_lane = first_lane + pair * 2;
+
+            result = ia64_packed_set_u16(
+                result, pair * 2, ia64_packed_u16(source2, source_lane));
+            result = ia64_packed_set_u16(
+                result, pair * 2 + 1, ia64_packed_u16(source3, source_lane));
+        }
+        break;
+    }
+    case IA64_PACKED_I2_MIX4_R:
+    case IA64_PACKED_I2_MIX4_L: {
+        unsigned source_lane = op == IA64_PACKED_I2_MIX4_R ? 1 : 0;
+
+        result = ia64_packed_set_u32(
+            result, 0, ia64_packed_u32(source2, source_lane));
+        result = ia64_packed_set_u32(
+            result, 1, ia64_packed_u32(source3, source_lane));
+        break;
+    }
+    case IA64_PACKED_I2_PACK2_USS:
+    case IA64_PACKED_I2_PACK2_SSS:
+        for (unsigned lane = 0; lane < 4; lane++) {
+            int16_t value = ia64_packed_u16(source3, lane);
+            uint8_t packed = op == IA64_PACKED_I2_PACK2_USS
+                ? ia64_saturate_unsigned_i8(value)
+                : ia64_saturate_signed_i8(value);
+
+            result = ia64_packed_set_u8(result, lane, packed);
+        }
+        for (unsigned lane = 0; lane < 4; lane++) {
+            int16_t value = ia64_packed_u16(source2, lane);
+            uint8_t packed = op == IA64_PACKED_I2_PACK2_USS
+                ? ia64_saturate_unsigned_i8(value)
+                : ia64_saturate_signed_i8(value);
+
+            result = ia64_packed_set_u8(result, lane + 4, packed);
+        }
+        break;
+    case IA64_PACKED_I2_PACK4_SSS:
+        for (unsigned lane = 0; lane < 2; lane++) {
+            int32_t value = ia64_packed_u32(source3, lane);
+
+            result = ia64_packed_set_u16(
+                result, lane, ia64_saturate_signed_i16(value));
+        }
+        for (unsigned lane = 0; lane < 2; lane++) {
+            int32_t value = ia64_packed_u32(source2, lane);
+
+            result = ia64_packed_set_u16(
+                result, lane + 2, ia64_saturate_signed_i16(value));
+        }
+        break;
+    case IA64_PACKED_I2_UNPACK1_H:
+    case IA64_PACKED_I2_UNPACK1_L: {
+        unsigned first_lane = op == IA64_PACKED_I2_UNPACK1_H ? 0 : 4;
+
+        for (unsigned pair = 0; pair < 4; pair++) {
+            unsigned source_lane = first_lane + pair;
+
+            result = ia64_packed_set_u8(
+                result, pair * 2, ia64_packed_u8(source2, source_lane));
+            result = ia64_packed_set_u8(
+                result, pair * 2 + 1, ia64_packed_u8(source3, source_lane));
+        }
+        break;
+    }
+    case IA64_PACKED_I2_UNPACK2_H:
+    case IA64_PACKED_I2_UNPACK2_L: {
+        unsigned first_lane = op == IA64_PACKED_I2_UNPACK2_H ? 0 : 2;
+
+        for (unsigned pair = 0; pair < 2; pair++) {
+            unsigned source_lane = first_lane + pair;
+
+            result = ia64_packed_set_u16(
+                result, pair * 2, ia64_packed_u16(source2, source_lane));
+            result = ia64_packed_set_u16(
+                result, pair * 2 + 1, ia64_packed_u16(source3, source_lane));
+        }
+        break;
+    }
+    case IA64_PACKED_I2_UNPACK4_H:
+    case IA64_PACKED_I2_UNPACK4_L: {
+        unsigned source_lane = op == IA64_PACKED_I2_UNPACK4_H ? 0 : 1;
+
+        result = ia64_packed_set_u32(
+            result, 0, ia64_packed_u32(source2, source_lane));
+        result = ia64_packed_set_u32(
+            result, 1, ia64_packed_u32(source3, source_lane));
+        break;
+    }
+    case IA64_PACKED_I2_PMIN1_U:
+    case IA64_PACKED_I2_PMAX1_U:
+        for (unsigned lane = 0; lane < 8; lane++) {
+            uint8_t left = ia64_packed_u8(source2, lane);
+            uint8_t right = ia64_packed_u8(source3, lane);
+            uint8_t chosen = op == IA64_PACKED_I2_PMIN1_U
+                ? MIN(left, right)
+                : MAX(left, right);
+
+            result = ia64_packed_set_u8(result, lane, chosen);
+        }
+        break;
+    case IA64_PACKED_I2_PMIN2:
+    case IA64_PACKED_I2_PMAX2:
+        for (unsigned lane = 0; lane < 4; lane++) {
+            int16_t left = ia64_packed_u16(source2, lane);
+            int16_t right = ia64_packed_u16(source3, lane);
+            int16_t chosen = op == IA64_PACKED_I2_PMIN2
+                ? MIN(left, right)
+                : MAX(left, right);
+
+            result = ia64_packed_set_u16(result, lane, chosen);
+        }
+        break;
+    case IA64_PACKED_I2_PMPY2_R:
+    case IA64_PACKED_I2_PMPY2_L: {
+        unsigned first_lane = op == IA64_PACKED_I2_PMPY2_R ? 1 : 0;
+
+        for (unsigned lane = 0; lane < 2; lane++) {
+            unsigned source_lane = first_lane + lane * 2;
+            int16_t left = ia64_packed_u16(source2, source_lane);
+            int16_t right = ia64_packed_u16(source3, source_lane);
+
+            result = ia64_packed_set_u32(
+                result, lane, (uint32_t)((int32_t)left * (int32_t)right));
+        }
+        break;
+    }
+    case IA64_PACKED_I2_PSAD1:
+        for (unsigned lane = 0; lane < 8; lane++) {
+            int delta = ia64_packed_u8(source2, lane) -
+                        ia64_packed_u8(source3, lane);
+
+            result += delta < 0 ? -delta : delta;
+        }
+        break;
+    default:
+        return false;
+    }
+
+    ia64_write_gr(env, r1, result);
+    return true;
+}
+
 bool ia64_slot_is_i_mux(IA64SlotType type, uint64_t raw)
 {
     uint8_t za;

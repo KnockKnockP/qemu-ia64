@@ -10,6 +10,7 @@
 #include "hw/core/cpu.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
+#include "hw/ia64/vibtanium.h"
 #include "mem.h"
 #include "qemu/error-report.h"
 #include "trace-target_ia64.h"
@@ -79,8 +80,10 @@ enum {
 #define EFI_LINUX_APPEND_SIZE UINT64_C(0x00001000)
 #define EFI_PAGE_ALLOC_BASE UINT64_C(0x03000000)
 #define EFI_PAGE_ALLOC_SIZE (EFI_LINUX_APPEND_BASE - EFI_PAGE_ALLOC_BASE)
-#define EFI_LOW_CONVENTIONAL_BASE UINT64_C(0x00100000)
-#define EFI_LOW_CONVENTIONAL_PAGES UINT64_C(0x00000f00)
+#define EFI_RUNTIME_GRANULE_BASE UINT64_C(0x00000000)
+#define EFI_RUNTIME_GRANULE_SIZE UINT64_C(0x01000000)
+#define EFI_LOW_CONVENTIONAL_BASE EFI_RUNTIME_GRANULE_SIZE
+#define EFI_LOW_CONVENTIONAL_PAGES UINT64_C(0)
 #define EFI_HIGH_CONVENTIONAL_BASE UINT64_C(0x04000000)
 #define EFI_HIGH_CONVENTIONAL_PAGES \
     ((EFI_GUEST_RAM_TOP - EFI_HIGH_CONVENTIONAL_BASE) / EFI_PAGE_SIZE)
@@ -110,6 +113,7 @@ enum {
     EFI_RUNTIME_SERVICES_DATA = 6,
     EFI_CONVENTIONAL_MEMORY = 7,
     EFI_ACPI_RECLAIM_MEMORY = 9,
+    EFI_MEMORY_MAPPED_IO_PORT_SPACE = 12,
 };
 
 typedef enum IA64PalProcedureId {
@@ -173,6 +177,7 @@ enum {
     EFI_ALLOCATE_ADDRESS = 2,
 };
 
+#define EFI_MEMORY_UC UINT64_C(0x0000000000000001)
 #define EFI_MEMORY_WB UINT64_C(0x0000000000000008)
 #define EFI_MEMORY_RUNTIME UINT64_C(0x8000000000000000)
 #define EFI_UNSPECIFIED_TIMEZONE 0x07ff
@@ -491,7 +496,7 @@ static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
     ia64_advance_itc(env, 1);
     if (ia64_timer_interrupt_due(env)) {
         ia64_latch_timer_interrupt(env);
-        cpu_interrupt(env_cpu(env), CPU_INTERRUPT_HARD);
+        cpu_set_interrupt(env_cpu(env), CPU_INTERRUPT_HARD);
     }
 }
 
@@ -1546,25 +1551,11 @@ static unsigned efi_emit_split_conventional(CPUIA64State *env, uint64_t map,
 static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
 {
     unsigned index = 0;
-    const EfiMemoryRange low_firmware = {
-        .type = EFI_BOOT_SERVICES_DATA,
-        .address = 0,
-        .pages = VIBTANIUM_EFI_BLOB_BASE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB,
-    };
     const EfiMemoryRange runtime_firmware = {
         .type = EFI_RUNTIME_SERVICES_DATA,
-        .address = VIBTANIUM_EFI_BLOB_BASE,
-        .pages = VIBTANIUM_EFI_BLOB_SIZE / EFI_PAGE_SIZE,
+        .address = EFI_RUNTIME_GRANULE_BASE,
+        .pages = EFI_RUNTIME_GRANULE_SIZE / EFI_PAGE_SIZE,
         .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
-    };
-    const EfiMemoryRange high_firmware = {
-        .type = EFI_BOOT_SERVICES_DATA,
-        .address = VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE,
-        .pages = (EFI_LOW_CONVENTIONAL_BASE -
-                  (VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE)) /
-                 EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB,
     };
     const EfiMemoryRange loader_image = {
         .type = EFI_LOADER_CODE,
@@ -1596,10 +1587,14 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
         .pages = EFI_LINUX_APPEND_SIZE / EFI_PAGE_SIZE,
         .attributes = EFI_MEMORY_WB,
     };
+    const EfiMemoryRange io_port_space = {
+        .type = EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+        .address = VIBTANIUM_IO_PORT_BASE,
+        .pages = VIBTANIUM_IO_PORT_SIZE / EFI_PAGE_SIZE,
+        .attributes = EFI_MEMORY_UC,
+    };
 
-    index = efi_emit_memory_descriptor(env, map, index, &low_firmware);
     index = efi_emit_memory_descriptor(env, map, index, &runtime_firmware);
-    index = efi_emit_memory_descriptor(env, map, index, &high_firmware);
     index = efi_emit_split_conventional(env, map, index,
                                         EFI_LOW_CONVENTIONAL_BASE,
                                         EFI_LOW_CONVENTIONAL_PAGES);
@@ -1611,6 +1606,7 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
     index = efi_emit_split_conventional(env, map, index,
                                         EFI_HIGH_CONVENTIONAL_BASE,
                                         EFI_HIGH_CONVENTIONAL_PAGES);
+    index = efi_emit_memory_descriptor(env, map, index, &io_port_space);
     return index;
 }
 
@@ -3857,6 +3853,10 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_alu_shladd(type, raw)) {
             ia64_exec_alu_shladd(env, raw);
+            continue;
+        }
+        if (ia64_slot_is_i_packed_i2(type, raw)) {
+            ia64_exec_i_packed_i2(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mux(type, raw)) {
