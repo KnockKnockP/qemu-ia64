@@ -26,6 +26,24 @@
 #define IA64_PMD_COUNT 256
 #define IA64_CFM_MASK UINT64_C(0x0000003fffffffff)
 #define IA64_IFS_VALID_BIT UINT64_C(0x8000000000000000)
+#define IA64_PSR_RI_SHIFT 41
+#define IA64_PSR_RI_MASK UINT64_C(0x0000060000000000)
+#define IA64_ISR_X_BIT 32
+#define IA64_ISR_W_BIT 33
+#define IA64_ISR_R_BIT 34
+#define IA64_ISR_EI_SHIFT 41
+#define IA64_ISR_EI_MASK UINT64_C(0x0000060000000000)
+
+static inline unsigned ia64_psr_ri(uint64_t psr)
+{
+    return (psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
+}
+
+static inline uint64_t ia64_psr_with_ri(uint64_t psr, unsigned ri)
+{
+    return (psr & ~IA64_PSR_RI_MASK) |
+           (((uint64_t)ri << IA64_PSR_RI_SHIFT) & IA64_PSR_RI_MASK);
+}
 
 enum IA64ApplicationRegister {
     IA64_AR_RSC = 16,

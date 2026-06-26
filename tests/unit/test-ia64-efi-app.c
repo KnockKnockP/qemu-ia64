@@ -259,6 +259,10 @@ static void test_builds_guest_firmware_tables(void)
     uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
                                                       &boot_media);
     uint64_t boot_services;
+    uint64_t runtime_services;
+    uint64_t get_time_descriptor;
+    uint64_t get_time_gate;
+    uint64_t set_virtual_address_map_descriptor;
     uint64_t handle_protocol_descriptor;
     uint64_t handle_protocol_gate;
     const uint8_t *config_entry;
@@ -272,6 +276,9 @@ static void test_builds_guest_firmware_tables(void)
     boot_services = load_le64(firmware_ptr(
         blob, VIBTANIUM_EFI_SYSTEM_TABLE + 96));
     g_assert_cmphex(boot_services, ==, VIBTANIUM_EFI_BOOT_SERVICES);
+    runtime_services = load_le64(firmware_ptr(
+        blob, VIBTANIUM_EFI_SYSTEM_TABLE + 88));
+    g_assert_cmphex(runtime_services, ==, VIBTANIUM_EFI_RUNTIME_SERVICES);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SYSTEM_TABLE + 104)),
                     ==, 1);
@@ -319,6 +326,22 @@ static void test_builds_guest_firmware_tables(void)
                          VIBTANIUM_EFI_BOOT_SERVICES + 24 + 17 * 8)),
                     ==, 0);
     g_assert_cmphex(firmware_ptr(blob, handle_protocol_gate)[0], !=, 0);
+
+    get_time_descriptor = load_le64(firmware_ptr(
+        blob, VIBTANIUM_EFI_RUNTIME_SERVICES + 24));
+    g_assert_cmphex(get_time_descriptor, ==,
+                    VIBTANIUM_EFI_DESCRIPTOR_BASE +
+                    VIBTANIUM_EFI_BOOT_SERVICE_COUNT * 16);
+    get_time_gate = load_le64(firmware_ptr(blob, get_time_descriptor));
+    g_assert_cmphex(get_time_gate, ==,
+                    VIBTANIUM_EFI_CALL_GATE_BASE +
+                    VIBTANIUM_EFI_BOOT_SERVICE_COUNT * 16);
+    g_assert_cmphex(firmware_ptr(blob, get_time_gate)[0], !=, 0);
+    set_virtual_address_map_descriptor = load_le64(firmware_ptr(
+        blob, VIBTANIUM_EFI_RUNTIME_SERVICES + 24 + 4 * 8));
+    g_assert_cmphex(set_virtual_address_map_descriptor, ==,
+                    VIBTANIUM_EFI_DESCRIPTOR_BASE +
+                    (VIBTANIUM_EFI_BOOT_SERVICE_COUNT + 4) * 16);
 
     config_entry = firmware_ptr(blob, VIBTANIUM_EFI_CONFIGURATION_TABLE);
     g_assert_cmpmem(config_entry, 16, efi_sal_system_table_guid, 16);

@@ -8,7 +8,6 @@
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
-#define IA64_PSR_RI_MASK  UINT64_C(0x0000060000000000)
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
 
 static bool ia64_exception_trace_enabled(void)
@@ -26,6 +25,28 @@ static uint64_t ia64_psr_clear_interruption_delivery_bits(uint64_t psr)
     return psr & ~(IA64_PSR_I_BIT | IA64_PSR_IC_BIT |
                    IA64_PSR_BN_BIT | IA64_PSR_RI_MASK |
                    IA64_PSR_CPL_MASK);
+}
+
+static uint64_t ia64_interruption_isr(uint64_t psr,
+                                      MMUAccessType access_type)
+{
+    uint64_t isr = ((uint64_t)ia64_psr_ri(psr) << IA64_ISR_EI_SHIFT) &
+                   IA64_ISR_EI_MASK;
+
+    switch (access_type) {
+    case MMU_INST_FETCH:
+        isr |= UINT64_C(1) << IA64_ISR_X_BIT;
+        break;
+    case MMU_DATA_STORE:
+        isr |= UINT64_C(1) << IA64_ISR_W_BIT;
+        break;
+    case MMU_DATA_LOAD:
+    default:
+        isr |= UINT64_C(1) << IA64_ISR_R_BIT;
+        break;
+    }
+
+    return isr;
 }
 
 const char *ia64_exception_name(IA64ExceptionKind kind)
@@ -122,7 +143,7 @@ void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
     env->cr[IA64_CR_IIP] = env->ip;
     env->cr[IA64_CR_IFA] = address;
     env->cr[IA64_CR_IIPA] = address;
-    env->cr[IA64_CR_ISR] = access_type;
+    env->cr[IA64_CR_ISR] = ia64_interruption_isr(env->psr, access_type);
 }
 
 void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
@@ -173,7 +194,7 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
     env->cr[IA64_CR_IIP] = access_type == MMU_INST_FETCH ?
                            (address & ~0xfULL) : env->ip;
     env->cr[IA64_CR_IFA] = address;
-    env->cr[IA64_CR_ISR] = access_type;
+    env->cr[IA64_CR_ISR] = ia64_interruption_isr(env->psr, access_type);
     if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_DATA_TLB_MISS ||
         kind == IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS ||

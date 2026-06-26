@@ -1462,19 +1462,21 @@ static void test_b_unit_indirect_return(void)
 static void test_b_unit_return_from_interruption(void)
 {
     const uint64_t rfi_raw = 0x00040000000ULL;
+    const uint64_t ipsr = ia64_psr_with_ri(0x001010084a2008ULL, 2);
     CPUIA64State env;
     uint64_t target = 0;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
-    env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
+    env.cr[IA64_CR_IPSR] = ipsr;
     env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
     env.cr[IA64_CR_IFS] = ia64_make_cfm(8, 3, 0) | IA64_IFS_VALID_BIT;
 
     g_assert_true(ia64_slot_is_b_indirect_branch(IA64_SLOT_TYPE_B, rfi_raw));
     g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
-                                              &target));
+                                               &target));
     g_assert_cmphex(target, ==, 0xa0000001007f7e50ULL);
-    g_assert_cmphex(env.psr, ==, 0x001010084a2008ULL);
+    g_assert_cmphex(env.psr, ==, ipsr);
+    g_assert_cmpuint(ia64_psr_ri(env.psr), ==, 2);
     g_assert_cmphex(env.cfm, ==, ia64_make_cfm(8, 3, 0));
 }
 

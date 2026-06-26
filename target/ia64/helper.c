@@ -106,6 +106,8 @@ enum {
     EFI_LOADER_DATA = 2,
     EFI_BOOT_SERVICES_CODE = 3,
     EFI_BOOT_SERVICES_DATA = 4,
+    EFI_RUNTIME_SERVICES_CODE = 5,
+    EFI_RUNTIME_SERVICES_DATA = 6,
     EFI_CONVENTIONAL_MEMORY = 7,
     EFI_ACPI_RECLAIM_MEMORY = 9,
 };
@@ -172,6 +174,9 @@ enum {
 };
 
 #define EFI_MEMORY_WB UINT64_C(0x0000000000000008)
+#define EFI_MEMORY_RUNTIME UINT64_C(0x8000000000000000)
+#define EFI_UNSPECIFIED_TIMEZONE 0x07ff
+#define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
 
 typedef struct EfiInstalledProtocol {
     bool in_use;
@@ -220,6 +225,7 @@ static uint64_t efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
 static uint64_t efi_memory_map_key = 1;
 static uint64_t efi_dynamic_handle_next = UINT64_C(0x00073000);
 static uint64_t efi_next_event_handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT + 1;
+static uint32_t efi_high_monotonic_count;
 static bool efi_conin_enter_pending = true;
 static char *efi_linux_cmdline_append;
 static bool efi_linux_cmdline_append_done;
@@ -282,6 +288,17 @@ typedef struct IA64FirmwareResult {
 static uint64_t ia64_region_offset(uint64_t address)
 {
     return address & IA64_REGION_OFFSET_MASK;
+}
+
+static uint64_t efi_service_descriptor_address(unsigned service_index)
+{
+    return VIBTANIUM_EFI_DESCRIPTOR_BASE + (uint64_t)service_index * 16;
+}
+
+static uint64_t efi_service_gate_address(unsigned service_index)
+{
+    return VIBTANIUM_EFI_CALL_GATE_BASE +
+           (uint64_t)service_index * IA64_BUNDLE_SIZE;
 }
 
 static bool efi_gate_service_index(uint64_t gate_ip, unsigned *index)
@@ -466,8 +483,10 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
             env->cr[IA64_CR_ISR]);
 }
 
-static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip)
+static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
+                               unsigned next_ri)
 {
+    env->psr = ia64_psr_with_ri(env->psr, next_ri);
     env->ip = next_ip;
     ia64_advance_itc(env, 1);
     if (ia64_timer_interrupt_due(env)) {
@@ -1527,10 +1546,24 @@ static unsigned efi_emit_split_conventional(CPUIA64State *env, uint64_t map,
 static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
 {
     unsigned index = 0;
-    const EfiMemoryRange zero_page_firmware = {
+    const EfiMemoryRange low_firmware = {
         .type = EFI_BOOT_SERVICES_DATA,
         .address = 0,
-        .pages = 0x100,
+        .pages = VIBTANIUM_EFI_BLOB_BASE / EFI_PAGE_SIZE,
+        .attributes = EFI_MEMORY_WB,
+    };
+    const EfiMemoryRange runtime_firmware = {
+        .type = EFI_RUNTIME_SERVICES_DATA,
+        .address = VIBTANIUM_EFI_BLOB_BASE,
+        .pages = VIBTANIUM_EFI_BLOB_SIZE / EFI_PAGE_SIZE,
+        .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+    };
+    const EfiMemoryRange high_firmware = {
+        .type = EFI_BOOT_SERVICES_DATA,
+        .address = VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE,
+        .pages = (EFI_LOW_CONVENTIONAL_BASE -
+                  (VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE)) /
+                 EFI_PAGE_SIZE,
         .attributes = EFI_MEMORY_WB,
     };
     const EfiMemoryRange loader_image = {
@@ -1564,7 +1597,9 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
         .attributes = EFI_MEMORY_WB,
     };
 
-    index = efi_emit_memory_descriptor(env, map, index, &zero_page_firmware);
+    index = efi_emit_memory_descriptor(env, map, index, &low_firmware);
+    index = efi_emit_memory_descriptor(env, map, index, &runtime_firmware);
+    index = efi_emit_memory_descriptor(env, map, index, &high_firmware);
     index = efi_emit_split_conventional(env, map, index,
                                         EFI_LOW_CONVENTIONAL_BASE,
                                         EFI_LOW_CONVENTIONAL_PAGES);
@@ -1648,6 +1683,7 @@ void vibtanium_efi_register_boot_media(
     efi_memory_map_key = 1;
     efi_dynamic_handle_next = UINT64_C(0x00073000);
     efi_next_event_handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT + 1;
+    efi_high_monotonic_count = 0;
     efi_conin_enter_pending = true;
 
     g_clear_pointer(&efi_boot_media_name, g_free);
@@ -2741,13 +2777,197 @@ static uint64_t efi_dispatch_boot_service(CPUIA64State *env, unsigned index)
     }
 }
 
+static void efi_write_time(CPUIA64State *env, uint64_t time)
+{
+    efi_guest_stw(env, time, 2026);
+    efi_guest_stb(env, time + 2, 6);
+    efi_guest_stb(env, time + 3, 26);
+    efi_guest_stb(env, time + 4, 0);
+    efi_guest_stb(env, time + 5, 0);
+    efi_guest_stb(env, time + 6, 0);
+    efi_guest_stb(env, time + 7, 0);
+    efi_guest_stl(env, time + 8, 0);
+    efi_guest_stw(env, time + 12, EFI_UNSPECIFIED_TIMEZONE);
+    efi_guest_stb(env, time + 14, 0);
+    efi_guest_stb(env, time + 15, 0);
+}
+
+static void efi_write_time_capabilities(CPUIA64State *env,
+                                        uint64_t capabilities)
+{
+    efi_guest_stl(env, capabilities, 1);
+    efi_guest_stl(env, capabilities + 4, 50000000);
+    efi_guest_stb(env, capabilities + 8, 0);
+}
+
+static bool efi_runtime_range_contains(uint64_t base, uint64_t pages,
+                                       uint64_t address)
+{
+    uint64_t size;
+    uint64_t end;
+
+    if (pages > UINT64_MAX / EFI_PAGE_SIZE) {
+        return false;
+    }
+    size = pages * EFI_PAGE_SIZE;
+    if (base > UINT64_MAX - size) {
+        return false;
+    }
+    end = base + size;
+    return address >= base && address < end;
+}
+
+static uint64_t efi_runtime_virtual_address(CPUIA64State *env,
+                                            uint64_t memory_map_size,
+                                            uint64_t descriptor_size,
+                                            uint64_t memory_map,
+                                            uint64_t physical)
+{
+    if (memory_map != 0 && descriptor_size >= EFI_MEMORY_DESCRIPTOR_SIZE &&
+        memory_map_size >= EFI_MEMORY_DESCRIPTOR_SIZE) {
+        uint64_t limit = memory_map_size - EFI_MEMORY_DESCRIPTOR_SIZE;
+
+        for (uint64_t offset = 0; offset <= limit; offset += descriptor_size) {
+            uint64_t descriptor = memory_map + offset;
+            uint64_t attributes = efi_guest_ldq(env, descriptor + 32);
+            uint64_t phys = efi_guest_ldq(env, descriptor + 8);
+            uint64_t virt = efi_guest_ldq(env, descriptor + 16);
+            uint64_t pages = efi_guest_ldq(env, descriptor + 24);
+
+            if ((attributes & EFI_MEMORY_RUNTIME) != 0 && virt != 0 &&
+                efi_runtime_range_contains(phys, pages, physical)) {
+                return virt + (physical - phys);
+            }
+        }
+    }
+
+    return IA64_KERNEL_PAGE_OFFSET + ia64_region_offset(physical);
+}
+
+static void efi_runtime_convert_service_descriptors(CPUIA64State *env,
+                                                    uint64_t memory_map_size,
+                                                    uint64_t descriptor_size,
+                                                    uint64_t memory_map)
+{
+    for (unsigned i = 0; i < VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT; i++) {
+        unsigned service_index = EFI_RUNTIME_SERVICE_BASE + i;
+        uint64_t descriptor = efi_service_descriptor_address(service_index);
+        uint64_t gate = efi_service_gate_address(service_index);
+
+        efi_guest_stq(env, descriptor,
+                      efi_runtime_virtual_address(env, memory_map_size,
+                                                  descriptor_size, memory_map,
+                                                  gate));
+        efi_guest_stq(env, descriptor + 8,
+                      efi_runtime_virtual_address(env, memory_map_size,
+                                                  descriptor_size, memory_map,
+                                                  VIBTANIUM_EFI_SYSTEM_TABLE));
+    }
+}
+
+static uint64_t efi_runtime_get_time(CPUIA64State *env)
+{
+    uint64_t time = ia64_read_gr(env, 32);
+    uint64_t capabilities = ia64_read_gr(env, 33);
+
+    if (time == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    efi_write_time(env, time);
+    if (capabilities != 0) {
+        efi_write_time_capabilities(env, capabilities);
+    }
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_get_wakeup_time(CPUIA64State *env)
+{
+    uint64_t enabled = ia64_read_gr(env, 32);
+    uint64_t pending = ia64_read_gr(env, 33);
+    uint64_t time = ia64_read_gr(env, 34);
+
+    if (enabled == 0 || pending == 0 || time == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    efi_guest_stb(env, enabled, 0);
+    efi_guest_stb(env, pending, 0);
+    efi_write_time(env, time);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_set_virtual_address_map(CPUIA64State *env)
+{
+    uint64_t memory_map_size = ia64_read_gr(env, 32);
+    uint64_t descriptor_size = ia64_read_gr(env, 33);
+    uint64_t descriptor_version = ia64_read_gr(env, 34);
+    uint64_t memory_map = ia64_read_gr(env, 35);
+
+    if (descriptor_version != EFI_MEMORY_DESCRIPTOR_VERSION ||
+        descriptor_size < EFI_MEMORY_DESCRIPTOR_SIZE ||
+        (memory_map == 0 && memory_map_size != 0)) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    efi_runtime_convert_service_descriptors(env, memory_map_size,
+                                            descriptor_size, memory_map);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_convert_pointer(CPUIA64State *env)
+{
+    uint64_t pointer = ia64_read_gr(env, 33);
+    uint64_t physical;
+
+    if (pointer == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    physical = efi_guest_ldq(env, pointer);
+    if (physical != 0) {
+        efi_guest_stq(env, pointer,
+                      IA64_KERNEL_PAGE_OFFSET + ia64_region_offset(physical));
+    }
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_get_next_high_mono_count(CPUIA64State *env)
+{
+    uint64_t count = ia64_read_gr(env, 32);
+
+    if (count == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    efi_guest_stl(env, count, efi_high_monotonic_count++);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
 static uint64_t efi_dispatch_runtime_service(CPUIA64State *env, unsigned index)
 {
     switch (index) {
+    case 0: /* GetTime */
+        return efi_runtime_get_time(env);
+    case 1: /* SetTime */
+        return ia64_read_gr(env, 32) != 0 ? VIBTANIUM_EFI_SUCCESS
+                                          : VIBTANIUM_EFI_INVALID_PARAMETER;
+    case 2: /* GetWakeupTime */
+        return efi_runtime_get_wakeup_time(env);
+    case 3: /* SetWakeupTime */
+        return VIBTANIUM_EFI_SUCCESS;
+    case 4: /* SetVirtualAddressMap */
+        return efi_runtime_set_virtual_address_map(env);
+    case 5: /* ConvertPointer */
+        return efi_runtime_convert_pointer(env);
     case 6: /* GetVariable */
     case 7: /* GetNextVariableName */
         return VIBTANIUM_EFI_NOT_FOUND;
     case 8: /* SetVariable */
+        return VIBTANIUM_EFI_SUCCESS;
+    case 9: /* GetNextHighMonotonicCount */
+        return efi_runtime_get_next_high_mono_count(env);
+    case 10: /* ResetSystem */
         return VIBTANIUM_EFI_SUCCESS;
     default:
         return VIBTANIUM_EFI_UNSUPPORTED;
@@ -3360,6 +3580,8 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     CPUState *cpu = env_cpu(env);
     IA64DecodedBundle decoded;
     uint64_t next_ip = env->ip + IA64_BUNDLE_SIZE;
+    unsigned start_slot = ia64_psr_ri(env->psr);
+    unsigned next_ri = 0;
 
     /*
      * This target still interprets complete IA-64 bundles inside one C helper.
@@ -3392,14 +3614,19 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     {
         IA64CountedStoreLoop store_loop;
 
-        if (ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
+        if (start_slot == 0 &&
+            ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
-            ia64_finish_bundle(env, next_ip);
+            ia64_finish_bundle(env, next_ip, 0);
             return;
         }
     }
 
-    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+    if (start_slot >= IA64_SLOT_COUNT) {
+        start_slot = 0;
+    }
+
+    for (int slot = start_slot; slot < IA64_SLOT_COUNT; slot++) {
         IA64SlotType type = decoded.info->slot_type[slot];
         uint64_t raw = decoded.slot[slot];
         uint8_t qp = ia64_slot_predicate(raw);
@@ -3411,6 +3638,8 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         IA64ExtractInstruction extract;
         IA64DepositInstruction deposit;
         IA64IntegerExtendInstruction int_ext;
+
+        env->psr = ia64_psr_with_ri(env->psr, slot);
 
         if (decoded.info->long_immediate && slot == 1) {
             uint8_t x_qp = ia64_slot_predicate(decoded.slot[2]);
@@ -3667,7 +3896,13 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             break;
         }
         if (ia64_slot_is_b_indirect_branch(type, raw)) {
+            bool rfi = ia64_slot_major_opcode(raw) == 0x0 &&
+                       ((raw >> 27) & 0x3f) == 0x08;
+
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
+            if (rfi) {
+                next_ri = ia64_psr_ri(env->psr);
+            }
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
@@ -3683,5 +3918,5 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         abort_unsupported_slot(env, &decoded, slot);
     }
 
-    ia64_finish_bundle(env, next_ip);
+    ia64_finish_bundle(env, next_ip, next_ri);
 }

@@ -538,6 +538,59 @@ static bool ia64_ar_trace_enabled(void)
     return enabled != 0;
 }
 
+static int ia64_branch_trace_filter(void)
+{
+    static int filter = -2;
+
+    if (filter == -2) {
+        const char *value = g_getenv("VIBTANIUM_BRANCH_TRACE_REG");
+        char *endptr = NULL;
+
+        filter = -1;
+        if (value && *value) {
+            unsigned long parsed = strtoul(value, &endptr, 0);
+
+            if (endptr != value && parsed < IA64_BR_COUNT) {
+                filter = (int)parsed;
+            }
+        }
+    }
+    return filter;
+}
+
+static bool ia64_branch_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_BRANCH_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static void ia64_trace_branch_write(CPUIA64State *env, const char *op,
+                                    uint32_t reg, uint64_t value,
+                                    uint64_t aux)
+{
+    int filter;
+
+    if (!env || reg >= IA64_BR_COUNT || !ia64_branch_trace_enabled()) {
+        return;
+    }
+
+    filter = ia64_branch_trace_filter();
+    if (filter >= 0 && reg != (uint32_t)filter) {
+        return;
+    }
+
+    fprintf(stderr,
+            "[ia64-br] ip=0x%016" PRIx64 " ri=%u %s b%u"
+            " old=0x%016" PRIx64 " new=0x%016" PRIx64
+            " aux=0x%016" PRIx64 "\n",
+            env->ip, ia64_psr_ri(env->psr), op, reg, env->br[reg],
+            value, aux);
+}
+
 static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)
 {
     if (!env || reg >= IA64_AR_COUNT) {
@@ -635,6 +688,8 @@ bool ia64_exec_i_mov_to_branch(CPUIA64State *env, uint64_t raw)
 
     b1 = (raw >> 6) & 0x7;
     r2 = (raw >> 13) & 0x7f;
+    ia64_trace_branch_write(env, "mov-to-branch", b1,
+                            ia64_read_gr(env, r2), r2);
     env->br[b1] = ia64_read_gr(env, r2);
     return true;
 }
@@ -3752,6 +3807,8 @@ bool ia64_exec_b_call_relative(CPUIA64State *env,
     }
 
     b1 = (raw >> 6) & 0x7;
+    ia64_trace_branch_write(env, "br.call-relative", b1,
+                            bundle_ip + IA64_BUNDLE_SIZE, bundle_ip);
     env->br[b1] = bundle_ip + IA64_BUNDLE_SIZE;
     ia64_enter_call_frame(env);
     *target_ip = bundle_ip + ia64_branch_displacement(raw);
@@ -3829,6 +3886,8 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
 
     *target_ip = env->br[b2] & ~0xfULL;
     if (major == 0x1) {
+        ia64_trace_branch_write(env, "br.call-indirect", b1,
+                                bundle_ip + IA64_BUNDLE_SIZE, env->br[b2]);
         env->br[b1] = bundle_ip + IA64_BUNDLE_SIZE;
         ia64_enter_call_frame(env);
     } else if (x6 == 0x21) {
