@@ -51,6 +51,18 @@ static uint64_t make_i2_packed_raw(uint8_t za, uint8_t zb,
            ((uint64_t)r2 << 13) | ((uint64_t)r1 << 6);
 }
 
+static uint64_t make_extract_raw(bool sign_extend, uint8_t r1, uint8_t r3,
+                                 uint8_t position, uint8_t length)
+{
+    g_assert_cmpuint(length, >=, 1);
+    g_assert_cmpuint(length, <=, 64);
+
+    return (5ULL << 37) | (1ULL << 34) |
+           ((uint64_t)(length - 1) << 27) |
+           ((uint64_t)r3 << 20) | ((uint64_t)position << 14) |
+           ((uint64_t)sign_extend << 13) | ((uint64_t)r1 << 6);
+}
+
 static void test_reset(void)
 {
     CPUIA64State env;
@@ -773,6 +785,9 @@ static void test_i_unit_mux_permutations(void)
 static void test_i_unit_packed_i2_frontier_mix4r(void)
 {
     const uint64_t linux_mix4r_r2_r8_r8_raw = 0x0f880810080ULL;
+    const uint64_t md5_extr_u_r9_r2_25_39_raw =
+        make_extract_raw(false, 9, 2, 25, 39);
+    IA64ExtractInstruction decoded;
     CPUIA64State env;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
@@ -783,7 +798,18 @@ static void test_i_unit_packed_i2_frontier_mix4r(void)
     g_assert_false(ia64_slot_is_i_mux(IA64_SLOT_TYPE_I,
                                       linux_mix4r_r2_r8_r8_raw));
     g_assert_true(ia64_exec_i_packed_i2(&env, linux_mix4r_r2_r8_r8_raw));
-    g_assert_cmphex(ia64_read_gr(&env, 2), ==, 0x1122334411223344ULL);
+    g_assert_cmphex(ia64_read_gr(&env, 2), ==, 0x5566778855667788ULL);
+
+    ia64_write_gr(&env, 8, 0x0000000089abcdefULL);
+    g_assert_true(ia64_exec_i_packed_i2(&env, linux_mix4r_r2_r8_r8_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 2), ==, 0x89abcdef89abcdefULL);
+    g_assert_true(ia64_decode_extract(IA64_SLOT_TYPE_I,
+                                      md5_extr_u_r9_r2_25_39_raw,
+                                      &decoded));
+    g_assert_true(ia64_exec_extract(&env, &decoded));
+    g_assert_cmphex(ia64_read_gr(&env, 9), ==, 0x44d5e6f7c4ULL);
+    g_assert_cmphex(ia64_read_gr(&env, 9) & 0xffffffffULL, ==,
+                    0xd5e6f7c4ULL);
 }
 
 typedef struct PackedI2Case {
@@ -801,35 +827,35 @@ static void test_i_unit_packed_i2_operations(void)
 {
     static const PackedI2Case cases[] = {
         { "mix1.r", 0, 0, 0, 2, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf707f505f303f101ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x06f604f402f200f0ULL },
         { "mix1.l", 0, 0, 2, 2, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf606f404f202f000ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x07f705f503f301f1ULL },
         { "mix2.r", 0, 1, 0, 2, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf7f60706f3f20302ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x0504f5f40100f1f0ULL },
         { "mix2.l", 0, 1, 2, 2, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf5f40504f1f00100ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x0706f7f60302f3f2ULL },
         { "mix4.r", 1, 0, 0, 2, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf7f6f5f407060504ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x03020100f3f2f1f0ULL },
         { "mix4.l", 1, 0, 2, 2, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf3f2f1f003020100ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x07060504f7f6f5f4ULL },
         { "pack2.uss", 0, 1, 0, 0, 0x00ff007f0000ffffULL,
-          0x01900080ff7fff38ULL, 0xff7f0000ff800000ULL },
+          0x01900080ff7fff38ULL, 0xff800000ff7f0000ULL },
         { "pack2.sss", 0, 1, 2, 0, 0x00ff007f0000ffffULL,
-          0x01900080ff7fff38ULL, 0x7f7f00ff7f7f8080ULL },
+          0x01900080ff7fff38ULL, 0x7f7f80807f7f00ffULL },
         { "pack4.sss", 1, 0, 2, 0, 0x00007fffffff63c0ULL,
-          0xffff7fff00009c40ULL, 0x7fff800080007fffULL },
+          0xffff7fff00009c40ULL, 0x80007fff7fff8000ULL },
         { "unpack1.h", 0, 0, 0, 1, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf303f202f101f000ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x07f706f605f504f4ULL },
         { "unpack1.l", 0, 0, 2, 1, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf707f606f505f404ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x03f302f201f100f0ULL },
         { "unpack2.h", 0, 1, 0, 1, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf3f20302f1f00100ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x0706f7f60504f5f4ULL },
         { "unpack2.l", 0, 1, 2, 1, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf7f60706f5f40504ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x0302f3f20100f1f0ULL },
         { "unpack4.h", 1, 0, 0, 1, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf3f2f1f003020100ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x07060504f7f6f5f4ULL },
         { "unpack4.l", 1, 0, 2, 1, 0x0706050403020100ULL,
-          0xf7f6f5f4f3f2f1f0ULL, 0xf7f6f5f407060504ULL },
+          0xf7f6f5f4f3f2f1f0ULL, 0x03020100f3f2f1f0ULL },
         { "pmin1.u", 0, 0, 1, 0, 0x80017f00ff105522ULL,
           0x7f0180ffff001133ULL, 0x7f017f00ff001122ULL },
         { "pmax1.u", 0, 0, 1, 1, 0x80017f00ff105522ULL,
@@ -839,9 +865,9 @@ static void test_i_unit_packed_i2_operations(void)
         { "pmax2", 0, 1, 3, 1, 0xfe70012c000afffdULL,
           0x01f4fed40014fffcULL, 0x01f4012c0014fffdULL },
         { "pmpy2.r", 0, 1, 1, 3, 0xfffb0004fffd0002ULL,
-          0xfff7fff800070006ULL, 0x0000002dffffffebULL },
-        { "pmpy2.l", 0, 1, 3, 3, 0xfffb0004fffd0002ULL,
           0xfff7fff800070006ULL, 0xffffffe00000000cULL },
+        { "pmpy2.l", 0, 1, 3, 3, 0xfffb0004fffd0002ULL,
+          0xfff7fff800070006ULL, 0x0000002dffffffebULL },
         { "psad1", 0, 0, 3, 2, 0x0001020304050607ULL,
           0x0706050403020100ULL, 0x20ULL },
     };

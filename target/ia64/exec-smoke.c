@@ -2421,46 +2421,47 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
     switch (op) {
     case IA64_PACKED_I2_MIX1_R:
     case IA64_PACKED_I2_MIX1_L: {
-        unsigned first_lane = op == IA64_PACKED_I2_MIX1_R ? 1 : 0;
+        unsigned first_lane = op == IA64_PACKED_I2_MIX1_R ? 0 : 1;
 
         for (unsigned pair = 0; pair < 4; pair++) {
             unsigned source_lane = first_lane + pair * 2;
 
             result = ia64_packed_set_u8(
-                result, pair * 2, ia64_packed_u8(source2, source_lane));
+                result, pair * 2, ia64_packed_u8(source3, source_lane));
             result = ia64_packed_set_u8(
-                result, pair * 2 + 1, ia64_packed_u8(source3, source_lane));
+                result, pair * 2 + 1, ia64_packed_u8(source2, source_lane));
         }
         break;
     }
     case IA64_PACKED_I2_MIX2_R:
     case IA64_PACKED_I2_MIX2_L: {
-        unsigned first_lane = op == IA64_PACKED_I2_MIX2_R ? 1 : 0;
+        unsigned first_lane = op == IA64_PACKED_I2_MIX2_R ? 0 : 1;
 
         for (unsigned pair = 0; pair < 2; pair++) {
             unsigned source_lane = first_lane + pair * 2;
 
             result = ia64_packed_set_u16(
-                result, pair * 2, ia64_packed_u16(source2, source_lane));
+                result, pair * 2, ia64_packed_u16(source3, source_lane));
             result = ia64_packed_set_u16(
-                result, pair * 2 + 1, ia64_packed_u16(source3, source_lane));
+                result, pair * 2 + 1,
+                ia64_packed_u16(source2, source_lane));
         }
         break;
     }
     case IA64_PACKED_I2_MIX4_R:
     case IA64_PACKED_I2_MIX4_L: {
-        unsigned source_lane = op == IA64_PACKED_I2_MIX4_R ? 1 : 0;
+        unsigned source_lane = op == IA64_PACKED_I2_MIX4_R ? 0 : 1;
 
         result = ia64_packed_set_u32(
-            result, 0, ia64_packed_u32(source2, source_lane));
+            result, 0, ia64_packed_u32(source3, source_lane));
         result = ia64_packed_set_u32(
-            result, 1, ia64_packed_u32(source3, source_lane));
+            result, 1, ia64_packed_u32(source2, source_lane));
         break;
     }
     case IA64_PACKED_I2_PACK2_USS:
     case IA64_PACKED_I2_PACK2_SSS:
         for (unsigned lane = 0; lane < 4; lane++) {
-            int16_t value = ia64_packed_u16(source3, lane);
+            int16_t value = ia64_packed_u16(source2, lane);
             uint8_t packed = op == IA64_PACKED_I2_PACK2_USS
                 ? ia64_saturate_unsigned_i8(value)
                 : ia64_saturate_signed_i8(value);
@@ -2468,7 +2469,7 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
             result = ia64_packed_set_u8(result, lane, packed);
         }
         for (unsigned lane = 0; lane < 4; lane++) {
-            int16_t value = ia64_packed_u16(source2, lane);
+            int16_t value = ia64_packed_u16(source3, lane);
             uint8_t packed = op == IA64_PACKED_I2_PACK2_USS
                 ? ia64_saturate_unsigned_i8(value)
                 : ia64_saturate_signed_i8(value);
@@ -2478,13 +2479,13 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
         break;
     case IA64_PACKED_I2_PACK4_SSS:
         for (unsigned lane = 0; lane < 2; lane++) {
-            int32_t value = ia64_packed_u32(source3, lane);
+            int32_t value = ia64_packed_u32(source2, lane);
 
             result = ia64_packed_set_u16(
                 result, lane, ia64_saturate_signed_i16(value));
         }
         for (unsigned lane = 0; lane < 2; lane++) {
-            int32_t value = ia64_packed_u32(source2, lane);
+            int32_t value = ia64_packed_u32(source3, lane);
 
             result = ia64_packed_set_u16(
                 result, lane + 2, ia64_saturate_signed_i16(value));
@@ -2492,40 +2493,41 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
         break;
     case IA64_PACKED_I2_UNPACK1_H:
     case IA64_PACKED_I2_UNPACK1_L: {
-        unsigned first_lane = op == IA64_PACKED_I2_UNPACK1_H ? 0 : 4;
+        unsigned first_lane = op == IA64_PACKED_I2_UNPACK1_H ? 4 : 0;
 
         for (unsigned pair = 0; pair < 4; pair++) {
             unsigned source_lane = first_lane + pair;
 
             result = ia64_packed_set_u8(
-                result, pair * 2, ia64_packed_u8(source2, source_lane));
+                result, pair * 2, ia64_packed_u8(source3, source_lane));
             result = ia64_packed_set_u8(
-                result, pair * 2 + 1, ia64_packed_u8(source3, source_lane));
+                result, pair * 2 + 1, ia64_packed_u8(source2, source_lane));
         }
         break;
     }
     case IA64_PACKED_I2_UNPACK2_H:
     case IA64_PACKED_I2_UNPACK2_L: {
-        unsigned first_lane = op == IA64_PACKED_I2_UNPACK2_H ? 0 : 2;
+        unsigned first_lane = op == IA64_PACKED_I2_UNPACK2_H ? 2 : 0;
 
         for (unsigned pair = 0; pair < 2; pair++) {
             unsigned source_lane = first_lane + pair;
 
             result = ia64_packed_set_u16(
-                result, pair * 2, ia64_packed_u16(source2, source_lane));
+                result, pair * 2, ia64_packed_u16(source3, source_lane));
             result = ia64_packed_set_u16(
-                result, pair * 2 + 1, ia64_packed_u16(source3, source_lane));
+                result, pair * 2 + 1,
+                ia64_packed_u16(source2, source_lane));
         }
         break;
     }
     case IA64_PACKED_I2_UNPACK4_H:
     case IA64_PACKED_I2_UNPACK4_L: {
-        unsigned source_lane = op == IA64_PACKED_I2_UNPACK4_H ? 0 : 1;
+        unsigned source_lane = op == IA64_PACKED_I2_UNPACK4_H ? 1 : 0;
 
         result = ia64_packed_set_u32(
-            result, 0, ia64_packed_u32(source2, source_lane));
+            result, 0, ia64_packed_u32(source3, source_lane));
         result = ia64_packed_set_u32(
-            result, 1, ia64_packed_u32(source3, source_lane));
+            result, 1, ia64_packed_u32(source2, source_lane));
         break;
     }
     case IA64_PACKED_I2_PMIN1_U:
@@ -2554,7 +2556,7 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
         break;
     case IA64_PACKED_I2_PMPY2_R:
     case IA64_PACKED_I2_PMPY2_L: {
-        unsigned first_lane = op == IA64_PACKED_I2_PMPY2_R ? 1 : 0;
+        unsigned first_lane = op == IA64_PACKED_I2_PMPY2_R ? 0 : 1;
 
         for (unsigned lane = 0; lane < 2; lane++) {
             unsigned source_lane = first_lane + lane * 2;
