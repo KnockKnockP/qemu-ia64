@@ -33,7 +33,8 @@
 #define ACPI_RSDT_LENGTH (36 + ACPI_RSDT_ENTRY_COUNT * 4)
 #define ACPI_XSDT_LENGTH (36 + ACPI_RSDT_ENTRY_COUNT * 8)
 #define ACPI_FADT_LENGTH 244
-#define ACPI_DSDT_LENGTH 36
+#define ACPI_DSDT_AML_LENGTH 58
+#define ACPI_DSDT_LENGTH (36 + ACPI_DSDT_AML_LENGTH)
 #define ACPI_MADT_LOCAL_SAPIC_LENGTH 16
 #define ACPI_MADT_IO_SAPIC_LENGTH 16
 #define ACPI_MADT_LENGTH \
@@ -42,6 +43,30 @@
 #define ACPI_ADR_SPACE_SYSTEM_IO 1
 #define PCDP_CONSOLE_UART 0
 #define PCDP_UART_PRIMARY_CONSOLE (1 << 2)
+
+static const uint8_t vibtanium_dsdt_aml[ACPI_DSDT_AML_LENGTH] = {
+    /*
+     * Scope (_SB) {
+     *     Device (COM1) {
+     *         Name (_HID, EisaId ("PNP0501"))
+     *         Name (_UID, One)
+     *         Name (_STA, 0x0f)
+     *         Name (_CRS, ResourceTemplate () {
+     *             IO (Decode16, 0x03f8, 0x03f8, 0x00, 0x08)
+     *             IRQNoFlags () {4}
+     *         })
+     *     }
+     * }
+     */
+    0x10, 0x39, 0x5f, 0x53, 0x42, 0x5f,
+    0x5b, 0x82, 0x32, 0x43, 0x4f, 0x4d, 0x31,
+    0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x05, 0x01,
+    0x08, 0x5f, 0x55, 0x49, 0x44, 0x01,
+    0x08, 0x5f, 0x53, 0x54, 0x41, 0x0a, 0x0f,
+    0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x10, 0x0a, 0x0d,
+    0x47, 0x01, 0xf8, 0x03, 0xf8, 0x03, 0x00, 0x08,
+    0x22, 0x10, 0x00, 0x79, 0x00,
+};
 
 static bool range_ok(size_t size, uint64_t offset, uint64_t length)
 {
@@ -790,6 +815,7 @@ static void write_acpi_dsdt(uint8_t *blob, size_t size)
     uint8_t *dsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_DSDT,
                              ACPI_DSDT_LENGTH);
 
+    memcpy(dsdt + 36, vibtanium_dsdt_aml, sizeof(vibtanium_dsdt_aml));
     write_acpi_table_header(dsdt, "DSDT", ACPI_DSDT_LENGTH, 2);
 }
 

@@ -412,8 +412,17 @@ static void test_builds_guest_firmware_tables(void)
 
     dsdt = firmware_ptr(blob, VIBTANIUM_EFI_ACPI_DSDT);
     g_assert_cmpmem(dsdt, 4, "DSDT", 4);
-    g_assert_cmphex(load_le32(dsdt + 4), ==, 36);
-    g_assert_cmphex(byte_sum(dsdt, 36), ==, 0);
+    g_assert_cmphex(load_le32(dsdt + 4), ==, 94);
+    g_assert_cmphex(byte_sum(dsdt, 94), ==, 0);
+    g_assert_cmpmem(dsdt + 45, 4, "COM1", 4);
+    g_assert_cmpmem(dsdt + 50, 4, "_HID", 4);
+    g_assert_cmphex(dsdt[54], ==, 0x0c);
+    g_assert_cmphex(dsdt[55], ==, 0x41);
+    g_assert_cmphex(dsdt[56], ==, 0xd0);
+    g_assert_cmphex(dsdt[57], ==, 0x05);
+    g_assert_cmphex(dsdt[58], ==, 0x01);
+    g_assert_cmpmem(dsdt + 81, 8, "\x47\x01\xf8\x03\xf8\x03\x00\x08", 8);
+    g_assert_cmpmem(dsdt + 89, 3, "\x22\x10\x00", 3);
 
     madt = firmware_ptr(blob, VIBTANIUM_EFI_ACPI_MADT);
     g_assert_cmpmem(madt, 4, "APIC", 4);
