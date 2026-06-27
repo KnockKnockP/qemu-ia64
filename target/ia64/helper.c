@@ -348,12 +348,80 @@ static bool ia64_progress_trace_enabled(void)
     return enabled != 0;
 }
 
+static uint64_t ia64_progress_trace_interval(void)
+{
+    static int initialized;
+    static uint64_t interval;
+
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_IA64_PROGRESS_INTERVAL");
+
+        interval = UINT64_C(0x100000);
+        if (value != NULL && *value != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed = g_ascii_strtoull(value, &endptr, 0);
+
+            if (endptr != value && parsed != 0) {
+                interval = parsed;
+            }
+        }
+        initialized = 1;
+    }
+
+    return interval;
+}
+
+static bool ia64_progress_trace_ip_matches(uint64_t ip)
+{
+    static int initialized;
+    static bool min_enabled;
+    static bool max_enabled;
+    static uint64_t min_ip;
+    static uint64_t max_ip;
+
+    if (!initialized) {
+        const char *min = g_getenv("VIBTANIUM_IA64_PROGRESS_IP_MIN");
+        const char *max = g_getenv("VIBTANIUM_IA64_PROGRESS_IP_MAX");
+
+        if (min != NULL && *min != '\0') {
+            char *endptr = NULL;
+
+            min_ip = g_ascii_strtoull(min, &endptr, 0);
+            min_enabled = endptr != min;
+        }
+        if (max != NULL && *max != '\0') {
+            char *endptr = NULL;
+
+            max_ip = g_ascii_strtoull(max, &endptr, 0);
+            max_enabled = endptr != max;
+        }
+        initialized = 1;
+    }
+
+    if (min_enabled && ip < min_ip) {
+        return false;
+    }
+    if (max_enabled && ip > max_ip) {
+        return false;
+    }
+
+    return true;
+}
+
 static void ia64_progress_trace_bundle(CPUIA64State *env)
 {
     static uint64_t count;
+    static uint64_t matched_count;
+    uint64_t interval;
 
     count++;
-    if ((count & UINT64_C(0xfffff)) != 0) {
+    if (!ia64_progress_trace_ip_matches(env->ip)) {
+        return;
+    }
+
+    matched_count++;
+    interval = ia64_progress_trace_interval();
+    if ((matched_count % interval) != 0) {
         return;
     }
 
@@ -3236,6 +3304,76 @@ static bool ia64_ldst_trace_op_matches(const char *op)
     return filter == NULL || *filter == '\0' || g_str_equal(filter, op);
 }
 
+static bool ia64_ldst_trace_width_matches(uint8_t width)
+{
+    static int initialized;
+    static bool has_filter;
+    static uint64_t filter;
+
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_LDST_TRACE_WIDTH");
+
+        if (value != NULL && *value != '\0') {
+            char *endptr = NULL;
+
+            filter = g_ascii_strtoull(value, &endptr, 0);
+            has_filter = endptr != value;
+        }
+        initialized = 1;
+    }
+
+    return !has_filter || width == filter;
+}
+
+static bool ia64_ldst_trace_value_matches(uint64_t value)
+{
+    static int initialized;
+    static bool has_exact_filter;
+    static bool has_min_filter;
+    static bool has_max_filter;
+    static uint64_t exact_filter;
+    static uint64_t min_filter;
+    static uint64_t max_filter;
+
+    if (!initialized) {
+        const char *exact = g_getenv("VIBTANIUM_LDST_TRACE_VALUE");
+        const char *min = g_getenv("VIBTANIUM_LDST_TRACE_VALUE_MIN");
+        const char *max = g_getenv("VIBTANIUM_LDST_TRACE_VALUE_MAX");
+
+        if (exact != NULL && *exact != '\0') {
+            char *endptr = NULL;
+
+            exact_filter = g_ascii_strtoull(exact, &endptr, 0);
+            has_exact_filter = endptr != exact;
+        }
+        if (min != NULL && *min != '\0') {
+            char *endptr = NULL;
+
+            min_filter = g_ascii_strtoull(min, &endptr, 0);
+            has_min_filter = endptr != min;
+        }
+        if (max != NULL && *max != '\0') {
+            char *endptr = NULL;
+
+            max_filter = g_ascii_strtoull(max, &endptr, 0);
+            has_max_filter = endptr != max;
+        }
+        initialized = 1;
+    }
+
+    if (has_exact_filter) {
+        return value == exact_filter;
+    }
+    if (has_min_filter && value < min_filter) {
+        return false;
+    }
+    if (has_max_filter && value > max_filter) {
+        return false;
+    }
+
+    return true;
+}
+
 static void ia64_trace_ldst(CPUIA64State *env, const char *op,
                             uint64_t address, uint8_t width, uint64_t value)
 {
@@ -3249,6 +3387,12 @@ static void ia64_trace_ldst(CPUIA64State *env, const char *op,
     if (!ia64_ldst_trace_op_matches(op)) {
         return;
     }
+    if (!ia64_ldst_trace_width_matches(width)) {
+        return;
+    }
+    if (!ia64_ldst_trace_value_matches(value)) {
+        return;
+    }
     if (!ia64_ldst_trace_matches(address, paddr, has_paddr, width)) {
         return;
     }
@@ -3258,6 +3402,90 @@ static void ia64_trace_ldst(CPUIA64State *env, const char *op,
             "[ia64-ldst] ip=0x%016" PRIx64 " op=%s vaddr=0x%016" PRIx64
             " paddr=%s0x%016" PRIx64 " width=%u value=0x%016" PRIx64 "\n",
             env->ip, op, address, has_paddr ? "" : "?", paddr, width, value);
+}
+
+static bool ia64_alat_ranges_overlap(uint64_t a, uint8_t a_width,
+                                     uint64_t b, uint8_t b_width)
+{
+    uint64_t a_end;
+    uint64_t b_end;
+
+    if (a_width == 0 || b_width == 0) {
+        return false;
+    }
+
+    a_end = a + a_width - 1;
+    b_end = b + b_width - 1;
+    if (a_end < a || b_end < b) {
+        return true;
+    }
+
+    return a <= b_end && b <= a_end;
+}
+
+static void ia64_alat_resolve_address(CPUIA64State *env, uint64_t address,
+                                      MMUAccessType access_type,
+                                      uint64_t *resolved, bool *physical)
+{
+    IA64TranslateResult result;
+
+    if (ia64_translate_address(env, address, access_type, 0, true, &result)) {
+        *resolved = result.paddr;
+        *physical = true;
+    } else {
+        *resolved = address;
+        *physical = false;
+    }
+}
+
+static void ia64_alat_invalidate_target(CPUIA64State *env, uint8_t target)
+{
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        if (env->alat.entries[i].valid &&
+            env->alat.entries[i].target == target) {
+            env->alat.entries[i].valid = false;
+        }
+    }
+}
+
+static void ia64_alat_record_load(CPUIA64State *env, uint8_t target,
+                                  uint64_t address, uint8_t width)
+{
+    IA64AlatEntry *entry;
+
+    if (target == 0 || target >= IA64_GR_COUNT) {
+        return;
+    }
+
+    ia64_alat_invalidate_target(env, target);
+    entry = &env->alat.entries[env->alat.next % IA64_ALAT_COUNT];
+    env->alat.next = (env->alat.next + 1) % IA64_ALAT_COUNT;
+
+    memset(entry, 0, sizeof(*entry));
+    entry->valid = true;
+    entry->target = target;
+    entry->width = width;
+    ia64_alat_resolve_address(env, address, MMU_DATA_LOAD,
+                              &entry->address, &entry->physical);
+}
+
+static void ia64_alat_invalidate_store(CPUIA64State *env, uint64_t address,
+                                       uint8_t width)
+{
+    uint64_t resolved;
+    bool physical;
+
+    ia64_alat_resolve_address(env, address, MMU_DATA_STORE,
+                              &resolved, &physical);
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        IA64AlatEntry *entry = &env->alat.entries[i];
+
+        if (entry->valid && entry->physical == physical &&
+            ia64_alat_ranges_overlap(entry->address, entry->width,
+                                     resolved, width)) {
+            entry->valid = false;
+        }
+    }
 }
 
 static void ia64_st_le_unaligned(CPUIA64State *env, uint64_t address,
@@ -3308,6 +3536,7 @@ static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
 
     if (width > 1 && (address & (width - 1)) != 0) {
         ia64_st_le_unaligned(env, address, width, value);
+        ia64_alat_invalidate_store(env, address, width);
         return;
     }
 
@@ -3327,6 +3556,8 @@ static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
     default:
         g_assert_not_reached();
     }
+
+    ia64_alat_invalidate_store(env, address, width);
 }
 
 static bool ia64_rse_is_rnat_slot(uint64_t address)
@@ -3569,8 +3800,13 @@ static bool exec_ldst_immediate(CPUIA64State *env,
     switch (decoded->kind) {
     case IA64_LDST_IMM_LOAD:
         if (decoded->target != 0) {
-            ia64_write_gr(env, decoded->target,
-                          ia64_ldst_read(env, address, decoded->width));
+            uint64_t value = ia64_ldst_read(env, address, decoded->width);
+
+            ia64_write_gr(env, decoded->target, value);
+            if (decoded->memory_class == 2 || decoded->memory_class == 3) {
+                ia64_alat_record_load(env, decoded->target, address,
+                                      decoded->width);
+            }
         }
         break;
     case IA64_LDST_IMM_STORE:

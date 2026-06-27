@@ -22,6 +22,7 @@
 #define IA64_ITR_COUNT 8
 #define IA64_DTR_COUNT 8
 #define IA64_TC_COUNT 32
+#define IA64_ALAT_COUNT 32
 #define IA64_PMC_COUNT 256
 #define IA64_PMD_COUNT 256
 #define IA64_CFM_MASK UINT64_C(0x0000003fffffffff)
@@ -208,6 +209,19 @@ typedef struct IA64ExceptionRecord {
     uint8_t message[160];
 } IA64ExceptionRecord;
 
+typedef struct IA64AlatEntry {
+    bool valid;
+    uint8_t target;
+    uint8_t width;
+    bool physical;
+    uint64_t address;
+} IA64AlatEntry;
+
+typedef struct IA64AlatState {
+    IA64AlatEntry entries[IA64_ALAT_COUNT];
+    uint8_t next;
+} IA64AlatState;
+
 typedef enum IA64CPUModel {
     IA64_CPU_MODEL_ITANIUM2,
 } IA64CPUModel;
@@ -252,6 +266,7 @@ typedef struct CPUArchState {
     IA64InterruptState interrupt;
     IA64MemorySkeletonState memory;
     IA64ExceptionRecord exception;
+    IA64AlatState alat;
 
     struct {} end_reset_fields;
 } CPUIA64State;

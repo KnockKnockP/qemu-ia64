@@ -221,6 +221,35 @@ uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg)
     return env->rse.stacked_gr[ia64_stacked_gr_slot(env, reg)];
 }
 
+static int ia64_alat_find_gr(CPUIA64State *env, uint32_t reg)
+{
+    if (!env || reg >= IA64_GR_COUNT) {
+        return -1;
+    }
+
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        if (env->alat.entries[i].valid && env->alat.entries[i].target == reg) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
+{
+    if (!env || reg >= IA64_GR_COUNT) {
+        return;
+    }
+
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        if (env->alat.entries[i].valid &&
+            env->alat.entries[i].target == reg) {
+            env->alat.entries[i].valid = false;
+        }
+    }
+}
+
 void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
 {
     if (!env || reg >= IA64_GR_COUNT || reg == 0) {
@@ -238,6 +267,7 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
     } else {
         env->rse.stacked_gr[ia64_stacked_gr_slot(env, reg)] = value;
     }
+    ia64_alat_invalidate_gr(env, reg);
     env->gr[0] = 0;
 }
 
@@ -1027,17 +1057,26 @@ bool ia64_slot_is_m_check_advanced(IA64SlotType type, uint64_t raw)
 bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
                                 uint64_t bundle_ip, uint64_t *target_ip)
 {
+    uint8_t target;
+    uint8_t x3;
+    int alat_index;
+
     if (!env || !target_ip ||
         !ia64_slot_is_m_check_advanced(IA64_SLOT_TYPE_M, raw)) {
         return false;
     }
 
-    /*
-     * The minimal executor does not yet model ALAT allocation or hazards.
-     * Treat chk.a/chk.a.clr as a passing check so firmware code that already
-     * consumed the loaded value continues through its normal path.
-     */
-    *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+    target = (raw >> 6) & 0x7f;
+    x3 = (raw >> 33) & 0x7;
+    alat_index = ia64_alat_find_gr(env, target);
+    if (alat_index >= 0) {
+        if (x3 == 5) {
+            env->alat.entries[alat_index].valid = false;
+        }
+        *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
+    } else {
+        *target_ip = bundle_ip + ia64_branch_displacement(raw);
+    }
     return true;
 }
 

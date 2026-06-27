@@ -388,7 +388,18 @@ static void test_m_unit_system_memory_management(void)
     g_assert_cmpint(ia64_branch_displacement(chk_a_clr_r10_raw), ==, 192);
     g_assert_true(ia64_exec_m_check_advanced(&env, chk_a_clr_r10_raw,
                                              0x100eb30, &target));
+    g_assert_cmphex(target, ==, 0x100ebf0);
+
+    env.alat.entries[0].valid = true;
+    env.alat.entries[0].target = 10;
+    env.alat.entries[0].width = 4;
+    env.alat.entries[0].physical = true;
+    env.alat.entries[0].address = 0x1000;
+    target = 0;
+    g_assert_true(ia64_exec_m_check_advanced(&env, chk_a_clr_r10_raw,
+                                             0x100eb30, &target));
     g_assert_cmphex(target, ==, 0x100eb40);
+    g_assert_false(env.alat.entries[0].valid);
 
     g_assert_true(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M, sync_i_raw));
     g_assert_true(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,

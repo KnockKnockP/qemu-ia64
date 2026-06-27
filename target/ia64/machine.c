@@ -53,6 +53,32 @@ static const VMStateDescription vmstate_nat = {
     }
 };
 
+static const VMStateDescription vmstate_alat_entry = {
+    .name = "alat-entry",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(valid, IA64AlatEntry),
+        VMSTATE_UINT8(target, IA64AlatEntry),
+        VMSTATE_UINT8(width, IA64AlatEntry),
+        VMSTATE_BOOL(physical, IA64AlatEntry),
+        VMSTATE_UINT64(address, IA64AlatEntry),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_alat = {
+    .name = "alat",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(entries, IA64AlatState, IA64_ALAT_COUNT, 0,
+                             vmstate_alat_entry, IA64AlatEntry),
+        VMSTATE_UINT8(next, IA64AlatState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_interrupt = {
     .name = "interrupt",
     .version_id = 1,
@@ -139,6 +165,9 @@ static int ia64_env_post_load(void *opaque, int version_id)
     if (version_id < 2 && (env->psr & IA64_PSR_BN_BIT)) {
         memcpy(env->banked_gr, &env->gr[16], sizeof(env->banked_gr));
     }
+    if (version_id < 3) {
+        memset(&env->alat, 0, sizeof(env->alat));
+    }
     ia64_cpu_init_synthetic_cpuid(env);
     env->gr[0] = 0;
     env->pr |= 1;
@@ -147,7 +176,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_env = {
     .name = "env",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = ia64_env_post_load,
     .fields = (const VMStateField[]) {
@@ -174,6 +203,8 @@ static const VMStateDescription vmstate_env = {
                        IA64MemorySkeletonState),
         VMSTATE_STRUCT(exception, CPUIA64State, 0, vmstate_exception,
                        IA64ExceptionRecord),
+        VMSTATE_VSTRUCT_V(alat, CPUIA64State, 3, vmstate_alat,
+                          IA64AlatState, 1),
         VMSTATE_END_OF_LIST()
     }
 };
