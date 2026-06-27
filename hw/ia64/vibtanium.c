@@ -17,6 +17,12 @@
 #include "target/ia64/exec-smoke.h"
 
 #define VIBTANIUM_DEFAULT_LINUX_APPEND ""
+#define VIBTANIUM_IOSAPIC_REG_SELECT 0x00
+#define VIBTANIUM_IOSAPIC_WINDOW     0x10
+#define VIBTANIUM_IOSAPIC_EOI        0x40
+#define VIBTANIUM_IOSAPIC_VERSION    0x01
+#define VIBTANIUM_IOSAPIC_RTE_LOW(i)  (0x10 + (i) * 2)
+#define VIBTANIUM_IOSAPIC_RTE_HIGH(i) (0x11 + (i) * 2)
 
 static void vibtanium_uart_irq(void *opaque, int n, int level)
 {
@@ -162,6 +168,99 @@ static const MemoryRegionOps vibtanium_local_sapic_ipi_ops = {
     .impl = {
         .min_access_size = 4,
         .max_access_size = 8,
+    },
+};
+
+static bool vibtanium_iosapic_register_index(uint32_t reg, unsigned *index,
+                                             bool *high)
+{
+    if (reg < VIBTANIUM_IOSAPIC_RTE_LOW(0)) {
+        return false;
+    }
+    reg -= VIBTANIUM_IOSAPIC_RTE_LOW(0);
+    if ((reg >> 1) >= VIBTANIUM_IOSAPIC_REDIRECTION_COUNT) {
+        return false;
+    }
+
+    *index = reg >> 1;
+    *high = (reg & 1) != 0;
+    return true;
+}
+
+static uint64_t vibtanium_iosapic_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    unsigned index;
+    bool high;
+
+    if (size != 4) {
+        return UINT32_MAX;
+    }
+
+    switch (offset) {
+    case VIBTANIUM_IOSAPIC_REG_SELECT:
+        return vms->iosapic_select;
+    case VIBTANIUM_IOSAPIC_WINDOW:
+        if (vms->iosapic_select == VIBTANIUM_IOSAPIC_VERSION) {
+            return ((VIBTANIUM_IOSAPIC_REDIRECTION_COUNT - 1) << 16) | 0x11;
+        }
+        if (vibtanium_iosapic_register_index(vms->iosapic_select, &index,
+                                             &high)) {
+            return high ? vms->iosapic_rte_high[index]
+                        : vms->iosapic_rte_low[index];
+        }
+        return 0;
+    case VIBTANIUM_IOSAPIC_EOI:
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static void vibtanium_iosapic_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    unsigned index;
+    bool high;
+
+    if (size != 4) {
+        return;
+    }
+
+    switch (offset) {
+    case VIBTANIUM_IOSAPIC_REG_SELECT:
+        vms->iosapic_select = value;
+        break;
+    case VIBTANIUM_IOSAPIC_WINDOW:
+        if (vibtanium_iosapic_register_index(vms->iosapic_select, &index,
+                                             &high)) {
+            if (high) {
+                vms->iosapic_rte_high[index] = value;
+            } else {
+                vms->iosapic_rte_low[index] = value;
+            }
+        }
+        break;
+    case VIBTANIUM_IOSAPIC_EOI:
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps vibtanium_iosapic_ops = {
+    .read = vibtanium_iosapic_read,
+    .write = vibtanium_iosapic_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
     },
 };
 
@@ -542,6 +641,13 @@ static void vibtanium_init(MachineState *machine)
                           VIBTANIUM_LOCAL_SAPIC_IPI_SIZE);
     memory_region_add_subregion(sysmem, VIBTANIUM_LOCAL_SAPIC_IPI_BASE,
                                 &vms->local_sapic_ipi);
+
+    memory_region_init_io(&vms->iosapic, OBJECT(machine),
+                          &vibtanium_iosapic_ops, vms,
+                          "vibtanium.iosapic",
+                          VIBTANIUM_IOSAPIC_SIZE);
+    memory_region_add_subregion(sysmem, VIBTANIUM_IOSAPIC_BASE,
+                                &vms->iosapic);
 
     qemu_init_irq_child(OBJECT(machine), "uart-irq", &vms->uart_irq,
                         vibtanium_uart_irq, vms, 0);

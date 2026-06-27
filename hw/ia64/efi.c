@@ -28,6 +28,17 @@
 #define HCDP_TABLE_LENGTH 88
 #define HCDP_UART_OFFSET 40
 #define HCDP_UART_LENGTH 48
+#define ACPI_RSDP_LENGTH 36
+#define ACPI_RSDT_ENTRY_COUNT 2
+#define ACPI_RSDT_LENGTH (36 + ACPI_RSDT_ENTRY_COUNT * 4)
+#define ACPI_XSDT_LENGTH (36 + ACPI_RSDT_ENTRY_COUNT * 8)
+#define ACPI_FADT_LENGTH 244
+#define ACPI_DSDT_LENGTH 36
+#define ACPI_MADT_LOCAL_SAPIC_LENGTH 16
+#define ACPI_MADT_IO_SAPIC_LENGTH 16
+#define ACPI_MADT_LENGTH \
+    (36 + 8 + ACPI_MADT_LOCAL_SAPIC_LENGTH + ACPI_MADT_IO_SAPIC_LENGTH)
+#define ACPI_FACS_LENGTH 64
 #define ACPI_ADR_SPACE_SYSTEM_IO 1
 #define PCDP_CONSOLE_UART 0
 #define PCDP_UART_PRIMARY_CONSOLE (1 << 2)
@@ -40,6 +51,12 @@ static bool range_ok(size_t size, uint64_t offset, uint64_t length)
 static uint16_t rd16(const uint8_t *p)
 {
     return p[0] | ((uint16_t)p[1] << 8);
+}
+
+static void wr16(uint8_t *p, uint16_t value)
+{
+    p[0] = value;
+    p[1] = value >> 8;
 }
 
 static uint32_t rd32(const uint8_t *p)
@@ -109,6 +126,16 @@ static uint32_t efi_crc32(const uint8_t *data, size_t size)
     return ~crc;
 }
 
+static uint8_t byte_checksum(const uint8_t *table, size_t size)
+{
+    uint32_t sum = 0;
+
+    for (size_t i = 0; i < size; i++) {
+        sum = (sum + table[i]) & 0xff;
+    }
+    return (uint8_t)((0x100 - sum) & 0xff);
+}
+
 static void write_table_header(uint8_t *table, size_t size,
                                uint64_t signature)
 {
@@ -118,6 +145,32 @@ static void write_table_header(uint8_t *table, size_t size,
     wr32(table + 16, 0);
     wr32(table + 20, 0);
     wr32(table + 16, efi_crc32(table, size));
+}
+
+static void write_acpi_table_header(uint8_t *table, const char *signature,
+                                    uint32_t length, uint8_t revision)
+{
+    memcpy(table, signature, 4);
+    wr32(table + 4, length);
+    table[8] = revision;
+    table[9] = 0;
+    memcpy(table + 10, "VIBTAN", 6);
+    memcpy(table + 16, "VIBTANIU", 8);
+    wr32(table + 24, 1);
+    memcpy(table + 28, "VIBT", 4);
+    wr32(table + 32, 1);
+    table[9] = byte_checksum(table, length);
+}
+
+static void write_acpi_gas(uint8_t *gas, uint8_t address_space,
+                           uint8_t bit_width, uint8_t access_width,
+                           uint64_t address)
+{
+    gas[0] = address_space;
+    gas[1] = bit_width;
+    gas[2] = 0;
+    gas[3] = access_width;
+    wr64(gas + 4, address);
 }
 
 static void write_ia64_bundle(uint8_t *blob, size_t size, uint64_t address,
@@ -189,12 +242,7 @@ static void write_fixed_ascii(uint8_t *p, size_t size, const char *text)
 
 static uint8_t sal_checksum(const uint8_t *table, size_t size)
 {
-    uint32_t sum = 0;
-
-    for (size_t i = 0; i < size; i++) {
-        sum = (sum + table[i]) & 0xff;
-    }
-    return (uint8_t)((0x100 - sum) & 0xff);
+    return byte_checksum(table, size);
 }
 
 static void efi_image_reset(VibtaniumEfiImage *image)
@@ -562,6 +610,11 @@ static const uint8_t efi_hcdp_table_guid[16] = {
     0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98,
 };
 
+static const uint8_t efi_acpi20_table_guid[16] = {
+    0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11,
+    0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81,
+};
+
 static void write_utf16_ascii(uint8_t *blob, size_t size, uint64_t address,
                               const char *text)
 {
@@ -598,12 +651,16 @@ static void write_loaded_image(uint8_t *blob, size_t size,
 static void write_configuration_table(uint8_t *blob, size_t size)
 {
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE,
-               efi_sal_system_table_guid);
+               efi_acpi20_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 16,
-              VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+              VIBTANIUM_EFI_ACPI_RSDP);
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 24,
-               efi_hcdp_table_guid);
+               efi_sal_system_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 40,
+              VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+    write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 48,
+               efi_hcdp_table_guid);
+    blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 64,
               VIBTANIUM_EFI_HCDP_TABLE);
 }
 
@@ -670,6 +727,119 @@ static void write_hcdp_table(uint8_t *blob, size_t size)
     table[9] = sal_checksum(table, HCDP_TABLE_LENGTH);
 }
 
+static void write_acpi_root_pointer(uint8_t *blob, size_t size)
+{
+    uint8_t *rsdp = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_RSDP,
+                             ACPI_RSDP_LENGTH);
+
+    memcpy(rsdp, "RSD PTR ", 8);
+    memcpy(rsdp + 9, "VIBTAN", 6);
+    rsdp[15] = 2;
+    wr32(rsdp + 16, VIBTANIUM_EFI_ACPI_RSDT);
+    wr32(rsdp + 20, ACPI_RSDP_LENGTH);
+    wr64(rsdp + 24, VIBTANIUM_EFI_ACPI_XSDT);
+    rsdp[8] = byte_checksum(rsdp, 20);
+    rsdp[32] = byte_checksum(rsdp, ACPI_RSDP_LENGTH);
+}
+
+static void write_acpi_root_tables(uint8_t *blob, size_t size)
+{
+    uint8_t *rsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_RSDT,
+                             ACPI_RSDT_LENGTH);
+    uint8_t *xsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_XSDT,
+                             ACPI_XSDT_LENGTH);
+
+    wr32(rsdt + 36, VIBTANIUM_EFI_ACPI_FADT);
+    wr32(rsdt + 40, VIBTANIUM_EFI_ACPI_MADT);
+    write_acpi_table_header(rsdt, "RSDT", ACPI_RSDT_LENGTH, 1);
+
+    wr64(xsdt + 36, VIBTANIUM_EFI_ACPI_FADT);
+    wr64(xsdt + 44, VIBTANIUM_EFI_ACPI_MADT);
+    write_acpi_table_header(xsdt, "XSDT", ACPI_XSDT_LENGTH, 1);
+}
+
+static void write_acpi_fadt(uint8_t *blob, size_t size)
+{
+    uint8_t *fadt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_FADT,
+                             ACPI_FADT_LENGTH);
+
+    wr32(fadt + 36, VIBTANIUM_EFI_ACPI_FACS);
+    wr32(fadt + 40, VIBTANIUM_EFI_ACPI_DSDT);
+    fadt[45] = 4; /* Enterprise server. */
+    wr16(fadt + 46, 9);
+    wr32(fadt + 56, 0x400);
+    wr32(fadt + 64, 0x404);
+    wr32(fadt + 76, 0x408);
+    fadt[88] = 4;
+    fadt[89] = 2;
+    fadt[91] = 4;
+    wr16(fadt + 109, 0);
+    wr32(fadt + 112, (1 << 0) | (1 << 2) | (1 << 4) |
+                       (1 << 5) | (1 << 6) | (1 << 8) |
+                       (1 << 12));
+    wr64(fadt + 132, VIBTANIUM_EFI_ACPI_FACS);
+    wr64(fadt + 140, VIBTANIUM_EFI_ACPI_DSDT);
+    write_acpi_gas(fadt + 148, ACPI_ADR_SPACE_SYSTEM_IO, 32, 1, 0x400);
+    write_acpi_gas(fadt + 172, ACPI_ADR_SPACE_SYSTEM_IO, 16, 1, 0x404);
+    write_acpi_gas(fadt + 208, ACPI_ADR_SPACE_SYSTEM_IO, 32, 1, 0x408);
+    write_acpi_table_header(fadt, "FACP", ACPI_FADT_LENGTH, 3);
+}
+
+static void write_acpi_dsdt(uint8_t *blob, size_t size)
+{
+    uint8_t *dsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_DSDT,
+                             ACPI_DSDT_LENGTH);
+
+    write_acpi_table_header(dsdt, "DSDT", ACPI_DSDT_LENGTH, 2);
+}
+
+static void write_acpi_madt(uint8_t *blob, size_t size)
+{
+    uint8_t *madt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_MADT,
+                             ACPI_MADT_LENGTH);
+    uint8_t *lsapic = madt + 44;
+    uint8_t *iosapic = lsapic + ACPI_MADT_LOCAL_SAPIC_LENGTH;
+
+    wr32(madt + 36, VIBTANIUM_LOCAL_SAPIC_IPI_BASE);
+    wr32(madt + 40, 1);
+
+    lsapic[0] = 7; /* ACPI_MADT_TYPE_LOCAL_SAPIC */
+    lsapic[1] = ACPI_MADT_LOCAL_SAPIC_LENGTH;
+    lsapic[2] = 0;
+    lsapic[3] = 0;
+    lsapic[4] = 0;
+    wr32(lsapic + 8, 1);
+    wr32(lsapic + 12, 0);
+
+    iosapic[0] = 6; /* ACPI_MADT_TYPE_IO_SAPIC */
+    iosapic[1] = ACPI_MADT_IO_SAPIC_LENGTH;
+    iosapic[2] = 0;
+    wr32(iosapic + 4, 0);
+    wr64(iosapic + 8, VIBTANIUM_IOSAPIC_BASE);
+
+    write_acpi_table_header(madt, "APIC", ACPI_MADT_LENGTH, 3);
+}
+
+static void write_acpi_facs(uint8_t *blob, size_t size)
+{
+    uint8_t *facs = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_FACS,
+                             ACPI_FACS_LENGTH);
+
+    memcpy(facs, "FACS", 4);
+    wr32(facs + 4, ACPI_FACS_LENGTH);
+    facs[32] = 2;
+}
+
+static void write_acpi_tables(uint8_t *blob, size_t size)
+{
+    write_acpi_root_pointer(blob, size);
+    write_acpi_root_tables(blob, size);
+    write_acpi_fadt(blob, size);
+    write_acpi_dsdt(blob, size);
+    write_acpi_madt(blob, size);
+    write_acpi_facs(blob, size);
+}
+
 static void write_system_table(uint8_t *blob, size_t size)
 {
     uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE, 120);
@@ -693,7 +863,7 @@ static void write_system_table(uint8_t *blob, size_t size)
               VIBTANIUM_EFI_RUNTIME_SERVICES);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 96,
               VIBTANIUM_EFI_BOOT_SERVICES);
-    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 2);
+    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 3);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 112,
               VIBTANIUM_EFI_CONFIGURATION_TABLE);
     write_table_header(table, 120, 0x5453595320494249ULL);
@@ -822,6 +992,7 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                         EFI_RUNTIME_SERVICE_BASE,
                         VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT, -1);
     write_configuration_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    write_acpi_tables(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_sal_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
