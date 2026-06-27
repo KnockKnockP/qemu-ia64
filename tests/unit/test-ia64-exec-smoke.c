@@ -267,6 +267,7 @@ static void test_i_unit_mov_ip_and_nop(void)
     const uint64_t mov_ip_r35_raw = 0x001800008c0ULL;
     const uint64_t mov_b_r35_b0_raw = 0x001880008c0ULL;
     const uint64_t nop_i_raw = 0x00008000000ULL;
+    const uint64_t break_i_syscall_raw = 0x01000000000ULL;
     CPUIA64State env;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
@@ -282,6 +283,10 @@ static void test_i_unit_mov_ip_and_nop(void)
     g_assert_cmphex(ia64_read_gr(&env, 35), ==, 0xfeedface);
 
     g_assert_true(ia64_slot_is_i_nop(IA64_SLOT_TYPE_I, nop_i_raw));
+    g_assert_true(ia64_slot_is_i_break(IA64_SLOT_TYPE_I,
+                                       break_i_syscall_raw));
+    g_assert_cmphex(ia64_i_break_immediate(break_i_syscall_raw),
+                    ==, 0x100000);
 }
 
 static void test_i_unit_mov_from_predicate(void)

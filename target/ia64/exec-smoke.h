@@ -202,6 +202,8 @@ bool ia64_return_from_call_frame(CPUIA64State *env, uint64_t target_ip);
 bool ia64_slot_is_m34_alloc(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m34_alloc(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_nop(IA64SlotType type, uint64_t raw);
+bool ia64_slot_is_i_break(IA64SlotType type, uint64_t raw);
+uint64_t ia64_i_break_immediate(uint64_t raw);
 bool ia64_slot_is_i_mov_ip(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_mov_ip(CPUIA64State *env, uint64_t raw, uint64_t bundle_ip);
 bool ia64_slot_is_i_mov_from_branch(IA64SlotType type, uint64_t raw);

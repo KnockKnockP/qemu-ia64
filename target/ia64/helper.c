@@ -15,6 +15,9 @@
 #include "qemu/error-report.h"
 #include "trace-target_ia64.h"
 
+static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
+                                      uint64_t aux0, uint64_t aux1);
+
 static void abort_unsupported_slot(CPUIA64State *env,
                                    const IA64DecodedBundle *decoded,
                                    int slot)
@@ -45,6 +48,20 @@ static void abort_zero_branch(CPUIA64State *env,
               "IA-64 execution frontier at IP=0x%016" PRIx64
               ": branch target became zero in %s; bundle %s\n",
               env->ip, slot_text, bundle_text);
+}
+
+static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
+                               uint64_t iim, uint64_t *next_ip)
+{
+    char detail[64];
+
+    snprintf(detail, sizeof(detail), "%s iim=0x%" PRIx64, mnemonic, iim);
+    ia64_record_exception(env, IA64_EXCEPTION_BREAK, iim,
+                          MMU_INST_FETCH, detail);
+    env->cr[IA64_CR_IPSR] = env->psr;
+    env->cr[IA64_CR_IIM] = iim;
+    *next_ip = env->cr[IA64_CR_IVA] + UINT64_C(0x2c00);
+    ia64_progress_trace_event(env, mnemonic, iim, *next_ip);
 }
 
 enum {
@@ -4105,6 +4122,12 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         if (ia64_slot_is_i_nop(type, raw)) {
             continue;
         }
+        if (ia64_slot_is_i_break(type, raw)) {
+            uint64_t iim = ia64_i_break_immediate(raw);
+
+            ia64_deliver_break(env, "break.i", iim, &next_ip);
+            break;
+        }
         if (ia64_slot_is_m34_alloc(type, raw)) {
             ia64_exec_m34_alloc(env, raw);
             continue;
@@ -4169,15 +4192,8 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_break(type, raw)) {
             uint64_t iim = ia64_m_break_immediate(raw);
-            char detail[64];
 
-            snprintf(detail, sizeof(detail), "break.m iim=0x%" PRIx64, iim);
-            ia64_record_exception(env, IA64_EXCEPTION_BREAK, iim,
-                                  MMU_INST_FETCH, detail);
-            env->cr[IA64_CR_IPSR] = env->psr;
-            env->cr[IA64_CR_IIM] = iim;
-            next_ip = env->cr[IA64_CR_IVA] + UINT64_C(0x2c00);
-            ia64_progress_trace_event(env, "break.m", iim, next_ip);
+            ia64_deliver_break(env, "break.m", iim, &next_ip);
             break;
         }
         if (ia64_slot_is_m_mov_to_region_register(type, raw) &&

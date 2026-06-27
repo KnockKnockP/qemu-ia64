@@ -798,6 +798,18 @@ bool ia64_slot_is_i_nop(IA64SlotType type, uint64_t raw)
     return ia64_slot_is_i_misc_x6(type, raw, 0x1) && y == 0;
 }
 
+bool ia64_slot_is_i_break(IA64SlotType type, uint64_t raw)
+{
+    uint8_t y = (raw >> 26) & 0x1;
+
+    return ia64_slot_is_i_misc_x6(type, raw, 0x0) && y == 0;
+}
+
+uint64_t ia64_i_break_immediate(uint64_t raw)
+{
+    return (((raw >> 36) & 0x1) << 20) | ((raw >> 6) & 0xfffff);
+}
+
 bool ia64_slot_is_i_mov_ip(IA64SlotType type, uint64_t raw)
 {
     return ia64_slot_is_i_misc_x6(type, raw, 0x30);
