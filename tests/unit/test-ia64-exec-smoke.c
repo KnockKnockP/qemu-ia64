@@ -10,6 +10,8 @@
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
+#define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
+#define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 static void store_le64(uint8_t *p, uint64_t value)
 {
     for (int i = 0; i < 8; i++) {
@@ -262,6 +264,44 @@ static void test_rse_backing_store_address_helpers(void)
     g_assert_cmphex(env.ar[IA64_AR_BSP], ==, 0x1000);
 }
 
+static void test_rse_stacked_write_marks_clean_register_dirty(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 100;
+    env.rse.clean_count = 104;
+    ia64_set_cfm(&env, ia64_make_cfm(4, 4, 0));
+
+    ia64_write_gr(&env, 33, 0xa000000100825380ULL);
+
+    g_assert_cmphex(ia64_read_gr(&env, 33), ==, 0xa000000100825380ULL);
+    g_assert_cmpuint(env.rse.clean_count, ==, 101);
+}
+
+static void test_rse_bspstore_write_preserves_dirty_boundary(void)
+{
+    const uint64_t mov_ar_bspstore_r33_raw =
+        (0x2aULL << 27) | (18ULL << 20) | (33ULL << 13);
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 104;
+    env.rse.clean_count = 101;
+    env.rse.bspstore = 0x2000;
+    env.rse.bsp = 0x2000;
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+    ia64_write_gr(&env, 33, 0x3018);
+
+    g_assert_true(ia64_slot_is_mov_to_application(IA64_SLOT_TYPE_I,
+                                                  mov_ar_bspstore_r33_raw));
+    g_assert_true(ia64_exec_mov_to_application(&env, IA64_SLOT_TYPE_I,
+                                               mov_ar_bspstore_r33_raw));
+    g_assert_cmphex(env.rse.bspstore, ==, 0x3018);
+    g_assert_cmpuint(env.rse.clean_count, ==, 101);
+}
+
 static void test_i_unit_mov_ip_and_nop(void)
 {
     const uint64_t mov_ip_r35_raw = 0x001800008c0ULL;
@@ -287,6 +327,38 @@ static void test_i_unit_mov_ip_and_nop(void)
                                        break_i_syscall_raw));
     g_assert_cmphex(ia64_i_break_immediate(break_i_syscall_raw),
                     ==, 0x100000);
+}
+
+static void test_i_unit_break_delivers_interruption_state(void)
+{
+    const uint64_t bundle_ip = 0x200000;
+    const uint64_t iva = 0x100000;
+    const uint64_t psr_before = IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                                IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK;
+    CPUIA64State env;
+    uint64_t next_ip = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = bundle_ip;
+    env.psr = ia64_psr_with_ri(psr_before, 1);
+    env.cr[IA64_CR_IVA] = iva;
+    env.cr[IA64_CR_IFS] = 0x8000000000001234ULL;
+    ia64_deliver_break_interruption(&env, 0x100000, &next_ip,
+                                    "break.i iim=0x100000");
+
+    g_assert_cmphex(env.ip, ==, iva + 0x2c00);
+    g_assert_cmphex(next_ip, ==, env.ip);
+    g_assert_cmphex(env.cr[IA64_CR_IIM], ==, 0x100000);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, bundle_ip);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, ia64_psr_with_ri(psr_before, 1));
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK, ==,
+                    UINT64_C(1) << IA64_ISR_EI_SHIFT);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_X_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_X_BIT);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, 0);
+    g_assert_cmphex(env.psr & (IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                               IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK |
+                               IA64_PSR_RI_MASK), ==, 0);
 }
 
 static void test_i_unit_mov_from_predicate(void)
@@ -1820,6 +1892,27 @@ static void test_b_unit_indirect_return_retreats_clean_bsp(void)
     g_assert_cmphex(env.rse.bspstore, ==, 0x1200);
 }
 
+static void test_b_unit_indirect_return_clamps_clean_boundary(void)
+{
+    const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_set_cfm(&env, ia64_make_cfm(2, 0, 0));
+    env.rse.current_frame_base = 4;
+    env.rse.clean_count = 2321;
+    env.ar[IA64_AR_PFS] = ia64_make_cfm(6, 4, 0);
+    env.br[0] = 0x1001047;
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, br_ret_b0_raw, 0x2000,
+                                              &target));
+
+    g_assert_cmphex(target, ==, 0x1001040);
+    g_assert_cmpuint(env.rse.current_frame_base, ==, 0);
+    g_assert_cmpuint(env.rse.clean_count, ==, 0);
+}
+
 static void test_b_unit_return_from_interruption(void)
 {
     const uint64_t rfi_raw = 0x00040000000ULL;
@@ -1899,6 +1992,29 @@ static void test_rfi_uncovers_valid_interruption_frame(void)
                                               &target));
     g_assert_cmphex(env.cfm, ==, interrupted_cfm);
     g_assert_cmpuint(env.rse.current_frame_base, ==, 11);
+}
+
+static void test_rfi_uncovers_valid_frame_clamps_clean_boundary(void)
+{
+    const uint64_t rfi_raw = 0x00040000000ULL;
+    const uint64_t interrupted_cfm = ia64_make_cfm(8, 3, 0);
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
+    env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
+    env.rse.current_frame_base = 19;
+    env.rse.clean_count = 2321;
+    ia64_set_cfm(&env, 0);
+    env.cr[IA64_CR_IFS] = interrupted_cfm | IA64_IFS_VALID_BIT;
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
+                                              &target));
+    g_assert_cmphex(target, ==, 0xa0000001007f7e50ULL);
+    g_assert_cmphex(env.cfm, ==, interrupted_cfm);
+    g_assert_cmpuint(env.rse.current_frame_base, ==, 11);
+    g_assert_cmpuint(env.rse.clean_count, ==, 11);
 }
 
 static void test_rfi_ignores_invalid_ifs(void)
@@ -2096,8 +2212,14 @@ int main(int argc, char **argv)
                     test_frame_state_updates_preserve_interruption_frame_state);
     g_test_add_func("/ia64-exec-smoke/rse-backing-store-address-helpers",
                     test_rse_backing_store_address_helpers);
+    g_test_add_func("/ia64-exec-smoke/rse-stacked-write-marks-clean-register-dirty",
+                    test_rse_stacked_write_marks_clean_register_dirty);
+    g_test_add_func("/ia64-exec-smoke/rse-bspstore-write-preserves-dirty-boundary",
+                    test_rse_bspstore_write_preserves_dirty_boundary);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-ip-and-nop",
                     test_i_unit_mov_ip_and_nop);
+    g_test_add_func("/ia64-exec-smoke/i-unit-break-delivers-interruption-state",
+                    test_i_unit_break_delivers_interruption_state);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-from-predicate",
                     test_i_unit_mov_from_predicate);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask",
@@ -2188,12 +2310,16 @@ int main(int argc, char **argv)
                     test_b_unit_indirect_return_wraps_frame_base);
     g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-clean-bsp",
                     test_b_unit_indirect_return_retreats_clean_bsp);
+    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-clean-boundary",
+                    test_b_unit_indirect_return_clamps_clean_boundary);
     g_test_add_func("/ia64-exec-smoke/b-unit-rfi",
                     test_b_unit_return_from_interruption);
     g_test_add_func("/ia64-exec-smoke/rfi-staged-control-registers",
                     test_rfi_staged_control_registers);
     g_test_add_func("/ia64-exec-smoke/rfi-valid-ifs-uncovers-frame",
                     test_rfi_uncovers_valid_interruption_frame);
+    g_test_add_func("/ia64-exec-smoke/rfi-valid-ifs-clamps-clean-boundary",
+                    test_rfi_uncovers_valid_frame_clamps_clean_boundary);
     g_test_add_func("/ia64-exec-smoke/rfi-invalid-ifs",
                     test_rfi_ignores_invalid_ifs);
     g_test_add_func("/ia64-exec-smoke/b-unit-system-branch-extensions",

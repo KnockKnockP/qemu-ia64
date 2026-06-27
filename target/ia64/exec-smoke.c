@@ -80,6 +80,15 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
     ia64_clear_exception(env);
 }
 
+void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
+                                     uint64_t *next_ip, const char *detail)
+{
+    ia64_deliver_exception(env, IA64_EXCEPTION_BREAK, env->ip,
+                           MMU_INST_FETCH, detail);
+    env->cr[IA64_CR_IIM] = iim;
+    *next_ip = env->ip;
+}
+
 const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status)
 {
     switch (status) {
@@ -265,7 +274,10 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
             env->gr[reg] = value;
         }
     } else {
-        env->rse.stacked_gr[ia64_stacked_gr_slot(env, reg)] = value;
+        uint32_t slot = ia64_stacked_gr_slot(env, reg);
+
+        env->rse.stacked_gr[slot] = value;
+        env->rse.clean_count = MIN(env->rse.clean_count, slot);
     }
     ia64_alat_invalidate_gr(env, reg);
     env->gr[0] = 0;
@@ -772,7 +784,9 @@ static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)
 
         env->rse.bspstore = value & ~7ULL;
         env->rse.bsp = ia64_rse_skip_regs(env->rse.bspstore, dirty);
-        env->rse.clean_count = dirty == 0 ? env->rse.current_frame_base : 0;
+        env->rse.clean_count = dirty == 0
+            ? MIN(env->rse.clean_count, env->rse.current_frame_base)
+            : 0;
         ia64_rse_sync_ar(env);
         break;
     }
@@ -4256,6 +4270,8 @@ static void ia64_uncover_stack_frame(CPUIA64State *env, uint64_t restored_cfm)
         (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
          restored_sof) % IA64_STACKED_GR_COUNT;
     ia64_rse_restore_preserved_frame(env, restored_sof);
+    env->rse.clean_count = MIN(env->rse.clean_count,
+                               env->rse.current_frame_base);
     ia64_set_cfm(env, restored_cfm);
 }
 

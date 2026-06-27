@@ -56,11 +56,7 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     char detail[64];
 
     snprintf(detail, sizeof(detail), "%s iim=0x%" PRIx64, mnemonic, iim);
-    ia64_record_exception(env, IA64_EXCEPTION_BREAK, iim,
-                          MMU_INST_FETCH, detail);
-    env->cr[IA64_CR_IPSR] = env->psr;
-    env->cr[IA64_CR_IIM] = iim;
-    *next_ip = env->cr[IA64_CR_IVA] + UINT64_C(0x2c00);
+    ia64_deliver_break_interruption(env, iim, next_ip, detail);
     ia64_progress_trace_event(env, mnemonic, iim, *next_ip);
 }
 
@@ -3594,6 +3590,8 @@ static void ia64_exec_flushrs(CPUIA64State *env)
     uint64_t address = env->rse.bspstore;
 
     if (dirty == 0 || env->rse.bspstore == 0) {
+        env->rse.clean_count = MIN(env->rse.clean_count,
+                                   env->rse.current_frame_base);
         return;
     }
 
@@ -4370,19 +4368,18 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                           ((raw >> 27) & 0x3f) == 0x21;
             uint32_t dirty_before =
                 ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
-            uint32_t clean_before = env->rse.clean_count;
 
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {
                 ia64_rse_fill_clean_preserved_frame(env,
                                                     (env->cfm >> 7) & 0x7f,
                                                     dirty_before,
-                                                    clean_before);
+                                                    env->rse.clean_count);
             }
             if (rfi_valid_ifs) {
                 ia64_rse_fill_clean_preserved_frame(env, env->rse.sof,
                                                     dirty_before,
-                                                    clean_before);
+                                                    env->rse.clean_count);
             }
             if (rfi) {
                 next_ri = ia64_psr_ri(env->psr);
