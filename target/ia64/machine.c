@@ -168,6 +168,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     if (version_id < 3) {
         memset(&env->alat, 0, sizeof(env->alat));
     }
+    ia64_rse_reconstruct_transients(env);
     ia64_cpu_init_synthetic_cpuid(env);
     env->gr[0] = 0;
     env->pr |= 1;

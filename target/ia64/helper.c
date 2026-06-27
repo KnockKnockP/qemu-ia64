@@ -4230,6 +4230,10 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             ia64_exec_m_virtual_translation(env, raw)) {
             continue;
         }
+        if (ia64_slot_is_m_invala(type, raw) &&
+            ia64_exec_m_invala(env, raw)) {
+            continue;
+        }
         if (ia64_slot_is_m_flushrs(type, raw)) {
             ia64_exec_flushrs(env);
             continue;

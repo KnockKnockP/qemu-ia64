@@ -302,6 +302,43 @@ static void test_rse_bspstore_write_preserves_dirty_boundary(void)
     g_assert_cmpuint(env.rse.clean_count, ==, 101);
 }
 
+static void test_rse_reconstructs_clean_partition_after_load(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 17;
+    env.rse.clean_count = 0;
+    env.rse.bspstore = 0x4000;
+    env.rse.bsp = 0x4000;
+
+    ia64_rse_reconstruct_transients(&env);
+
+    g_assert_cmpuint(env.rse.clean_count, ==, 17);
+
+    env.rse.clean_count = 17;
+    env.rse.bsp = ia64_rse_skip_regs(env.rse.bspstore, 3);
+
+    ia64_rse_reconstruct_transients(&env);
+
+    g_assert_cmpuint(env.rse.clean_count, ==, 14);
+
+    env.rse.clean_count = 17;
+    env.rse.bsp = ia64_rse_skip_regs(env.rse.bspstore, 20);
+
+    ia64_rse_reconstruct_transients(&env);
+
+    g_assert_cmpuint(env.rse.clean_count, ==, 0);
+
+    env.rse.clean_count = 17;
+    env.rse.bspstore = 0;
+    env.rse.bsp = 0;
+
+    ia64_rse_reconstruct_transients(&env);
+
+    g_assert_cmpuint(env.rse.clean_count, ==, 0);
+}
+
 static void test_i_unit_mov_ip_and_nop(void)
 {
     const uint64_t mov_ip_r35_raw = 0x001800008c0ULL;
@@ -506,6 +543,7 @@ static void test_m_unit_system_memory_management(void)
     const uint64_t mov_r24_pkr_r6_raw =
         (1ULL << 37) | (0x13ULL << 27) | (6ULL << 20) | (24ULL << 6);
     const uint64_t kernel_mov_m_ar_rsc_0_raw = 0x00141000000ULL;
+    const uint64_t kernel_invala_raw = 0x00080000000ULL;
     const uint64_t kernel_loadrs_raw = 0x00050000000ULL;
     const uint64_t kernel_flushrs_raw = 0x00060000000ULL;
     CPUIA64State env;
@@ -534,6 +572,25 @@ static void test_m_unit_system_memory_management(void)
     g_assert_true(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M, sync_i_raw));
     g_assert_true(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,
                                              elilo_fc_r32_raw));
+    env.alat.next = 2;
+    env.alat.entries[0].valid = true;
+    env.alat.entries[0].target = 12;
+    env.alat.entries[0].width = 8;
+    env.alat.entries[0].physical = true;
+    env.alat.entries[0].address = 0x2000;
+    env.alat.entries[1].valid = true;
+    env.alat.entries[1].target = 13;
+    env.alat.entries[1].width = 4;
+    env.alat.entries[1].address = 0x3000;
+    g_assert_true(ia64_slot_is_m_invala(IA64_SLOT_TYPE_M,
+                                        kernel_invala_raw));
+    g_assert_false(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,
+                                              kernel_invala_raw));
+    g_assert_true(ia64_exec_m_invala(&env, kernel_invala_raw));
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        g_assert_false(env.alat.entries[i].valid);
+    }
+    g_assert_cmpuint(env.alat.next, ==, 0);
 
     g_assert_true(ia64_slot_is_m_processor_mask(IA64_SLOT_TYPE_M,
                                                 kernel_rsm_0x6000_raw));
@@ -2216,6 +2273,8 @@ int main(int argc, char **argv)
                     test_rse_stacked_write_marks_clean_register_dirty);
     g_test_add_func("/ia64-exec-smoke/rse-bspstore-write-preserves-dirty-boundary",
                     test_rse_bspstore_write_preserves_dirty_boundary);
+    g_test_add_func("/ia64-exec-smoke/rse-reconstructs-clean-partition-after-load",
+                    test_rse_reconstructs_clean_partition_after_load);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-ip-and-nop",
                     test_i_unit_mov_ip_and_nop);
     g_test_add_func("/ia64-exec-smoke/i-unit-break-delivers-interruption-state",

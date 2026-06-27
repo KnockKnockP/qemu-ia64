@@ -163,6 +163,24 @@ uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
     return addr + (uint64_t)((num_regs + delta / 0x3f) * 8);
 }
 
+void ia64_rse_reconstruct_transients(CPUIA64State *env)
+{
+    uint32_t dirty;
+
+    if (!env) {
+        return;
+    }
+    if (env->rse.bspstore == 0) {
+        env->rse.clean_count = 0;
+        return;
+    }
+
+    dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
+    env->rse.clean_count = dirty < env->rse.current_frame_base
+        ? env->rse.current_frame_base - dirty
+        : 0;
+}
+
 static void ia64_rse_sync_ar(CPUIA64State *env)
 {
     env->ar[IA64_AR_BSP] = env->rse.bsp;
@@ -1822,6 +1840,25 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
+bool ia64_slot_is_m_invala(IA64SlotType type, uint64_t raw)
+{
+    return type == IA64_SLOT_TYPE_M &&
+           ia64_slot_major_opcode(raw) == 0 &&
+           ((raw >> 33) & 0x7) == 0 &&
+           ((raw >> 31) & 0x3) == 1 &&
+           ((raw >> 27) & 0xf) == 0;
+}
+
+bool ia64_exec_m_invala(CPUIA64State *env, uint64_t raw)
+{
+    if (!env || !ia64_slot_is_m_invala(IA64_SLOT_TYPE_M, raw)) {
+        return false;
+    }
+
+    memset(&env->alat, 0, sizeof(env->alat));
+    return true;
+}
+
 bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw)
 {
     uint8_t major;
@@ -1847,9 +1884,7 @@ bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw)
     x2 = (raw >> 31) & 0x3;
     x4 = (raw >> 27) & 0xf;
 
-    if (x2 == 1 && x4 == 0) {
-        return true;
-    }
+    /* invala has architectural ALAT side effects and is handled separately. */
     if (x2 == 2 && (x4 == 0 || x4 == 2 || x4 == 3)) {
         return true;
     }
