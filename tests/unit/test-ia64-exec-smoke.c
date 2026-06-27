@@ -9,6 +9,7 @@
 #include "target/ia64/mem.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 static void store_le64(uint8_t *p, uint64_t value)
 {
     for (int i = 0; i < 8; i++) {
@@ -189,6 +190,46 @@ static void test_m34_alloc_updates_frame_state(void)
     g_assert_cmpuint(env.rse.sof, ==, 6);
     g_assert_cmpuint(env.rse.sol, ==, 4);
     g_assert_cmpuint(env.rse.sor, ==, 0);
+}
+
+static void test_frame_state_updates_preserve_interruption_frame_state(void)
+{
+    const uint64_t elilo_alloc_raw = 0x02c0040c880ULL;
+    const uint64_t br_ctop_raw = 0x080000001c0ULL;
+    const uint64_t clrrrb_raw = 0x04ULL << 27;
+    const uint64_t cfm_with_rrb = ia64_make_cfm(8, 3, 1) |
+        (5ULL << 18) | (6ULL << 25) | (7ULL << 32);
+    const uint64_t saved_ifs = 0x8000000000003333ULL;
+    CPUIA64State env;
+    uint64_t target = 0;
+    bool taken = false;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.cr[IA64_CR_IFS] = saved_ifs;
+    ia64_set_cfm(&env, ia64_make_cfm(2, 1, 0));
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
+
+    g_assert_true(ia64_exec_m34_alloc(&env, elilo_alloc_raw));
+    g_assert_cmphex(env.cfm, ==, ia64_make_cfm(6, 4, 0));
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
+
+    ia64_set_cfm(&env, ia64_make_cfm(8, 3, 1));
+    env.ar[IA64_AR_LC] = 1;
+    g_assert_true(ia64_exec_b_branch_relative(&env, br_ctop_raw, 0x2000,
+                                              &target, &taken));
+    g_assert_true(taken);
+    g_assert_cmpuint(env.rse.rrb_gr, ==, 7);
+    g_assert_cmpuint(env.rse.rrb_fr, ==, 95);
+    g_assert_cmpuint(env.rse.rrb_pr, ==, 47);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
+
+    ia64_set_cfm(&env, cfm_with_rrb);
+    g_assert_true(ia64_exec_b_indirect_branch(&env, clrrrb_raw, 0x2010,
+                                              &target));
+    g_assert_cmpuint(env.rse.rrb_gr, ==, 0);
+    g_assert_cmpuint(env.rse.rrb_fr, ==, 0);
+    g_assert_cmpuint(env.rse.rrb_pr, ==, 0);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
 }
 
 static void test_rse_backing_store_address_helpers(void)
@@ -1933,6 +1974,33 @@ static void test_b_unit_system_branch_extensions(void)
     g_assert_cmphex(target, ==, 0x2060);
 }
 
+static void test_cover_sets_ifs_only_when_interruption_collection_off(void)
+{
+    const uint64_t cover_raw = 0x02ULL << 27;
+    const uint64_t cfm = ia64_make_cfm(8, 3, 0);
+    const uint64_t saved_ifs = 0x8000000000003333ULL;
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_set_cfm(&env, cfm);
+    env.cr[IA64_CR_IFS] = saved_ifs;
+    env.psr = 0;
+    g_assert_true(ia64_exec_b_indirect_branch(&env, cover_raw, 0x3000,
+                                              &target));
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, cfm | IA64_IFS_VALID_BIT);
+    g_assert_cmphex(env.cfm, ==, 0);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_set_cfm(&env, cfm);
+    env.cr[IA64_CR_IFS] = saved_ifs;
+    env.psr = IA64_PSR_IC_BIT;
+    g_assert_true(ia64_exec_b_indirect_branch(&env, cover_raw, 0x3010,
+                                              &target));
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
+    g_assert_cmphex(env.cfm, ==, 0);
+}
+
 static void test_b_unit_indirect_call_updates_link_and_frame(void)
 {
     const uint64_t br_call_b0_b6_raw = 0x0210000d000ULL;
@@ -2019,6 +2087,8 @@ int main(int argc, char **argv)
                     test_unsupported_instruction_message);
     g_test_add_func("/ia64-exec-smoke/m34-alloc-updates-frame-state",
                     test_m34_alloc_updates_frame_state);
+    g_test_add_func("/ia64-exec-smoke/frame-state-preserves-ifs",
+                    test_frame_state_updates_preserve_interruption_frame_state);
     g_test_add_func("/ia64-exec-smoke/rse-backing-store-address-helpers",
                     test_rse_backing_store_address_helpers);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-ip-and-nop",
@@ -2123,6 +2193,8 @@ int main(int argc, char **argv)
                     test_rfi_ignores_invalid_ifs);
     g_test_add_func("/ia64-exec-smoke/b-unit-system-branch-extensions",
                     test_b_unit_system_branch_extensions);
+    g_test_add_func("/ia64-exec-smoke/cover-ifs-psr-ic",
+                    test_cover_sets_ifs_only_when_interruption_collection_off);
     g_test_add_func("/ia64-exec-smoke/b-unit-indirect-call",
                     test_b_unit_indirect_call_updates_link_and_frame);
     g_test_add_func("/ia64-exec-smoke/b-unit-predict-or-nop",

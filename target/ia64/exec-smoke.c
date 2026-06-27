@@ -18,6 +18,7 @@
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
+#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_INTERRUPT_VECTOR_MASK UINT64_C(0xff)
@@ -123,7 +124,6 @@ void ia64_set_cfm(CPUIA64State *env, uint64_t cfm)
     env->rse.rrb_gr = (cfm >> 18) & 0x7f;
     env->rse.rrb_fr = (cfm >> 25) & 0x7f;
     env->rse.rrb_pr = (cfm >> 32) & 0x3f;
-    env->cr[IA64_CR_IFS] = cfm;
 }
 
 static uint32_t ia64_rse_slot_num(uint64_t addr)
@@ -4207,7 +4207,6 @@ static void ia64_update_cfm_rename_bases(CPUIA64State *env)
                ((uint64_t)(env->rse.rrb_gr & 0x7f) << 18) |
                ((uint64_t)(env->rse.rrb_fr & 0x7f) << 25) |
                ((uint64_t)(env->rse.rrb_pr & 0x3f) << 32);
-    env->cr[IA64_CR_IFS] = env->cfm;
 }
 
 static void ia64_rotate_modulo_scheduled_registers(CPUIA64State *env)
@@ -4232,7 +4231,9 @@ static void ia64_cover_stack_frame(CPUIA64State *env)
         (env->rse.current_frame_base + covered_sof) % IA64_STACKED_GR_COUNT;
     ia64_rse_preserve_frame(env, covered_sof);
     ia64_set_cfm(env, 0);
-    env->cr[IA64_CR_IFS] = covered_cfm | IA64_IFS_VALID_BIT;
+    if ((env->psr & IA64_PSR_IC_BIT) == 0) {
+        env->cr[IA64_CR_IFS] = covered_cfm | IA64_IFS_VALID_BIT;
+    }
 }
 
 static void ia64_uncover_stack_frame(CPUIA64State *env, uint64_t restored_cfm)

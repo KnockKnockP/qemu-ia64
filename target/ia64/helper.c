@@ -4348,6 +4348,8 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         if (ia64_slot_is_b_indirect_branch(type, raw)) {
             bool rfi = ia64_slot_major_opcode(raw) == 0x0 &&
                        ((raw >> 27) & 0x3f) == 0x08;
+            bool rfi_valid_ifs =
+                rfi && (env->cr[IA64_CR_IFS] & IA64_IFS_VALID_BIT) != 0;
             bool br_ret = ia64_slot_major_opcode(raw) == 0x0 &&
                           ((raw >> 27) & 0x3f) == 0x21;
             uint32_t dirty_before =
@@ -4358,6 +4360,11 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             if (br_ret) {
                 ia64_rse_fill_clean_preserved_frame(env,
                                                     (env->cfm >> 7) & 0x7f,
+                                                    dirty_before,
+                                                    clean_before);
+            }
+            if (rfi_valid_ifs) {
+                ia64_rse_fill_clean_preserved_frame(env, env->rse.sof,
                                                     dirty_before,
                                                     clean_before);
             }
