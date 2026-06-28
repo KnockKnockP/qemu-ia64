@@ -4419,6 +4419,28 @@ static bool exec_false_predicated_side_effect(CPUIA64State *env,
     return false;
 }
 
+/*
+ * Diagnostic: log do_execve() filenames so a userspace exec loop can be
+ * identified. do_execve() in the Debian 3.2.0-4-itanium kernel is at a fixed
+ * address; gated behind VIBTANIUM_EXECVE_TRACE so it costs nothing by default.
+ */
+static void ia64_trace_execve(CPUIA64State *env)
+{
+    static int enabled = -1;
+    char path[176];
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_EXECVE_TRACE") != NULL;
+    }
+    if (enabled == 0 || env->ip != UINT64_C(0xa0000001002072e0)) {
+        return;
+    }
+    ia64_trace_guest_c_string(env, ia64_read_gr(env, 32), path, sizeof(path));
+    fprintf(stderr, "[ia64-execve] do_execve path=%s current=0x%016" PRIx64
+            " b0=0x%016" PRIx64 "\n",
+            path, ia64_read_gr(env, 13), env->br[0]);
+}
+
 void HELPER(exec_bundle)(CPUIA64State *env,
                          uint32_t tmpl,
                          uint64_t slot0,
@@ -4439,6 +4461,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
      */
     cpu->neg.can_do_io = true;
 
+    ia64_trace_execve(env);
     ia64_maybe_apply_linux_cmdline_append(env);
 
     decoded.tmpl = tmpl & 0x1f;
@@ -4670,11 +4693,31 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_purge_translation(type, raw) &&
             ia64_exec_m_purge_translation(env, raw)) {
+            uint8_t px6 = (raw >> 27) & 0x3f;
+            uint8_t ps = (ia64_read_gr(env, (raw >> 13) & 0x7f) >> 2) & 0x3f;
+
             /*
              * The modeled translation-cache/register entries were invalidated;
-             * drop the host softmmu TLB so stale cached pages are re-filled.
+             * drop the matching host softmmu TLB so stale cached pages re-fill.
+             * Flush exactly the purged ia64 page range: ia64 pages can be larger
+             * than TARGET_PAGE_SIZE, so a single host-page flush would leave
+             * stale mappings whose physical page is later reused and corrupted
+             * (seen as a slab free_block NULL deref). A range flush over just the
+             * page -- rather than a full tlb_flush on every ptc.l -- also avoids
+             * the re-fault storm during library mmap/mprotect that makes
+             * userspace crawl. ptc.e and unusual page sizes fall back to a full
+             * flush.
              */
-            tlb_flush(cpu);
+            if (px6 != 0x34 && ps >= TARGET_PAGE_BITS && ps < 40) {
+                uint64_t len = UINT64_C(1) << ps;
+                uint64_t addr = ia64_read_gr(env, (raw >> 20) & 0x7f) &
+                                ~(len - 1);
+
+                tlb_flush_range_by_mmuidx(cpu, addr, len, 0x7,
+                                          TARGET_LONG_BITS);
+            } else {
+                tlb_flush(cpu);
+            }
             continue;
         }
         if (ia64_slot_is_m_invala(type, raw) &&
