@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "bundle.h"
+#include "exec-smoke.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "exec/memop.h"
@@ -86,6 +87,18 @@ static bool ia64_pc_is_efi_call_gate(uint64_t pc)
 static bool ia64_slot_may_change_flow(IA64SlotType type, uint64_t raw)
 {
     uint8_t major;
+
+    /*
+     * A break instruction (in any unit) delivers a break interruption and
+     * redirects execution to the IVT -- e.g. kernel_execve's syscall break.
+     * The delivery sets env->ip to the vector inside HELPER(exec_bundle), so
+     * the bundle must end the TB; otherwise the next translated bundle's
+     * "movi cpu_ip, pc" overwrites the vector and the handler never runs.
+     * break.m was already covered by the M-unit decode below; break.i was not.
+     */
+    if (ia64_slot_is_i_break(type, raw) || ia64_slot_is_m_break(type, raw)) {
+        return true;
+    }
 
     if (type == IA64_SLOT_TYPE_B) {
         major = ia64_slot_major_opcode(raw);
