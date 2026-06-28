@@ -723,6 +723,10 @@ static void ia64_progress_trace_bundle(CPUIA64State *env)
     static uint64_t matched_count;
     uint64_t interval;
 
+    if (!ia64_progress_trace_enabled()) {
+        return;
+    }
+
     count++;
     if (!ia64_progress_trace_ip_matches(env->ip)) {
         return;
@@ -737,10 +741,6 @@ static void ia64_progress_trace_bundle(CPUIA64State *env)
     trace_ia64_progress_bundle(count, env->ip, env->psr, env->cfm,
                                env->ar[IA64_AR_LC], env->ar[IA64_AR_EC],
                                env->ar[IA64_AR_BSPSTORE], env->br[0]);
-    if (!ia64_progress_trace_enabled()) {
-        return;
-    }
-
     fprintf(stderr,
             "[ia64-progress] bundles=%" PRIu64 " ip=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
@@ -755,6 +755,10 @@ static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
 {
     static uint64_t event_count;
 
+    if (!ia64_progress_trace_enabled()) {
+        return;
+    }
+
     event_count++;
     if (event_count > 16 && (event_count & UINT64_C(0xffff)) != 0) {
         return;
@@ -762,10 +766,6 @@ static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
 
     trace_ia64_progress_event(event, env->ip, value, next_ip, env->psr,
                               env->cfm);
-    if (!ia64_progress_trace_enabled()) {
-        return;
-    }
-
     fprintf(stderr,
             "[ia64-progress] event=%s ip=0x%016" PRIx64
             " value=0x%016" PRIx64 " next=0x%016" PRIx64
