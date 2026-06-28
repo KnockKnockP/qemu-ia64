@@ -303,6 +303,174 @@ static void test_rse_bspstore_write_preserves_dirty_boundary(void)
     g_assert_cmpuint(env.rse.clean_count, ==, 101);
 }
 
+static void test_rse_loadrs_dirty_partition_survives_bspstore_switch(void)
+{
+    const uint64_t mov_ar_bspstore_r33_raw =
+        (0x2aULL << 27) | (18ULL << 20) | (33ULL << 13);
+    CPUIA64State env;
+    uint32_t dirty;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 32;
+    env.rse.bspstore = 0x2000;
+    env.rse.bsp = 0x2000;
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+
+    ia64_rse_mark_dirty_partition(&env, 10);
+    dirty = ia64_rse_num_regs(env.rse.bspstore, env.rse.bsp);
+
+    g_assert_cmpuint(dirty, ==, 10);
+    g_assert_cmphex(env.rse.bsp, ==, ia64_rse_skip_regs(0x2000, 10));
+    g_assert_cmpuint(env.rse.clean_count, ==, 22);
+
+    ia64_write_gr(&env, 33, 0x6000);
+    g_assert_true(ia64_exec_mov_to_application(&env, IA64_SLOT_TYPE_I,
+                                               mov_ar_bspstore_r33_raw));
+
+    g_assert_cmphex(env.rse.bspstore, ==, 0x6000);
+    g_assert_cmphex(env.rse.bsp, ==, ia64_rse_skip_regs(0x6000, 10));
+    g_assert_cmpuint(ia64_rse_num_regs(env.rse.bspstore, env.rse.bsp), ==, 10);
+}
+
+typedef struct TestRSEBackingStore {
+    uint64_t first_address;
+    uint64_t value[8];
+    uint32_t read_count;
+    bool forbid_reads;
+} TestRSEBackingStore;
+
+static uint64_t test_rse_read_backing_store_register(CPUIA64State *env,
+                                                     uint64_t address,
+                                                     void *opaque)
+{
+    TestRSEBackingStore *store = opaque;
+    uint32_t index;
+
+    g_assert_nonnull(env);
+    g_assert_nonnull(store);
+    g_assert_false(store->forbid_reads);
+    g_assert_cmphex(address, >=, store->first_address);
+
+    index = (address - store->first_address) / 8;
+    g_assert_cmpuint(index, <, G_N_ELEMENTS(store->value));
+    store->read_count++;
+    return store->value[index];
+}
+
+static void test_rse_loadrs_preserves_dirty_frame_uncovered_by_rfi(void)
+{
+    const uint64_t rfi_raw = 0x00040000000ULL;
+    const uint64_t interrupted_cfm = ia64_make_cfm(8, 3, 0);
+    const uint64_t expected[8] = {
+        0x1000000000000000ULL, 0x2111111111111111ULL,
+        0x3222222222222222ULL, 0x4333333333333333ULL,
+        0x5444444444444444ULL, 0x6555555555555555ULL,
+        0x7666666666666666ULL, 0x8777777777777777ULL,
+    };
+    TestRSEBackingStore store = {
+        .first_address = 0x6000,
+        .value = {
+            0xdead000000000000ULL, 0xdead111111111111ULL,
+            0xdead222222222222ULL, 0xdead333333333333ULL,
+            0xdead444444444444ULL, 0xdead555555555555ULL,
+            0xdead666666666666ULL, 0xdead777777777777ULL,
+        },
+        .forbid_reads = true,
+    };
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 19;
+    ia64_set_cfm(&env, 0);
+    for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
+        env.rse.stacked_gr[i] = 0xdead000000000000ULL | i;
+    }
+    for (uint32_t i = 0; i < G_N_ELEMENTS(expected); i++) {
+        env.rse.stacked_gr[11 + i] = expected[i];
+    }
+
+    env.rse.bspstore = store.first_address;
+    env.rse.bsp = ia64_rse_skip_regs(store.first_address,
+                                     G_N_ELEMENTS(expected));
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+
+    ia64_rse_load_dirty_partition(&env, store.first_address, env.rse.bsp,
+                                  test_rse_read_backing_store_register,
+                                  &store);
+    ia64_rse_set_dirty_partition(&env, store.first_address, env.rse.bsp);
+
+    g_assert_cmpuint(ia64_rse_dirty_partition_first_slot(
+                         &env, G_N_ELEMENTS(expected)), ==, 11);
+    g_assert_cmpuint(store.read_count, ==, 0);
+    g_assert_cmphex(env.rse.stacked_gr[11], ==, expected[0]);
+    g_assert_cmphex(env.rse.stacked_gr[18], ==, expected[7]);
+    g_assert_cmphex(env.rse.stacked_gr[19], ==,
+                    0xdead000000000000ULL | 19);
+
+    env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
+    env.cr[IA64_CR_IIP] = 0x2000000000118397ULL;
+    env.cr[IA64_CR_IFS] = interrupted_cfm | IA64_IFS_VALID_BIT;
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0xa00000010000bfb0,
+                                              &target));
+    g_assert_cmphex(target, ==, 0x2000000000118390ULL);
+    g_assert_cmphex(env.cfm, ==, interrupted_cfm);
+    g_assert_cmpuint(env.rse.current_frame_base, ==, 11);
+    for (uint32_t i = 0; i < G_N_ELEMENTS(expected); i++) {
+        g_assert_cmphex(ia64_read_gr(&env, 32 + i), ==, expected[i]);
+    }
+}
+
+static void test_rse_loadrs_reads_clean_prefix_only(void)
+{
+    const uint64_t dirty[4] = {
+        0xd100000000000000ULL, 0xd211111111111111ULL,
+        0xd322222222222222ULL, 0xd433333333333333ULL,
+    };
+    TestRSEBackingStore store = {
+        .first_address = 0x6000,
+        .value = {
+            0xc100000000000000ULL, 0xc211111111111111ULL,
+            0xc322222222222222ULL, 0xc433333333333333ULL,
+        },
+    };
+    CPUIA64State env;
+    uint64_t start = store.first_address;
+    uint64_t mid = ia64_rse_skip_regs(start, 4);
+    uint64_t end = ia64_rse_skip_regs(start, 8);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 12;
+    ia64_set_cfm(&env, 0);
+    for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
+        env.rse.stacked_gr[i] = 0xdead000000000000ULL | i;
+    }
+    for (uint32_t i = 0; i < G_N_ELEMENTS(dirty); i++) {
+        env.rse.stacked_gr[8 + i] = dirty[i];
+    }
+    env.rse.bspstore = mid;
+    env.rse.bsp = end;
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+
+    ia64_rse_load_dirty_partition(&env, start, end,
+                                  test_rse_read_backing_store_register,
+                                  &store);
+    ia64_rse_set_dirty_partition(&env, start, end);
+
+    g_assert_cmpuint(store.read_count, ==, 4);
+    for (uint32_t i = 0; i < 4; i++) {
+        g_assert_cmphex(env.rse.stacked_gr[4 + i], ==, store.value[i]);
+        g_assert_cmphex(env.rse.stacked_gr[8 + i], ==, dirty[i]);
+    }
+    g_assert_cmphex(env.rse.bspstore, ==, start);
+    g_assert_cmphex(env.rse.bsp, ==, end);
+    g_assert_cmpuint(env.rse.clean_count, ==, 4);
+}
+
 static void test_rse_reconstructs_clean_partition_after_load(void)
 {
     CPUIA64State env;
@@ -2376,6 +2544,12 @@ int main(int argc, char **argv)
                     test_rse_stacked_write_marks_clean_register_dirty);
     g_test_add_func("/ia64-exec-smoke/rse-bspstore-write-preserves-dirty-boundary",
                     test_rse_bspstore_write_preserves_dirty_boundary);
+    g_test_add_func("/ia64-exec-smoke/rse-loadrs-dirty-partition-bspstore-switch",
+                    test_rse_loadrs_dirty_partition_survives_bspstore_switch);
+    g_test_add_func("/ia64-exec-smoke/rse-loadrs-preserves-rfi-frame",
+                    test_rse_loadrs_preserves_dirty_frame_uncovered_by_rfi);
+    g_test_add_func("/ia64-exec-smoke/rse-loadrs-reads-clean-prefix-only",
+                    test_rse_loadrs_reads_clean_prefix_only);
     g_test_add_func("/ia64-exec-smoke/rse-reconstructs-clean-partition-after-load",
                     test_rse_reconstructs_clean_partition_after_load);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-ip-and-nop",

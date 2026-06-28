@@ -19,6 +19,118 @@
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
                                       uint64_t aux0, uint64_t aux1);
 
+#define IA64_LINUX_BREAK_SYSCALL UINT64_C(0x100000)
+#define IA64_PSR_CPL_SHIFT 32
+#define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+
+static bool ia64_syscall_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_SYSCALL_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static const char *ia64_linux_syscall_name(uint64_t nr)
+{
+    switch (nr) {
+    case 1025: return "exit";
+    case 1026: return "read";
+    case 1027: return "write";
+    case 1028: return "open";
+    case 1029: return "close";
+    case 1033: return "execve";
+    case 1034: return "chdir";
+    case 1041: return "getpid";
+    case 1042: return "getppid";
+    case 1043: return "mount";
+    case 1046: return "getuid";
+    case 1049: return "access";
+    case 1055: return "mkdir";
+    case 1060: return "brk";
+    case 1062: return "getgid";
+    case 1065: return "ioctl";
+    case 1066: return "fcntl";
+    case 1070: return "dup2";
+    case 1081: return "setsid";
+    case 1092: return "readlink";
+    case 1103: return "statfs";
+    case 1104: return "fstatfs";
+    case 1126: return "wait4";
+    case 1128: return "clone";
+    case 1130: return "uname";
+    case 1144: return "getdents";
+    case 1146: return "readv";
+    case 1147: return "writev";
+    case 1151: return "mmap";
+    case 1152: return "munmap";
+    case 1155: return "mprotect";
+    case 1172: return "mmap2";
+    case 1177: return "rt_sigaction";
+    case 1178: return "rt_sigpending";
+    case 1179: return "rt_sigprocmask";
+    case 1180: return "rt_sigqueueinfo";
+    case 1181: return "rt_sigreturn";
+    case 1182: return "rt_sigsuspend";
+    case 1183: return "rt_sigtimedwait";
+    case 1184: return "getcwd";
+    case 1210: return "stat";
+    case 1211: return "lstat";
+    case 1212: return "fstat";
+    case 1213: return "clone2";
+    case 1214: return "getdents64";
+    case 1216: return "readahead";
+    case 1233: return "set_tid_address";
+    case 1236: return "exit_group";
+    case 1257: return "fstatfs64";
+    case 1258: return "statfs64";
+    case 1270: return "waitid";
+    case 1281: return "openat";
+    case 1282: return "mkdirat";
+    case 1291: return "readlinkat";
+    case 1327: return "open_by_handle_at";
+    default: return "unknown";
+    }
+}
+
+static void ia64_trace_linux_syscall_break(CPUIA64State *env,
+                                           const char *mnemonic,
+                                           uint64_t iim, uint64_t next_ip)
+{
+    uint64_t nr;
+    uint64_t cpl;
+
+    if (!ia64_syscall_trace_enabled() || iim != IA64_LINUX_BREAK_SYSCALL) {
+        return;
+    }
+
+    nr = ia64_read_gr(env, 15);
+    cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    fprintf(stderr,
+            "[ia64-syscall] %s nr=%" PRIu64 "(%s) ip=0x%016" PRIx64
+            " next=0x%016" PRIx64 " cpl=%" PRIu64
+            " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
+            " pr=0x%016" PRIx64 " r8=0x%016" PRIx64
+            " r10=0x%016" PRIx64 " r15=0x%016" PRIx64
+            " r32=0x%016" PRIx64 " r33=0x%016" PRIx64
+            " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
+            " r36=0x%016" PRIx64 " r37=0x%016" PRIx64
+            " r38=0x%016" PRIx64 " r39=0x%016" PRIx64
+            " b0=0x%016" PRIx64 " b6=0x%016" PRIx64
+            " b7=0x%016" PRIx64 " bsp=0x%016" PRIx64
+            " bspstore=0x%016" PRIx64 "\n",
+            mnemonic, nr, ia64_linux_syscall_name(nr), env->ip, next_ip,
+            cpl, env->psr, env->cfm, env->pr, ia64_read_gr(env, 8),
+            ia64_read_gr(env, 10), nr, ia64_read_gr(env, 32),
+            ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+            ia64_read_gr(env, 35), ia64_read_gr(env, 36),
+            ia64_read_gr(env, 37), ia64_read_gr(env, 38),
+            ia64_read_gr(env, 39), env->br[0], env->br[6], env->br[7],
+            env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE]);
+}
+
 static void abort_unsupported_slot(CPUIA64State *env,
                                    const IA64DecodedBundle *decoded,
                                    int slot)
@@ -57,6 +169,7 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     char detail[64];
 
     snprintf(detail, sizeof(detail), "%s iim=0x%" PRIx64, mnemonic, iim);
+    ia64_trace_linux_syscall_break(env, mnemonic, iim, *next_ip);
     ia64_deliver_break_interruption(env, iim, next_ip, detail);
     ia64_progress_trace_event(env, mnemonic, iim, *next_ip);
 }
@@ -3590,16 +3703,6 @@ static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
     ia64_alat_invalidate_store(env, address, width);
 }
 
-static bool ia64_rse_is_rnat_slot(uint64_t address)
-{
-    return ((address >> 3) & 0x3f) == 0x3f;
-}
-
-static uint64_t ia64_rse_reg_address(uint64_t address)
-{
-    return ia64_rse_is_rnat_slot(address) ? address + 8 : address;
-}
-
 static void ia64_exec_flushrs(CPUIA64State *env)
 {
     uint32_t dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
@@ -3612,8 +3715,7 @@ static void ia64_exec_flushrs(CPUIA64State *env)
         return;
     }
 
-    first_slot = (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
-                  (dirty % IA64_STACKED_GR_COUNT)) % IA64_STACKED_GR_COUNT;
+    first_slot = ia64_rse_dirty_partition_first_slot(env, dirty);
     for (uint32_t i = 0; i < dirty; i++) {
         address = ia64_rse_reg_address(address);
         ia64_ldst_write(env, address, 8,
@@ -3629,26 +3731,11 @@ static void ia64_exec_flushrs(CPUIA64State *env)
     env->ar[IA64_AR_BSP] = address;
 }
 
-static void ia64_rse_load_regs_ending_at_bspstore(CPUIA64State *env,
-                                                  uint32_t count)
+static uint64_t ia64_rse_read_backing_store_register(CPUIA64State *env,
+                                                     uint64_t address,
+                                                     void *opaque)
 {
-    uint64_t start;
-    uint64_t address;
-
-    if (count == 0 || env->rse.bspstore == 0) {
-        return;
-    }
-
-    count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
-    start = ia64_rse_skip_regs(env->rse.bspstore, -(int64_t)count);
-    address = start;
-    for (uint32_t i = 0; i < count; i++) {
-        address = ia64_rse_reg_address(address);
-        env->rse.stacked_gr[(env->rse.current_frame_base + i) %
-                            IA64_STACKED_GR_COUNT] =
-            ia64_ldst_read(env, address, 8);
-        address += 8;
-    }
+    return ia64_ldst_read(env, address, 8);
 }
 
 static bool ia64_rse_trace_enabled(void)
@@ -3691,6 +3778,7 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
     uint64_t bspstore = env->rse.bspstore;
     uint64_t frame_base = env->rse.bsp;
     uint32_t filled = 0;
+    bool trace = ia64_rse_trace_enabled();
 
     if (count == 0 || bspstore == 0 || frame_base == 0) {
         return;
@@ -3720,7 +3808,7 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
                                env->rse.current_frame_base);
     ia64_rse_sync_ar_after_fill(env);
 
-    if (ia64_rse_trace_enabled()) {
+    if (trace) {
         fprintf(stderr,
                 "[ia64-rse] ip=0x%016" PRIx64
                 " fill-restored count=%u filled=%u"
@@ -3732,16 +3820,34 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
 static void ia64_exec_loadrs(CPUIA64State *env)
 {
     uint64_t bytes = (env->rse.rsc >> 16) & 0x3fff;
-    uint64_t start = env->rse.bspstore;
-    uint64_t end = start + bytes;
+    uint64_t end = env->rse.bsp;
+    uint64_t start;
     uint32_t count;
+    uint32_t before;
 
-    if (bytes == 0 || start == 0 || end < start) {
+    if (end == 0 || end < bytes) {
         return;
     }
 
+    start = end - bytes;
     count = ia64_rse_num_regs(start, end);
-    ia64_rse_load_regs_ending_at_bspstore(env, count);
+    before = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
+    if (count != 0) {
+        ia64_rse_load_dirty_partition(env, start, end,
+                                      ia64_rse_read_backing_store_register,
+                                      NULL);
+    }
+    ia64_rse_set_dirty_partition(env, start, end);
+    if (ia64_rse_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-rse] ip=0x%016" PRIx64
+                " loadrs bytes=0x%016" PRIx64 " count=%u"
+                " dirty-before=%u bspstore=0x%016" PRIx64
+                " bsp=0x%016" PRIx64 " start=0x%016" PRIx64
+                " end=0x%016" PRIx64 "\n",
+                env->ip, bytes, count, before, env->rse.bspstore,
+                env->rse.bsp, start, end);
+    }
 }
 
 static const char *ia64_atomic_name(IA64AtomicKind kind, bool release)
@@ -4454,7 +4560,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             bool rfi_valid_ifs =
                 rfi && (env->cr[IA64_CR_IFS] & IA64_IFS_VALID_BIT) != 0;
             bool br_ret = ia64_slot_major_opcode(raw) == 0x0 &&
-                          ((raw >> 27) & 0x3f) == 0x21;
+                           ((raw >> 27) & 0x3f) == 0x21;
 
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {

@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "exception.h"
+#include "exec-smoke.h"
 #include "mem.h"
 #include "trace-target_ia64.h"
 
@@ -18,6 +19,21 @@ static bool ia64_exception_trace_enabled(void)
         enabled = g_getenv("VIBTANIUM_EXCEPTION_TRACE") != NULL;
     }
     return enabled != 0;
+}
+
+static bool ia64_user_exception_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_USER_EXCEPTION_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static bool ia64_exception_from_user(uint64_t psr)
+{
+    return (psr & IA64_PSR_CPL_MASK) == IA64_PSR_CPL_MASK;
 }
 
 static uint64_t ia64_psr_clear_interruption_delivery_bits(uint64_t psr)
@@ -235,6 +251,38 @@ trace:
                 env->cr[IA64_CR_IIP], env->cr[IA64_CR_IFA],
                 env->cr[IA64_CR_ISR], env->psr, env->cr[IA64_CR_ITIR],
                 env->cr[IA64_CR_IHA], env->cr[IA64_CR_PTA], rr);
+    }
+    if (ia64_user_exception_trace_enabled() &&
+        ia64_exception_from_user(old_psr) &&
+        kind != IA64_EXCEPTION_BREAK &&
+        kind != IA64_EXCEPTION_EXTERNAL_INTERRUPT) {
+        fprintf(stderr,
+                "[ia64-user-exception] kind=%s ip=0x%016" PRIx64
+                " address=0x%016" PRIx64 " access=%d"
+                " vector=0x%04" PRIx64 " target=0x%016" PRIx64
+                " old_psr=0x%016" PRIx64 " psr=0x%016" PRIx64
+                " ipsr=0x%016" PRIx64 " iip=0x%016" PRIx64
+                " ifa=0x%016" PRIx64 " isr=0x%016" PRIx64
+                " itir=0x%016" PRIx64 " iha=0x%016" PRIx64
+                " cfm=0x%016" PRIx64 " pr=0x%016" PRIx64
+                " r8=0x%016" PRIx64 " r10=0x%016" PRIx64
+                " r15=0x%016" PRIx64 " r32=0x%016" PRIx64
+                " r33=0x%016" PRIx64 " r34=0x%016" PRIx64
+                " r35=0x%016" PRIx64 " b0=0x%016" PRIx64
+                " b6=0x%016" PRIx64 " b7=0x%016" PRIx64
+                " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64
+                " rsc=0x%016" PRIx64 "\n",
+                ia64_exception_name(kind), source_ip, address, access_type,
+                env->exception.vector, env->ip, old_psr, env->psr,
+                env->cr[IA64_CR_IPSR], env->cr[IA64_CR_IIP],
+                env->cr[IA64_CR_IFA], env->cr[IA64_CR_ISR],
+                env->cr[IA64_CR_ITIR], env->cr[IA64_CR_IHA],
+                env->cfm, env->pr, ia64_read_gr(env, 8),
+                ia64_read_gr(env, 10), ia64_read_gr(env, 15),
+                ia64_read_gr(env, 32), ia64_read_gr(env, 33),
+                ia64_read_gr(env, 34), ia64_read_gr(env, 35),
+                env->br[0], env->br[6], env->br[7], env->ar[IA64_AR_BSP],
+                env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RSC]);
     }
 }
 

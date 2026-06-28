@@ -164,6 +164,61 @@ uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs)
     return addr + (uint64_t)((num_regs + delta / 0x3f) * 8);
 }
 
+static bool ia64_rse_is_rnat_slot(uint64_t address)
+{
+    return ia64_rse_slot_num(address) == 0x3f;
+}
+
+uint64_t ia64_rse_reg_address(uint64_t address)
+{
+    return ia64_rse_is_rnat_slot(address) ? address + 8 : address;
+}
+
+uint32_t ia64_rse_dirty_partition_first_slot(CPUIA64State *env,
+                                             uint32_t count)
+{
+    if (!env) {
+        return 0;
+    }
+
+    return (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
+            (count % IA64_STACKED_GR_COUNT)) % IA64_STACKED_GR_COUNT;
+}
+
+void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
+                                   uint64_t load_end,
+                                   IA64RSEReadRegisterFn read_register,
+                                   void *opaque)
+{
+    uint64_t dirty_start;
+    uint64_t dirty_end;
+    uint64_t address;
+    uint32_t first_slot;
+    uint32_t count;
+
+    if (!env || !read_register || load_end <= load_start) {
+        return;
+    }
+
+    count = ia64_rse_num_regs(load_start, load_end);
+    if (count == 0) {
+        return;
+    }
+    count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
+    first_slot = ia64_rse_dirty_partition_first_slot(env, count);
+    dirty_start = env->rse.bspstore;
+    dirty_end = env->rse.bsp;
+    address = ia64_rse_skip_regs(load_end, -(int64_t)count);
+    for (uint32_t i = 0; i < count; i++) {
+        address = ia64_rse_reg_address(address);
+        if (dirty_start == 0 || address < dirty_start || address >= dirty_end) {
+            env->rse.stacked_gr[(first_slot + i) % IA64_STACKED_GR_COUNT] =
+                read_register(env, address, opaque);
+        }
+        address += 8;
+    }
+}
+
 void ia64_rse_reconstruct_transients(CPUIA64State *env)
 {
     uint32_t dirty;
@@ -180,6 +235,45 @@ void ia64_rse_reconstruct_transients(CPUIA64State *env)
     env->rse.clean_count = dirty < env->rse.current_frame_base
         ? env->rse.current_frame_base - dirty
         : 0;
+}
+
+static void ia64_rse_sync_ar(CPUIA64State *env);
+
+void ia64_rse_mark_dirty_partition(CPUIA64State *env, uint32_t count)
+{
+    uint32_t dirty;
+
+    if (!env || count == 0 || env->rse.bspstore == 0) {
+        return;
+    }
+
+    dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
+    if (dirty < count) {
+        env->rse.bsp = ia64_rse_skip_regs(env->rse.bspstore, count);
+        dirty = count;
+    }
+    env->rse.clean_count = dirty < env->rse.current_frame_base
+        ? env->rse.current_frame_base - dirty
+        : 0;
+    ia64_rse_sync_ar(env);
+}
+
+void ia64_rse_set_dirty_partition(CPUIA64State *env, uint64_t start,
+                                  uint64_t end)
+{
+    uint32_t dirty;
+
+    if (!env || end < start) {
+        return;
+    }
+
+    env->rse.bspstore = start;
+    env->rse.bsp = end;
+    dirty = ia64_rse_num_regs(start, end);
+    env->rse.clean_count = dirty < env->rse.current_frame_base
+        ? env->rse.current_frame_base - dirty
+        : 0;
+    ia64_rse_sync_ar(env);
 }
 
 static void ia64_rse_sync_ar(CPUIA64State *env)
@@ -746,9 +840,12 @@ static void ia64_trace_branch_write(CPUIA64State *env, const char *op,
     fprintf(stderr,
             "[ia64-br] ip=0x%016" PRIx64 " ri=%u %s b%u"
             " old=0x%016" PRIx64 " new=0x%016" PRIx64
-            " aux=0x%016" PRIx64 "\n",
+            " aux=0x%016" PRIx64
+            " cfm=0x%016" PRIx64 " pfs=0x%016" PRIx64
+            " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 "\n",
             env->ip, ia64_psr_ri(env->psr), op, reg, env->br[reg],
-            value, aux);
+            value, aux, env->cfm, env->ar[IA64_AR_PFS], env->rse.bsp,
+            env->rse.bspstore);
 }
 
 static void ia64_trace_branch_return(CPUIA64State *env, const char *op,
@@ -771,8 +868,12 @@ static void ia64_trace_branch_return(CPUIA64State *env, const char *op,
 
     fprintf(stderr,
             "[ia64-br] ip=0x%016" PRIx64 " ri=%u %s b%u"
-            " target=0x%016" PRIx64 " aux=0x%016" PRIx64 "\n",
-            env->ip, ia64_psr_ri(env->psr), op, reg, target, bundle_ip);
+            " target=0x%016" PRIx64 " aux=0x%016" PRIx64
+            " cfm=0x%016" PRIx64 " pfs=0x%016" PRIx64
+            " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 "\n",
+            env->ip, ia64_psr_ri(env->psr), op, reg, target, bundle_ip,
+            env->cfm, env->ar[IA64_AR_PFS], env->rse.bsp,
+            env->rse.bspstore);
 }
 
 static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)

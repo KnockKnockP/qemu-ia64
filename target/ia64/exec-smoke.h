@@ -197,6 +197,19 @@ void ia64_set_cfm(CPUIA64State *env, uint64_t cfm);
 uint32_t ia64_rse_num_regs(uint64_t bspstore, uint64_t bsp);
 uint64_t ia64_rse_skip_regs(uint64_t addr, int64_t num_regs);
 void ia64_rse_reconstruct_transients(CPUIA64State *env);
+void ia64_rse_mark_dirty_partition(CPUIA64State *env, uint32_t count);
+void ia64_rse_set_dirty_partition(CPUIA64State *env, uint64_t start,
+                                  uint64_t end);
+uint64_t ia64_rse_reg_address(uint64_t address);
+uint32_t ia64_rse_dirty_partition_first_slot(CPUIA64State *env,
+                                             uint32_t count);
+typedef uint64_t (*IA64RSEReadRegisterFn)(CPUIA64State *env,
+                                          uint64_t address,
+                                          void *opaque);
+void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
+                                   uint64_t load_end,
+                                   IA64RSEReadRegisterFn read_register,
+                                   void *opaque);
 uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg);
 void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value);
 bool ia64_read_pr(CPUIA64State *env, uint32_t predicate);
