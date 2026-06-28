@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "mem.h"
 #include "exec/page-protection.h"
+#include "perf.h"
 #include "trace-target_ia64.h"
 
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
@@ -427,6 +428,10 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
         return false;
     }
 
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATION_INSTALL);
+    IA64_PERF_INC(instruction ? IA64_PERF_TARGET_TRANSLATION_INSTALL_INST :
+                  IA64_PERF_TARGET_TRANSLATION_INSTALL_DATA);
+
     page_mask = ia64_page_mask(page_size);
     region = ia64_va_region(virtual_address);
     entry = (IA64TranslationEntry) {
@@ -511,6 +516,7 @@ void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
     if (!env) {
         return;
     }
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATION_PURGE_CACHE);
     probe = ia64_purge_probe(env, address, page_size);
     ia64_invalidate_overlapping_entries(env->memory.itc, IA64_TC_COUNT, &probe,
                                         all_rids);
@@ -527,6 +533,7 @@ void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
     if (!env) {
         return;
     }
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATION_PURGE_REGISTER);
     probe = ia64_purge_probe(env, address, page_size);
     if (instruction) {
         ia64_invalidate_overlapping_entries(env->memory.itr, IA64_ITR_COUNT,
@@ -543,6 +550,7 @@ void ia64_purge_all_translation_cache(CPUIA64State *env)
     if (!env) {
         return;
     }
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATION_PURGE_ALL);
     for (unsigned i = 0; i < IA64_TC_COUNT; i++) {
         env->memory.itc[i].valid = false;
         env->memory.dtc[i].valid = false;
@@ -594,7 +602,16 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
     result->debug = debug;
     result->page_size = 12;
 
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE);
+    if (ia64_perf_enabled()) {
+        ia64_perf_count_access_type(access_type);
+    }
+    if (debug) {
+        IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_DEBUG);
+    }
+
     if (!needs_translation) {
+        IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_PHYSICAL);
         result->status = IA64_TRANSLATE_OK;
         result->paddr = address & IA64_PHYSICAL_ADDRESS_MASK;
         result->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
@@ -609,6 +626,7 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
     }
 
     entry = ia64_lookup_translation(env, instruction, address);
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_LOOKUP);
     if (!entry) {
         result->status = IA64_TRANSLATE_TLB_MISS;
         ia64_trace_translation_miss(env, instruction, address, rr);
@@ -659,6 +677,10 @@ record:
     env->memory.last_status = result->status;
     env->memory.last_page_size = result->page_size;
     env->memory.identity_region0_only = false;
+
+    if (ia64_perf_enabled()) {
+        ia64_perf_count_translate_status(result->status);
+    }
 
     return result->status == IA64_TRANSLATE_OK;
 }

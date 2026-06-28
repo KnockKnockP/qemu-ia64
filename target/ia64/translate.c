@@ -10,6 +10,7 @@
 #include "exec/target_page.h"
 #include "exec/translator.h"
 #include "hw/ia64/efi.h"
+#include "perf.h"
 #include "tcg/tcg-op.h"
 #include "trace-target_ia64.h"
 
@@ -67,6 +68,9 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
 
 static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
 {
+    if (ia64_perf_enabled()) {
+        gen_helper_perf_tb_exec();
+    }
 }
 
 static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
@@ -175,6 +179,10 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     lo = translator_ldq_end(ctx->env, &ctx->base, pc, MO_LE);
     hi = translator_ldq_end(ctx->env, &ctx->base, pc + 8, MO_LE);
     ia64_decode_bundle_words(lo, hi, &bundle);
+    IA64_PERF_INC(IA64_PERF_BUNDLE_DECODED);
+    if (!bundle.valid) {
+        IA64_PERF_INC(IA64_PERF_BUNDLE_DECODE_INVALID);
+    }
     ia64_format_decoded_bundle(&bundle, bundle_text, sizeof(bundle_text));
     trace_ia64_bundle_decode(pc, bundle_text);
 
@@ -186,6 +194,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
                            tcg_constant_i64(bundle.slot[1]),
                            tcg_constant_i64(bundle.slot[2]));
     if (ia64_bundle_may_change_flow(&bundle, pc)) {
+        IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
         ctx->base.is_jmp = DISAS_EXIT;
     }
 }
@@ -222,6 +231,7 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb, int *max_insns,
 {
     DisasContext ctx;
 
+    IA64_PERF_INC(IA64_PERF_TB_TRANSLATED);
     translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops, &ctx.base,
                     TCG_TYPE_VA);
 }

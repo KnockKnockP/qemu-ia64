@@ -4,6 +4,7 @@
 #include "exception.h"
 #include "exec-smoke.h"
 #include "mem.h"
+#include "perf.h"
 #include "trace-target_ia64.h"
 
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
@@ -184,6 +185,11 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
 
     if (nested_data_tlb) {
         kind = IA64_EXCEPTION_DATA_NESTED_TLB;
+    }
+
+    IA64_PERF_INC(IA64_PERF_EXCEPTION_DELIVERED);
+    if (ia64_perf_enabled()) {
+        ia64_perf_count_exception_kind(kind);
     }
 
     ia64_record_exception(env, kind, address, access_type, detail);

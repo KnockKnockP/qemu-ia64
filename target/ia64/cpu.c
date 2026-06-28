@@ -7,6 +7,7 @@
 #include "exception.h"
 #include "exec-smoke.h"
 #include "mem.h"
+#include "perf.h"
 #include "accel/tcg/cpu-loop.h"
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
@@ -106,6 +107,7 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
 
     cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_DELIVERED);
     ia64_deliver_exception(env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env->ip,
                            MMU_DATA_LOAD, "external interrupt");
     return true;
@@ -166,6 +168,21 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     IA64CPU *cpu = IA64_CPU(cs);
     IA64TranslateResult result;
 
+    IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL);
+    switch (access_type) {
+    case MMU_INST_FETCH:
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_INST);
+        break;
+    case MMU_DATA_LOAD:
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_LOAD);
+        break;
+    case MMU_DATA_STORE:
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_STORE);
+        break;
+    default:
+        break;
+    }
+
     if (ia64_translate_address(&cpu->env, address, access_type, mmu_idx,
                                false, &result)) {
         /*
@@ -177,14 +194,17 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      result.paddr & TARGET_PAGE_MASK, result.prot, mmu_idx,
                      TARGET_PAGE_SIZE);
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_SUCCESS);
         return true;
     }
 
     if (probe) {
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_PROBE_FAIL);
         return false;
     }
 
     cpu_restore_state(cs, retaddr);
+    IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION);
 
     if (result.status == IA64_TRANSLATE_TLB_MISS) {
         IA64ExceptionKind kind;
@@ -204,6 +224,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         ia64_deliver_exception(&cpu->env, IA64_EXCEPTION_PAGE_FAULT, address,
                                access_type, result.message);
     }
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
     cpu_loop_exit(cs);
     return true;
 }

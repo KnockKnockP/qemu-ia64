@@ -56,12 +56,14 @@ tests = {
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/exec-smoke.c',
     meson.project_source_root() / 'target/ia64/mem.c',
+    meson.project_source_root() / 'target/ia64/perf.c',
   ],
   'test-ia64-memory-exceptions': [
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/exec-smoke.c',
     meson.project_source_root() / 'target/ia64/mem.c',
+    meson.project_source_root() / 'target/ia64/perf.c',
   ],
   'test-ia64-efi-app': [
     meson.project_source_root() / 'hw/ia64/efi.c',
@@ -69,6 +71,7 @@ tests = {
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/exec-smoke.c',
     meson.project_source_root() / 'target/ia64/mem.c',
+    meson.project_source_root() / 'target/ia64/perf.c',
   ],
   'test-ia64-efi-storage': [
     meson.project_source_root() / 'hw/ia64/efi-storage.c',

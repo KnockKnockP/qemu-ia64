@@ -13,12 +13,18 @@
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/vibtanium.h"
 #include "mem.h"
+#include "perf.h"
 #include "qemu/error-report.h"
 #include "system/memory.h"
 #include "trace-target_ia64.h"
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
                                       uint64_t aux0, uint64_t aux1);
+
+void HELPER(perf_tb_exec)(void)
+{
+    IA64_PERF_INC(IA64_PERF_TB_EXECUTED);
+}
 
 #define IA64_LINUX_BREAK_SYSCALL UINT64_C(0x100000)
 #define IA64_PSR_CPL_SHIFT 32
@@ -306,6 +312,7 @@ static void abort_unsupported_slot(CPUIA64State *env,
 
     ia64_format_decoded_bundle(decoded, bundle_text, sizeof(bundle_text));
     ia64_format_slot_class(decoded, slot, slot_text, sizeof(slot_text));
+    IA64_PERF_INC(IA64_PERF_UNSUPPORTED_ABORT);
 
     cpu_abort(env_cpu(env),
               "IA-64 execution frontier at IP=0x%016" PRIx64
@@ -322,6 +329,7 @@ static void abort_zero_branch(CPUIA64State *env,
 
     ia64_format_decoded_bundle(decoded, bundle_text, sizeof(bundle_text));
     ia64_format_slot_class(decoded, slot, slot_text, sizeof(slot_text));
+    IA64_PERF_INC(IA64_PERF_ZERO_BRANCH_ABORT);
 
     cpu_abort(env_cpu(env),
               "IA-64 execution frontier at IP=0x%016" PRIx64
@@ -335,6 +343,7 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     char detail[64];
 
     snprintf(detail, sizeof(detail), "%s iim=0x%" PRIx64, mnemonic, iim);
+    IA64_PERF_INC(IA64_PERF_OP_BREAK);
     ia64_trace_linux_syscall_break(env, mnemonic, iim, *next_ip);
     ia64_deliver_break_interruption(env, iim, next_ip, detail);
     ia64_progress_trace_event(env, mnemonic, iim, *next_ip);
@@ -1494,6 +1503,115 @@ static void firmware_write_result(CPUIA64State *env,
     }
 }
 
+static void ia64_perf_count_pal_call(uint64_t function_id)
+{
+    static uint64_t reported_other[8];
+    static unsigned reported_other_count;
+
+    if (!ia64_perf_enabled()) {
+        return;
+    }
+
+    switch (function_id) {
+    case IA64_PAL_CACHE_FLUSH:
+    case IA64_PAL_CACHE_INIT:
+    case IA64_PAL_CACHE_LINE_INIT:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_CACHE_MAINT);
+        break;
+    case IA64_PAL_HALT:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_HALT);
+        break;
+    case IA64_PAL_HALT_LIGHT:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_HALT_LIGHT);
+        break;
+    case IA64_PAL_CACHE_INFO:
+    case IA64_PAL_CACHE_SUMMARY:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_CACHE_INFO);
+        break;
+    case IA64_PAL_MEMORY_ATTRIBUTES:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_MEMORY_ATTRIBUTES);
+        break;
+    case IA64_PAL_PTCE_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_PTCE_INFO);
+        break;
+    case IA64_PAL_RSE_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_RSE_INFO);
+        break;
+    case IA64_PAL_VIRTUAL_MEMORY_INFO:
+    case IA64_PAL_VIRTUAL_MEMORY_SUMMARY:
+    case IA64_PAL_VIRTUAL_MEMORY_PAGE_SIZE:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_VM_PAGE_SIZE);
+        break;
+    case IA64_PAL_BUS_GET_FEATURES:
+    case IA64_PAL_BUS_SET_FEATURES:
+    case IA64_PAL_PROCESSOR_GET_FEATURES:
+    case IA64_PAL_PROCESSOR_SET_FEATURES:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_FEATURES);
+        break;
+    case IA64_PAL_DEBUG_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_DEBUG);
+        break;
+    case IA64_PAL_FREQUENCY_BASE:
+    case IA64_PAL_FREQUENCY_RATIOS:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_FREQUENCY);
+        break;
+    case IA64_PAL_PERFORMANCE_MONITOR_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_PERF_MONITOR);
+        break;
+    case IA64_PAL_FIXED_ADDRESS:
+    case IA64_PAL_PLATFORM_ADDR:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_FIXED_PLATFORM);
+        break;
+    case IA64_PAL_VERSION_PROC:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_VERSION);
+        break;
+    case IA64_PAL_REGISTER_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_REGISTER_INFO);
+        break;
+    case IA64_PAL_PREFETCH_VISIBILITY:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_PREFETCH);
+        break;
+    case IA64_PAL_LOGICAL_TO_PHYSICAL:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_LOGICAL_TO_PHYSICAL);
+        break;
+    case IA64_PAL_CACHE_SHARED_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_CACHE_SHARED);
+        break;
+    case IA64_PAL_SHUTDOWN:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_SHUTDOWN);
+        break;
+    case IA64_PAL_HALT_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_HALT_INFO);
+        break;
+    case IA64_PAL_BRAND_INFO:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_BRAND);
+        break;
+    case IA64_PAL_MACHINE_CHECK_CLEAR_LOG:
+    case IA64_PAL_MACHINE_CHECK_DRAIN:
+    case IA64_PAL_MACHINE_CHECK_EXPECTED:
+    case IA64_PAL_MACHINE_CHECK_DYNAMIC_STATE:
+    case IA64_PAL_MACHINE_CHECK_REGISTER_MEMORY:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_MACHINE_CHECK);
+        break;
+    default:
+        for (unsigned i = 0; i < reported_other_count; i++) {
+            if (reported_other[i] == function_id) {
+                goto count_other;
+            }
+        }
+        if (reported_other_count < ARRAY_SIZE(reported_other)) {
+            fprintf(stderr,
+                    "[ia64-perf] firmware.pal.other_id.%u=0x%016" PRIx64
+                    "\n",
+                    reported_other_count, function_id);
+            reported_other[reported_other_count++] = function_id;
+        }
+count_other:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_OTHER);
+        break;
+    }
+}
+
 static bool dispatch_firmware_gate(CPUIA64State *env, uint64_t gate_ip)
 {
     uint64_t physical = ia64_region_offset(gate_ip);
@@ -1506,6 +1624,7 @@ static bool dispatch_firmware_gate(CPUIA64State *env, uint64_t gate_ip)
     if (physical == VIBTANIUM_EFI_PAL_PROC) {
         bool static_call;
 
+        IA64_PERF_INC(IA64_PERF_FIRMWARE_PAL);
         function_id = ia64_read_gr(env, 28);
         static_call = pal_uses_static_calling_convention(function_id);
         if (static_call) {
@@ -1522,6 +1641,7 @@ static bool dispatch_firmware_gate(CPUIA64State *env, uint64_t gate_ip)
             arg1 = ia64_read_gr(env, 34);
             arg2 = ia64_read_gr(env, 35);
         }
+        ia64_perf_count_pal_call(function_id);
         result = dispatch_pal(env, function_id, arg0, arg1);
         firmware_trace_call(env, "pal", pal_procedure_name(function_id),
                             function_id, arg0, arg1, arg2, result);
@@ -1530,6 +1650,7 @@ static bool dispatch_firmware_gate(CPUIA64State *env, uint64_t gate_ip)
     }
 
     if (physical == VIBTANIUM_EFI_SAL_PROC) {
+        IA64_PERF_INC(IA64_PERF_FIRMWARE_SAL);
         function_id = ia64_read_gr(env, 32);
         arg0 = ia64_read_gr(env, 33);
         arg1 = ia64_read_gr(env, 34);
@@ -3469,6 +3590,7 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         return dispatch_firmware_gate(env, gate_ip);
     }
 
+    IA64_PERF_INC(IA64_PERF_FIRMWARE_EFI);
     if (service_index < EFI_RUNTIME_SERVICE_BASE) {
         result = efi_dispatch_boot_service(env,
                                            service_index -
@@ -3530,32 +3652,35 @@ static bool ia64_trace_range_matches(uint64_t address, uint8_t width,
     return address <= filter_end && access_end >= filter_start;
 }
 
-static bool ia64_ldst_trace_matches(uint64_t vaddr, uint64_t paddr,
-                                    bool has_paddr, uint8_t width)
-{
-    static int initialized;
-    static bool enabled;
-    static bool has_vaddr_filter;
-    static bool has_paddr_filter;
-    static uint64_t vaddr_filter_start;
-    static uint64_t vaddr_filter_end;
-    static uint64_t paddr_filter_start;
-    static uint64_t paddr_filter_end;
+typedef struct IA64LdstTraceConfig {
+    int initialized;
+    bool enabled;
+    bool has_vaddr_filter;
+    bool has_paddr_filter;
+    uint64_t vaddr_filter_start;
+    uint64_t vaddr_filter_end;
+    uint64_t paddr_filter_start;
+    uint64_t paddr_filter_end;
+} IA64LdstTraceConfig;
 
-    if (!initialized) {
+static IA64LdstTraceConfig *ia64_ldst_trace_config(void)
+{
+    static IA64LdstTraceConfig config;
+
+    if (!config.initialized) {
         const char *trace = g_getenv("VIBTANIUM_LDST_TRACE");
         const char *addr = g_getenv("VIBTANIUM_LDST_TRACE_ADDR");
         const char *size = g_getenv("VIBTANIUM_LDST_TRACE_SIZE");
         const char *paddr_env = g_getenv("VIBTANIUM_LDST_TRACE_PADDR");
         const char *psize = g_getenv("VIBTANIUM_LDST_TRACE_PSIZE");
 
-        enabled = trace != NULL || addr != NULL || paddr_env != NULL;
+        config.enabled = trace != NULL || addr != NULL || paddr_env != NULL;
         if (addr != NULL && *addr != '\0') {
             char *endptr = NULL;
             uint64_t parsed_size = 1;
 
-            vaddr_filter_start = g_ascii_strtoull(addr, &endptr, 0);
-            has_vaddr_filter = endptr != addr;
+            config.vaddr_filter_start = g_ascii_strtoull(addr, &endptr, 0);
+            config.has_vaddr_filter = endptr != addr;
             if (size != NULL && *size != '\0') {
                 endptr = NULL;
                 parsed_size = g_ascii_strtoull(size, &endptr, 0);
@@ -3563,14 +3688,16 @@ static bool ia64_ldst_trace_matches(uint64_t vaddr, uint64_t paddr,
                     parsed_size = 1;
                 }
             }
-            vaddr_filter_end = vaddr_filter_start + parsed_size - 1;
+            config.vaddr_filter_end = config.vaddr_filter_start +
+                                      parsed_size - 1;
         }
         if (paddr_env != NULL && *paddr_env != '\0') {
             char *endptr = NULL;
             uint64_t parsed_size = 1;
 
-            paddr_filter_start = g_ascii_strtoull(paddr_env, &endptr, 0);
-            has_paddr_filter = endptr != paddr_env;
+            config.paddr_filter_start = g_ascii_strtoull(paddr_env, &endptr,
+                                                         0);
+            config.has_paddr_filter = endptr != paddr_env;
             if (psize != NULL && *psize != '\0') {
                 endptr = NULL;
                 parsed_size = g_ascii_strtoull(psize, &endptr, 0);
@@ -3578,26 +3705,42 @@ static bool ia64_ldst_trace_matches(uint64_t vaddr, uint64_t paddr,
                     parsed_size = 1;
                 }
             }
-            paddr_filter_end = paddr_filter_start + parsed_size - 1;
+            config.paddr_filter_end = config.paddr_filter_start +
+                                      parsed_size - 1;
         }
-        initialized = 1;
+        config.initialized = 1;
     }
 
-    if (!enabled) {
+    return &config;
+}
+
+static bool ia64_ldst_trace_needs_paddr(void)
+{
+    IA64LdstTraceConfig *config = ia64_ldst_trace_config();
+
+    return config->enabled && config->has_paddr_filter;
+}
+
+static bool ia64_ldst_trace_matches(uint64_t vaddr, uint64_t paddr,
+                                    bool has_paddr, uint8_t width)
+{
+    IA64LdstTraceConfig *config = ia64_ldst_trace_config();
+
+    if (!config->enabled) {
         return false;
     }
-    if (!has_vaddr_filter && !has_paddr_filter) {
+    if (!config->has_vaddr_filter && !config->has_paddr_filter) {
         return true;
     }
-    if (has_vaddr_filter &&
-        ia64_trace_range_matches(vaddr, width, vaddr_filter_start,
-                                 vaddr_filter_end)) {
+    if (config->has_vaddr_filter &&
+        ia64_trace_range_matches(vaddr, width, config->vaddr_filter_start,
+                                 config->vaddr_filter_end)) {
         return true;
     }
 
-    return has_paddr && has_paddr_filter &&
-           ia64_trace_range_matches(paddr, width, paddr_filter_start,
-                                    paddr_filter_end);
+    return has_paddr && config->has_paddr_filter &&
+           ia64_trace_range_matches(paddr, width, config->paddr_filter_start,
+                                    config->paddr_filter_end);
 }
 
 static bool ia64_ldst_trace_op_matches(const char *op)
@@ -3689,9 +3832,8 @@ static void ia64_trace_ldst(CPUIA64State *env, const char *op,
     IA64TranslateResult result;
     MMUAccessType access_type = g_str_equal(op, "store") ? MMU_DATA_STORE
                                                          : MMU_DATA_LOAD;
-    bool has_paddr = ia64_translate_address(env, address, access_type, 0,
-                                            true, &result);
-    uint64_t paddr = has_paddr ? result.paddr : 0;
+    bool has_paddr;
+    uint64_t paddr;
 
     if (!ia64_ldst_trace_op_matches(op)) {
         return;
@@ -3702,6 +3844,16 @@ static void ia64_trace_ldst(CPUIA64State *env, const char *op,
     if (!ia64_ldst_trace_value_matches(value)) {
         return;
     }
+    if (!ia64_ldst_trace_matches(address, 0, false, width) &&
+        !ia64_ldst_trace_needs_paddr()) {
+        return;
+    }
+
+    has_paddr = ia64_translate_address(env, address, access_type, 0, true,
+                                       &result);
+    paddr = has_paddr ? result.paddr : 0;
+    IA64_PERF_INC(IA64_PERF_LDST_TRACE_PADDR_PROBE);
+
     if (!ia64_ldst_trace_matches(address, paddr, has_paddr, width)) {
         return;
     }
@@ -3802,6 +3954,7 @@ static void ia64_alat_resolve_address(CPUIA64State *env, uint64_t address,
 {
     IA64TranslateResult result;
 
+    IA64_PERF_INC(IA64_PERF_ALAT_RESOLVE);
     if (ia64_translate_address(env, address, access_type, 0, true, &result)) {
         *resolved = result.paddr;
         *physical = true;
@@ -3826,6 +3979,7 @@ static void ia64_alat_record_load(CPUIA64State *env, uint8_t target,
 {
     IA64AlatEntry *entry;
 
+    IA64_PERF_INC(IA64_PERF_ALAT_RECORD_LOAD);
     if (target == 0 || target >= IA64_GR_COUNT) {
         return;
     }
@@ -3848,6 +4002,7 @@ static void ia64_alat_invalidate_store(CPUIA64State *env, uint64_t address,
     uint64_t resolved;
     bool physical;
 
+    IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_STORE);
     ia64_alat_resolve_address(env, address, MMU_DATA_STORE,
                               &resolved, &physical);
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
@@ -3875,7 +4030,9 @@ static uint64_t ia64_ldst_read(CPUIA64State *env, uint64_t address,
 {
     uint64_t value;
 
+    IA64_PERF_INC(IA64_PERF_LDST_READ);
     if (width > 1 && (address & (width - 1)) != 0) {
+        IA64_PERF_INC(IA64_PERF_LDST_UNALIGNED_READ);
         value = ia64_ld_le_unaligned(env, address, width);
         ia64_trace_ldst(env, "load", address, width, value);
         return value;
@@ -3905,9 +4062,11 @@ static uint64_t ia64_ldst_read(CPUIA64State *env, uint64_t address,
 static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
                             uint8_t width, uint64_t value)
 {
+    IA64_PERF_INC(IA64_PERF_LDST_WRITE);
     ia64_trace_ldst(env, "store", address, width, value);
 
     if (width > 1 && (address & (width - 1)) != 0) {
+        IA64_PERF_INC(IA64_PERF_LDST_UNALIGNED_WRITE);
         ia64_st_le_unaligned(env, address, width, value);
         ia64_alat_invalidate_store(env, address, width);
         return;
@@ -3939,6 +4098,7 @@ static void ia64_exec_flushrs(CPUIA64State *env)
     uint32_t first_slot;
     uint64_t address = env->rse.bspstore;
 
+    IA64_PERF_INC(IA64_PERF_OP_RSE_FLUSHRS);
     if (dirty == 0 || env->rse.bspstore == 0) {
         env->rse.clean_count = MIN(env->rse.clean_count,
                                    env->rse.current_frame_base);
@@ -4010,6 +4170,7 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
     uint32_t filled = 0;
     bool trace = ia64_rse_trace_enabled();
 
+    IA64_PERF_INC(IA64_PERF_OP_RSE_FILL_RESTORED);
     if (count == 0 || bspstore == 0 || frame_base == 0) {
         return;
     }
@@ -4055,6 +4216,7 @@ static void ia64_exec_loadrs(CPUIA64State *env)
     uint32_t count;
     uint32_t before;
 
+    IA64_PERF_INC(IA64_PERF_OP_RSE_LOADRS);
     if (end == 0 || end < bytes) {
         return;
     }
@@ -4153,6 +4315,7 @@ static bool exec_m_atomic(CPUIA64State *env,
     uint64_t mask = ia64_width_mask(decoded->width);
     bool write_memory = false;
 
+    IA64_PERF_INC(IA64_PERF_ATOMIC_MEMORY_OP);
     switch (decoded->kind) {
     case IA64_ATOMIC_CMPXCHG:
         store_value = ia64_read_gr(env, decoded->source);
@@ -4374,6 +4537,7 @@ static bool exec_counted_store_loop(CPUIA64State *env,
         return false;
     }
 
+    IA64_PERF_INC(IA64_PERF_COUNTED_STORE_LOOP);
     iterations = loop_count + 1;
     address = ia64_read_gr(env, loop->store.base);
     value = ia64_read_gr(env, loop->store.source);
@@ -4453,6 +4617,9 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     unsigned start_slot = ia64_psr_ri(env->psr);
     unsigned next_ri = 0;
 
+    IA64_PERF_INC(IA64_PERF_HELPER_EXEC_BUNDLE);
+    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+
     /*
      * This target still interprets complete IA-64 bundles inside one C helper.
      * Nested memory helpers therefore cannot hand QEMU a translated-code return
@@ -4479,6 +4646,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     ia64_state_trace_bundle(env);
 
     if (vibtanium_efi_dispatch_gate(env, env->ip)) {
+        IA64_PERF_INC(IA64_PERF_HELPER_EFI_DISPATCH);
         return;
     }
 
@@ -4488,6 +4656,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         if (start_slot == 0 &&
             ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
+            IA64_PERF_INC(IA64_PERF_OP_STORE);
             ia64_finish_bundle(env, next_ip, 0);
             return;
         }
@@ -4511,11 +4680,16 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         IA64IntegerExtendInstruction int_ext;
 
         env->psr = ia64_psr_with_ri(env->psr, slot);
+        IA64_PERF_INC(IA64_PERF_INTERP_SLOT_ITERATION);
+        if (ia64_perf_enabled()) {
+            ia64_perf_count_slot_type(type);
+        }
 
         if (decoded.info->long_immediate && slot == 1) {
             uint8_t x_qp = ia64_slot_predicate(decoded.slot[2]);
 
             if (ia64_read_pr(env, x_qp)) {
+                IA64_PERF_INC(IA64_PERF_INTERP_LONG_IMMEDIATE);
                 if (!ia64_exec_lx_movl(env, decoded.slot[1],
                                        decoded.slot[2]) &&
                     !ia64_exec_lx_nop_or_hint(env, decoded.slot[1],
@@ -4528,7 +4702,9 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
 
         if (!ia64_read_pr(env, qp)) {
+            IA64_PERF_INC(IA64_PERF_INTERP_PREDICATED_FALSE);
             if (exec_false_predicated_side_effect(env, &decoded, slot)) {
+                IA64_PERF_INC(IA64_PERF_INTERP_FALSE_PRED_SIDE_EFFECT);
                 continue;
             }
             if (!(type == IA64_SLOT_TYPE_B &&
@@ -4537,10 +4713,13 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                 continue;
             }
         }
+        IA64_PERF_INC(IA64_PERF_INTERP_SLOT_EXECUTED);
         if (ia64_exec_smoke_slot_supported(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SMOKE);
             continue;
         }
         if (ia64_slot_is_i_nop(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_NOP);
             continue;
         }
         if (ia64_slot_is_i_break(type, raw)) {
@@ -4550,46 +4729,57 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             break;
         }
         if (ia64_slot_is_m34_alloc(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALLOC);
             ia64_exec_m34_alloc(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mov_ip(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_MOV_IP);
             ia64_exec_i_mov_ip(env, raw, env->ip);
             continue;
         }
         if (ia64_slot_is_i_mov_from_branch(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_BRANCH_REGISTER);
             ia64_exec_i_mov_from_branch(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mov_to_branch(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_BRANCH_REGISTER);
             ia64_exec_i_mov_to_branch(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mov_from_predicate(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PREDICATE_REGISTER);
             ia64_exec_i_mov_from_predicate(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mov_to_predicate(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PREDICATE_REGISTER);
             ia64_exec_i_mov_to_predicate(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mov_to_rotating_predicate_immediate(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PREDICATE_REGISTER);
             ia64_exec_i_mov_to_rotating_predicate_immediate(env, raw);
             continue;
         }
         if (ia64_slot_is_mov_to_application(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_APPLICATION_REGISTER);
             ia64_exec_mov_to_application(env, type, raw);
             continue;
         }
         if (ia64_slot_is_mov_from_application(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_APPLICATION_REGISTER);
             ia64_exec_mov_from_application(env, type, raw);
             continue;
         }
         if (ia64_slot_is_mov_to_application_immediate(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_APPLICATION_REGISTER);
             ia64_exec_mov_to_application_immediate(env, type, raw);
             continue;
         }
         if (ia64_slot_is_check_speculative(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SPECULATION_CHECK);
             ia64_exec_check_speculative(env, type, raw, env->ip, &next_ip);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
@@ -4600,6 +4790,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_m_check_advanced(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SPECULATION_CHECK);
             ia64_exec_m_check_advanced(env, raw, env->ip, &next_ip);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
@@ -4611,14 +4802,17 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_processor_mask(type, raw) &&
             ia64_exec_m_processor_mask(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PROCESSOR_MASK);
             continue;
         }
         if (ia64_slot_is_m_mov_from_processor_status(type, raw) &&
             ia64_exec_m_mov_from_processor_status(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PROCESSOR_STATUS);
             continue;
         }
         if (ia64_slot_is_m_mov_to_processor_status(type, raw) &&
             ia64_exec_m_mov_to_processor_status(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PROCESSOR_STATUS);
             continue;
         }
         if (ia64_slot_is_m_break(type, raw)) {
@@ -4629,40 +4823,49 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_mov_to_region_register(type, raw) &&
             ia64_exec_m_mov_to_region_register(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_REGION_REGISTER);
             /*
              * QEMU's host TLB is keyed by virtual page and mmu_idx, while
              * IA-64 RIDs live inside RR state used by target-side lookup.
              * Drop cached host translations when a region register changes.
              */
             tlb_flush(cpu);
+            IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_FULL);
             continue;
         }
         if (ia64_slot_is_m_mov_from_region_register(type, raw) &&
             ia64_exec_m_mov_from_region_register(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_REGION_REGISTER);
             continue;
         }
         if (ia64_slot_is_m_mov_to_control(type, raw) &&
             ia64_exec_m_mov_to_control(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_CONTROL_REGISTER);
             continue;
         }
         if (ia64_slot_is_m_mov_from_control(type, raw) &&
             ia64_exec_m_mov_from_control(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_CONTROL_REGISTER);
             continue;
         }
         if (ia64_slot_is_m_mov_from_processor_identifier(type, raw) &&
             ia64_exec_m_mov_from_processor_identifier(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_PROCESSOR_ID);
             continue;
         }
         if (ia64_slot_is_m_mov_to_indexed_system_register(type, raw) &&
             ia64_exec_m_mov_to_indexed_system_register(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_INDEXED_SYSTEM_REGISTER);
             continue;
         }
         if (ia64_slot_is_m_mov_from_indexed_system_register(type, raw) &&
             ia64_exec_m_mov_from_indexed_system_register(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_INDEXED_SYSTEM_REGISTER);
             continue;
         }
         if (ia64_slot_is_m_insert_translation(type, raw) &&
             ia64_exec_m_insert_translation(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_INSERT_TRANSLATION);
             continue;
         }
         if (ia64_slot_is_m_probe(type, raw)) {
@@ -4671,10 +4874,12 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                 ia64_exec_m_probe_checked(env, raw, &fault);
 
             if (status == IA64_PROBE_FAULT) {
+                IA64_PERF_INC(IA64_PERF_OP_PROBE_TRANSLATION);
                 ia64_deliver_translation_fault(env, &fault);
                 return;
             }
             if (status == IA64_PROBE_OK) {
+                IA64_PERF_INC(IA64_PERF_OP_PROBE_TRANSLATION);
                 continue;
             }
         }
@@ -4684,10 +4889,12 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                 ia64_exec_m_virtual_translation_checked(env, raw, &fault);
 
             if (status == IA64_VIRTUAL_TRANSLATION_FAULT) {
+                IA64_PERF_INC(IA64_PERF_OP_VIRTUAL_TRANSLATION);
                 ia64_deliver_translation_fault(env, &fault);
                 return;
             }
             if (status == IA64_VIRTUAL_TRANSLATION_OK) {
+                IA64_PERF_INC(IA64_PERF_OP_VIRTUAL_TRANSLATION);
                 continue;
             }
         }
@@ -4696,6 +4903,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             uint8_t px6 = (raw >> 27) & 0x3f;
             uint8_t ps = (ia64_read_gr(env, (raw >> 13) & 0x7f) >> 2) & 0x3f;
 
+            IA64_PERF_INC(IA64_PERF_OP_PURGE_TRANSLATION);
             /*
              * The modeled translation-cache/register entries were invalidated;
              * drop the matching host softmmu TLB so stale cached pages re-fill.
@@ -4715,13 +4923,16 @@ void HELPER(exec_bundle)(CPUIA64State *env,
 
                 tlb_flush_range_by_mmuidx(cpu, addr, len, 0x7,
                                           TARGET_LONG_BITS);
+                IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_RANGE);
             } else {
                 tlb_flush(cpu);
+                IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_FULL);
             }
             continue;
         }
         if (ia64_slot_is_m_invala(type, raw) &&
             ia64_exec_m_invala(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_INVALA);
             continue;
         }
         if (ia64_slot_is_m_flushrs(type, raw)) {
@@ -4733,120 +4944,166 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_m_system_noop(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SYSTEM_NOOP);
             continue;
         }
         if (ia64_slot_is_m_setf(type, raw) && ia64_exec_m_setf(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SETF_GETF);
             continue;
         }
         if (ia64_slot_is_m_getf(type, raw) && ia64_exec_m_getf(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SETF_GETF);
             continue;
         }
         if (ia64_decode_m_atomic(type, raw, &atomic) &&
             exec_m_atomic(env, &atomic)) {
+            IA64_PERF_INC(IA64_PERF_OP_ATOMIC);
             continue;
         }
         if (ia64_decode_extract(type, raw, &extract) &&
             ia64_exec_extract(env, &extract)) {
+            IA64_PERF_INC(IA64_PERF_OP_EXTRACT_DEPOSIT);
             continue;
         }
         if (ia64_decode_deposit(type, raw, &deposit) &&
             ia64_exec_deposit(env, &deposit)) {
+            IA64_PERF_INC(IA64_PERF_OP_EXTRACT_DEPOSIT);
             continue;
         }
         if (ia64_slot_is_i_shift_right_pair(type, raw) &&
             ia64_exec_i_shift_right_pair(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SHIFT_EXTEND);
             continue;
         }
         if (ia64_decode_integer_extend(type, raw, &int_ext) &&
             ia64_exec_integer_extend(env, &int_ext)) {
+            IA64_PERF_INC(IA64_PERF_OP_SHIFT_EXTEND);
             continue;
         }
         if (ia64_slot_is_f_reciprocal_approx(type, raw) &&
             ia64_exec_f_reciprocal_approx(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT);
             continue;
         }
         if (ia64_slot_is_f_misc(type, raw) &&
             ia64_exec_f_misc(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT);
             continue;
         }
         if (ia64_slot_is_f_multiply_add(type, raw) &&
             ia64_exec_f_multiply_add(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT);
             continue;
         }
         if (ia64_slot_is_f_select_or_xma(type, raw) &&
             ia64_exec_f_select_or_xma(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT);
             continue;
         }
         if (ia64_decode_floating_memory(type, raw, &fldst) &&
             exec_floating_memory(env, &fldst)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT_MEMORY);
             continue;
         }
         if (ia64_decode_ldst_immediate(type, raw, &ldst) &&
             exec_ldst_immediate(env, &ldst)) {
+            switch (ldst.kind) {
+            case IA64_LDST_IMM_LOAD:
+                IA64_PERF_INC(IA64_PERF_OP_LOAD);
+                break;
+            case IA64_LDST_IMM_STORE:
+                IA64_PERF_INC(IA64_PERF_OP_STORE);
+                break;
+            case IA64_LDST_IMM_PREFETCH:
+                IA64_PERF_INC(IA64_PERF_OP_PREFETCH);
+                break;
+            default:
+                break;
+            }
             continue;
         }
         if (ia64_decode_compare(type, raw, &cmp) &&
             ia64_exec_compare(env, &cmp)) {
+            IA64_PERF_INC(IA64_PERF_OP_COMPARE);
             continue;
         }
         if (ia64_decode_predicate_test(type, raw, &pred_test) &&
             ia64_exec_predicate_test(env, &pred_test)) {
+            IA64_PERF_INC(IA64_PERF_OP_PREDICATE_TEST);
+            if (pred_test.kind == IA64_PRED_TEST_NAT) {
+                IA64_PERF_INC(IA64_PERF_OP_NAT_TEST);
+            }
             continue;
         }
         if (ia64_slot_is_alu_add(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_alu_add(env, raw);
             continue;
         }
         if (ia64_slot_is_alu_sub(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_alu_sub(env, raw);
             continue;
         }
         if (ia64_slot_is_alu_logic(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_alu_logic(env, raw);
             continue;
         }
         if (ia64_slot_is_alu_addp4(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_alu_addp4(env, raw);
             continue;
         }
         if (ia64_slot_is_alu_shladd(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_alu_shladd(env, raw);
             continue;
         }
         if (ia64_slot_is_i_packed_i2(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_i_packed_i2(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mux(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_i_mux(env, raw);
             continue;
         }
         if (ia64_slot_is_i_bit_count(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_i_bit_count(env, raw);
             continue;
         }
         if (ia64_slot_is_i_variable_shift(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_i_variable_shift(env, raw);
             continue;
         }
         if (ia64_slot_is_addl(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ADDL);
             ia64_exec_addl(env, raw);
             continue;
         }
         if (ia64_slot_is_b_branch_relative(type, raw)) {
             bool branch_taken = false;
 
+            IA64_PERF_INC(IA64_PERF_OP_BRANCH_DIRECT);
             ia64_exec_b_branch_relative(env, raw, env->ip, &next_ip,
                                         &branch_taken);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
             if (branch_taken || next_ip != env->ip + IA64_BUNDLE_SIZE) {
+                IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
                 break;
             }
+            IA64_PERF_INC(IA64_PERF_BRANCH_FALLTHROUGH);
             continue;
         }
         if (ia64_slot_is_b_call_relative(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_BRANCH_CALL);
+            IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
             ia64_exec_b_call_relative(env, raw, env->ip, &next_ip);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
@@ -4861,6 +5118,8 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             bool br_ret = ia64_slot_major_opcode(raw) == 0x0 &&
                            ((raw >> 27) & 0x3f) == 0x21;
 
+            IA64_PERF_INC(IA64_PERF_OP_BRANCH_INDIRECT);
+            IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {
                 ia64_rse_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
@@ -4877,6 +5136,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             break;
         }
         if (ia64_slot_is_b_predict_or_nop(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_BRANCH_PREDICT);
             continue;
         }
         if (decoded.info->long_immediate && type == IA64_SLOT_TYPE_X) {

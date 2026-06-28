@@ -7,6 +7,7 @@ ia64_ss.add(files(
   'helper.c',
   'machine.c',
   'mem.c',
+  'perf.c',
   'translate.c',
 ))
 
