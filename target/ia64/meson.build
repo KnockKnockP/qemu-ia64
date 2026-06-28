@@ -8,6 +8,7 @@ ia64_ss.add(files(
   'machine.c',
   'mem.c',
   'perf.c',
+  'tcg-skeleton.c',
   'translate.c',
 ))
 

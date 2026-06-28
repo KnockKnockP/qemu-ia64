@@ -2,6 +2,7 @@
 
 # translate.c
 disable ia64_bundle_decode(uint64_t ip, const char *bundle) "ip=0x%016" PRIx64 " %s"
+disable ia64_tcg_tb_boundary(uint64_t ip, const char *reason) "ip=0x%016" PRIx64 " reason=%s"
 
 # helper.c
 disable ia64_efi_service(uint64_t ip, const char *group, uint32_t index, const char *status, uint64_t r32, uint64_t r33, uint64_t r34, uint64_t r35) "ip=0x%016" PRIx64 " service=%s[%" PRIu32 "] status=%s r32=0x%016" PRIx64 " r33=0x%016" PRIx64 " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
