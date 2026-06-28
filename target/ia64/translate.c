@@ -7,6 +7,7 @@
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "exec/memop.h"
+#include "exec/target_page.h"
 #include "exec/translator.h"
 #include "hw/ia64/efi.h"
 #include "tcg/tcg-op.h"
@@ -49,9 +50,19 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
                                        CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
+    int bound;
 
     ctx->base.is_jmp = DISAS_NEXT;
     ctx->env = cpu_env(cs);
+
+    /*
+     * Instruction fetch exceptions raised while translating a later bundle in
+     * a TB must not skip earlier, already translated-but-not-executed bundles.
+     * Keep each TB inside the starting TARGET_PAGE_SIZE page so the next page
+     * is fetched only after the current page's bundles have retired.
+     */
+    bound = -(ctx->base.pc_first | TARGET_PAGE_MASK) / IA64_BUNDLE_SIZE;
+    ctx->base.max_insns = MIN(ctx->base.max_insns, bound);
 }
 
 static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)

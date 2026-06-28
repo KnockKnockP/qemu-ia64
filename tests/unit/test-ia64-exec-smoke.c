@@ -692,6 +692,24 @@ static void test_m_unit_system_memory_management(void)
         (1ULL << 37) | (0x24ULL << 27) | (8ULL << 6) | (20ULL << 20);
     const uint64_t kernel_itr_i_r16_r18_raw = 0x02079024000ULL;
     const uint64_t kernel_tpa_r3_r2_raw = 0x020f02000c0ULL;
+    const uint64_t probe_r_r8_r33_imm3_raw =
+        (1ULL << 37) | (0x18ULL << 27) | (33ULL << 20) |
+        (3ULL << 13) | (8ULL << 6);
+    const uint64_t probe_w_r8_r33_imm3_raw =
+        (1ULL << 37) | (0x19ULL << 27) | (33ULL << 20) |
+        (3ULL << 13) | (8ULL << 6);
+    const uint64_t probe_r_r8_r33_r9_raw =
+        (1ULL << 37) | (0x38ULL << 27) | (33ULL << 20) |
+        (9ULL << 13) | (8ULL << 6);
+    const uint64_t probe_rw_fault_r33_imm3_raw =
+        (1ULL << 37) | (0x31ULL << 27) | (33ULL << 20) |
+        (3ULL << 13);
+    const uint64_t probe_r_fault_r33_imm3_raw =
+        (1ULL << 37) | (0x32ULL << 27) | (33ULL << 20) |
+        (3ULL << 13);
+    const uint64_t probe_w_fault_r33_imm3_raw =
+        (1ULL << 37) | (0x33ULL << 27) | (33ULL << 20) |
+        (3ULL << 13);
     const uint64_t kernel_thash_r4_r2_raw =
         (1ULL << 37) | (0x1aULL << 27) | (2ULL << 20) | (4ULL << 6);
     const uint64_t kernel_ttag_r5_r2_raw =
@@ -921,6 +939,64 @@ static void test_m_unit_system_memory_management(void)
                         &env, kernel_tpa_r3_r2_raw, &fault),
                     ==, IA64_VIRTUAL_TRANSLATION_OK);
     g_assert_cmphex(ia64_read_gr(&env, 3), ==, 0x0000000004b48a10ULL);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    memset(&fault, 0, sizeof(fault));
+    env.psr = IA64_PSR_DT_BIT;
+    ia64_write_gr(&env, 33, 0x2000000000012000ULL);
+    g_assert_true(ia64_install_translation(
+                      &env, false, true, 0, 0x2000000000012000ULL,
+                      0x0000000004c00000ULL | (3ULL << 7) |
+                      (2ULL << 9) | 1ULL,
+                      12ULL << 2));
+    g_assert_true(ia64_slot_is_m_probe(IA64_SLOT_TYPE_M,
+                                       probe_r_fault_r33_imm3_raw));
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_r_fault_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_w_fault_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_rw_fault_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_r_r8_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 1);
+
+    ia64_write_gr(&env, 9, 3);
+    ia64_write_gr(&env, 8, 0);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_r_r8_r33_r9_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 1);
+
+    g_assert_true(ia64_install_translation(
+                      &env, false, true, 0, 0x2000000000012000ULL,
+                      0x0000000004d00000ULL | (2ULL << 9) | 1ULL,
+                      12ULL << 2));
+    ia64_write_gr(&env, 8, 0xfeed);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_r_r8_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 0);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_w_r8_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_OK);
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 0);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_w_fault_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_FAULT);
+    g_assert_cmpint(fault.status, ==, IA64_TRANSLATE_ACCESS_DENIED);
+    g_assert_cmpint(fault.access_type, ==, MMU_DATA_STORE);
+    g_assert_nonnull(strstr(fault.message, "cpl=3"));
+
+    ia64_write_gr(&env, 33, 0x2000000000030000ULL);
+    g_assert_cmpint(ia64_exec_m_probe_checked(
+                        &env, probe_r_r8_r33_imm3_raw, &fault),
+                    ==, IA64_PROBE_FAULT);
+    g_assert_cmpint(fault.status, ==, IA64_TRANSLATE_TLB_MISS);
 
     ia64_write_gr(&env, 2, 0xa000000100bc0000ULL);
     env.cr[IA64_CR_PTA] = (20ULL << 2) | (1ULL << 15);

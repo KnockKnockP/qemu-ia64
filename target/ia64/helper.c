@@ -3547,6 +3547,70 @@ static void ia64_trace_ldst(CPUIA64State *env, const char *op,
             env->ip, op, address, has_paddr ? "" : "?", paddr, width, value);
 }
 
+static bool ia64_ldst_decode_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_LDST_DECODE_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static void ia64_trace_ldst_decoded(CPUIA64State *env, const char *op,
+                                    uint64_t address, uint8_t width,
+                                    uint64_t value,
+                                    const IA64LdstImmediate *decoded)
+{
+    IA64TranslateResult result;
+    MMUAccessType access_type = g_str_equal(op, "store") ? MMU_DATA_STORE
+                                                         : MMU_DATA_LOAD;
+    bool has_paddr;
+    uint64_t paddr;
+    uint64_t update = 0;
+
+    if (!ia64_ldst_decode_trace_enabled() || !decoded) {
+        return;
+    }
+
+    has_paddr = ia64_translate_address(env, address, access_type, 0, true,
+                                       &result);
+    paddr = has_paddr ? result.paddr : 0;
+
+    if (!ia64_ldst_trace_op_matches(op) ||
+        !ia64_ldst_trace_width_matches(width) ||
+        !ia64_ldst_trace_value_matches(value) ||
+        !ia64_ldst_trace_matches(address, paddr, has_paddr, width)) {
+        return;
+    }
+
+    if (decoded->base_update) {
+        update = decoded->update_from_register
+            ? ia64_read_gr(env, decoded->update_source)
+            : (uint64_t)decoded->immediate;
+    }
+
+    fprintf(stderr,
+            "[ia64-ldst-decoded] ip=0x%016" PRIx64
+            " op=%s vaddr=0x%016" PRIx64 " paddr=%s0x%016" PRIx64
+            " width=%u value=0x%016" PRIx64
+            " base=r%u base-value=0x%016" PRIx64
+            " target=r%u source=r%u source-value=0x%016" PRIx64
+            " update=%s0x%016" PRIx64 " update-source=r%u"
+            " cfm=0x%016" PRIx64 " pr=0x%016" PRIx64
+            " r1=0x%016" PRIx64 " r8=0x%016" PRIx64
+            " r12=0x%016" PRIx64 " r13=0x%016" PRIx64
+            " b0=0x%016" PRIx64 " b6=0x%016" PRIx64 "\n",
+            env->ip, op, address, has_paddr ? "" : "?", paddr, width, value,
+            decoded->base, ia64_read_gr(env, decoded->base),
+            decoded->target, decoded->source, ia64_read_gr(env, decoded->source),
+            decoded->base_update ? "" : "none:", update,
+            decoded->update_source, env->cfm, env->pr,
+            ia64_read_gr(env, 1), ia64_read_gr(env, 8),
+            ia64_read_gr(env, 12), ia64_read_gr(env, 13),
+            env->br[0], env->br[6]);
+}
+
 static bool ia64_alat_ranges_overlap(uint64_t a, uint8_t a_width,
                                      uint64_t b, uint8_t b_width)
 {
@@ -3963,6 +4027,8 @@ static bool exec_ldst_immediate(CPUIA64State *env,
         if (decoded->target != 0) {
             uint64_t value = ia64_ldst_read(env, address, decoded->width);
 
+            ia64_trace_ldst_decoded(env, "load", address, decoded->width,
+                                    value, decoded);
             ia64_write_gr(env, decoded->target, value);
             if (decoded->memory_class == 2 || decoded->memory_class == 3) {
                 ia64_alat_record_load(env, decoded->target, address,
@@ -3971,9 +4037,14 @@ static bool exec_ldst_immediate(CPUIA64State *env,
         }
         break;
     case IA64_LDST_IMM_STORE:
-        ia64_ldst_write(env, address, decoded->width,
-                        ia64_read_gr(env, decoded->source));
+    {
+        uint64_t value = ia64_read_gr(env, decoded->source);
+
+        ia64_trace_ldst_decoded(env, "store", address, decoded->width,
+                                value, decoded);
+        ia64_ldst_write(env, address, decoded->width, value);
         break;
+    }
     case IA64_LDST_IMM_PREFETCH:
         break;
     default:
@@ -4369,6 +4440,12 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_mov_to_region_register(type, raw) &&
             ia64_exec_m_mov_to_region_register(env, raw)) {
+            /*
+             * QEMU's host TLB is keyed by virtual page and mmu_idx, while
+             * IA-64 RIDs live inside RR state used by target-side lookup.
+             * Drop cached host translations when a region register changes.
+             */
+            tlb_flush(cpu);
             continue;
         }
         if (ia64_slot_is_m_mov_from_region_register(type, raw) &&
@@ -4398,6 +4475,19 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         if (ia64_slot_is_m_insert_translation(type, raw) &&
             ia64_exec_m_insert_translation(env, raw)) {
             continue;
+        }
+        if (ia64_slot_is_m_probe(type, raw)) {
+            IA64TranslateResult fault;
+            IA64ProbeStatus status =
+                ia64_exec_m_probe_checked(env, raw, &fault);
+
+            if (status == IA64_PROBE_FAULT) {
+                ia64_deliver_translation_fault(env, &fault);
+                return;
+            }
+            if (status == IA64_PROBE_OK) {
+                continue;
+            }
         }
         if (ia64_slot_is_m_virtual_translation(type, raw)) {
             IA64TranslateResult fault;

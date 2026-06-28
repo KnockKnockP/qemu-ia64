@@ -20,6 +20,12 @@ typedef enum IA64VirtualTranslationStatus {
     IA64_VIRTUAL_TRANSLATION_FAULT,
 } IA64VirtualTranslationStatus;
 
+typedef enum IA64ProbeStatus {
+    IA64_PROBE_UNSUPPORTED,
+    IA64_PROBE_OK,
+    IA64_PROBE_FAULT,
+} IA64ProbeStatus;
+
 typedef struct IA64ExecSmokeReport {
     IA64ExecSmokeStatus status;
     IA64DecodedBundle bundle;
@@ -299,6 +305,10 @@ bool ia64_exec_m_mov_from_indexed_system_register(CPUIA64State *env,
                                                   uint64_t raw);
 bool ia64_slot_is_m_insert_translation(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_m_probe(IA64SlotType type, uint64_t raw);
+IA64ProbeStatus ia64_exec_m_probe_checked(CPUIA64State *env, uint64_t raw,
+                                          IA64TranslateResult *fault);
+bool ia64_exec_m_probe(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw);
 IA64VirtualTranslationStatus
 ia64_exec_m_virtual_translation_checked(CPUIA64State *env, uint64_t raw,

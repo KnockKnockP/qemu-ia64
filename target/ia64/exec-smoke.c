@@ -19,6 +19,7 @@
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+#define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_INTERRUPT_VECTOR_MASK UINT64_C(0xff)
 #define IA64_INTERRUPT_SPURIOUS_VECTOR UINT64_C(0x0f)
@@ -1980,11 +1981,108 @@ bool ia64_exec_m_purge_translation(CPUIA64State *env, uint64_t raw)
     case 0x0d: /* ptr.i */
         ia64_purge_translation_register(env, true, address, page_size);
         break;
-    default:   /* ptc.l / ptc.g / ptc.ga */
-        ia64_purge_translation_cache(env, address, page_size);
+    case 0x09: /* ptc.l */
+        ia64_purge_translation_cache(env, address, page_size, false);
+        break;
+    default:   /* ptc.g / ptc.ga */
+        /*
+         * Architecturally these still identify a RID, but processors may
+         * over-purge TC entries.  With one emulated CPU, all-RID purge is a
+         * conservative shootdown for stale same-VA translations.
+         */
+        ia64_purge_translation_cache(env, address, page_size, true);
         break;
     }
     return true;
+}
+
+bool ia64_slot_is_m_probe(IA64SlotType type, uint64_t raw)
+{
+    uint8_t x6;
+
+    if (type != IA64_SLOT_TYPE_M || ia64_slot_major_opcode(raw) != 0x1 ||
+        ((raw >> 33) & 0x7) != 0) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    return x6 == 0x38 || x6 == 0x39 || x6 == 0x18 || x6 == 0x19 ||
+           x6 == 0x31 || x6 == 0x32 || x6 == 0x33;
+}
+
+static bool ia64_probe_is_faulting(uint8_t x6)
+{
+    return x6 == 0x31 || x6 == 0x32 || x6 == 0x33;
+}
+
+static MMUAccessType ia64_probe_access_type(uint8_t x6)
+{
+    /*
+     * The current AR model has no writable-but-unreadable translation, so a
+     * store probe is the strict check for probe.rw.fault.
+     */
+    return x6 == 0x19 || x6 == 0x31 || x6 == 0x33 ? MMU_DATA_STORE
+                                                   : MMU_DATA_LOAD;
+}
+
+IA64ProbeStatus ia64_exec_m_probe_checked(CPUIA64State *env, uint64_t raw,
+                                          IA64TranslateResult *fault)
+{
+    IA64TranslateResult result;
+    uint8_t x6;
+    uint32_t target;
+    uint32_t address_reg;
+    uint64_t address;
+    MMUAccessType access_type;
+    bool faulting;
+    int requested_cpl;
+    int current_cpl;
+    int effective_cpl;
+
+    if (!env || !ia64_slot_is_m_probe(IA64_SLOT_TYPE_M, raw)) {
+        return IA64_PROBE_UNSUPPORTED;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    faulting = ia64_probe_is_faulting(x6);
+    access_type = ia64_probe_access_type(x6);
+    target = (raw >> 6) & 0x7f;
+    address_reg = (raw >> 20) & 0x7f;
+    address = ia64_read_gr(env, address_reg);
+
+    if (x6 == 0x38 || x6 == 0x39) {
+        requested_cpl = ia64_read_gr(env, (raw >> 13) & 0x7f) & 0x3;
+    } else {
+        requested_cpl = (raw >> 13) & 0x3;
+    }
+    current_cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    effective_cpl = requested_cpl < current_cpl ? current_cpl : requested_cpl;
+
+    if (ia64_translate_address_with_cpl(env, address, access_type, 0,
+                                        effective_cpl, true, &result)) {
+        if (!faulting) {
+            ia64_write_gr(env, target, 1);
+        }
+        return IA64_PROBE_OK;
+    }
+
+    if (!faulting &&
+        (result.status == IA64_TRANSLATE_ACCESS_DENIED ||
+         result.status == IA64_TRANSLATE_BAD_ADDRESS ||
+         result.status == IA64_TRANSLATE_UNIMPLEMENTED)) {
+        ia64_write_gr(env, target, 0);
+        return IA64_PROBE_OK;
+    }
+
+    if (fault) {
+        *fault = result;
+    }
+    return IA64_PROBE_FAULT;
+}
+
+bool ia64_exec_m_probe(CPUIA64State *env, uint64_t raw)
+{
+    return ia64_exec_m_probe_checked(env, raw, NULL) == IA64_PROBE_OK;
 }
 
 bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw)

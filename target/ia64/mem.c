@@ -386,7 +386,8 @@ static int ia64_entry_prot(const IA64TranslationEntry *entry)
 
 static void ia64_invalidate_overlapping_entries(IA64TranslationEntry *entries,
                                                 unsigned count,
-                                                const IA64TranslationEntry *entry)
+                                                const IA64TranslationEntry *entry,
+                                                bool all_rids)
 {
     uint64_t start = entry->vaddr_base;
     uint64_t end = start + (UINT64_C(1) << entry->page_size);
@@ -396,7 +397,7 @@ static void ia64_invalidate_overlapping_entries(IA64TranslationEntry *entries,
         uint64_t existing_start;
         uint64_t existing_end;
 
-        if (!existing->valid || existing->rid != entry->rid) {
+        if (!existing->valid || (!all_rids && existing->rid != entry->rid)) {
             continue;
         }
 
@@ -457,11 +458,11 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
         if (slot >= IA64_ITR_COUNT) {
             return false;
         }
-        ia64_invalidate_overlapping_entries(tr, IA64_ITR_COUNT, &entry);
-        ia64_invalidate_overlapping_entries(tc, IA64_TC_COUNT, &entry);
+        ia64_invalidate_overlapping_entries(tr, IA64_ITR_COUNT, &entry, false);
+        ia64_invalidate_overlapping_entries(tc, IA64_TC_COUNT, &entry, false);
         tr[slot] = entry;
     } else {
-        ia64_invalidate_overlapping_entries(tc, IA64_TC_COUNT, &entry);
+        ia64_invalidate_overlapping_entries(tc, IA64_TC_COUNT, &entry, false);
         tc[*next_tc % IA64_TC_COUNT] = entry;
         *next_tc = (*next_tc + 1) % IA64_TC_COUNT;
     }
@@ -503,7 +504,7 @@ static IA64TranslationEntry ia64_purge_probe(CPUIA64State *env, vaddr address,
 
 /* ptc.l / ptc.g / ptc.ga: purge matching dynamic instruction/data TLB entries. */
 void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
-                                  uint8_t page_size)
+                                  uint8_t page_size, bool all_rids)
 {
     IA64TranslationEntry probe;
 
@@ -511,8 +512,10 @@ void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
         return;
     }
     probe = ia64_purge_probe(env, address, page_size);
-    ia64_invalidate_overlapping_entries(env->memory.itc, IA64_TC_COUNT, &probe);
-    ia64_invalidate_overlapping_entries(env->memory.dtc, IA64_TC_COUNT, &probe);
+    ia64_invalidate_overlapping_entries(env->memory.itc, IA64_TC_COUNT, &probe,
+                                        all_rids);
+    ia64_invalidate_overlapping_entries(env->memory.dtc, IA64_TC_COUNT, &probe,
+                                        all_rids);
 }
 
 /* ptr.i / ptr.d: purge a matching pinned instruction/data translation register. */
@@ -527,10 +530,10 @@ void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
     probe = ia64_purge_probe(env, address, page_size);
     if (instruction) {
         ia64_invalidate_overlapping_entries(env->memory.itr, IA64_ITR_COUNT,
-                                            &probe);
+                                            &probe, false);
     } else {
         ia64_invalidate_overlapping_entries(env->memory.dtr, IA64_DTR_COUNT,
-                                            &probe);
+                                            &probe, false);
     }
 }
 
@@ -565,11 +568,22 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
                             MMUAccessType access_type, int mmu_idx,
                             bool debug, IA64TranslateResult *result)
 {
+    return ia64_translate_address_with_cpl(
+        env, address, access_type, mmu_idx,
+        ia64_current_privilege_level(env->psr), debug, result);
+}
+
+bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
+                                     MMUAccessType access_type, int mmu_idx,
+                                     int cpl, bool debug,
+                                     IA64TranslateResult *result)
+{
     bool instruction = access_type == MMU_INST_FETCH;
     bool needs_translation = ia64_translation_required(env->psr, access_type);
     const IA64TranslationEntry *entry;
     uint64_t rr;
 
+    cpl &= 0x3;
     memset(result, 0, sizeof(*result));
     result->vaddr = address;
     result->region = ia64_va_region(address);
@@ -621,15 +635,13 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
         goto record;
     }
 
-    if (!ia64_translation_allows(entry, access_type,
-                                 ia64_current_privilege_level(env->psr))) {
+    if (!ia64_translation_allows(entry, access_type, cpl)) {
         result->status = IA64_TRANSLATE_ACCESS_DENIED;
         snprintf(result->message, sizeof(result->message),
                  "%s translation access denied address=0x%016" VADDR_PRIx
                  " ar=%u pl=%u cpl=%d",
                  instruction ? "instruction" : "data", address,
-                 entry->access_rights, entry->privilege_level,
-                 ia64_current_privilege_level(env->psr));
+                 entry->access_rights, entry->privilege_level, cpl);
         goto record;
     }
 
