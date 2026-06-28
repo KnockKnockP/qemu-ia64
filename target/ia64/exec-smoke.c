@@ -16,7 +16,6 @@
 #define IA64_FR_TWO_TO_63 0x1.0p63
 #define IA64_FR_TWO_TO_64_L 0x1.0p64L
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
-#define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
@@ -24,6 +23,8 @@
 #define IA64_INTERRUPT_VECTOR_MASK UINT64_C(0xff)
 #define IA64_INTERRUPT_SPURIOUS_VECTOR UINT64_C(0x0f)
 #define IA64_LOCAL_VECTOR_MASK_BIT UINT64_C(0x0000000000010000)
+
+static bool ia64_read_gr_nat(CPUIA64State *env, uint32_t reg);
 
 static uint64_t ia64_default_region_register(unsigned index)
 {
@@ -1086,6 +1087,55 @@ bool ia64_exec_i_mov_to_application_immediate(CPUIA64State *env,
     return ia64_exec_mov_to_application_immediate(env, IA64_SLOT_TYPE_I, raw);
 }
 
+bool ia64_slot_is_check_speculative(IA64SlotType type, uint64_t raw)
+{
+    uint8_t major = ia64_slot_major_opcode(raw);
+    uint8_t x3 = (raw >> 33) & 0x7;
+
+    if (type == IA64_SLOT_TYPE_I) {
+        return major == 0x0 && x3 == 1;
+    }
+
+    if (type == IA64_SLOT_TYPE_M) {
+        return major == 0x1 && (x3 == 1 || x3 == 3);
+    }
+
+    return false;
+}
+
+int64_t ia64_check_speculative_displacement(uint64_t raw)
+{
+    uint64_t encoded = (((raw >> 36) & 0x1) << 20) |
+                       (((raw >> 20) & 0x1fff) << 7) |
+                       ((raw >> 6) & 0x7f);
+
+    return ia64_sign_extend(encoded, 21) << 4;
+}
+
+bool ia64_exec_check_speculative(CPUIA64State *env, IA64SlotType type,
+                                 uint64_t raw, uint64_t bundle_ip,
+                                 uint64_t *target_ip)
+{
+    uint8_t source;
+    bool deferred;
+
+    if (!env || !target_ip || !ia64_slot_is_check_speculative(type, raw)) {
+        return false;
+    }
+
+    source = (raw >> 13) & 0x7f;
+    if (type == IA64_SLOT_TYPE_M && ((raw >> 33) & 0x7) == 3) {
+        deferred = ia64_fr_is_natval(&env->fr[ia64_map_fr(env, source)]);
+    } else {
+        deferred = ia64_read_gr_nat(env, source);
+    }
+
+    *target_ip = deferred
+        ? bundle_ip + ia64_check_speculative_displacement(raw)
+        : bundle_ip + IA64_BUNDLE_SIZE;
+    return true;
+}
+
 bool ia64_slot_is_m_check_advanced(IA64SlotType type, uint64_t raw)
 {
     uint8_t x3;
@@ -1849,7 +1899,9 @@ bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw)
     return x6 == 0x1a || x6 == 0x1b || x6 == 0x1e || x6 == 0x1f;
 }
 
-bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
+IA64VirtualTranslationStatus
+ia64_exec_m_virtual_translation_checked(CPUIA64State *env, uint64_t raw,
+                                        IA64TranslateResult *fault)
 {
     uint8_t x6;
     uint32_t target;
@@ -1858,7 +1910,7 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
     uint64_t value;
 
     if (!env || !ia64_slot_is_m_virtual_translation(IA64_SLOT_TYPE_M, raw)) {
-        return false;
+        return IA64_VIRTUAL_TRANSLATION_UNSUPPORTED;
     }
 
     x6 = (raw >> 27) & 0x3f;
@@ -1868,10 +1920,19 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
 
     switch (x6) {
     case 0x1e: /* tpa */
-        if (!ia64_translate_data_non_access(env, address, &value)) {
-            value = address & IA64_PHYSICAL_ADDRESS_MASK;
+    {
+        IA64TranslateResult result;
+
+        if (!ia64_translate_address(env, address, MMU_DATA_LOAD, 0, true,
+                                    &result)) {
+            if (fault) {
+                *fault = result;
+            }
+            return IA64_VIRTUAL_TRANSLATION_FAULT;
         }
+        value = result.paddr;
         break;
+    }
     case 0x1f: /* tak */
         value = 0;
         break;
@@ -1887,7 +1948,13 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
     }
 
     ia64_write_gr(env, target, value);
-    return true;
+    return IA64_VIRTUAL_TRANSLATION_OK;
+}
+
+bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
+{
+    return ia64_exec_m_virtual_translation_checked(env, raw, NULL) ==
+           IA64_VIRTUAL_TRANSLATION_OK;
 }
 
 bool ia64_slot_is_m_invala(IA64SlotType type, uint64_t raw)
@@ -3137,6 +3204,43 @@ static bool ia64_floating_memory_format(uint8_t size_code,
     }
 }
 
+static bool ia64_floating_load_pair_format(uint8_t size_code,
+                                           IA64FloatingMemoryFormat *format,
+                                           uint8_t *width)
+{
+    switch (size_code) {
+    case 1:
+        *format = IA64_FLOAT_FMT_SIGNIFICAND;
+        *width = 8;
+        return true;
+    case 2:
+        *format = IA64_FLOAT_FMT_SINGLE;
+        *width = 4;
+        return true;
+    case 3:
+        *format = IA64_FLOAT_FMT_DOUBLE;
+        *width = 8;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_floating_load_pair_class(uint8_t memory_class)
+{
+    switch (memory_class) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 8:
+    case 9:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
                                  IA64FloatingMemoryInstruction *decoded)
 {
@@ -3157,13 +3261,31 @@ bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
     if (major != 0x6 && major != 0x7) {
         return false;
     }
-    if (major == 0x6 && ((raw >> 27) & 0x1) != 0) {
-        return false;
-    }
 
     x6 = (raw >> 30) & 0x3f;
     memory_class = x6 >> 2;
     size_code = x6 & 0x3;
+
+    if (major == 0x6 && ((raw >> 27) & 0x1) != 0) {
+        if (memory_class == 7 ||
+            !ia64_floating_load_pair_class(memory_class) ||
+            !ia64_floating_load_pair_format(size_code, &format, &width)) {
+            return false;
+        }
+
+        memset(decoded, 0, sizeof(*decoded));
+        decoded->kind = IA64_FLOAT_MEM_LOAD_PAIR;
+        decoded->format = format;
+        decoded->width = width;
+        decoded->freg = (raw >> 6) & 0x7f;
+        decoded->freg2 = (raw >> 13) & 0x7f;
+        decoded->base = (raw >> 20) & 0x7f;
+        decoded->memory_class = memory_class;
+        decoded->base_update = ((raw >> 36) & 0x1) != 0;
+        decoded->immediate = decoded->width * 2;
+        return true;
+    }
+
     if (!ia64_floating_memory_format(size_code, memory_class,
                                      &format, &width)) {
         return false;

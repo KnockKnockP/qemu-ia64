@@ -100,6 +100,14 @@ static bool ia64_slot_may_change_flow(IA64SlotType type, uint64_t raw)
         return true;
     }
 
+    if (ia64_slot_is_check_speculative(type, raw)) {
+        return true;
+    }
+
+    if (ia64_slot_is_m_virtual_translation(type, raw)) {
+        return true;
+    }
+
     if (type == IA64_SLOT_TYPE_B) {
         major = ia64_slot_major_opcode(raw);
         if (major == 0x1 || major == 0x4 || major == 0x5) {

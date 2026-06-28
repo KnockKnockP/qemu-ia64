@@ -11,6 +11,7 @@
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
+#define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 static void store_le64(uint8_t *p, uint64_t value)
 {
@@ -504,6 +505,11 @@ static void test_m_unit_system_memory_management(void)
         (1ULL << 37) | (0x29ULL << 27) | (9ULL << 13);
     const uint64_t mov_psr_l_r10_raw =
         (1ULL << 37) | (0x2dULL << 27) | (10ULL << 13);
+    const uint64_t userspace_chk_s_m_r22_raw = 0x0220002c140ULL;
+    const uint64_t chk_s_i_r22_raw =
+        (1ULL << 33) | (22ULL << 13) | (5ULL << 6);
+    const uint64_t chk_s_f8_raw =
+        (1ULL << 37) | (3ULL << 33) | (8ULL << 13) | (5ULL << 6);
     const uint64_t kernel_break_m_0_raw = 0;
     const uint64_t break_m_immediate_raw =
         (1ULL << 36) | (0x34567ULL << 6);
@@ -547,9 +553,56 @@ static void test_m_unit_system_memory_management(void)
     const uint64_t kernel_loadrs_raw = 0x00050000000ULL;
     const uint64_t kernel_flushrs_raw = 0x00060000000ULL;
     CPUIA64State env;
+    IA64TranslateResult fault;
     uint64_t target = 0;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+
+    g_assert_true(ia64_slot_is_check_speculative(
+                      IA64_SLOT_TYPE_M, userspace_chk_s_m_r22_raw));
+    g_assert_cmpint(ia64_check_speculative_displacement(
+                        userspace_chk_s_m_r22_raw), ==, 80);
+    g_assert_true(ia64_exec_check_speculative(
+                      &env, IA64_SLOT_TYPE_M, userspace_chk_s_m_r22_raw,
+                      0x2000000000032370ULL, &target));
+    g_assert_cmphex(target, ==, 0x2000000000032380ULL);
+
+    env.nat.gr_nat[22 / 64] |= 1ULL << (22 % 64);
+    target = 0;
+    g_assert_true(ia64_exec_check_speculative(
+                      &env, IA64_SLOT_TYPE_M, userspace_chk_s_m_r22_raw,
+                      0x2000000000032370ULL, &target));
+    g_assert_cmphex(target, ==, 0x20000000000323c0ULL);
+    env.nat.gr_nat[22 / 64] = 0;
+
+    g_assert_true(ia64_slot_is_check_speculative(IA64_SLOT_TYPE_I,
+                                                chk_s_i_r22_raw));
+    g_assert_cmpint(ia64_check_speculative_displacement(chk_s_i_r22_raw),
+                    ==, 80);
+    env.nat.gr_nat[22 / 64] |= 1ULL << (22 % 64);
+    target = 0;
+    g_assert_true(ia64_exec_check_speculative(
+                      &env, IA64_SLOT_TYPE_I, chk_s_i_r22_raw, 0x1000,
+                      &target));
+    g_assert_cmphex(target, ==, 0x1050);
+    env.nat.gr_nat[22 / 64] = 0;
+
+    g_assert_true(ia64_slot_is_check_speculative(IA64_SLOT_TYPE_M,
+                                                chk_s_f8_raw));
+    g_assert_cmpint(ia64_check_speculative_displacement(chk_s_f8_raw),
+                    ==, 80);
+    target = 0;
+    g_assert_true(ia64_exec_check_speculative(
+                      &env, IA64_SLOT_TYPE_M, chk_s_f8_raw, 0x2000,
+                      &target));
+    g_assert_cmphex(target, ==, 0x2010);
+    env.fr[8].raw[0] = 0;
+    env.fr[8].raw[1] = 0x1fffe;
+    target = 0;
+    g_assert_true(ia64_exec_check_speculative(
+                      &env, IA64_SLOT_TYPE_M, chk_s_f8_raw, 0x2000,
+                      &target));
+    g_assert_cmphex(target, ==, 0x2050);
 
     g_assert_true(ia64_slot_is_m_check_advanced(IA64_SLOT_TYPE_M,
                                                 chk_a_clr_r10_raw));
@@ -680,6 +733,28 @@ static void test_m_unit_system_memory_management(void)
     g_assert_true(ia64_exec_m_virtual_translation(&env,
                                                   kernel_tpa_r3_r2_raw));
     g_assert_cmphex(ia64_read_gr(&env, 3), ==, 0x0000000100bc0000ULL);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    memset(&fault, 0, sizeof(fault));
+    env.psr = IA64_PSR_DT_BIT;
+    ia64_write_gr(&env, 2, 0xa000000000040a10ULL);
+    g_assert_cmpint(ia64_exec_m_virtual_translation_checked(
+                        &env, kernel_tpa_r3_r2_raw, &fault),
+                    ==, IA64_VIRTUAL_TRANSLATION_FAULT);
+    g_assert_cmpint(fault.status, ==, IA64_TRANSLATE_TLB_MISS);
+    g_assert_cmphex(fault.vaddr, ==, 0xa000000000040a10ULL);
+    g_assert_cmphex(ia64_read_gr(&env, 3), ==, 0);
+
+    g_assert_true(ia64_install_translation(
+                      &env, false, true, 0, 0xa000000000040000ULL,
+                      0x0000000004b48000ULL | (7ULL << 9) | 1ULL,
+                      12ULL << 2));
+    g_assert_cmpint(ia64_exec_m_virtual_translation_checked(
+                        &env, kernel_tpa_r3_r2_raw, &fault),
+                    ==, IA64_VIRTUAL_TRANSLATION_OK);
+    g_assert_cmphex(ia64_read_gr(&env, 3), ==, 0x0000000004b48a10ULL);
+
+    ia64_write_gr(&env, 2, 0xa000000100bc0000ULL);
     env.cr[IA64_CR_PTA] = (20ULL << 2) | (1ULL << 15);
     g_assert_true(ia64_exec_m_virtual_translation(&env,
                                                   kernel_thash_r4_r2_raw));
@@ -1483,6 +1558,8 @@ static void test_floating_memory_decode(void)
     const uint64_t elilo_stf_spill_f4_r8_imm32_raw = 0x0eef0808800ULL;
     const uint64_t linux_stf_spill_f0_r27_imm32_raw = 0x0eec1b00800ULL;
     const uint64_t linux_lfetch_r32_raw = 0x0cb12000000ULL;
+    const uint64_t ldfp8_f32_f41_r21_update_raw = 0x0d049552810ULL;
+    const uint64_t ldfpd_f8_f9_r10_raw = 0x0c0c8a12200ULL;
     IA64FloatingMemoryInstruction decoded;
 
     g_assert_true(ia64_decode_floating_memory(IA64_SLOT_TYPE_M,
@@ -1529,6 +1606,32 @@ static void test_floating_memory_decode(void)
     g_assert_cmpuint(decoded.width, ==, 16);
     g_assert_cmpuint(decoded.base, ==, 32);
     g_assert_cmpuint(decoded.memory_class, ==, 0x0b);
+    g_assert_false(decoded.base_update);
+
+    g_assert_true(ia64_decode_floating_memory(IA64_SLOT_TYPE_M,
+                                              ldfp8_f32_f41_r21_update_raw,
+                                              &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_FLOAT_MEM_LOAD_PAIR);
+    g_assert_cmpint(decoded.format, ==, IA64_FLOAT_FMT_SIGNIFICAND);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.freg, ==, 32);
+    g_assert_cmpuint(decoded.freg2, ==, 41);
+    g_assert_cmpuint(decoded.base, ==, 21);
+    g_assert_cmpuint(decoded.memory_class, ==, 0);
+    g_assert_true(decoded.base_update);
+    g_assert_false(decoded.update_from_register);
+    g_assert_cmpint(decoded.immediate, ==, 16);
+
+    g_assert_true(ia64_decode_floating_memory(IA64_SLOT_TYPE_M,
+                                              ldfpd_f8_f9_r10_raw,
+                                              &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_FLOAT_MEM_LOAD_PAIR);
+    g_assert_cmpint(decoded.format, ==, IA64_FLOAT_FMT_DOUBLE);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.freg, ==, 8);
+    g_assert_cmpuint(decoded.freg2, ==, 9);
+    g_assert_cmpuint(decoded.base, ==, 10);
+    g_assert_cmpuint(decoded.memory_class, ==, 0);
     g_assert_false(decoded.base_update);
 }
 

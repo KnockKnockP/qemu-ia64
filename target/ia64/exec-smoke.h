@@ -4,6 +4,7 @@
 
 #include "cpu.h"
 #include "bundle.h"
+#include "mem.h"
 
 #define IA64_SMOKE_NOP_RAW 0x08000000ULL
 
@@ -12,6 +13,12 @@ typedef enum IA64ExecSmokeStatus {
     IA64_EXEC_SMOKE_RESERVED_TEMPLATE,
     IA64_EXEC_SMOKE_UNSUPPORTED_SLOT,
 } IA64ExecSmokeStatus;
+
+typedef enum IA64VirtualTranslationStatus {
+    IA64_VIRTUAL_TRANSLATION_UNSUPPORTED,
+    IA64_VIRTUAL_TRANSLATION_OK,
+    IA64_VIRTUAL_TRANSLATION_FAULT,
+} IA64VirtualTranslationStatus;
 
 typedef struct IA64ExecSmokeReport {
     IA64ExecSmokeStatus status;
@@ -64,6 +71,7 @@ typedef struct IA64CountedStoreLoop {
 
 typedef enum IA64FloatingMemoryKind {
     IA64_FLOAT_MEM_LOAD,
+    IA64_FLOAT_MEM_LOAD_PAIR,
     IA64_FLOAT_MEM_STORE,
     IA64_FLOAT_MEM_PREFETCH,
 } IA64FloatingMemoryKind;
@@ -81,6 +89,7 @@ typedef struct IA64FloatingMemoryInstruction {
     IA64FloatingMemoryFormat format;
     uint8_t width;
     uint8_t freg;
+    uint8_t freg2;
     uint8_t base;
     uint8_t update_source;
     uint8_t memory_class;
@@ -236,6 +245,11 @@ bool ia64_slot_is_mov_to_application_immediate(IA64SlotType type,
 bool ia64_exec_mov_to_application_immediate(CPUIA64State *env,
                                             IA64SlotType type,
                                             uint64_t raw);
+bool ia64_slot_is_check_speculative(IA64SlotType type, uint64_t raw);
+int64_t ia64_check_speculative_displacement(uint64_t raw);
+bool ia64_exec_check_speculative(CPUIA64State *env, IA64SlotType type,
+                                 uint64_t raw, uint64_t bundle_ip,
+                                 uint64_t *target_ip);
 bool ia64_slot_is_m_check_advanced(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
                                 uint64_t bundle_ip, uint64_t *target_ip);
@@ -273,6 +287,9 @@ bool ia64_exec_m_mov_from_indexed_system_register(CPUIA64State *env,
 bool ia64_slot_is_m_insert_translation(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw);
+IA64VirtualTranslationStatus
+ia64_exec_m_virtual_translation_checked(CPUIA64State *env, uint64_t raw,
+                                        IA64TranslateResult *fault);
 bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_purge_translation(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_purge_translation(CPUIA64State *env, uint64_t raw);

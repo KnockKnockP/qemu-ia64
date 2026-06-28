@@ -61,6 +61,22 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     ia64_progress_trace_event(env, mnemonic, iim, *next_ip);
 }
 
+static void ia64_deliver_translation_fault(CPUIA64State *env,
+                                           const IA64TranslateResult *result)
+{
+    IA64ExceptionKind kind;
+
+    if (result->status == IA64_TRANSLATE_TLB_MISS) {
+        kind = result->vhpt_enabled ? IA64_EXCEPTION_DATA_TLB_MISS
+                                    : IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS;
+    } else {
+        kind = IA64_EXCEPTION_PAGE_FAULT;
+    }
+
+    ia64_deliver_exception(env, kind, result->vaddr, result->access_type,
+                           result->message);
+}
+
 enum {
     EFI_BOOT_SERVICE_BASE = 0,
     EFI_RUNTIME_SERVICE_BASE =
@@ -3924,6 +3940,20 @@ static void exec_floating_load(CPUIA64State *env,
     }
 }
 
+static void exec_floating_load_pair(CPUIA64State *env,
+                                    const IA64FloatingMemoryInstruction *decoded,
+                                    uint64_t address)
+{
+    IA64FloatingMemoryInstruction element = *decoded;
+
+    element.kind = IA64_FLOAT_MEM_LOAD;
+    element.base_update = false;
+    exec_floating_load(env, &element, address);
+
+    element.freg = decoded->freg2;
+    exec_floating_load(env, &element, address + decoded->width);
+}
+
 static void exec_floating_store(CPUIA64State *env,
                                 const IA64FloatingMemoryInstruction *decoded,
                                 uint64_t address)
@@ -3965,6 +3995,9 @@ static bool exec_floating_memory(CPUIA64State *env,
     switch (decoded->kind) {
     case IA64_FLOAT_MEM_LOAD:
         exec_floating_load(env, decoded, address);
+        break;
+    case IA64_FLOAT_MEM_LOAD_PAIR:
+        exec_floating_load_pair(env, decoded, address);
         break;
     case IA64_FLOAT_MEM_STORE:
         exec_floating_store(env, decoded, address);
@@ -4190,6 +4223,16 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             ia64_exec_mov_to_application_immediate(env, type, raw);
             continue;
         }
+        if (ia64_slot_is_check_speculative(type, raw)) {
+            ia64_exec_check_speculative(env, type, raw, env->ip, &next_ip);
+            if (next_ip == 0) {
+                abort_zero_branch(env, &decoded, slot);
+            }
+            if (next_ip != env->ip + IA64_BUNDLE_SIZE) {
+                break;
+            }
+            continue;
+        }
         if (ia64_slot_is_m_check_advanced(type, raw)) {
             ia64_exec_m_check_advanced(env, raw, env->ip, &next_ip);
             if (next_ip == 0) {
@@ -4250,9 +4293,18 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             ia64_exec_m_insert_translation(env, raw)) {
             continue;
         }
-        if (ia64_slot_is_m_virtual_translation(type, raw) &&
-            ia64_exec_m_virtual_translation(env, raw)) {
-            continue;
+        if (ia64_slot_is_m_virtual_translation(type, raw)) {
+            IA64TranslateResult fault;
+            IA64VirtualTranslationStatus status =
+                ia64_exec_m_virtual_translation_checked(env, raw, &fault);
+
+            if (status == IA64_VIRTUAL_TRANSLATION_FAULT) {
+                ia64_deliver_translation_fault(env, &fault);
+                return;
+            }
+            if (status == IA64_VIRTUAL_TRANSLATION_OK) {
+                continue;
+            }
         }
         if (ia64_slot_is_m_purge_translation(type, raw) &&
             ia64_exec_m_purge_translation(env, raw)) {
