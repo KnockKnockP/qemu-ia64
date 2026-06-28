@@ -3651,41 +3651,64 @@ static void ia64_rse_sync_ar_after_fill(CPUIA64State *env)
     env->ar[IA64_AR_RNAT] = env->rse.rnat;
 }
 
-static void ia64_rse_fill_clean_preserved_frame(CPUIA64State *env,
-                                                uint32_t preserved,
-                                                uint32_t dirty_before,
-                                                uint32_t clean_before)
+/*
+ * Mandatory RSE fill after a frame is restored (br.ret, or rfi with a valid
+ * CR.IFS).  Each register of the restored frame is either still resident in the
+ * physical stacked register file ("dirty": its backing-store address is at or
+ * above AR.BSPSTORE) or was already spilled to the backing store ("clean":
+ * below AR.BSPSTORE).  Reload exactly the clean registers from memory and leave
+ * the resident ones untouched.
+ *
+ * This per-register clean/dirty decision -- keyed off the architectural
+ * AR.BSPSTORE boundary rather than a reconstructed scalar count -- is what makes
+ * a context switch correct: switch_to flushes the outgoing task and repoints
+ * AR.BSPSTORE/AR.RNAT at the incoming task's backing store, so the restored
+ * frame's preserved registers come back from the new task's spilled image
+ * instead of leaking stale physical-stack contents from the previous task (or
+ * from an as-yet-unfilled brand-new thread).  Ordinary intra-task call/return
+ * leaves AR.BSPSTORE far below the frame, so nothing is reloaded and the live
+ * register file keeps being used.
+ */
+static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
 {
-    uint32_t clean_count;
-    uint32_t clean_available;
-    uint64_t old_bspstore;
+    uint64_t bspstore = env->rse.bspstore;
+    uint64_t frame_base = env->rse.bsp;
+    uint32_t filled = 0;
 
-    if (preserved == 0 || dirty_before >= preserved ||
-        clean_before == 0 || env->rse.bspstore == 0) {
+    if (count == 0 || bspstore == 0 || frame_base == 0) {
+        return;
+    }
+    count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t address = ia64_rse_skip_regs(frame_base, i);
+
+        if (address >= bspstore) {
+            /* This register and every higher one are still resident. */
+            break;
+        }
+        env->rse.stacked_gr[(env->rse.current_frame_base + i) %
+                            IA64_STACKED_GR_COUNT] =
+            ia64_ldst_read(env, ia64_rse_reg_address(address), 8);
+        filled++;
+    }
+
+    if (filled == 0) {
         return;
     }
 
-    clean_available = clean_before > env->rse.current_frame_base
-        ? clean_before - env->rse.current_frame_base
-        : 0;
-    clean_count = MIN(preserved - dirty_before, clean_available);
-    if (clean_count == 0) {
-        return;
-    }
-
-    old_bspstore = env->rse.bspstore;
-    ia64_rse_load_regs_ending_at_bspstore(env, clean_count);
-    env->rse.bspstore = env->rse.bsp;
+    /* The reloaded registers are now resident; lower the store pointer. */
+    env->rse.bspstore = frame_base;
+    env->rse.clean_count = MIN(env->rse.clean_count,
+                               env->rse.current_frame_base);
     ia64_rse_sync_ar_after_fill(env);
 
     if (ia64_rse_trace_enabled()) {
         fprintf(stderr,
                 "[ia64-rse] ip=0x%016" PRIx64
-                " fill-clean-return preserved=%u dirty=%u clean=%u count=%u"
-                " old-bspstore=0x%016" PRIx64
-                " new-bsp=0x%016" PRIx64 "\n",
-                env->ip, preserved, dirty_before, clean_before, clean_count,
-                old_bspstore, env->rse.bsp);
+                " fill-restored count=%u filled=%u"
+                " bspstore=0x%016" PRIx64 " bsp=0x%016" PRIx64 "\n",
+                env->ip, count, filled, env->rse.bspstore, env->rse.bsp);
     }
 }
 
@@ -4370,20 +4393,13 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                 rfi && (env->cr[IA64_CR_IFS] & IA64_IFS_VALID_BIT) != 0;
             bool br_ret = ia64_slot_major_opcode(raw) == 0x0 &&
                           ((raw >> 27) & 0x3f) == 0x21;
-            uint32_t dirty_before =
-                ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
 
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {
-                ia64_rse_fill_clean_preserved_frame(env,
-                                                    (env->cfm >> 7) & 0x7f,
-                                                    dirty_before,
-                                                    env->rse.clean_count);
+                ia64_rse_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
             }
             if (rfi_valid_ifs) {
-                ia64_rse_fill_clean_preserved_frame(env, env->rse.sof,
-                                                    dirty_before,
-                                                    env->rse.clean_count);
+                ia64_rse_fill_restored_frame(env, env->rse.sof);
             }
             if (rfi) {
                 next_ri = ia64_psr_ri(env->psr);
