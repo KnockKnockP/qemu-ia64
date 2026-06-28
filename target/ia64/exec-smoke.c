@@ -4618,6 +4618,71 @@ static bool ia64_exception_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool ia64_user_rfi_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_USER_RFI_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static uint64_t ia64_psr_cpl(uint64_t psr)
+{
+    return (psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+}
+
+static void ia64_trace_user_rfi(CPUIA64State *env, uint64_t bundle_ip,
+                                uint64_t target)
+{
+    uint64_t ipsr;
+
+    if (!ia64_user_rfi_trace_enabled()) {
+        return;
+    }
+
+    ipsr = env->cr[IA64_CR_IPSR];
+    if (ia64_psr_cpl(ipsr) != 3) {
+        return;
+    }
+
+    fprintf(stderr,
+            "[ia64-user-rfi] ip=0x%016" PRIx64
+            " target=0x%016" PRIx64
+            " ipsr=0x%016" PRIx64
+            " ifs=0x%016" PRIx64
+            " old_psr=0x%016" PRIx64
+            " cfm=0x%016" PRIx64
+            " pr=0x%016" PRIx64
+            " r8=0x%016" PRIx64
+            " r10=0x%016" PRIx64
+            " r15=0x%016" PRIx64
+            " r32=0x%016" PRIx64
+            " r33=0x%016" PRIx64
+            " r34=0x%016" PRIx64
+            " r35=0x%016" PRIx64
+            " r36=0x%016" PRIx64
+            " r37=0x%016" PRIx64
+            " r38=0x%016" PRIx64
+            " r39=0x%016" PRIx64
+            " b0=0x%016" PRIx64
+            " b6=0x%016" PRIx64
+            " b7=0x%016" PRIx64
+            " bsp=0x%016" PRIx64
+            " bspstore=0x%016" PRIx64
+            " rsc=0x%016" PRIx64 "\n",
+            bundle_ip, target, ipsr, env->cr[IA64_CR_IFS], env->psr,
+            env->cfm, env->pr, ia64_read_gr(env, 8), ia64_read_gr(env, 10),
+            ia64_read_gr(env, 15), ia64_read_gr(env, 32),
+            ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+            ia64_read_gr(env, 35), ia64_read_gr(env, 36),
+            ia64_read_gr(env, 37), ia64_read_gr(env, 38),
+            ia64_read_gr(env, 39), env->br[0], env->br[6], env->br[7],
+            env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+            env->ar[IA64_AR_RSC]);
+}
+
 int64_t ia64_branch_displacement(uint64_t raw)
 {
     uint64_t encoded = (((raw >> 36) & 0x1) << 20) |
@@ -4925,6 +4990,7 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
 
         trace_ia64_rfi(bundle_ip, target, env->cr[IA64_CR_IPSR],
                        env->cr[IA64_CR_IFS], env->psr, env->cfm);
+        ia64_trace_user_rfi(env, bundle_ip, target);
         if (ia64_exception_trace_enabled()) {
             fprintf(stderr,
                     "[ia64-rfi] ip=0x%016" PRIx64

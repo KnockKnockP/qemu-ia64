@@ -132,10 +132,18 @@ static const VMStateDescription vmstate_memory = {
                              vmstate_translation_entry, IA64TranslationEntry),
         VMSTATE_STRUCT_ARRAY(dtr, IA64MemorySkeletonState, IA64_DTR_COUNT, 0,
                              vmstate_translation_entry, IA64TranslationEntry),
-        VMSTATE_STRUCT_ARRAY(itc, IA64MemorySkeletonState, IA64_TC_COUNT, 0,
-                             vmstate_translation_entry, IA64TranslationEntry),
-        VMSTATE_STRUCT_ARRAY(dtc, IA64MemorySkeletonState, IA64_TC_COUNT, 0,
-                             vmstate_translation_entry, IA64TranslationEntry),
+        /*
+         * Dynamic TLB entries are cache state.  Keep serializing only the
+         * original 32 slots so older Debian frontier snapshots remain loadable.
+         */
+        VMSTATE_STRUCT_SUB_ARRAY(itc, IA64MemorySkeletonState, 0,
+                                 IA64_TC_VMSTATE_COUNT, 0,
+                                 vmstate_translation_entry,
+                                 IA64TranslationEntry),
+        VMSTATE_STRUCT_SUB_ARRAY(dtc, IA64MemorySkeletonState, 0,
+                                 IA64_TC_VMSTATE_COUNT, 0,
+                                 vmstate_translation_entry,
+                                 IA64TranslationEntry),
         VMSTATE_UINT8(next_itc, IA64MemorySkeletonState),
         VMSTATE_UINT8(next_dtc, IA64MemorySkeletonState),
         VMSTATE_END_OF_LIST()
@@ -170,6 +178,12 @@ static int ia64_env_post_load(void *opaque, int version_id)
     }
     ia64_rse_reconstruct_transients(env);
     ia64_cpu_init_synthetic_cpuid(env);
+    for (unsigned i = IA64_TC_VMSTATE_COUNT; i < IA64_TC_COUNT; i++) {
+        env->memory.itc[i].valid = false;
+        env->memory.dtc[i].valid = false;
+    }
+    env->memory.next_itc %= IA64_TC_COUNT;
+    env->memory.next_dtc %= IA64_TC_COUNT;
     env->gr[0] = 0;
     env->pr |= 1;
     return 0;

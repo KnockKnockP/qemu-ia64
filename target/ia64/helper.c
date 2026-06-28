@@ -14,6 +14,7 @@
 #include "hw/ia64/vibtanium.h"
 #include "mem.h"
 #include "qemu/error-report.h"
+#include "system/memory.h"
 #include "trace-target_ia64.h"
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
@@ -95,6 +96,169 @@ static const char *ia64_linux_syscall_name(uint64_t nr)
     }
 }
 
+static bool ia64_trace_guest_read_u8(CPUIA64State *env, uint64_t address,
+                                     uint8_t *value, char *status,
+                                     size_t status_size)
+{
+    IA64TranslateResult result;
+    CPUState *cs = env_cpu(env);
+    vaddr saved_vaddr = env->memory.last_vaddr;
+    hwaddr saved_paddr = env->memory.last_paddr;
+    uint8_t saved_region = env->memory.last_region;
+    uint8_t saved_status = env->memory.last_status;
+    uint8_t saved_page_size = env->memory.last_page_size;
+    bool saved_identity_region0_only = env->memory.identity_region0_only;
+    MemTxResult mem_result;
+
+    if (!ia64_translate_address(env, address, MMU_DATA_LOAD, 0, true,
+                                &result)) {
+        snprintf(status, status_size, "translate:%s",
+                 ia64_translate_status_name(result.status));
+        goto fail;
+    }
+
+    mem_result = address_space_read(cs->as, result.paddr,
+                                    MEMTXATTRS_UNSPECIFIED, value, 1);
+    if (mem_result != MEMTX_OK) {
+        snprintf(status, status_size, "mem:%d", mem_result);
+        goto fail;
+    }
+
+    env->memory.last_vaddr = saved_vaddr;
+    env->memory.last_paddr = saved_paddr;
+    env->memory.last_region = saved_region;
+    env->memory.last_status = saved_status;
+    env->memory.last_page_size = saved_page_size;
+    env->memory.identity_region0_only = saved_identity_region0_only;
+    return true;
+
+fail:
+    env->memory.last_vaddr = saved_vaddr;
+    env->memory.last_paddr = saved_paddr;
+    env->memory.last_region = saved_region;
+    env->memory.last_status = saved_status;
+    env->memory.last_page_size = saved_page_size;
+    env->memory.identity_region0_only = saved_identity_region0_only;
+    return false;
+}
+
+static void ia64_trace_guest_c_string(CPUIA64State *env, uint64_t address,
+                                      char *buf, size_t buflen)
+{
+    char status[48] = "ok";
+    size_t out = 0;
+
+    if (buflen == 0) {
+        return;
+    }
+    if (address == 0) {
+        g_strlcpy(buf, "<null>", buflen);
+        return;
+    }
+
+    buf[out++] = '"';
+    for (unsigned i = 0; i < 160 && out + 5 < buflen; i++) {
+        uint8_t ch;
+
+        if (!ia64_trace_guest_read_u8(env, address + i, &ch, status,
+                                      sizeof(status))) {
+            out += snprintf(buf + out, buflen - out, "<unreadable:%s>",
+                            status);
+            break;
+        }
+        if (ch == 0) {
+            break;
+        }
+        if (ch == '\\' || ch == '"') {
+            buf[out++] = '\\';
+            buf[out++] = ch;
+        } else if (ch >= 0x20 && ch <= 0x7e) {
+            buf[out++] = ch;
+        } else {
+            out += snprintf(buf + out, buflen - out, "\\x%02x", ch);
+        }
+    }
+    if (out + 2 < buflen) {
+        buf[out++] = '"';
+    }
+    buf[out] = '\0';
+}
+
+static bool ia64_linux_syscall_arg_is_path(uint64_t nr, unsigned arg_index,
+                                           const char **label)
+{
+    switch (nr) {
+    case 1028: /* open */
+    case 1033: /* execve */
+    case 1034: /* chdir */
+    case 1049: /* access */
+    case 1055: /* mkdir */
+    case 1092: /* readlink */
+    case 1103: /* statfs */
+    case 1210: /* stat */
+    case 1211: /* lstat */
+    case 1258: /* statfs64 */
+        if (arg_index == 0) {
+            *label = "path";
+            return true;
+        }
+        return false;
+    case 1043: /* mount */
+        if (arg_index == 0) {
+            *label = "source";
+            return true;
+        }
+        if (arg_index == 1) {
+            *label = "target";
+            return true;
+        }
+        if (arg_index == 2) {
+            *label = "fstype";
+            return true;
+        }
+        return false;
+    case 1281: /* openat */
+    case 1282: /* mkdirat */
+    case 1291: /* readlinkat */
+    case 1327: /* open_by_handle_at */
+        if (arg_index == 1) {
+            *label = "path";
+            return true;
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
+static void ia64_trace_linux_syscall_paths(CPUIA64State *env,
+                                           const char *mnemonic,
+                                           uint64_t nr)
+{
+    uint64_t arg[6];
+    char rendered[192];
+    bool shifted_m_gate = g_str_equal(mnemonic, "break.m");
+    bool any = false;
+
+    for (unsigned i = 0; i < ARRAY_SIZE(arg); i++) {
+        arg[i] = ia64_read_gr(env, 32 + i + (shifted_m_gate ? 1 : 0));
+    }
+
+    for (unsigned i = 0; i < ARRAY_SIZE(arg); i++) {
+        const char *label = NULL;
+
+        if (!ia64_linux_syscall_arg_is_path(nr, i, &label)) {
+            continue;
+        }
+        if (!any) {
+            fprintf(stderr, " paths");
+            any = true;
+        }
+        ia64_trace_guest_c_string(env, arg[i], rendered, sizeof(rendered));
+        fprintf(stderr, " %s=0x%016" PRIx64 ":%s", label, arg[i], rendered);
+    }
+}
+
 static void ia64_trace_linux_syscall_break(CPUIA64State *env,
                                            const char *mnemonic,
                                            uint64_t iim, uint64_t next_ip)
@@ -120,7 +284,7 @@ static void ia64_trace_linux_syscall_break(CPUIA64State *env,
             " r38=0x%016" PRIx64 " r39=0x%016" PRIx64
             " b0=0x%016" PRIx64 " b6=0x%016" PRIx64
             " b7=0x%016" PRIx64 " bsp=0x%016" PRIx64
-            " bspstore=0x%016" PRIx64 "\n",
+            " bspstore=0x%016" PRIx64,
             mnemonic, nr, ia64_linux_syscall_name(nr), env->ip, next_ip,
             cpl, env->psr, env->cfm, env->pr, ia64_read_gr(env, 8),
             ia64_read_gr(env, 10), nr, ia64_read_gr(env, 32),
@@ -129,6 +293,8 @@ static void ia64_trace_linux_syscall_break(CPUIA64State *env,
             ia64_read_gr(env, 37), ia64_read_gr(env, 38),
             ia64_read_gr(env, 39), env->br[0], env->br[6], env->br[7],
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE]);
+    ia64_trace_linux_syscall_paths(env, mnemonic, nr);
+    fprintf(stderr, "\n");
 }
 
 static void abort_unsupported_slot(CPUIA64State *env,
