@@ -487,6 +487,65 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
     return true;
 }
 
+static IA64TranslationEntry ia64_purge_probe(CPUIA64State *env, vaddr address,
+                                             uint8_t page_size)
+{
+    if (!ia64_page_size_supported(page_size)) {
+        page_size = ia64_region_page_size(env->rr[ia64_va_region(address)]);
+    }
+    return (IA64TranslationEntry) {
+        .valid = true,
+        .vaddr_base = ia64_page_base(address, page_size),
+        .page_size = page_size,
+        .rid = ia64_region_id(env->rr[ia64_va_region(address)]),
+    };
+}
+
+/* ptc.l / ptc.g / ptc.ga: purge matching dynamic instruction/data TLB entries. */
+void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
+                                  uint8_t page_size)
+{
+    IA64TranslationEntry probe;
+
+    if (!env) {
+        return;
+    }
+    probe = ia64_purge_probe(env, address, page_size);
+    ia64_invalidate_overlapping_entries(env->memory.itc, IA64_TC_COUNT, &probe);
+    ia64_invalidate_overlapping_entries(env->memory.dtc, IA64_TC_COUNT, &probe);
+}
+
+/* ptr.i / ptr.d: purge a matching pinned instruction/data translation register. */
+void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
+                                     vaddr address, uint8_t page_size)
+{
+    IA64TranslationEntry probe;
+
+    if (!env) {
+        return;
+    }
+    probe = ia64_purge_probe(env, address, page_size);
+    if (instruction) {
+        ia64_invalidate_overlapping_entries(env->memory.itr, IA64_ITR_COUNT,
+                                            &probe);
+    } else {
+        ia64_invalidate_overlapping_entries(env->memory.dtr, IA64_DTR_COUNT,
+                                            &probe);
+    }
+}
+
+/* ptc.e: purge the entire dynamic translation cache. */
+void ia64_purge_all_translation_cache(CPUIA64State *env)
+{
+    if (!env) {
+        return;
+    }
+    for (unsigned i = 0; i < IA64_TC_COUNT; i++) {
+        env->memory.itc[i].valid = false;
+        env->memory.dtc[i].valid = false;
+    }
+}
+
 bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
                                     hwaddr *paddr)
 {

@@ -42,6 +42,11 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
                               vaddr virtual_address,
                               uint64_t translation_format,
                               uint64_t itir);
+void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
+                                  uint8_t page_size);
+void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
+                                     vaddr address, uint8_t page_size);
+void ia64_purge_all_translation_cache(CPUIA64State *env);
 bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
                                     hwaddr *paddr);
 bool ia64_translate_address(CPUIA64State *env, vaddr address,

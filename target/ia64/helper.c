@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "exec/cputlb.h"
 #include "bundle.h"
 #include "cpu.h"
 #include "exception.h"
@@ -4251,6 +4252,15 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_virtual_translation(type, raw) &&
             ia64_exec_m_virtual_translation(env, raw)) {
+            continue;
+        }
+        if (ia64_slot_is_m_purge_translation(type, raw) &&
+            ia64_exec_m_purge_translation(env, raw)) {
+            /*
+             * The modeled translation-cache/register entries were invalidated;
+             * drop the host softmmu TLB so stale cached pages are re-filled.
+             */
+            tlb_flush(cpu);
             continue;
         }
         if (ia64_slot_is_m_invala(type, raw) &&

@@ -1786,6 +1786,56 @@ bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
+bool ia64_slot_is_m_purge_translation(IA64SlotType type, uint64_t raw)
+{
+    uint8_t x6;
+
+    if (type != IA64_SLOT_TYPE_M || ia64_slot_major_opcode(raw) != 0x1 ||
+        ((raw >> 33) & 0x7) != 0) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    /* ptc.l/g/ga (0x09/0x0a/0x0b), ptr.d/i (0x0c/0x0d), ptc.e (0x34). */
+    return x6 == 0x09 || x6 == 0x0a || x6 == 0x0b ||
+           x6 == 0x0c || x6 == 0x0d || x6 == 0x34;
+}
+
+bool ia64_exec_m_purge_translation(CPUIA64State *env, uint64_t raw)
+{
+    uint8_t x6;
+    uint64_t address;
+    uint8_t page_size;
+
+    if (!env || !ia64_slot_is_m_purge_translation(IA64_SLOT_TYPE_M, raw)) {
+        return false;
+    }
+
+    x6 = (raw >> 27) & 0x3f;
+    address = ia64_read_gr(env, (raw >> 20) & 0x7f);
+
+    if (x6 == 0x34) {
+        /* ptc.e r3: purge the whole dynamic translation cache. */
+        ia64_purge_all_translation_cache(env);
+        return true;
+    }
+
+    /* ptc.* / ptr.* take the purge page size from r2{7:2}. */
+    page_size = (ia64_read_gr(env, (raw >> 13) & 0x7f) >> 2) & 0x3f;
+    switch (x6) {
+    case 0x0c: /* ptr.d */
+        ia64_purge_translation_register(env, false, address, page_size);
+        break;
+    case 0x0d: /* ptr.i */
+        ia64_purge_translation_register(env, true, address, page_size);
+        break;
+    default:   /* ptc.l / ptc.g / ptc.ga */
+        ia64_purge_translation_cache(env, address, page_size);
+        break;
+    }
+    return true;
+}
+
 bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw)
 {
     uint8_t x6;

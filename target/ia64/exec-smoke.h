@@ -274,6 +274,8 @@ bool ia64_slot_is_m_insert_translation(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_insert_translation(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_virtual_translation(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_m_purge_translation(IA64SlotType type, uint64_t raw);
+bool ia64_exec_m_purge_translation(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_invala(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_invala(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_flushrs(IA64SlotType type, uint64_t raw);
