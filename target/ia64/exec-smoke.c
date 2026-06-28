@@ -359,7 +359,7 @@ static int ia64_alat_find_gr(CPUIA64State *env, uint32_t reg)
     return -1;
 }
 
-static void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
+void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
 {
     if (!env || reg >= IA64_GR_COUNT) {
         return;

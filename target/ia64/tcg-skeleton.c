@@ -3,9 +3,11 @@
 #include "qemu/osdep.h"
 #include "exec-smoke.h"
 #include "hw/ia64/efi.h"
+#include "perf.h"
 #include "tcg-skeleton.h"
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
+#define IA64_TCG_FAST_GR_LIMIT 16
 
 enum {
     IA64_EFI_SERVICE_DESCRIPTOR_COUNT =
@@ -70,6 +72,169 @@ const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary)
 bool ia64_tcg_tb_boundary_ends_tb(IA64TcgTbBoundary boundary)
 {
     return boundary != IA64_TCG_TB_BOUNDARY_NONE;
+}
+
+static int64_t ia64_tcg_sign_extend(uint64_t value, unsigned bits)
+{
+    uint64_t sign = 1ULL << (bits - 1);
+    uint64_t mask = (1ULL << bits) - 1;
+
+    value &= mask;
+    return (int64_t)((value ^ sign) - sign);
+}
+
+static bool ia64_tcg_fast_static_gr(uint32_t reg)
+{
+    return reg < IA64_TCG_FAST_GR_LIMIT;
+}
+
+static bool ia64_tcg_fast_add_source(IA64TcgFastSlot *slot, uint32_t reg)
+{
+    if (!ia64_tcg_fast_static_gr(reg)) {
+        return false;
+    }
+    if (reg != 0) {
+        slot->source_nat_mask |= 1ULL << reg;
+    }
+    return true;
+}
+
+static bool ia64_tcg_fast_set_target(IA64TcgFastSlot *slot, uint32_t reg)
+{
+    if (!ia64_tcg_fast_static_gr(reg)) {
+        return false;
+    }
+    slot->target = reg;
+    if (reg != 0) {
+        slot->dest_mask = 1ULL << reg;
+    }
+    return true;
+}
+
+static void ia64_tcg_fast_count_op(IA64TcgFastBundle *fast, unsigned shift)
+{
+    fast->op_counts += 1u << shift;
+}
+
+static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
+                                     IA64TcgFastSlot *slot,
+                                     IA64TcgFastBundle *fast)
+{
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint8_t x2a;
+    uint8_t x2b;
+    uint8_t x4;
+
+    memset(slot, 0, sizeof(*slot));
+    if (ia64_slot_predicate(raw) != 0) {
+        return false;
+    }
+
+    if (ia64_exec_smoke_slot_supported(type, raw) ||
+        ia64_slot_is_i_nop(type, raw)) {
+        slot->op = IA64_TCG_FAST_OP_NOP;
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_NOP_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_alu_add(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        x2a = (raw >> 34) & 0x3;
+        r3 = (raw >> 20) & 0x7f;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ALU_ADD;
+        slot->source3 = r3;
+        if (x2a == 2) {
+            slot->source2_immediate = true;
+            slot->immediate =
+                ia64_tcg_sign_extend((((raw >> 36) & 0x1) << 13) |
+                                     (((raw >> 27) & 0x3f) << 7) |
+                                     ((raw >> 13) & 0x7f), 14);
+        } else {
+            r2 = (raw >> 13) & 0x7f;
+            if (!ia64_tcg_fast_add_source(slot, r2)) {
+                return false;
+            }
+            slot->source2 = r2;
+            slot->immediate = (raw >> 27) & 0x3;
+        }
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_ALU_ADD_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_alu_logic(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        x2b = (raw >> 27) & 0x3;
+        x4 = (raw >> 29) & 0xf;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ALU_LOGIC;
+        slot->logic_op = x2b;
+        slot->source3 = r3;
+        if (x4 == 0xb) {
+            slot->source2_immediate = true;
+            slot->immediate =
+                ia64_tcg_sign_extend((((raw >> 36) & 0x1) << 7) |
+                                     ((raw >> 13) & 0x7f), 8);
+        } else {
+            if (!ia64_tcg_fast_add_source(slot, r2)) {
+                return false;
+            }
+            slot->source2 = r2;
+        }
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_ALU_LOGIC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_addl(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r3 = (raw >> 20) & 0x3;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ADDL;
+        slot->source3 = r3;
+        slot->immediate = ia64_addl_immediate(raw);
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_ADDL_SHIFT);
+        return true;
+    }
+
+    return false;
+}
+
+bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
+                                IA64TcgFastBundle *fast)
+{
+    if (!bundle || !fast || !bundle->valid || bundle->info->long_immediate) {
+        return false;
+    }
+
+    memset(fast, 0, sizeof(*fast));
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
+                                      bundle->slot[slot],
+                                      &fast->slot[slot], fast)) {
+            return false;
+        }
+        fast->slot_count++;
+        fast->source_nat_mask |= fast->slot[slot].source_nat_mask;
+        fast->dest_mask |= fast->slot[slot].dest_mask;
+    }
+
+    return fast->slot_count == IA64_SLOT_COUNT;
 }
 
 static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,

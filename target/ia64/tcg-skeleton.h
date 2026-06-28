@@ -38,4 +38,41 @@ const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary);
 bool ia64_tcg_tb_boundary_ends_tb(IA64TcgTbBoundary boundary);
 bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc);
 
+typedef enum IA64TcgFastOp {
+    IA64_TCG_FAST_OP_NOP,
+    IA64_TCG_FAST_OP_ALU_ADD,
+    IA64_TCG_FAST_OP_ALU_LOGIC,
+    IA64_TCG_FAST_OP_ADDL,
+} IA64TcgFastOp;
+
+typedef enum IA64TcgFastLogicOp {
+    IA64_TCG_FAST_LOGIC_AND,
+    IA64_TCG_FAST_LOGIC_ANDCM,
+    IA64_TCG_FAST_LOGIC_OR,
+    IA64_TCG_FAST_LOGIC_XOR,
+} IA64TcgFastLogicOp;
+
+typedef struct IA64TcgFastSlot {
+    IA64TcgFastOp op;
+    IA64TcgFastLogicOp logic_op;
+    uint8_t target;
+    uint8_t source2;
+    uint8_t source3;
+    bool source2_immediate;
+    int64_t immediate;
+    uint64_t source_nat_mask;
+    uint64_t dest_mask;
+} IA64TcgFastSlot;
+
+typedef struct IA64TcgFastBundle {
+    IA64TcgFastSlot slot[IA64_SLOT_COUNT];
+    uint32_t slot_count;
+    uint32_t op_counts;
+    uint64_t source_nat_mask;
+    uint64_t dest_mask;
+} IA64TcgFastBundle;
+
+bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
+                                IA64TcgFastBundle *fast);
+
 #endif

@@ -13,6 +13,12 @@ typedef enum IA64PerfCounter {
     IA64_PERF_BUNDLE_EXECUTED,
     IA64_PERF_HELPER_EXEC_BUNDLE,
     IA64_PERF_HELPER_EFI_DISPATCH,
+    IA64_PERF_TCG_FAST_BUNDLE,
+    IA64_PERF_TCG_FAST_SLOT,
+    IA64_PERF_TCG_FAST_NOP,
+    IA64_PERF_TCG_FAST_ALU_ADD,
+    IA64_PERF_TCG_FAST_ALU_LOGIC,
+    IA64_PERF_TCG_FAST_ADDL,
     IA64_PERF_INTERP_SLOT_ITERATION,
     IA64_PERF_INTERP_SLOT_EXECUTED,
     IA64_PERF_INTERP_LONG_IMMEDIATE,
@@ -154,6 +160,17 @@ void ia64_perf_count_slot_type(IA64SlotType type);
 void ia64_perf_count_access_type(int access_type);
 void ia64_perf_count_translate_status(unsigned status);
 void ia64_perf_count_exception_kind(unsigned kind);
+
+#define IA64_PERF_FAST_COUNT_NOP_SHIFT 0
+#define IA64_PERF_FAST_COUNT_ALU_ADD_SHIFT 4
+#define IA64_PERF_FAST_COUNT_ALU_LOGIC_SHIFT 8
+#define IA64_PERF_FAST_COUNT_ADDL_SHIFT 12
+#define IA64_PERF_FAST_COUNT_MASK 0xfu
+
+static inline uint32_t ia64_perf_fast_count(uint32_t counts, unsigned shift)
+{
+    return (counts >> shift) & IA64_PERF_FAST_COUNT_MASK;
+}
 
 static inline bool ia64_perf_enabled(void)
 {

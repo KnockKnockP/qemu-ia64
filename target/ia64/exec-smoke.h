@@ -320,6 +320,7 @@ bool ia64_slot_is_m_invala(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_invala(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_flushrs(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_m_loadrs(IA64SlotType type, uint64_t raw);
+void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg);
 bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw);
 bool ia64_slot_pair_is_lx_movl(uint64_t l_raw, uint64_t x_raw);
 uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw);

@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "hw/ia64/efi.h"
 #include "target/ia64/exec-smoke.h"
+#include "target/ia64/perf.h"
 #include "target/ia64/tcg-skeleton.h"
 
 static IA64DecodedBundle make_bundle(uint8_t tmpl,
@@ -125,6 +126,81 @@ static void test_state_changing_slots_end_tb(void)
     assert_boundary(IA64_TCG_TB_BOUNDARY_RSE_STATE, &bundle, 0x1000);
 }
 
+static void test_fast_bundle_accepts_hot_integer_subset(void)
+{
+    const uint64_t addl_r8_0_r0_raw = 0x12000000200ULL;
+    const uint64_t add_r1_r2_r3_raw =
+        (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
+    const uint64_t and_r4_r4_r5_raw =
+        (8ULL << 37) | (3ULL << 29) | (5ULL << 20) |
+        (4ULL << 13) | (4ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, addl_r8_0_r0_raw,
+                    add_r1_r2_r3_raw, and_r4_r4_r5_raw);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpuint(fast.slot_count, ==, IA64_SLOT_COUNT);
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_ADDL);
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_ALU_ADD);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_ALU_LOGIC);
+    g_assert_cmphex(fast.source_nat_mask, ==,
+                    (1ULL << 2) | (1ULL << 3) |
+                    (1ULL << 4) | (1ULL << 5));
+    g_assert_cmphex(fast.dest_mask, ==,
+                    (1ULL << 1) | (1ULL << 4) | (1ULL << 8));
+    g_assert_cmpuint(ia64_perf_fast_count(fast.op_counts,
+                                          IA64_PERF_FAST_COUNT_ALU_ADD_SHIFT),
+                     ==, 1);
+    g_assert_cmpuint(ia64_perf_fast_count(fast.op_counts,
+                                          IA64_PERF_FAST_COUNT_ALU_LOGIC_SHIFT),
+                     ==, 1);
+    g_assert_cmpuint(ia64_perf_fast_count(fast.op_counts,
+                                          IA64_PERF_FAST_COUNT_ADDL_SHIFT),
+                     ==, 1);
+}
+
+static void test_fast_bundle_accepts_nop_and_add_immediate(void)
+{
+    const uint64_t adds_r6_minus1_r7_raw =
+        (8ULL << 37) | (1ULL << 36) | (2ULL << 34) |
+        (0x3fULL << 27) | (7ULL << 20) | (0x7fULL << 13) |
+        (6ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, IA64_SMOKE_NOP_RAW,
+                    adds_r6_minus1_r7_raw, IA64_SMOKE_NOP_RAW);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_NOP);
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_ALU_ADD);
+    g_assert_true(fast.slot[1].source2_immediate);
+    g_assert_cmpint(fast.slot[1].immediate, ==, -1);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_NOP);
+    g_assert_cmphex(fast.source_nat_mask, ==, 1ULL << 7);
+    g_assert_cmphex(fast.dest_mask, ==, 1ULL << 6);
+    g_assert_cmpuint(ia64_perf_fast_count(fast.op_counts,
+                                          IA64_PERF_FAST_COUNT_NOP_SHIFT),
+                     ==, 2);
+}
+
+static void test_fast_bundle_rejects_predicated_or_stacked_gr(void)
+{
+    const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
+    const uint64_t add_r1_r2_r3_raw =
+        (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
+    IA64DecodedBundle bundle;
+    IA64TcgFastBundle fast;
+
+    bundle = make_bundle(0x00, add_r1_r2_r3_raw | 1,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+
+    bundle = make_bundle(0x00, add_r36_r36_r1_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -139,6 +215,12 @@ int main(int argc, char **argv)
                     test_break_and_branch_end_tb);
     g_test_add_func("/ia64-tcg-skeleton/state-changing-slots",
                     test_state_changing_slots_end_tb);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-hot-integer-subset",
+                    test_fast_bundle_accepts_hot_integer_subset);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-nop-add-immediate",
+                    test_fast_bundle_accepts_nop_and_add_immediate);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-rejects-unsafe",
+                    test_fast_bundle_rejects_predicated_or_stacked_gr);
 
     return g_test_run();
 }

@@ -4605,6 +4605,46 @@ static void ia64_trace_execve(CPUIA64State *env)
             path, ia64_read_gr(env, 13), env->br[0]);
 }
 
+void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
+                               uint32_t op_counts)
+{
+    CPUState *cpu = env_cpu(env);
+
+    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    IA64_PERF_INC(IA64_PERF_TCG_FAST_BUNDLE);
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_SLOT, slot_count);
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_NOP,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_NOP_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_ALU_ADD,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_ALU_ADD_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_ALU_LOGIC,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_ALU_LOGIC_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_ADDL,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_ADDL_SHIFT));
+
+    cpu->neg.can_do_io = true;
+    ia64_trace_execve(env);
+    ia64_maybe_apply_linux_cmdline_append(env);
+    ia64_progress_trace_bundle(env);
+    ia64_state_trace_bundle(env);
+}
+
+void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
+                                uint64_t dest_mask)
+{
+    for (unsigned reg = 1; reg < 64; reg++) {
+        if (dest_mask & (1ULL << reg)) {
+            ia64_alat_invalidate_gr(env, reg);
+        }
+    }
+    env->gr[0] = 0;
+    ia64_finish_bundle(env, next_ip, 0);
+}
+
 void HELPER(exec_bundle)(CPUIA64State *env,
                          uint32_t tmpl,
                          uint64_t slot0,
