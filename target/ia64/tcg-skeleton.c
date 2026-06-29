@@ -142,6 +142,8 @@ const char *ia64_tcg_fallback_reason_name(IA64TcgFallbackReason reason)
         return "fast.ldst-register-update";
     case IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS:
         return "fast.ldst-memory-class";
+    case IA64_TCG_FALLBACK_FAST_LDST_DEPENDENCY:
+        return "fast.ldst-dependency";
     case IA64_TCG_FALLBACK_FAST_LDST_TARGET:
         return "fast.ldst-target";
     case IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT:
@@ -208,12 +210,17 @@ static bool ia64_tcg_ldst_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool ia64_tcg_fast_ldst_store_class(uint8_t memory_class)
+{
+    return memory_class == 0x0c || memory_class == 0x0d ||
+           memory_class == 0x0e;
+}
+
 static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
     const IA64LdstImmediate *ldst, unsigned slot_index)
 {
-    if (slot_index != 0) {
-        return IA64_TCG_FALLBACK_FAST_LDST_SLOT;
-    }
+    (void)slot_index;
+
     if (ia64_tcg_ldst_trace_enabled()) {
         return IA64_TCG_FALLBACK_FAST_LDST_TRACE;
     }
@@ -237,12 +244,14 @@ static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
         }
         return IA64_TCG_FALLBACK_NONE;
     case IA64_LDST_IMM_STORE:
-        if (ldst->memory_class != 0x0c) {
+        if (!ia64_tcg_fast_ldst_store_class(ldst->memory_class)) {
             return IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS;
         }
         if (!ia64_tcg_fast_static_gr(ldst->source)) {
             return IA64_TCG_FALLBACK_FAST_STATIC_GR;
         }
+        return IA64_TCG_FALLBACK_NONE;
+    case IA64_LDST_IMM_PREFETCH:
         return IA64_TCG_FALLBACK_NONE;
     default:
         return IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS;
@@ -266,7 +275,7 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
                                           IA64TcgFastSlot *slot,
                                           IA64TcgFastBundle *fast)
 {
-    if (slot_index != 0 || ia64_tcg_ldst_trace_enabled()) {
+    if (ia64_tcg_ldst_trace_enabled()) {
         return false;
     }
     if (ldst->update_from_register ||
@@ -284,13 +293,16 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
         ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT);
         break;
     case IA64_LDST_IMM_STORE:
-        if (ldst->memory_class != 0x0c ||
+        if (!ia64_tcg_fast_ldst_store_class(ldst->memory_class) ||
             !ia64_tcg_fast_static_gr(ldst->source)) {
             return false;
         }
         slot->op = IA64_TCG_FAST_OP_LDST_STORE;
         slot->source2 = ldst->source;
         ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_LDST_STORE_SHIFT);
+        break;
+    case IA64_LDST_IMM_PREFETCH:
+        slot->op = IA64_TCG_FAST_OP_NOP;
         break;
     default:
         return false;
@@ -840,6 +852,42 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
 }
 
+static bool ia64_tcg_fast_slot_is_ldst(const IA64TcgFastSlot *slot)
+{
+    return slot->op == IA64_TCG_FAST_OP_LDST_LOAD ||
+           slot->op == IA64_TCG_FAST_OP_LDST_STORE;
+}
+
+static bool ia64_tcg_fast_slot_has_prior_base_dependency(
+    const IA64TcgFastSlot *slot, uint64_t prior_dest_mask)
+{
+    return ia64_tcg_fast_slot_is_ldst(slot) && slot->base != 0 &&
+           (prior_dest_mask & (1ULL << slot->base)) != 0;
+}
+
+static bool ia64_tcg_bundle_has_ldst_base_dependency(
+    const IA64DecodedBundle *bundle)
+{
+    IA64TcgFastBundle scratch;
+    IA64TcgFastSlot slot;
+    uint64_t prior_dest_mask = 0;
+
+    memset(&scratch, 0, sizeof(scratch));
+    for (int i = 0; i < IA64_SLOT_COUNT; i++) {
+        if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[i],
+                                      bundle->slot[i], i, &slot, &scratch)) {
+            return false;
+        }
+        if (ia64_tcg_fast_slot_has_prior_base_dependency(&slot,
+                                                         prior_dest_mask)) {
+            return true;
+        }
+        prior_dest_mask |= slot.dest_mask;
+    }
+
+    return false;
+}
+
 IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
     const IA64DecodedBundle *bundle, uint64_t pc)
 {
@@ -868,12 +916,18 @@ IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
         }
     }
 
+    if (ia64_tcg_bundle_has_ldst_base_dependency(bundle)) {
+        return IA64_TCG_FALLBACK_FAST_LDST_DEPENDENCY;
+    }
+
     return IA64_TCG_FALLBACK_RUNTIME_GUARD;
 }
 
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast)
 {
+    uint64_t prior_dest_mask = 0;
+
     if (!bundle || !fast || !bundle->valid || bundle->info->long_immediate) {
         return false;
     }
@@ -886,9 +940,14 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                       &fast->slot[slot], fast)) {
             return false;
         }
+        if (ia64_tcg_fast_slot_has_prior_base_dependency(&fast->slot[slot],
+                                                         prior_dest_mask)) {
+            return false;
+        }
         fast->slot_count++;
         fast->source_nat_mask |= fast->slot[slot].source_nat_mask;
         fast->dest_mask |= fast->slot[slot].dest_mask;
+        prior_dest_mask |= fast->slot[slot].dest_mask;
     }
 
     return fast->slot_count == IA64_SLOT_COUNT;
