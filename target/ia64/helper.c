@@ -4182,6 +4182,7 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
 {
     uint64_t bspstore = env->rse.bspstore;
     uint64_t frame_base = env->rse.bsp;
+    uint64_t address;
     uint32_t filled = 0;
     bool trace = ia64_rse_trace_enabled();
 
@@ -4190,23 +4191,28 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
         return;
     }
     count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
+    address = ia64_rse_reg_address(ia64_rse_skip_regs(frame_base, 0));
+    if (address >= bspstore) {
+        return;
+    }
 
     for (uint32_t i = 0; i < count; i++) {
-        uint64_t address = ia64_rse_skip_regs(frame_base, i);
-
         if (address >= bspstore) {
             /* This register and every higher one are still resident. */
             break;
         }
         env->rse.stacked_gr[(env->rse.current_frame_base + i) %
                             IA64_STACKED_GR_COUNT] =
-            ia64_ldst_read(env, ia64_rse_reg_address(address), 8);
+            ia64_ldst_read(env, address, 8);
         filled++;
+        address = ia64_rse_reg_address(address + 8);
     }
 
     if (filled == 0) {
         return;
     }
+    IA64_PERF_INC(IA64_PERF_OP_RSE_FILL_RESTORED_MEM);
+    IA64_PERF_ADD(IA64_PERF_OP_RSE_FILL_RESTORED_REG, filled);
 
     /* The reloaded registers are now resident; lower the store pointer. */
     env->rse.bspstore = frame_base;

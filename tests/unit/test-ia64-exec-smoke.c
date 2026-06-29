@@ -239,12 +239,21 @@ static void test_rse_backing_store_address_helpers(void)
 {
     const uint64_t br_call_raw = 0x0a006ba6000ULL;
     const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    uint64_t address;
     CPUIA64State env;
     uint64_t target = 0;
 
     g_assert_cmphex(ia64_rse_skip_regs(0x1000, 63), ==, 0x1200);
     g_assert_cmphex(ia64_rse_skip_regs(0x1010, -4), ==, 0x0fe8);
     g_assert_cmpuint(ia64_rse_num_regs(0x1000, 0x1200), ==, 63);
+    g_assert_cmphex(ia64_rse_reg_address(0x11f8), ==, 0x1200);
+
+    address = ia64_rse_skip_regs(0x1000, 62);
+    g_assert_cmphex(address, ==, 0x11f0);
+    address = ia64_rse_reg_address(address + 8);
+    g_assert_cmphex(address, ==, ia64_rse_skip_regs(0x1000, 63));
+    address = ia64_rse_reg_address(address + 8);
+    g_assert_cmphex(address, ==, ia64_rse_skip_regs(0x1000, 64));
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.rse.bspstore = 0x1000;
