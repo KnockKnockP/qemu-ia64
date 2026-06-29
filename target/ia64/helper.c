@@ -240,6 +240,84 @@ static void ia64_trace_guest_c_string(CPUIA64State *env, uint64_t address,
     buf[out] = '\0';
 }
 
+static bool ia64_trace_guest_read_u64(CPUIA64State *env, uint64_t address,
+                                      uint64_t *value, char *status,
+                                      size_t status_size)
+{
+    IA64TranslateResult result;
+    CPUState *cs = env_cpu(env);
+    vaddr saved_vaddr = env->memory.last_vaddr;
+    hwaddr saved_paddr = env->memory.last_paddr;
+    uint8_t saved_region = env->memory.last_region;
+    uint8_t saved_status = env->memory.last_status;
+    uint8_t saved_page_size = env->memory.last_page_size;
+    bool saved_identity_region0_only = env->memory.identity_region0_only;
+    MemTxResult mem_result;
+    uint64_t raw;
+
+    if (!ia64_translate_address(env, address, MMU_DATA_LOAD, 0, true,
+                                &result)) {
+        snprintf(status, status_size, "translate:%s",
+                 ia64_translate_status_name(result.status));
+        goto fail;
+    }
+
+    mem_result = address_space_read(cs->as, result.paddr,
+                                    MEMTXATTRS_UNSPECIFIED,
+                                    &raw, sizeof(raw));
+    if (mem_result != MEMTX_OK) {
+        snprintf(status, status_size, "mem:%d", mem_result);
+        goto fail;
+    }
+
+    env->memory.last_vaddr = saved_vaddr;
+    env->memory.last_paddr = saved_paddr;
+    env->memory.last_region = saved_region;
+    env->memory.last_status = saved_status;
+    env->memory.last_page_size = saved_page_size;
+    env->memory.identity_region0_only = saved_identity_region0_only;
+    *value = le64_to_cpu(raw);
+    return true;
+
+fail:
+    env->memory.last_vaddr = saved_vaddr;
+    env->memory.last_paddr = saved_paddr;
+    env->memory.last_region = saved_region;
+    env->memory.last_status = saved_status;
+    env->memory.last_page_size = saved_page_size;
+    env->memory.identity_region0_only = saved_identity_region0_only;
+    return false;
+}
+
+static void ia64_trace_execve_vector(CPUIA64State *env, const char *label,
+                                     uint64_t vector, unsigned max_items)
+{
+    char status[48] = "ok";
+    char rendered[160];
+
+    fprintf(stderr, " %s=0x%016" PRIx64, label, vector);
+    if (vector == 0) {
+        return;
+    }
+
+    for (unsigned i = 0; i < max_items; i++) {
+        uint64_t item;
+
+        if (!ia64_trace_guest_read_u64(env, vector + i * sizeof(item),
+                                       &item, status, sizeof(status))) {
+            fprintf(stderr, " %s[%u]=<unreadable:%s>", label, i, status);
+            return;
+        }
+        if (item == 0) {
+            fprintf(stderr, " %s[%u]=NULL", label, i);
+            return;
+        }
+        ia64_trace_guest_c_string(env, item, rendered, sizeof(rendered));
+        fprintf(stderr, " %s[%u]=0x%016" PRIx64 ":%s",
+                label, i, item, rendered);
+    }
+}
+
 static bool ia64_linux_syscall_arg_is_path(uint64_t nr, unsigned arg_index,
                                            const char **label)
 {
@@ -4802,6 +4880,8 @@ static void ia64_trace_execve(CPUIA64State *env)
 {
     static int enabled = -1;
     char path[176];
+    uint64_t argv;
+    uint64_t envp;
 
     if (enabled < 0) {
         enabled = g_getenv("VIBTANIUM_EXECVE_TRACE") != NULL;
@@ -4810,9 +4890,14 @@ static void ia64_trace_execve(CPUIA64State *env)
         return;
     }
     ia64_trace_guest_c_string(env, ia64_read_gr(env, 32), path, sizeof(path));
+    argv = ia64_read_gr(env, 33);
+    envp = ia64_read_gr(env, 34);
     fprintf(stderr, "[ia64-execve] do_execve path=%s current=0x%016" PRIx64
-            " b0=0x%016" PRIx64 "\n",
+            " b0=0x%016" PRIx64,
             path, ia64_read_gr(env, 13), env->br[0]);
+    ia64_trace_execve_vector(env, "argv", argv, 4);
+    ia64_trace_execve_vector(env, "envp", envp, 2);
+    fprintf(stderr, "\n");
 }
 
 static void ia64_count_fast_tcg_ops(uint32_t slot_count, uint32_t op_counts,
