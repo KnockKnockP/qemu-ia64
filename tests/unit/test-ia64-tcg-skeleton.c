@@ -145,6 +145,10 @@ static void test_efi_call_gate_ends_tb(void)
                                  VIBTANIUM_EFI_PAL_PROC;
     uint64_t region4_service_alias = UINT64_C(0x4000000000000000) |
                                      VIBTANIUM_EFI_CALL_GATE_BASE;
+    uint64_t region7_pal_alias = UINT64_C(0xe000000000000000) |
+                                 VIBTANIUM_EFI_PAL_PROC;
+    uint64_t region7_service_alias = UINT64_C(0xe000000000000000) |
+                                     VIBTANIUM_EFI_CALL_GATE_BASE;
     uint64_t last_service_gate =
         VIBTANIUM_EFI_CALL_GATE_BASE +
         (IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT - 1) * IA64_BUNDLE_SIZE;
@@ -158,6 +162,10 @@ static void test_efi_call_gate_ends_tb(void)
                     &bundle, VIBTANIUM_EFI_CALL_GATE_BASE);
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
                     &bundle, last_service_gate);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
+                    &bundle, region7_pal_alias);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
+                    &bundle, region7_service_alias);
     g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(
                         &bundle, VIBTANIUM_EFI_PAL_PROC),
                     ==, IA64_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE);

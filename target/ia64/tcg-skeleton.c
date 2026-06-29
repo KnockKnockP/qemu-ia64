@@ -8,6 +8,7 @@
 #include "tcg-skeleton.h"
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
+#define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
 #define IA64_TCG_FAST_GR_LIMIT 32
 #define IA64_TCG_TARGET_PAGE_MASK (~((UINT64_C(1) << TARGET_PAGE_BITS) - 1))
 
@@ -24,11 +25,14 @@ enum {
 
 bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
 {
+    uint64_t region;
     uint64_t offset;
 
-    if ((pc & ~IA64_REGION_OFFSET_MASK) != 0) {
+    region = pc & ~IA64_REGION_OFFSET_MASK;
+    if (region != 0 && region != IA64_KERNEL_PAGE_OFFSET) {
         return false;
     }
+    pc &= IA64_REGION_OFFSET_MASK;
     if (pc == VIBTANIUM_EFI_PAL_PROC || pc == VIBTANIUM_EFI_SAL_PROC) {
         return true;
     }

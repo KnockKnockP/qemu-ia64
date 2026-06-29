@@ -732,9 +732,11 @@ static uint64_t ia64_region_offset(uint64_t address)
     return address & IA64_REGION_OFFSET_MASK;
 }
 
-static bool efi_gate_address_is_physical(uint64_t address)
+static bool efi_gate_address_is_valid_alias(uint64_t address)
 {
-    return (address & ~IA64_REGION_OFFSET_MASK) == 0;
+    uint64_t region = address & ~IA64_REGION_OFFSET_MASK;
+
+    return region == 0 || region == IA64_KERNEL_PAGE_OFFSET;
 }
 
 static uint64_t efi_service_descriptor_address(unsigned service_index)
@@ -752,9 +754,10 @@ static bool efi_gate_service_index(uint64_t gate_ip, unsigned *index)
 {
     uint64_t offset;
 
-    if (!efi_gate_address_is_physical(gate_ip)) {
+    if (!efi_gate_address_is_valid_alias(gate_ip)) {
         return false;
     }
+    gate_ip = ia64_region_offset(gate_ip);
     if (gate_ip < VIBTANIUM_EFI_CALL_GATE_BASE) {
         return false;
     }
@@ -1795,16 +1798,17 @@ count_other:
 
 static bool dispatch_firmware_gate(CPUIA64State *env, uint64_t gate_ip)
 {
-    uint64_t physical = gate_ip;
+    uint64_t physical;
     IA64FirmwareResult result;
     uint64_t function_id;
     uint64_t arg0;
     uint64_t arg1;
     uint64_t arg2;
 
-    if (!efi_gate_address_is_physical(gate_ip)) {
+    if (!efi_gate_address_is_valid_alias(gate_ip)) {
         return false;
     }
+    physical = ia64_region_offset(gate_ip);
 
     if (physical == VIBTANIUM_EFI_PAL_PROC) {
         bool static_call;
