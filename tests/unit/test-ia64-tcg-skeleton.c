@@ -9,6 +9,7 @@
 #include "target/ia64/exec-smoke.h"
 #include "target/ia64/perf.h"
 #include "target/ia64/tcg-skeleton.h"
+#include "tcg/tcg.h"
 
 static IA64DecodedBundle make_bundle(uint8_t tmpl,
                                      uint64_t slot0,
@@ -40,6 +41,68 @@ static void assert_boundary(IA64TcgTbBoundary expected,
     g_assert_cmpint(ia64_tcg_tb_boundary_ends_tb(actual),
                     ==, expected != IA64_TCG_TB_BOUNDARY_NONE);
     g_assert_cmpstr(ia64_tcg_tb_boundary_name(actual), !=, "unknown");
+}
+
+typedef struct IA64HelperFlagInfo {
+    const char *name;
+    unsigned flags;
+} IA64HelperFlagInfo;
+
+static const IA64HelperFlagInfo helper_flag_info[] = {
+#define DEF_HELPER_0(name, ret) { #name, 0 },
+#define DEF_HELPER_1(name, ret, t1) { #name, 0 },
+#define DEF_HELPER_2(name, ret, t1, t2) { #name, 0 },
+#define DEF_HELPER_3(name, ret, t1, t2, t3) { #name, 0 },
+#define DEF_HELPER_4(name, ret, t1, t2, t3, t4) { #name, 0 },
+#define DEF_HELPER_5(name, ret, t1, t2, t3, t4, t5) { #name, 0 },
+#define DEF_HELPER_FLAGS_0(name, flags, ret) { #name, flags },
+#define DEF_HELPER_FLAGS_1(name, flags, ret, t1) { #name, flags },
+#define DEF_HELPER_FLAGS_2(name, flags, ret, t1, t2) { #name, flags },
+#define DEF_HELPER_FLAGS_3(name, flags, ret, t1, t2, t3) { #name, flags },
+#define DEF_HELPER_FLAGS_4(name, flags, ret, t1, t2, t3, t4) { #name, flags },
+#define DEF_HELPER_FLAGS_5(name, flags, ret, t1, t2, t3, t4, t5) \
+    { #name, flags },
+#include "target/ia64/helper.h"
+#undef DEF_HELPER_FLAGS_5
+#undef DEF_HELPER_FLAGS_4
+#undef DEF_HELPER_FLAGS_3
+#undef DEF_HELPER_FLAGS_2
+#undef DEF_HELPER_FLAGS_1
+#undef DEF_HELPER_FLAGS_0
+#undef DEF_HELPER_5
+#undef DEF_HELPER_4
+#undef DEF_HELPER_3
+#undef DEF_HELPER_2
+#undef DEF_HELPER_1
+#undef DEF_HELPER_0
+};
+
+static unsigned helper_flags_for(const char *name)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(helper_flag_info); i++) {
+        if (g_str_equal(helper_flag_info[i].name, name)) {
+            return helper_flag_info[i].flags;
+        }
+    }
+
+    g_assert_not_reached();
+}
+
+static void test_helper_flags_are_conservative(void)
+{
+    g_assert_cmphex(helper_flags_for("exec_bundle"), ==, 0);
+    g_assert_cmphex(helper_flags_for("start_fast_bundle"), ==, 0);
+    g_assert_cmphex(helper_flags_for("finish_fast_bundle"), ==, 0);
+    g_assert_cmphex(helper_flags_for("finish_fast_store"), ==, 0);
+    g_assert_cmphex(helper_flags_for("finish_direct_branch_bundle"), ==, 0);
+
+    g_assert_cmphex(helper_flags_for("perf_direct_branch_fallback"),
+                    ==, TCG_CALL_NO_RWG);
+    g_assert_cmphex(helper_flags_for("perf_tcg_ldst_fallback"),
+                    ==, TCG_CALL_NO_RWG);
+    g_assert_cmphex(helper_flags_for("perf_tb_exit_main_loop"),
+                    ==, TCG_CALL_NO_RWG);
+    g_assert_cmphex(helper_flags_for("perf_tb_exec"), ==, TCG_CALL_NO_RWG);
 }
 
 static void test_fallthrough_bundle_does_not_end_tb(void)
@@ -376,6 +439,8 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
+    g_test_add_func("/ia64-tcg-skeleton/helper-flags-conservative",
+                    test_helper_flags_are_conservative);
     g_test_add_func("/ia64-tcg-skeleton/fallthrough",
                     test_fallthrough_bundle_does_not_end_tb);
     g_test_add_func("/ia64-tcg-skeleton/invalid-template",
