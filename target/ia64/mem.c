@@ -13,9 +13,17 @@
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
+#define IA64_TRANSLATION_LOOKUP_CACHE_PAGE_SHIFT 12
+#define IA64_TRANSLATION_LOOKUP_CACHE_MASK \
+    (IA64_TRANSLATION_LOOKUP_CACHE_COUNT - 1)
 #define IA64_VHPT_REGION_BITS_MASK UINT64_C(0xe000000000000000)
 #define IA64_VHPT_BASE_ADDRESS_MASK UINT64_C(0x1fffffffffff8000)
 #define IA64_VHPT_VA_HASH_MASK UINT64_C(0x0007ffffffffffff)
+
+#if (IA64_TRANSLATION_LOOKUP_CACHE_COUNT & \
+     IA64_TRANSLATION_LOOKUP_CACHE_MASK) != 0
+#error "IA64_TRANSLATION_LOOKUP_CACHE_COUNT must remain a power of two"
+#endif
 
 static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           MMUAccessType access_type,
@@ -216,6 +224,60 @@ static bool ia64_entry_matches(const IA64TranslationEntry *entry,
            entry->vaddr_base == ia64_page_base(address, entry->page_size);
 }
 
+static unsigned ia64_translation_lookup_cache_index(bool instruction,
+                                                    vaddr address)
+{
+    uint64_t guest_page = address >> IA64_TRANSLATION_LOOKUP_CACHE_PAGE_SHIFT;
+
+    guest_page ^= guest_page >> 6;
+    if (instruction) {
+        guest_page ^= IA64_TRANSLATION_LOOKUP_CACHE_COUNT / 2;
+    }
+    return guest_page & IA64_TRANSLATION_LOOKUP_CACHE_MASK;
+}
+
+void ia64_translation_lookup_cache_flush(CPUIA64State *env)
+{
+    if (!env) {
+        return;
+    }
+    memset(env->memory.lookup_cache, 0, sizeof(env->memory.lookup_cache));
+}
+
+static bool ia64_lookup_translation_cache(CPUIA64State *env,
+                                          bool instruction,
+                                          vaddr address,
+                                          uint32_t rid,
+                                          const IA64TranslationEntry **entry)
+{
+    IA64TranslationEntry *cached =
+        &env->memory.lookup_cache[
+            ia64_translation_lookup_cache_index(instruction, address)];
+
+    if (cached->instruction == instruction &&
+        ia64_entry_matches(cached, address, rid)) {
+        IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_LOOKUP_CACHE_HIT);
+        *entry = cached;
+        return true;
+    }
+
+    IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_LOOKUP_CACHE_MISS);
+    return false;
+}
+
+static void ia64_store_translation_cache(CPUIA64State *env,
+                                         bool instruction,
+                                         vaddr address,
+                                         const IA64TranslationEntry *entry)
+{
+    if (!entry) {
+        return;
+    }
+
+    env->memory.lookup_cache[
+        ia64_translation_lookup_cache_index(instruction, address)] = *entry;
+}
+
 static const IA64TranslationEntry *ia64_pick_best_entry(
     const IA64TranslationEntry *best,
     const IA64TranslationEntry *entry,
@@ -241,12 +303,17 @@ static const IA64TranslationEntry *ia64_lookup_translation(CPUIA64State *env,
     const IA64TranslationEntry *tc = instruction ? env->memory.itc
                                                  : env->memory.dtc;
 
+    if (ia64_lookup_translation_cache(env, instruction, address, rid, &best)) {
+        return best;
+    }
+
     for (unsigned i = 0; i < IA64_ITR_COUNT; i++) {
         best = ia64_pick_best_entry(best, &tr[i], address, rid);
     }
     for (unsigned i = 0; i < IA64_TC_COUNT; i++) {
         best = ia64_pick_best_entry(best, &tc[i], address, rid);
     }
+    ia64_store_translation_cache(env, instruction, address, best);
     return best;
 }
 
@@ -477,6 +544,7 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
         tc[*next_tc % IA64_TC_COUNT] = entry;
         *next_tc = (*next_tc + 1) % IA64_TC_COUNT;
     }
+    ia64_translation_lookup_cache_flush(env);
 
     trace_ia64_translation_install(ia64_translation_kind(instruction, pinned),
                                    slot, virtual_address, entry.vaddr_base,
@@ -528,6 +596,7 @@ void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
                                         all_rids);
     ia64_invalidate_overlapping_entries(env->memory.dtc, IA64_TC_COUNT, &probe,
                                         all_rids);
+    ia64_translation_lookup_cache_flush(env);
 }
 
 /* ptr.i / ptr.d: purge a matching pinned instruction/data translation register. */
@@ -548,6 +617,7 @@ void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
         ia64_invalidate_overlapping_entries(env->memory.dtr, IA64_DTR_COUNT,
                                             &probe, false);
     }
+    ia64_translation_lookup_cache_flush(env);
 }
 
 /* ptc.e: purge the entire dynamic translation cache. */
@@ -561,6 +631,7 @@ void ia64_purge_all_translation_cache(CPUIA64State *env)
         env->memory.itc[i].valid = false;
         env->memory.dtc[i].valid = false;
     }
+    ia64_translation_lookup_cache_flush(env);
 }
 
 bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
@@ -568,8 +639,8 @@ bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
 {
     IA64TranslateResult result;
 
-    if (!ia64_translate_address(env, address, MMU_DATA_LOAD, 0, true,
-                                &result)) {
+    if (!ia64_translate_address_no_detail(env, address, MMU_DATA_LOAD, 0,
+                                          true, &result)) {
         return false;
     }
     if (paddr) {
@@ -617,7 +688,15 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
     uint64_t rr;
 
     cpl &= 0x3;
-    memset(result, 0, sizeof(*result));
+    if (format_detail) {
+        memset(result, 0, sizeof(*result));
+    } else {
+        result->status = IA64_TRANSLATE_OK;
+        result->paddr = 0;
+        result->prot = 0;
+        result->identity = false;
+        result->message[0] = '\0';
+    }
     result->vaddr = address;
     result->region = ia64_va_region(address);
     rr = env->rr[result->region];

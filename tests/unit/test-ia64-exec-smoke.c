@@ -917,6 +917,7 @@ static void test_m_unit_system_memory_management(void)
     env.alat.entries[0].width = 4;
     env.alat.entries[0].physical = true;
     env.alat.entries[0].address = 0x1000;
+    env.alat.valid_mask = 1u << 0;
     target = 0;
     g_assert_true(ia64_exec_m_check_advanced(&env, chk_a_clr_r10_raw,
                                              0x100eb30, &target));
@@ -936,6 +937,7 @@ static void test_m_unit_system_memory_management(void)
     env.alat.entries[1].target = 13;
     env.alat.entries[1].width = 4;
     env.alat.entries[1].address = 0x3000;
+    env.alat.valid_mask = (1u << 0) | (1u << 1);
     g_assert_true(ia64_slot_is_m_invala(IA64_SLOT_TYPE_M,
                                         kernel_invala_raw));
     g_assert_false(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,

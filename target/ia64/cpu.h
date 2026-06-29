@@ -23,6 +23,7 @@
 #define IA64_DTR_COUNT 8
 #define IA64_TC_VMSTATE_COUNT 32
 #define IA64_TC_COUNT 128
+#define IA64_TRANSLATION_LOOKUP_CACHE_COUNT 64
 #define IA64_ALAT_COUNT 32
 #define IA64_PMC_COUNT 256
 #define IA64_PMD_COUNT 256
@@ -250,6 +251,12 @@ typedef struct IA64MemorySkeletonState {
     IA64TranslationEntry dtc[IA64_TC_COUNT];
     uint8_t next_itc;
     uint8_t next_dtc;
+    /*
+     * Transient direct-mapped cache for the target-side TR/TC lookup result.
+     * It is cleared whenever modeled translation state changes and is not
+     * serialized.
+     */
+    IA64TranslationEntry lookup_cache[IA64_TRANSLATION_LOOKUP_CACHE_COUNT];
 } IA64MemorySkeletonState;
 
 typedef enum IA64ExceptionKind {
@@ -287,6 +294,8 @@ typedef struct IA64AlatEntry {
 typedef struct IA64AlatState {
     IA64AlatEntry entries[IA64_ALAT_COUNT];
     uint8_t next;
+    /* Transient validity bitmap, reconstructed from entries after migration. */
+    uint32_t valid_mask;
 } IA64AlatState;
 
 typedef enum IA64CPUModel {

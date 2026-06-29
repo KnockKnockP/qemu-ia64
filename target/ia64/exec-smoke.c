@@ -346,12 +346,20 @@ uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg)
 
 static int ia64_alat_find_gr(CPUIA64State *env, uint32_t reg)
 {
+    uint32_t valid_mask;
+
     if (!env || reg >= IA64_GR_COUNT) {
         return -1;
     }
 
+    valid_mask = env->alat.valid_mask;
+    if (valid_mask == 0) {
+        return -1;
+    }
+
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
-        if (env->alat.entries[i].valid && env->alat.entries[i].target == reg) {
+        if ((valid_mask & (1u << i)) != 0 &&
+            env->alat.entries[i].target == reg) {
             return i;
         }
     }
@@ -359,16 +367,53 @@ static int ia64_alat_find_gr(CPUIA64State *env, uint32_t reg)
     return -1;
 }
 
-void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
+void ia64_alat_set_valid(CPUIA64State *env, unsigned index, bool valid)
 {
-    if (!env || reg >= IA64_GR_COUNT) {
+    if (!env || index >= IA64_ALAT_COUNT) {
+        return;
+    }
+
+    env->alat.entries[index].valid = valid;
+    if (valid) {
+        env->alat.valid_mask |= 1u << index;
+    } else {
+        env->alat.valid_mask &= ~(1u << index);
+    }
+}
+
+void ia64_alat_reconstruct_transients(CPUIA64State *env)
+{
+    uint32_t valid_mask = 0;
+
+    if (!env) {
         return;
     }
 
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
-        if (env->alat.entries[i].valid &&
+        if (env->alat.entries[i].valid) {
+            valid_mask |= 1u << i;
+        }
+    }
+    env->alat.valid_mask = valid_mask;
+}
+
+void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
+{
+    uint32_t valid_mask;
+
+    if (!env || reg >= IA64_GR_COUNT) {
+        return;
+    }
+
+    valid_mask = env->alat.valid_mask;
+    if (valid_mask == 0) {
+        return;
+    }
+
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        if ((valid_mask & (1u << i)) != 0 &&
             env->alat.entries[i].target == reg) {
-            env->alat.entries[i].valid = false;
+            ia64_alat_set_valid(env, i, false);
         }
     }
 }
@@ -1281,7 +1326,7 @@ bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
     alat_index = ia64_alat_find_gr(env, target);
     if (alat_index >= 0) {
         if (x3 == 5) {
-            env->alat.entries[alat_index].valid = false;
+            ia64_alat_set_valid(env, alat_index, false);
         }
         *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
     } else {
@@ -1466,6 +1511,7 @@ bool ia64_exec_m_mov_to_region_register(CPUIA64State *env, uint64_t raw)
     selector = ia64_read_gr(env, selector_reg);
     region = (selector >> 61) & 0x7;
     env->rr[region] = ia64_read_gr(env, source) & IA64_RR_IMPLEMENTED_MASK;
+    ia64_translation_lookup_cache_flush(env);
     return true;
 }
 

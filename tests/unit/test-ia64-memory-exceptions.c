@@ -182,6 +182,37 @@ static void test_translation_cache_preserves_pinned_register(void)
     g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
 }
 
+static void test_translation_lookup_cache_refreshes_after_install(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t large_translation = 0x0010000004000661ULL;
+    uint64_t small_translation = 0x0010000008000661ULL;
+    uint64_t large_itir = 0x68;
+    uint64_t small_itir = 0x40;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_DT_BIT;
+    env.rr[5] = test_rr(0x90, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, false, true, 2, base,
+                                           large_translation, large_itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           small_translation, small_itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
+    g_assert_cmpuint(result.page_size, ==, 16);
+}
+
 static void test_region_register_change_selects_new_rid(void)
 {
     CPUIA64State env;
@@ -695,6 +726,8 @@ int main(int argc, char **argv)
                     test_instruction_translation_register_lookup);
     g_test_add_func("/ia64-memory/tc-preserves-pinned-tr",
                     test_translation_cache_preserves_pinned_register);
+    g_test_add_func("/ia64-memory/lookup-cache-refreshes-after-install",
+                    test_translation_lookup_cache_refreshes_after_install);
     g_test_add_func("/ia64-memory/region-register-rid-change",
                     test_region_register_change_selects_new_rid);
     g_test_add_func("/ia64-memory/tc-purge-same-va-remap",

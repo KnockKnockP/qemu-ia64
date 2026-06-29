@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "exec/cputlb.h"
 #include "exec-smoke.h"
+#include "mem.h"
 #include "migration/vmstate.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
@@ -184,6 +185,8 @@ static int ia64_env_post_load(void *opaque, int version_id)
     }
     env->memory.next_itc %= IA64_TC_COUNT;
     env->memory.next_dtc %= IA64_TC_COUNT;
+    ia64_translation_lookup_cache_flush(env);
+    ia64_alat_reconstruct_transients(env);
     env->gr[0] = 0;
     env->pr |= 1;
     env->fault_exit_pending_tb_translate = false;

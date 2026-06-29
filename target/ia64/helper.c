@@ -1599,11 +1599,18 @@ static void firmware_trace_call(CPUIA64State *env, const char *source,
 
 static void firmware_invalidate_result_alat(CPUIA64State *env)
 {
+    uint32_t valid_mask = env->alat.valid_mask;
+
+    if (valid_mask == 0) {
+        return;
+    }
+
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
         IA64AlatEntry *entry = &env->alat.entries[i];
 
-        if (entry->valid && entry->target >= 8 && entry->target <= 11) {
-            entry->valid = false;
+        if ((valid_mask & (1u << i)) != 0 &&
+            entry->target >= 8 && entry->target <= 11) {
+            ia64_alat_set_valid(env, i, false);
         }
     }
 }
@@ -4079,7 +4086,8 @@ static void ia64_alat_resolve_address(CPUIA64State *env, uint64_t address,
     IA64TranslateResult result;
 
     IA64_PERF_INC(IA64_PERF_ALAT_RESOLVE);
-    if (ia64_translate_address(env, address, access_type, 0, true, &result)) {
+    if (ia64_translate_address_no_detail(env, address, access_type, 0, true,
+                                         &result)) {
         *resolved = result.paddr;
         *physical = true;
     } else {
@@ -4090,10 +4098,16 @@ static void ia64_alat_resolve_address(CPUIA64State *env, uint64_t address,
 
 static void ia64_alat_invalidate_target(CPUIA64State *env, uint8_t target)
 {
+    uint32_t valid_mask = env->alat.valid_mask;
+
+    if (valid_mask == 0) {
+        return;
+    }
+
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
-        if (env->alat.entries[i].valid &&
+        if ((valid_mask & (1u << i)) != 0 &&
             env->alat.entries[i].target == target) {
-            env->alat.entries[i].valid = false;
+            ia64_alat_set_valid(env, i, false);
         }
     }
 }
@@ -4102,6 +4116,7 @@ static void ia64_alat_record_load(CPUIA64State *env, uint8_t target,
                                   uint64_t address, uint8_t width)
 {
     IA64AlatEntry *entry;
+    unsigned index;
 
     IA64_PERF_INC(IA64_PERF_ALAT_RECORD_LOAD);
     if (target == 0 || target >= IA64_GR_COUNT) {
@@ -4109,15 +4124,16 @@ static void ia64_alat_record_load(CPUIA64State *env, uint8_t target,
     }
 
     ia64_alat_invalidate_target(env, target);
-    entry = &env->alat.entries[env->alat.next % IA64_ALAT_COUNT];
+    index = env->alat.next % IA64_ALAT_COUNT;
+    entry = &env->alat.entries[index];
     env->alat.next = (env->alat.next + 1) % IA64_ALAT_COUNT;
 
     memset(entry, 0, sizeof(*entry));
-    entry->valid = true;
     entry->target = target;
     entry->width = width;
     ia64_alat_resolve_address(env, address, MMU_DATA_LOAD,
                               &entry->address, &entry->physical);
+    ia64_alat_set_valid(env, index, true);
 }
 
 static void ia64_alat_invalidate_store(CPUIA64State *env, uint64_t address,
@@ -4125,17 +4141,23 @@ static void ia64_alat_invalidate_store(CPUIA64State *env, uint64_t address,
 {
     uint64_t resolved;
     bool physical;
+    uint32_t valid_mask = env->alat.valid_mask;
 
     IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_STORE);
+    if (valid_mask == 0) {
+        return;
+    }
+
     ia64_alat_resolve_address(env, address, MMU_DATA_STORE,
                               &resolved, &physical);
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
         IA64AlatEntry *entry = &env->alat.entries[i];
 
-        if (entry->valid && entry->physical == physical &&
+        if ((valid_mask & (1u << i)) != 0 &&
+            entry->physical == physical &&
             ia64_alat_ranges_overlap(entry->address, entry->width,
                                      resolved, width)) {
-            entry->valid = false;
+            ia64_alat_set_valid(env, i, false);
         }
     }
 }

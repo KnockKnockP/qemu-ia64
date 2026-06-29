@@ -178,6 +178,10 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_TARGET_TRANSLATE_NO_DETAIL] = "mmu.target_translate.no_detail",
     [IA64_PERF_TARGET_TRANSLATE_PHYSICAL] = "mmu.target_translate.physical",
     [IA64_PERF_TARGET_TRANSLATE_LOOKUP] = "mmu.target_translate.lookup",
+    [IA64_PERF_TARGET_TRANSLATE_LOOKUP_CACHE_HIT] =
+        "mmu.target_translate.lookup_cache.hit",
+    [IA64_PERF_TARGET_TRANSLATE_LOOKUP_CACHE_MISS] =
+        "mmu.target_translate.lookup_cache.miss",
     [IA64_PERF_TARGET_TRANSLATE_OK] = "mmu.target_translate.ok",
     [IA64_PERF_TARGET_TRANSLATE_TLB_MISS] = "mmu.target_translate.tlb_miss",
     [IA64_PERF_TARGET_TRANSLATE_NOT_PRESENT] = "mmu.target_translate.not_present",
