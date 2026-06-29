@@ -22,6 +22,11 @@
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_PFS_CFM_MASK UINT64_C(0x0000003fffffffff)
+#define IA64_PFS_PEC_SHIFT 52
+#define IA64_PFS_PEC_MASK UINT64_C(0x03f0000000000000)
+#define IA64_PFS_PPL_SHIFT 62
+#define IA64_PFS_PPL_MASK UINT64_C(0xc000000000000000)
 #define IA64_INTERRUPT_VECTOR_MASK UINT64_C(0xff)
 #define IA64_INTERRUPT_SPURIOUS_VECTOR UINT64_C(0x0f)
 #define IA64_LOCAL_VECTOR_MASK_BIT UINT64_C(0x0000000000010000)
@@ -4982,13 +4987,18 @@ static uint32_t ia64_cfm_sol(uint64_t cfm)
 static void ia64_enter_call_frame(CPUIA64State *env)
 {
     uint64_t caller_cfm = env->cfm;
+    uint64_t caller_ec = ia64_read_ar(env, IA64_AR_EC) & 0x3f;
+    uint64_t caller_cpl =
+        (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
     uint32_t caller_sof = ia64_cfm_sof(caller_cfm);
     uint32_t caller_sol = ia64_cfm_sol(caller_cfm);
     uint32_t output_count = caller_sof >= caller_sol
         ? caller_sof - caller_sol
         : 0;
 
-    env->ar[IA64_AR_PFS] = caller_cfm;
+    env->ar[IA64_AR_PFS] = (caller_cfm & IA64_PFS_CFM_MASK) |
+                           (caller_ec << IA64_PFS_PEC_SHIFT) |
+                           (caller_cpl << IA64_PFS_PPL_SHIFT);
     env->rse.current_frame_base =
         ia64_rse_wrap_slot(env->rse.current_frame_base + caller_sol);
     ia64_rse_preserve_frame(env, caller_sol);
@@ -4997,7 +5007,12 @@ static void ia64_enter_call_frame(CPUIA64State *env)
 
 static void ia64_restore_frame_from_pfs(CPUIA64State *env)
 {
-    uint64_t restored_cfm = env->ar[IA64_AR_PFS] & ((1ULL << 38) - 1);
+    uint64_t pfs = env->ar[IA64_AR_PFS];
+    uint64_t restored_cfm = pfs & IA64_PFS_CFM_MASK;
+    uint64_t restored_ec =
+        (pfs & IA64_PFS_PEC_MASK) >> IA64_PFS_PEC_SHIFT;
+    uint64_t restored_cpl =
+        (pfs & IA64_PFS_PPL_MASK) >> IA64_PFS_PPL_SHIFT;
     uint32_t restored_sof = ia64_cfm_sof(restored_cfm);
     uint32_t restored_sol = ia64_cfm_sol(restored_cfm);
     uint32_t caller_base =
@@ -5010,6 +5025,9 @@ static void ia64_restore_frame_from_pfs(CPUIA64State *env)
     env->rse.clean_count = MIN(env->rse.clean_count,
                                env->rse.current_frame_base);
     ia64_set_cfm(env, restored_cfm);
+    ia64_write_ar(env, IA64_AR_EC, restored_ec);
+    env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
+               (restored_cpl << IA64_PSR_CPL_SHIFT);
 }
 
 bool ia64_return_from_call_frame(CPUIA64State *env, uint64_t target_ip)

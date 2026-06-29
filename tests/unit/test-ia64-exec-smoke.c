@@ -12,7 +12,19 @@
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
 #define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
+#define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_PFS_CFM_MASK UINT64_C(0x0000003fffffffff)
+#define IA64_PFS_PEC_SHIFT 52
+#define IA64_PFS_PPL_SHIFT 62
+
+static uint64_t ia64_make_pfs(uint64_t cfm, uint64_t ec, uint64_t cpl)
+{
+    return (cfm & IA64_PFS_CFM_MASK) |
+           ((ec & 0x3f) << IA64_PFS_PEC_SHIFT) |
+           ((cpl & 0x3) << IA64_PFS_PPL_SHIFT);
+}
+
 static void store_le64(uint8_t *p, uint64_t value)
 {
     for (int i = 0; i < 8; i++) {
@@ -241,6 +253,43 @@ static void test_epc_clears_user_cpl_for_kernel_entry(void)
     g_assert_cmphex(target, ==, 0x3010);
     g_assert_cmphex(env.psr & IA64_PSR_CPL_MASK, ==, 0);
     g_assert_cmphex(env.psr & IA64_PSR_BN_BIT, ==, IA64_PSR_BN_BIT);
+}
+
+static void test_epc_gate_return_restores_pfs_privilege(void)
+{
+    const uint64_t br_call_raw = 0x0a006ba6000ULL;
+    const uint64_t br_ret_b6_raw = 0x0010800c100ULL;
+    const uint64_t epc_raw = 0x10ULL << 27;
+    const uint64_t caller_cfm = ia64_make_cfm(6, 4, 0);
+    const uint64_t caller_ec = 0x2a;
+    const uint64_t caller_cpl = 3;
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_CPL_MASK | IA64_PSR_BN_BIT;
+    env.ar[IA64_AR_EC] = caller_ec;
+    ia64_set_cfm(&env, caller_cfm);
+    env.br[6] = 0x400000000005b4e7ULL;
+
+    g_assert_true(ia64_exec_b_call_relative(&env, br_call_raw, 0x1001030,
+                                            &target));
+    g_assert_cmphex(env.ar[IA64_AR_PFS], ==,
+                    ia64_make_pfs(caller_cfm, caller_ec, caller_cpl));
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, epc_raw, target,
+                                              &target));
+    g_assert_cmphex(env.psr & IA64_PSR_CPL_MASK, ==, 0);
+    env.ar[IA64_AR_EC] = 0;
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, br_ret_b6_raw, target,
+                                              &target));
+
+    g_assert_cmphex(target, ==, 0x400000000005b4e0ULL);
+    g_assert_cmphex(env.psr & IA64_PSR_CPL_MASK, ==,
+                    caller_cpl << IA64_PSR_CPL_SHIFT);
+    g_assert_cmphex(env.ar[IA64_AR_EC], ==, caller_ec);
+    g_assert_cmphex(env.cfm, ==, caller_cfm);
 }
 
 static void test_bundle_fetch_decode(void)
@@ -2302,7 +2351,7 @@ static void test_b_unit_relative_call_updates_link_and_frame(void)
 
     g_assert_cmphex(target, ==, 0x1036d60);
     g_assert_cmphex(env.br[0], ==, 0x1001040);
-    g_assert_cmphex(env.ar[IA64_AR_PFS], ==, old_cfm);
+    g_assert_cmphex(env.ar[IA64_AR_PFS], ==, ia64_make_pfs(old_cfm, 0, 0));
     g_assert_cmphex(env.cfm, ==, ia64_make_cfm(2, 0, 0));
     g_assert_cmpuint(env.rse.current_frame_base, ==, 4);
     g_assert_cmphex(ia64_read_gr(&env, 32), ==, 0xaaaa);
@@ -2781,7 +2830,7 @@ static void test_b_unit_indirect_call_updates_link_and_frame(void)
 
     g_assert_cmphex(target, ==, 0x10203040);
     g_assert_cmphex(env.br[0], ==, 0x102efe0);
-    g_assert_cmphex(env.ar[IA64_AR_PFS], ==, old_cfm);
+    g_assert_cmphex(env.ar[IA64_AR_PFS], ==, ia64_make_pfs(old_cfm, 0, 0));
     g_assert_cmphex(env.cfm, ==, ia64_make_cfm(3, 0, 0));
     g_assert_cmpuint(env.rse.current_frame_base, ==, 6);
     g_assert_cmphex(ia64_read_gr(&env, 32), ==, 0x1111);
@@ -2848,6 +2897,8 @@ int main(int argc, char **argv)
                     test_syscall_return_rfi_kernel_to_user_transition);
     g_test_add_func("/ia64-exec-smoke/epc-user-to-kernel",
                     test_epc_clears_user_cpl_for_kernel_entry);
+    g_test_add_func("/ia64-exec-smoke/epc-gate-return-restores-pfs-privilege",
+                    test_epc_gate_return_restores_pfs_privilege);
     g_test_add_func("/ia64-exec-smoke/bundle-fetch-decode",
                     test_bundle_fetch_decode);
     g_test_add_func("/ia64-exec-smoke/ip-advances-for-nop-bundle",
