@@ -278,6 +278,194 @@ static void test_translation_register_purge_removes_pinned_entry(void)
     g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
 }
 
+static void test_demand_data_page_fault_delivery(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    vaddr ip = 0xa00000010015fcf0ULL;
+    uint64_t not_present_translation = 0x0010000004000660ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = ia64_psr_with_ri(IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                               IA64_TB_PSR_DT_BIT, 1);
+    env.ip = ip;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.rr[5] = test_rr(0x500, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           not_present_translation, itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_NOT_PRESENT);
+    g_assert_nonnull(strstr(result.message, "data translation not present"));
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_PAGE_FAULT, address,
+                           MMU_DATA_LOAD, result.message);
+
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_PAGE_FAULT);
+    g_assert_cmphex(env.exception.vector, ==, 0x5000);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, ip);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, address);
+    g_assert_cmphex(env.cr[IA64_CR_ITIR], ==,
+                    ia64_default_itir(&env, address));
+    g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                    IA64_ISR_EI_SHIFT, ==, 1);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_R_BIT);
+    g_assert_nonnull(strstr((const char *)env.exception.message,
+                            "data translation not present"));
+    g_assert_cmphex(env.ip, ==, 0x105000);
+}
+
+static void test_user_store_protection_page_fault_preserves_slot(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    vaddr ip = 0xa00000010015fcf0ULL;
+    uint64_t kernel_translation = 0x0010000004000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = ia64_psr_with_ri(IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                               IA64_TB_PSR_DT_BIT |
+                               IA64_TB_PSR_CPL_MASK, 2);
+    env.ip = ip;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.rr[5] = test_rr(0x501, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           kernel_translation, itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                          IA64_MMU_DATA_CPL3, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_ACCESS_DENIED);
+    g_assert_nonnull(strstr(result.message, "data translation access denied"));
+    g_assert_nonnull(strstr(result.message, "cpl=3"));
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_PAGE_FAULT, address,
+                           MMU_DATA_STORE, result.message);
+
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_PAGE_FAULT);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, ip);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, address);
+    g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                    IA64_ISR_EI_SHIFT, ==, 2);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_W_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_W_BIT);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, 0);
+    g_assert_nonnull(strstr((const char *)env.exception.message, "cpl=3"));
+    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+}
+
+static void test_instruction_fetch_page_fault_sets_fault_ip(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c08ULL;
+    uint64_t not_present_translation = 0x0010000004000660ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_PSR_I_BIT | IA64_TB_PSR_IT_BIT;
+    env.ip = 0xa00000010000ffe0ULL;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.rr[5] = test_rr(0x502, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, true, false, 0, base,
+                                           not_present_translation, itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                          IA64_MMU_INST_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_NOT_PRESENT);
+    g_assert_nonnull(strstr(result.message,
+                            "instruction translation not present"));
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_PAGE_FAULT, address,
+                           MMU_INST_FETCH, result.message);
+
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_PAGE_FAULT);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, address & ~0xfULL);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, address);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_X_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_X_BIT);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, 0);
+    g_assert_cmphex(env.ip, ==, 0x105000);
+}
+
+static void test_no_detail_translation_keeps_status_without_message(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t kernel_translation = 0x0010000004000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_TB_PSR_DT_BIT | IA64_TB_PSR_CPL_MASK;
+    env.rr[5] = test_rr(0x503, 26, false);
+
+    g_assert_false(ia64_translate_address_no_detail(
+                       &env, address, MMU_DATA_LOAD, IA64_MMU_DATA_CPL3,
+                       false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+    g_assert_cmpstr(result.message, ==, "");
+    g_assert_cmphex(env.memory.last_vaddr, ==, address);
+    g_assert_cmpint(env.memory.last_status, ==, IA64_TRANSLATE_TLB_MISS);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           kernel_translation, itir));
+    g_assert_false(ia64_translate_address_no_detail(
+                       &env, address, MMU_DATA_STORE, IA64_MMU_DATA_CPL3,
+                       false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_ACCESS_DENIED);
+    g_assert_cmpstr(result.message, ==, "");
+    g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+}
+
+static void test_fast_exception_delivery_keeps_state_without_message(void)
+{
+    CPUIA64State env;
+    uint64_t psr = ia64_psr_with_ri(IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                                    IA64_TB_PSR_DT_BIT, 2);
+    vaddr ip = 0xa00000010015fcf0ULL;
+    vaddr address = 0xa000000100002c00ULL;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = psr;
+    env.ip = ip;
+    env.cr[IA64_CR_IVA] = 0x100000;
+
+    ia64_deliver_exception_fast(&env, IA64_EXCEPTION_PAGE_FAULT, address,
+                                MMU_DATA_STORE, "unused fast detail");
+
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_PAGE_FAULT);
+    g_assert_cmphex(env.exception.vector, ==, 0x5000);
+    if (g_getenv("VIBTANIUM_EXCEPTION_TRACE") ||
+        g_getenv("VIBTANIUM_USER_EXCEPTION_TRACE")) {
+        g_assert_nonnull(strstr((const char *)env.exception.message,
+                                "unused fast detail"));
+    } else {
+        g_assert_cmpstr((const char *)env.exception.message, ==, "");
+    }
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, psr);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, ip);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, address);
+    g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                    IA64_ISR_EI_SHIFT, ==, 2);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_W_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_W_BIT);
+}
+
 static void test_exception_reporting(void)
 {
     CPUIA64State env;
@@ -513,6 +701,16 @@ int main(int argc, char **argv)
                     test_translation_cache_purge_and_same_va_remap);
     g_test_add_func("/ia64-memory/tr-purge-pinned-entry",
                     test_translation_register_purge_removes_pinned_entry);
+    g_test_add_func("/ia64-memory/demand-data-page-fault",
+                    test_demand_data_page_fault_delivery);
+    g_test_add_func("/ia64-memory/user-store-protection-page-fault",
+                    test_user_store_protection_page_fault_preserves_slot);
+    g_test_add_func("/ia64-memory/instruction-fetch-page-fault",
+                    test_instruction_fetch_page_fault_sets_fault_ip);
+    g_test_add_func("/ia64-memory/no-detail-translation",
+                    test_no_detail_translation_keeps_status_without_message);
+    g_test_add_func("/ia64-exception/fast-delivery",
+                    test_fast_exception_delivery_keeps_state_without_message);
     g_test_add_func("/ia64-exception/reporting", test_exception_reporting);
     g_test_add_func("/ia64-exception/tlb-miss-delivery",
                     test_tlb_miss_delivery_vectors_to_iva);

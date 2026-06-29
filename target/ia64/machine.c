@@ -186,6 +186,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     env->memory.next_dtc %= IA64_TC_COUNT;
     env->gr[0] = 0;
     env->pr |= 1;
+    env->fault_exit_pending_tb_translate = false;
     return 0;
 }
 

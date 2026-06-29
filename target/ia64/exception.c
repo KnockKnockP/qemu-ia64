@@ -101,9 +101,12 @@ void ia64_clear_exception(CPUIA64State *env)
     memset(&env->exception, 0, sizeof(env->exception));
 }
 
-void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
-                           vaddr address, MMUAccessType access_type,
-                           const char *detail)
+static void ia64_record_exception_common(CPUIA64State *env,
+                                         IA64ExceptionKind kind,
+                                         vaddr address,
+                                         MMUAccessType access_type,
+                                         const char *detail,
+                                         bool format_detail)
 {
     IA64ExceptionRecord *record = &env->exception;
 
@@ -151,11 +154,17 @@ void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
         break;
     }
 
-    snprintf((char *)record->message, sizeof(record->message),
-             "%s at ip=0x%016" VADDR_PRIx " address=0x%016" VADDR_PRIx
-             " access=%d%s%s",
-             ia64_exception_name(kind), record->ip, record->address,
-             access_type, detail ? " " : "", detail ? detail : "");
+    if (format_detail) {
+        IA64_PERF_INC(IA64_PERF_EXCEPTION_RECORD_FORMATTED);
+        snprintf((char *)record->message, sizeof(record->message),
+                 "%s at ip=0x%016" VADDR_PRIx " address=0x%016" VADDR_PRIx
+                 " access=%d%s%s",
+                 ia64_exception_name(kind), record->ip, record->address,
+                 access_type, detail ? " " : "", detail ? detail : "");
+    } else {
+        IA64_PERF_INC(IA64_PERF_EXCEPTION_RECORD_FAST);
+        record->message[0] = '\0';
+    }
 
     env->cr[IA64_CR_IIP] = env->ip;
     env->cr[IA64_CR_IFA] = address;
@@ -163,9 +172,20 @@ void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
     env->cr[IA64_CR_ISR] = ia64_interruption_isr(env->psr, access_type);
 }
 
-void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
-                            vaddr address, MMUAccessType access_type,
-                            const char *detail)
+void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
+                           vaddr address, MMUAccessType access_type,
+                           const char *detail)
+{
+    ia64_record_exception_common(env, kind, address, access_type, detail,
+                                 true);
+}
+
+static void ia64_deliver_exception_common(CPUIA64State *env,
+                                          IA64ExceptionKind kind,
+                                          vaddr address,
+                                          MMUAccessType access_type,
+                                          const char *detail,
+                                          bool format_detail)
 {
     uint64_t source_ip = env->ip;
     uint64_t old_psr = env->psr;
@@ -182,6 +202,8 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
         (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
          kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS) &&
         (old_psr & IA64_PSR_IC_BIT) == 0;
+    bool trace_enabled = ia64_exception_trace_enabled();
+    bool user_trace_enabled = ia64_user_exception_trace_enabled();
 
     if (nested_data_tlb) {
         kind = IA64_EXCEPTION_DATA_NESTED_TLB;
@@ -192,7 +214,9 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
         ia64_perf_count_exception_kind(kind);
     }
 
-    ia64_record_exception(env, kind, address, access_type, detail);
+    ia64_record_exception_common(env, kind, address, access_type, detail,
+                                 format_detail || trace_enabled ||
+                                 user_trace_enabled);
 
     if (nested_data_tlb) {
         env->cr[IA64_CR_IPSR] = saved_ipsr;
@@ -243,7 +267,7 @@ trace:
     trace_ia64_exception_mmu(ia64_exception_name(kind), address,
                              env->cr[IA64_CR_ITIR], env->cr[IA64_CR_IHA],
                              env->cr[IA64_CR_PTA], rr);
-    if (ia64_exception_trace_enabled()) {
+    if (trace_enabled) {
         fprintf(stderr,
                 "[ia64-exception] kind=%s ip=0x%016" PRIx64
                 " address=0x%016" PRIx64 " vector=0x%04" PRIx64
@@ -258,8 +282,7 @@ trace:
                 env->cr[IA64_CR_ISR], env->psr, env->cr[IA64_CR_ITIR],
                 env->cr[IA64_CR_IHA], env->cr[IA64_CR_PTA], rr);
     }
-    if (ia64_user_exception_trace_enabled() &&
-        ia64_exception_from_user(old_psr) &&
+    if (user_trace_enabled && ia64_exception_from_user(old_psr) &&
         kind != IA64_EXCEPTION_BREAK &&
         kind != IA64_EXCEPTION_EXTERNAL_INTERRUPT) {
         fprintf(stderr,
@@ -290,6 +313,22 @@ trace:
                 env->br[0], env->br[6], env->br[7], env->ar[IA64_AR_BSP],
                 env->ar[IA64_AR_BSPSTORE], env->ar[IA64_AR_RSC]);
     }
+}
+
+void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
+                            vaddr address, MMUAccessType access_type,
+                            const char *detail)
+{
+    ia64_deliver_exception_common(env, kind, address, access_type, detail,
+                                  true);
+}
+
+void ia64_deliver_exception_fast(CPUIA64State *env, IA64ExceptionKind kind,
+                                 vaddr address, MMUAccessType access_type,
+                                 const char *detail)
+{
+    ia64_deliver_exception_common(env, kind, address, access_type, detail,
+                                  false);
 }
 
 void ia64_format_exception(const IA64ExceptionRecord *record,

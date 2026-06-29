@@ -52,6 +52,9 @@ bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
 bool ia64_translate_address(CPUIA64State *env, vaddr address,
                             MMUAccessType access_type, int mmu_idx,
                             bool debug, IA64TranslateResult *result);
+bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
+                                      MMUAccessType access_type, int mmu_idx,
+                                      bool debug, IA64TranslateResult *result);
 bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
                                      MMUAccessType access_type, int mmu_idx,
                                      int cpl, bool debug,

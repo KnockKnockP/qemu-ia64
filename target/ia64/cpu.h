@@ -335,6 +335,12 @@ typedef struct CPUArchState {
     IA64ExceptionRecord exception;
     IA64AlatState alat;
 
+    /*
+     * Perf-only transient set by a fault-induced cpu_loop_exit and consumed
+     * by the next TB translation. It is not serialized.
+     */
+    bool fault_exit_pending_tb_translate;
+
     struct {} end_reset_fields;
 } CPUIA64State;
 

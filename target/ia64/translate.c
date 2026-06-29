@@ -469,9 +469,14 @@ static const TranslatorOps ia64_tr_ops = {
 void ia64_translate_code(CPUState *cs, TranslationBlock *tb, int *max_insns,
                          vaddr pc, void *host_pc)
 {
+    IA64CPU *cpu = IA64_CPU(cs);
     DisasContext ctx;
 
     IA64_PERF_INC(IA64_PERF_TB_TRANSLATED);
+    if (cpu->env.fault_exit_pending_tb_translate) {
+        IA64_PERF_INC(IA64_PERF_TB_TRANSLATED_AFTER_FAULT);
+        cpu->env.fault_exit_pending_tb_translate = false;
+    }
     IA64_PERF_INC((IA64PerfCounter)(IA64_PERF_TB_GENERATED_REGION0 +
                                     (pc >> 61)));
     translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops, &ctx.base,

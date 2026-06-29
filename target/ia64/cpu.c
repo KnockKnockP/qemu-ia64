@@ -216,8 +216,8 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         break;
     }
 
-    if (ia64_translate_address(&cpu->env, address, access_type, mmu_idx,
-                               false, &result)) {
+    if (ia64_translate_address_no_detail(&cpu->env, address, access_type,
+                                         mmu_idx, false, &result)) {
         /*
          * QEMU's softmmu TLB maps one TARGET_PAGE_SIZE page per fill.  IA-64
          * page size remains part of the target-side lookup; split it here so
@@ -240,9 +240,13 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     cpu_restore_state(cs, retaddr);
     IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION);
     if (access_type == MMU_DATA_LOAD) {
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION_LOAD);
         IA64_PERF_INC(IA64_PERF_LDST_LOAD_FAULT);
     } else if (access_type == MMU_DATA_STORE) {
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION_STORE);
         IA64_PERF_INC(IA64_PERF_LDST_STORE_FAULT);
+    } else if (access_type == MMU_INST_FETCH) {
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION_INST);
     }
 
     if (result.status == IA64_TRANSLATE_TLB_MISS) {
@@ -257,13 +261,14 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                    IA64_EXCEPTION_DATA_TLB_MISS :
                    IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS;
         }
-        ia64_deliver_exception(&cpu->env, kind, address, access_type,
-                               result.message);
+        ia64_deliver_exception_fast(&cpu->env, kind, address, access_type,
+                                    NULL);
     } else {
-        ia64_deliver_exception(&cpu->env, IA64_EXCEPTION_PAGE_FAULT, address,
-                               access_type, result.message);
+        ia64_deliver_exception_fast(&cpu->env, IA64_EXCEPTION_PAGE_FAULT,
+                                    address, access_type, NULL);
     }
     IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu->env.fault_exit_pending_tb_translate = true;
     cpu_loop_exit(cs);
     return true;
 }

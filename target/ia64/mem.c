@@ -17,6 +17,12 @@
 #define IA64_VHPT_BASE_ADDRESS_MASK UINT64_C(0x1fffffffffff8000)
 #define IA64_VHPT_VA_HASH_MASK UINT64_C(0x0007ffffffffffff)
 
+static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
+                                          MMUAccessType access_type,
+                                          int mmu_idx, int cpl, bool debug,
+                                          bool format_detail,
+                                          IA64TranslateResult *result);
+
 const char *ia64_translate_status_name(IA64TranslateStatus status)
 {
     switch (status) {
@@ -576,15 +582,34 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
                             MMUAccessType access_type, int mmu_idx,
                             bool debug, IA64TranslateResult *result)
 {
-    return ia64_translate_address_with_cpl(
+    return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
-        ia64_current_privilege_level(env->psr), debug, result);
+        ia64_current_privilege_level(env->psr), debug, true, result);
+}
+
+bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
+                                      MMUAccessType access_type, int mmu_idx,
+                                      bool debug, IA64TranslateResult *result)
+{
+    return ia64_translate_address_common(
+        env, address, access_type, mmu_idx,
+        ia64_current_privilege_level(env->psr), debug, false, result);
 }
 
 bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
                                      MMUAccessType access_type, int mmu_idx,
                                      int cpl, bool debug,
                                      IA64TranslateResult *result)
+{
+    return ia64_translate_address_common(env, address, access_type, mmu_idx,
+                                         cpl, debug, true, result);
+}
+
+static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
+                                          MMUAccessType access_type,
+                                          int mmu_idx, int cpl, bool debug,
+                                          bool format_detail,
+                                          IA64TranslateResult *result)
 {
     bool instruction = access_type == MMU_INST_FETCH;
     bool needs_translation = ia64_translation_required(env->psr, access_type);
@@ -603,6 +628,9 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
     result->page_size = 12;
 
     IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE);
+    if (!format_detail) {
+        IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_NO_DETAIL);
+    }
     if (ia64_perf_enabled()) {
         ia64_perf_count_access_type(access_type);
     }
@@ -616,12 +644,14 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
         result->paddr = address & IA64_PHYSICAL_ADDRESS_MASK;
         result->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         result->identity = result->paddr == address;
-        snprintf(result->message, sizeof(result->message),
-                 result->identity
-                 ? "physical identity translation address=0x%016" VADDR_PRIx
-                 : "physical mode region-bit strip address=0x%016" VADDR_PRIx
-                   " paddr=0x%016" HWADDR_PRIx,
-                 address, result->paddr);
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     result->identity
+                     ? "physical identity translation address=0x%016" VADDR_PRIx
+                     : "physical mode region-bit strip address=0x%016" VADDR_PRIx
+                       " paddr=0x%016" HWADDR_PRIx,
+                     address, result->paddr);
+        }
         goto record;
     }
 
@@ -630,12 +660,14 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
     if (!entry) {
         result->status = IA64_TRANSLATE_TLB_MISS;
         ia64_trace_translation_miss(env, instruction, address, rr);
-        snprintf(result->message, sizeof(result->message),
-                 "%s %s TLB miss address=0x%016" VADDR_PRIx
-                 " region=%u rid=0x%x",
-                 instruction ? "instruction" : "data",
-                 result->vhpt_enabled ? "VHPT" : "alternate", address,
-                 result->region, ia64_region_id(rr));
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     "%s %s TLB miss address=0x%016" VADDR_PRIx
+                     " region=%u rid=0x%x",
+                     instruction ? "instruction" : "data",
+                     result->vhpt_enabled ? "VHPT" : "alternate", address,
+                     result->region, ia64_region_id(rr));
+        }
         goto record;
     }
 
@@ -646,29 +678,36 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
 
     if (!entry->present) {
         result->status = IA64_TRANSLATE_NOT_PRESENT;
-        snprintf(result->message, sizeof(result->message),
-                 "%s translation not present address=0x%016" VADDR_PRIx
-                 " paddr=0x%016" HWADDR_PRIx,
-                 instruction ? "instruction" : "data", address, result->paddr);
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     "%s translation not present address=0x%016" VADDR_PRIx
+                     " paddr=0x%016" HWADDR_PRIx,
+                     instruction ? "instruction" : "data", address,
+                     result->paddr);
+        }
         goto record;
     }
 
     if (!ia64_translation_allows(entry, access_type, cpl)) {
         result->status = IA64_TRANSLATE_ACCESS_DENIED;
-        snprintf(result->message, sizeof(result->message),
-                 "%s translation access denied address=0x%016" VADDR_PRIx
-                 " ar=%u pl=%u cpl=%d",
-                 instruction ? "instruction" : "data", address,
-                 entry->access_rights, entry->privilege_level, cpl);
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     "%s translation access denied address=0x%016" VADDR_PRIx
+                     " ar=%u pl=%u cpl=%d",
+                     instruction ? "instruction" : "data", address,
+                     entry->access_rights, entry->privilege_level, cpl);
+        }
         goto record;
     }
 
     result->status = IA64_TRANSLATE_OK;
-    snprintf(result->message, sizeof(result->message),
-             "%s translation address=0x%016" VADDR_PRIx
-             " paddr=0x%016" HWADDR_PRIx " ps=%u rid=0x%x ar=%u",
-             instruction ? "instruction" : "data", address, result->paddr,
-             entry->page_size, entry->rid, entry->access_rights);
+    if (format_detail) {
+        snprintf(result->message, sizeof(result->message),
+                 "%s translation address=0x%016" VADDR_PRIx
+                 " paddr=0x%016" HWADDR_PRIx " ps=%u rid=0x%x ar=%u",
+                 instruction ? "instruction" : "data", address, result->paddr,
+                 entry->page_size, entry->rid, entry->access_rights);
+    }
 
 record:
     env->memory.last_vaddr = result->vaddr;
