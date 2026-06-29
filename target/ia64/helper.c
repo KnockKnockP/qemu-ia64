@@ -26,6 +26,16 @@ void HELPER(perf_tb_exec)(void)
     IA64_PERF_INC(IA64_PERF_TB_EXECUTED);
 }
 
+void HELPER(perf_direct_branch_fallback)(void)
+{
+    IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
+}
+
+void HELPER(perf_tb_exit_main_loop)(void)
+{
+    IA64_PERF_INC(IA64_PERF_TB_EXIT_MAIN_LOOP);
+}
+
 #define IA64_LINUX_BREAK_SYSCALL UINT64_C(0x100000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
@@ -4643,6 +4653,39 @@ void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
     }
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
+}
+
+uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
+                                             uint64_t next_ip,
+                                             uint32_t taken,
+                                             uint32_t nop_count)
+{
+    CPUState *cpu = env_cpu(env);
+    bool chain_ok;
+
+    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_TRANSLATED);
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_SLOT, nop_count);
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_NOP, nop_count);
+    IA64_PERF_INC(IA64_PERF_OP_BRANCH_DIRECT);
+    IA64_PERF_INC(taken ? IA64_PERF_BRANCH_TAKEN :
+                           IA64_PERF_BRANCH_FALLTHROUGH);
+    IA64_PERF_INC(IA64_PERF_TB_EXIT_DIRECT_BRANCH);
+
+    cpu->neg.can_do_io = true;
+    ia64_trace_execve(env);
+    ia64_maybe_apply_linux_cmdline_append(env);
+    ia64_progress_trace_bundle(env);
+    ia64_state_trace_bundle(env);
+
+    env->gr[0] = 0;
+    ia64_finish_bundle(env, next_ip, 0);
+
+    chain_ok = cpu->interrupt_request == 0 &&
+               !qatomic_read(&cpu->exit_request);
+    IA64_PERF_INC(chain_ok ? IA64_PERF_TB_EXIT_CHAINED :
+                             IA64_PERF_TB_EXIT_MAIN_LOOP);
+    return chain_ok ? 1 : 0;
 }
 
 void HELPER(exec_bundle)(CPUIA64State *env,

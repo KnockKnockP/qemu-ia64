@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "cpu-param.h"
 #include "exec-smoke.h"
 #include "hw/ia64/efi.h"
 #include "perf.h"
@@ -8,6 +9,7 @@
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_TCG_FAST_GR_LIMIT 16
+#define IA64_TCG_TARGET_PAGE_MASK (~((UINT64_C(1) << TARGET_PAGE_BITS) - 1))
 
 enum {
     IA64_EFI_SERVICE_DESCRIPTOR_COUNT =
@@ -235,6 +237,110 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
     }
 
     return fast->slot_count == IA64_SLOT_COUNT;
+}
+
+static bool ia64_tcg_same_page(uint64_t left, uint64_t right)
+{
+    return ((left ^ right) & IA64_TCG_TARGET_PAGE_MASK) == 0;
+}
+
+static bool ia64_tcg_slot_is_direct_branch_nop(IA64SlotType type,
+                                               uint64_t raw)
+{
+    if (type == IA64_SLOT_TYPE_M || type == IA64_SLOT_TYPE_I) {
+        return ia64_exec_smoke_slot_supported(type, raw) ||
+               ia64_slot_is_i_nop(type, raw);
+    }
+
+    return false;
+}
+
+bool ia64_tcg_bundle_has_direct_branch(const IA64DecodedBundle *bundle)
+{
+    if (!bundle || !bundle->valid) {
+        return false;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        IA64SlotType type = bundle->info->slot_type[slot];
+        uint64_t raw = bundle->slot[slot];
+
+        if (ia64_slot_is_b_branch_relative(type, raw) ||
+            ia64_slot_is_b_call_relative(type, raw)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ia64_tcg_bundle_has_indirect_branch(const IA64DecodedBundle *bundle)
+{
+    if (!bundle || !bundle->valid) {
+        return false;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if (ia64_slot_is_b_indirect_branch(bundle->info->slot_type[slot],
+                                           bundle->slot[slot])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
+                                  uint64_t pc,
+                                  IA64TcgDirectBranch *branch)
+{
+    uint64_t raw;
+    uint64_t target;
+    uint64_t fallthrough;
+    uint8_t btype;
+    uint8_t predicate;
+
+    if (!bundle || !branch || !bundle->valid || bundle->info->long_immediate) {
+        return false;
+    }
+
+    /*
+     * Keep P05 branch lowering easy to audit: only MIB/MMB-style bundles with
+     * two harmless leading no-ops and a final simple relative branch can use
+     * direct TCG control flow.  Calls, returns, loop branches, branch-register
+     * targets, and rotating predicate reads stay on the helper path.
+     */
+    if (!ia64_tcg_slot_is_direct_branch_nop(bundle->info->slot_type[0],
+                                            bundle->slot[0]) ||
+        !ia64_tcg_slot_is_direct_branch_nop(bundle->info->slot_type[1],
+                                            bundle->slot[1]) ||
+        !ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
+                                        bundle->slot[2])) {
+        return false;
+    }
+
+    raw = bundle->slot[2];
+    btype = (raw >> 6) & 0x7;
+    predicate = ia64_slot_predicate(raw);
+    if (btype > 1 || predicate >= 16) {
+        return false;
+    }
+
+    fallthrough = pc + IA64_BUNDLE_SIZE;
+    target = pc + ia64_branch_displacement(raw);
+    if (target == 0 || !ia64_tcg_same_page(pc, target) ||
+        !ia64_tcg_same_page(pc, fallthrough)) {
+        return false;
+    }
+
+    memset(branch, 0, sizeof(*branch));
+    branch->target_ip = target;
+    branch->fallthrough_ip = fallthrough;
+    branch->slot = 2;
+    branch->predicate = predicate;
+    branch->nop_count = 2;
+    branch->conditional = predicate != 0;
+    return true;
 }
 
 static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,

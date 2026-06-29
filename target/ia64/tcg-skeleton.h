@@ -75,4 +75,19 @@ typedef struct IA64TcgFastBundle {
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast);
 
+typedef struct IA64TcgDirectBranch {
+    uint64_t target_ip;
+    uint64_t fallthrough_ip;
+    uint8_t slot;
+    uint8_t predicate;
+    uint8_t nop_count;
+    bool conditional;
+} IA64TcgDirectBranch;
+
+bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
+                                  uint64_t pc,
+                                  IA64TcgDirectBranch *branch);
+bool ia64_tcg_bundle_has_direct_branch(const IA64DecodedBundle *bundle);
+bool ia64_tcg_bundle_has_indirect_branch(const IA64DecodedBundle *bundle);
+
 #endif

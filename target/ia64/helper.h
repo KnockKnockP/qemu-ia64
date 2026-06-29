@@ -2,4 +2,7 @@
 DEF_HELPER_5(exec_bundle, void, env, i32, i64, i64, i64)
 DEF_HELPER_3(start_fast_bundle, void, env, i32, i32)
 DEF_HELPER_3(finish_fast_bundle, void, env, i64, i64)
+DEF_HELPER_4(finish_direct_branch_bundle, i32, env, i64, i32, i32)
+DEF_HELPER_0(perf_direct_branch_fallback, void)
+DEF_HELPER_0(perf_tb_exit_main_loop, void)
 DEF_HELPER_0(perf_tb_exec, void)

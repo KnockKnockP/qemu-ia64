@@ -201,6 +201,76 @@ static void test_fast_bundle_rejects_predicated_or_stacked_gr(void)
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 }
 
+static void test_direct_branch_accepts_p0_same_page(void)
+{
+    const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
+    IA64DecodedBundle bundle =
+        make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                    IA64_SMOKE_NOP_RAW, br_cond_raw);
+    IA64TcgDirectBranch branch;
+
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmphex(branch.target_ip, ==, 0x20d0);
+    g_assert_cmphex(branch.fallthrough_ip, ==, 0x2010);
+    g_assert_cmpuint(branch.slot, ==, 2);
+    g_assert_cmpuint(branch.predicate, ==, 0);
+    g_assert_cmpuint(branch.nop_count, ==, 2);
+    g_assert_false(branch.conditional);
+}
+
+static void test_direct_branch_accepts_predicate_to_next_bundle(void)
+{
+    const uint64_t br_cond_to_fallthrough_raw = 0x08600002006ULL;
+    IA64DecodedBundle bundle =
+        make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                    IA64_SMOKE_NOP_RAW, br_cond_to_fallthrough_raw);
+    IA64TcgDirectBranch branch;
+
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle,
+                                               0xa0000001003e9700ULL,
+                                               &branch));
+    g_assert_cmphex(branch.target_ip, ==, 0xa0000001003e9710ULL);
+    g_assert_cmphex(branch.fallthrough_ip, ==, 0xa0000001003e9710ULL);
+    g_assert_cmpuint(branch.predicate, ==, 6);
+    g_assert_true(branch.conditional);
+}
+
+static void test_direct_branch_rejects_unsafe_forms(void)
+{
+    const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
+    const uint64_t br_cloop_raw = 0x091ffffc140ULL;
+    const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    IA64DecodedBundle bundle;
+    IA64TcgDirectBranch branch;
+
+    bundle = make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                         IA64_SMOKE_NOP_RAW, br_cloop_raw);
+    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+
+    bundle = make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                         IA64_SMOKE_NOP_RAW, br_cond_raw | 16);
+    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+
+    bundle = make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                         IA64_SMOKE_NOP_RAW, br_ret_b0_raw);
+    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_true(ia64_tcg_bundle_has_indirect_branch(&bundle));
+}
+
+static void test_direct_branch_rejects_page_crossing(void)
+{
+    const uint64_t br_cond_to_fallthrough_raw =
+        0x08600002006ULL & ~0x3fULL;
+    uint64_t pc = 0x1000 - IA64_BUNDLE_SIZE;
+    IA64DecodedBundle bundle =
+        make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                    IA64_SMOKE_NOP_RAW, br_cond_to_fallthrough_raw);
+    IA64TcgDirectBranch branch;
+
+    g_assert_false(ia64_tcg_build_direct_branch(&bundle, pc, &branch));
+    g_assert_true(ia64_tcg_bundle_has_direct_branch(&bundle));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -221,6 +291,14 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_nop_and_add_immediate);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-rejects-unsafe",
                     test_fast_bundle_rejects_predicated_or_stacked_gr);
+    g_test_add_func("/ia64-tcg-skeleton/direct-branch-p0-same-page",
+                    test_direct_branch_accepts_p0_same_page);
+    g_test_add_func("/ia64-tcg-skeleton/direct-branch-predicate-next",
+                    test_direct_branch_accepts_predicate_to_next_bundle);
+    g_test_add_func("/ia64-tcg-skeleton/direct-branch-rejects-unsafe",
+                    test_direct_branch_rejects_unsafe_forms);
+    g_test_add_func("/ia64-tcg-skeleton/direct-branch-rejects-page-crossing",
+                    test_direct_branch_rejects_page_crossing);
 
     return g_test_run();
 }
