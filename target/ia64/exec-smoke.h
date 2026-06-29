@@ -221,6 +221,7 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value);
 bool ia64_read_pr(CPUIA64State *env, uint32_t predicate);
 void ia64_write_pr(CPUIA64State *env, uint32_t predicate, bool value);
 void ia64_advance_itc(CPUIA64State *env, uint64_t ticks);
+bool ia64_advance_itc_and_check_timer(CPUIA64State *env, uint64_t ticks);
 bool ia64_timer_interrupt_due(CPUIA64State *env);
 void ia64_latch_timer_interrupt(CPUIA64State *env);
 bool ia64_queue_external_interrupt(CPUIA64State *env, uint64_t vector);

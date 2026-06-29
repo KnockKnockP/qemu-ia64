@@ -5,6 +5,7 @@
 #include "exception.h"
 #include "exec-smoke.h"
 #include "mem.h"
+#include "perf.h"
 #include "qemu/host-utils.h"
 #include "trace-target_ia64.h"
 
@@ -1578,7 +1579,9 @@ bool ia64_timer_interrupt_due(CPUIA64State *env)
 {
     uint64_t vector;
 
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_CHECK);
     if (!ia64_timer_compare_due(env)) {
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_FAST_NOT_DUE);
         return false;
     }
 
@@ -1588,11 +1591,40 @@ bool ia64_timer_interrupt_due(CPUIA64State *env)
         return false;
     }
 
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_DUE);
+    return true;
+}
+
+bool ia64_advance_itc_and_check_timer(CPUIA64State *env, uint64_t ticks)
+{
+    uint64_t vector;
+
+    if (!env) {
+        return false;
+    }
+
+    env->ar[IA64_AR_ITC] += ticks;
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_CHECK);
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_CHECK);
+
+    if (!ia64_timer_compare_due(env)) {
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_FAST_NOT_DUE);
+        return false;
+    }
+
+    vector = ia64_timer_vector(env);
+    if (ia64_interrupt_vector_active(env, vector) ||
+        ia64_interrupt_vector_pending(env, vector)) {
+        return false;
+    }
+
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_DUE);
     return true;
 }
 
 void ia64_latch_timer_interrupt(CPUIA64State *env)
 {
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_LATCHED);
     ia64_queue_external_interrupt(env, ia64_timer_vector(env));
 }
 

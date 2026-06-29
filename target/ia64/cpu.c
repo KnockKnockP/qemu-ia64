@@ -125,6 +125,7 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     IA64CPU *cpu = IA64_CPU(cs);
     CPUIA64State *env = &cpu->env;
 
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_CHECK);
     if ((interrupt_request & CPU_INTERRUPT_HARD) == 0 &&
         !ia64_external_interrupt_pending(env)) {
         return false;
@@ -136,6 +137,7 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
 
     if (!ia64_external_interrupt_enabled(env)) {
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
         return false;
     }
 
