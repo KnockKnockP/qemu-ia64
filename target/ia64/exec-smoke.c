@@ -183,8 +183,7 @@ uint32_t ia64_rse_dirty_partition_first_slot(CPUIA64State *env,
         return 0;
     }
 
-    return (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
-            (count % IA64_STACKED_GR_COUNT)) % IA64_STACKED_GR_COUNT;
+    return ia64_rse_wrap_slot(env->rse.current_frame_base - count);
 }
 
 void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
@@ -214,7 +213,7 @@ void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
     for (uint32_t i = 0; i < count; i++) {
         address = ia64_rse_reg_address(address);
         if (dirty_start == 0 || address < dirty_start || address >= dirty_end) {
-            env->rse.stacked_gr[(first_slot + i) % IA64_STACKED_GR_COUNT] =
+            env->rse.stacked_gr[ia64_rse_wrap_slot(first_slot + i)] =
                 read_register(env, address, opaque);
         }
         address += 8;
@@ -328,7 +327,7 @@ static uint32_t ia64_stacked_gr_slot(CPUIA64State *env, uint32_t reg)
     }
 
     slot = env->rse.current_frame_base + offset;
-    return slot % IA64_STACKED_GR_COUNT;
+    return ia64_rse_wrap_slot(slot);
 }
 
 uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg)
@@ -442,13 +441,27 @@ static void ia64_rse_invalidate(CPUIA64State *env, uint32_t first,
                                 uint32_t last)
 {
     uint32_t count;
+    uint32_t tail_count;
 
     if (last < first) {
         last += IA64_STACKED_GR_COUNT;
     }
     count = MIN(last - first, (uint32_t)IA64_STACKED_GR_COUNT);
-    for (uint32_t i = 0; i < count; i++) {
-        env->rse.stacked_gr[(first + i) % IA64_STACKED_GR_COUNT] = 0;
+    if (count == 0) {
+        return;
+    }
+    if (count == IA64_STACKED_GR_COUNT) {
+        memset(env->rse.stacked_gr, 0, sizeof(env->rse.stacked_gr));
+        return;
+    }
+
+    first = ia64_rse_wrap_slot(first);
+    tail_count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT - first);
+    memset(&env->rse.stacked_gr[first], 0,
+           tail_count * sizeof(env->rse.stacked_gr[0]));
+    if (tail_count < count) {
+        memset(env->rse.stacked_gr, 0,
+               (count - tail_count) * sizeof(env->rse.stacked_gr[0]));
     }
 }
 
@@ -4757,7 +4770,7 @@ static void ia64_cover_stack_frame(CPUIA64State *env)
     uint32_t covered_sof = env->rse.sof;
 
     env->rse.current_frame_base =
-        (env->rse.current_frame_base + covered_sof) % IA64_STACKED_GR_COUNT;
+        ia64_rse_wrap_slot(env->rse.current_frame_base + covered_sof);
     ia64_rse_preserve_frame(env, covered_sof);
     ia64_set_cfm(env, 0);
     if ((env->psr & IA64_PSR_IC_BIT) == 0) {
@@ -4770,8 +4783,7 @@ static void ia64_uncover_stack_frame(CPUIA64State *env, uint64_t restored_cfm)
     uint32_t restored_sof = restored_cfm & 0x7f;
 
     env->rse.current_frame_base =
-        (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
-         restored_sof) % IA64_STACKED_GR_COUNT;
+        ia64_rse_wrap_slot(env->rse.current_frame_base - restored_sof);
     ia64_rse_restore_preserved_frame(env, restored_sof);
     env->rse.clean_count = MIN(env->rse.clean_count,
                                env->rse.current_frame_base);
@@ -4915,7 +4927,7 @@ static void ia64_enter_call_frame(CPUIA64State *env)
 
     env->ar[IA64_AR_PFS] = caller_cfm;
     env->rse.current_frame_base =
-        (env->rse.current_frame_base + caller_sol) % IA64_STACKED_GR_COUNT;
+        ia64_rse_wrap_slot(env->rse.current_frame_base + caller_sol);
     ia64_rse_preserve_frame(env, caller_sol);
     ia64_set_cfm(env, ia64_make_cfm(output_count, 0, 0));
 }
@@ -4926,8 +4938,7 @@ static void ia64_restore_frame_from_pfs(CPUIA64State *env)
     uint32_t restored_sof = ia64_cfm_sof(restored_cfm);
     uint32_t restored_sol = ia64_cfm_sol(restored_cfm);
     uint32_t caller_base =
-        (env->rse.current_frame_base + IA64_STACKED_GR_COUNT -
-         restored_sol) % IA64_STACKED_GR_COUNT;
+        ia64_rse_wrap_slot(env->rse.current_frame_base - restored_sol);
 
     ia64_rse_invalidate(env, caller_base + restored_sof,
                         env->rse.current_frame_base + 96);

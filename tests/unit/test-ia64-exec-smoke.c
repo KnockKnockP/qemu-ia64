@@ -2422,6 +2422,68 @@ static void test_b_unit_indirect_return_wraps_frame_base(void)
     g_assert_cmphex(env.rse.stacked_gr[3], ==, 0);
 }
 
+static void test_b_unit_indirect_return_invalidates_contiguous_window(void)
+{
+    const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_set_cfm(&env, ia64_make_cfm(1, 0, 0));
+    env.rse.current_frame_base = 20;
+    env.ar[IA64_AR_PFS] = ia64_make_cfm(4, 4, 0);
+    env.br[0] = 0x1001047;
+    for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
+        env.rse.stacked_gr[i] = 0xfeed000000000000ULL | i;
+    }
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, br_ret_b0_raw, 0x2000,
+                                              &target));
+
+    g_assert_cmpuint(env.rse.current_frame_base, ==, 16);
+    g_assert_cmphex(env.rse.stacked_gr[19], ==,
+                    0xfeed000000000000ULL | 19);
+    for (uint32_t i = 20; i < 116; i++) {
+        g_assert_cmphex(env.rse.stacked_gr[i], ==, 0);
+    }
+    g_assert_cmphex(env.rse.stacked_gr[116], ==,
+                    0xfeed000000000000ULL | 116);
+}
+
+static void test_b_unit_indirect_return_invalidates_wrapped_window(void)
+{
+    const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    CPUIA64State env;
+    uint64_t target = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_set_cfm(&env, ia64_make_cfm(1, 0, 0));
+    env.rse.current_frame_base = IA64_STACKED_GR_COUNT - 4;
+    env.ar[IA64_AR_PFS] = ia64_make_cfm(4, 4, 0);
+    env.br[0] = 0x1001047;
+    for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
+        env.rse.stacked_gr[i] = 0xbeef000000000000ULL | i;
+    }
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, br_ret_b0_raw, 0x2000,
+                                              &target));
+
+    g_assert_cmpuint(env.rse.current_frame_base, ==,
+                     IA64_STACKED_GR_COUNT - 8);
+    g_assert_cmphex(env.rse.stacked_gr[IA64_STACKED_GR_COUNT - 5], ==,
+                    0xbeef000000000000ULL |
+                    (IA64_STACKED_GR_COUNT - 5));
+    for (uint32_t i = IA64_STACKED_GR_COUNT - 4;
+         i < IA64_STACKED_GR_COUNT; i++) {
+        g_assert_cmphex(env.rse.stacked_gr[i], ==, 0);
+    }
+    for (uint32_t i = 0; i < 92; i++) {
+        g_assert_cmphex(env.rse.stacked_gr[i], ==, 0);
+    }
+    g_assert_cmphex(env.rse.stacked_gr[92], ==,
+                    0xbeef000000000000ULL | 92);
+}
+
 static void test_b_unit_indirect_return_retreats_clean_bsp(void)
 {
     const uint64_t br_ret_b0_raw = 0x00108000100ULL;
@@ -2881,6 +2943,10 @@ int main(int argc, char **argv)
                     test_b_unit_indirect_return);
     g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-wrap",
                     test_b_unit_indirect_return_wraps_frame_base);
+    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-contiguous-invalidate",
+                    test_b_unit_indirect_return_invalidates_contiguous_window);
+    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-wrapped-invalidate",
+                    test_b_unit_indirect_return_invalidates_wrapped_window);
     g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-clean-bsp",
                     test_b_unit_indirect_return_retreats_clean_bsp);
     g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-clean-boundary",

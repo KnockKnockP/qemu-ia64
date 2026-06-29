@@ -7,6 +7,16 @@
 #include "mem.h"
 
 #define IA64_SMOKE_NOP_RAW 0x08000000ULL
+#define IA64_STACKED_GR_MASK (IA64_STACKED_GR_COUNT - 1)
+
+#if (IA64_STACKED_GR_COUNT & IA64_STACKED_GR_MASK) != 0
+#error "IA64_STACKED_GR_COUNT must remain a power of two"
+#endif
+
+static inline uint32_t ia64_rse_wrap_slot(uint32_t slot)
+{
+    return slot & IA64_STACKED_GR_MASK;
+}
 
 typedef enum IA64ExecSmokeStatus {
     IA64_EXEC_SMOKE_OK,

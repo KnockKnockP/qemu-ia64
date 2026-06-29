@@ -4233,8 +4233,8 @@ static void ia64_exec_flushrs(CPUIA64State *env)
     for (uint32_t i = 0; i < dirty; i++) {
         address = ia64_rse_reg_address(address);
         ia64_ldst_write(env, address, 8,
-                        env->rse.stacked_gr[(first_slot + i) %
-                                            IA64_STACKED_GR_COUNT]);
+                        env->rse.stacked_gr[
+                            ia64_rse_wrap_slot(first_slot + i)]);
         address += 8;
     }
 
@@ -4310,8 +4310,8 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
             /* This register and every higher one are still resident. */
             break;
         }
-        env->rse.stacked_gr[(env->rse.current_frame_base + i) %
-                            IA64_STACKED_GR_COUNT] =
+        env->rse.stacked_gr[
+            ia64_rse_wrap_slot(env->rse.current_frame_base + i)] =
             ia64_ldst_read(env, address, 8);
         filled++;
         address = ia64_rse_reg_address(address + 8);
