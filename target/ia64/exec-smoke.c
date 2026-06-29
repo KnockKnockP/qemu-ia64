@@ -92,6 +92,23 @@ void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
     *next_ip = env->ip;
 }
 
+bool ia64_pal_uses_stacked_calling_convention(uint64_t function_id)
+{
+    switch (function_id) {
+    case 257: /* PAL_HALT_INFO */
+    case 259: /* PAL_CACHE_READ */
+    case 260: /* PAL_CACHE_WRITE */
+    case 261: /* PAL_VM_TR_READ */
+    case 262: /* PAL_GET_PSTATE */
+    case 263: /* PAL_SET_PSTATE */
+    case 274: /* PAL_BRAND_INFO */
+    case 276: /* PAL_MC_ERROR_INJECT */
+        return true;
+    default:
+        return false;
+    }
+}
+
 const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status)
 {
     switch (status) {

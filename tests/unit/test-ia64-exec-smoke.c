@@ -118,6 +118,25 @@ static void test_banked_static_general_registers(void)
     g_assert_cmphex(ia64_read_gr(&env, 31), ==, 0x3232);
 }
 
+static void test_pal_calling_convention_table(void)
+{
+    g_assert_false(ia64_pal_uses_stacked_calling_convention(1));
+    g_assert_false(ia64_pal_uses_stacked_calling_convention(20));
+    g_assert_false(ia64_pal_uses_stacked_calling_convention(256));
+    g_assert_false(ia64_pal_uses_stacked_calling_convention(258));
+    g_assert_false(ia64_pal_uses_stacked_calling_convention(
+        UINT64_C(0x6000000000017050)));
+
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(257));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(259));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(260));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(261));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(262));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(263));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(274));
+    g_assert_true(ia64_pal_uses_stacked_calling_convention(276));
+}
+
 static void test_banked_register_switch_via_bsw(void)
 {
     const uint64_t bsw_0_raw = 0x0cULL << 27;
@@ -2819,6 +2838,8 @@ int main(int argc, char **argv)
     g_test_add_func("/ia64-exec-smoke/reset", test_reset);
     g_test_add_func("/ia64-exec-smoke/banked-static-gr",
                     test_banked_static_general_registers);
+    g_test_add_func("/ia64-exec-smoke/pal-calling-convention-table",
+                    test_pal_calling_convention_table);
     g_test_add_func("/ia64-exec-smoke/banked-bsw-visibility",
                     test_banked_register_switch_via_bsw);
     g_test_add_func("/ia64-exec-smoke/syscall-break-user-to-kernel",

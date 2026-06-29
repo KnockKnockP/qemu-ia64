@@ -205,6 +205,7 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env);
 void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env);
 void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
                                      uint64_t *next_ip, const char *detail);
+bool ia64_pal_uses_stacked_calling_convention(uint64_t function_id);
 
 const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status);
 bool ia64_exec_smoke_slot_supported(IA64SlotType type, uint64_t raw);

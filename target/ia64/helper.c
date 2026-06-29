@@ -580,8 +580,16 @@ typedef enum IA64PalProcedureId {
     IA64_PAL_LOGICAL_TO_PHYSICAL = 42,
     IA64_PAL_CACHE_SHARED_INFO = 43,
     IA64_PAL_SHUTDOWN = 44,
+    IA64_PAL_COPY_PAL = 256,
     IA64_PAL_HALT_INFO = 257,
+    IA64_PAL_TEST_PROC = 258,
+    IA64_PAL_CACHE_READ = 259,
+    IA64_PAL_CACHE_WRITE = 260,
+    IA64_PAL_VIRTUAL_MEMORY_TR_READ = 261,
+    IA64_PAL_GET_PSTATE = 262,
+    IA64_PAL_SET_PSTATE = 263,
     IA64_PAL_BRAND_INFO = 274,
+    IA64_PAL_MACHINE_CHECK_ERROR_INJECT = 276,
 } IA64PalProcedureId;
 
 typedef enum IA64SalProcedureId {
@@ -1317,10 +1325,26 @@ static const char *pal_procedure_name(uint64_t function_id)
         return "PAL_CACHE_SHARED_INFO";
     case IA64_PAL_SHUTDOWN:
         return "PAL_SHUTDOWN";
+    case IA64_PAL_COPY_PAL:
+        return "PAL_COPY_PAL";
     case IA64_PAL_HALT_INFO:
         return "PAL_HALT_INFO";
+    case IA64_PAL_TEST_PROC:
+        return "PAL_TEST_PROC";
+    case IA64_PAL_CACHE_READ:
+        return "PAL_CACHE_READ";
+    case IA64_PAL_CACHE_WRITE:
+        return "PAL_CACHE_WRITE";
+    case IA64_PAL_VIRTUAL_MEMORY_TR_READ:
+        return "PAL_VM_TR_READ";
+    case IA64_PAL_GET_PSTATE:
+        return "PAL_GET_PSTATE";
+    case IA64_PAL_SET_PSTATE:
+        return "PAL_SET_PSTATE";
     case IA64_PAL_BRAND_INFO:
         return "PAL_BRAND_INFO";
+    case IA64_PAL_MACHINE_CHECK_ERROR_INJECT:
+        return "PAL_MC_ERROR_INJECT";
     default:
         return "PAL_UNKNOWN";
     }
@@ -1488,6 +1512,15 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_PLATFORM_ADDR:
     case IA64_PAL_SHUTDOWN:
         return firmware_success(0, 0, 0);
+    case IA64_PAL_COPY_PAL:
+    case IA64_PAL_TEST_PROC:
+    case IA64_PAL_CACHE_READ:
+    case IA64_PAL_CACHE_WRITE:
+    case IA64_PAL_VIRTUAL_MEMORY_TR_READ:
+    case IA64_PAL_GET_PSTATE:
+    case IA64_PAL_SET_PSTATE:
+    case IA64_PAL_MACHINE_CHECK_ERROR_INJECT:
+        return firmware_status(IA64_FIRMWARE_STATUS_UNIMPLEMENTED);
     case IA64_PAL_CACHE_INFO:
         return pal_cache_info(arg0, arg1);
     case IA64_PAL_CACHE_SUMMARY:
@@ -1544,7 +1577,7 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
 
 static bool pal_uses_static_calling_convention(uint64_t function_id)
 {
-    return ((function_id >> 8) & 1) == 0;
+    return !ia64_pal_uses_stacked_calling_convention(function_id);
 }
 
 static IA64FirmwareResult dispatch_sal(uint64_t function_id)
@@ -1710,6 +1743,16 @@ static void ia64_perf_count_pal_call(uint64_t function_id)
         break;
     case IA64_PAL_SHUTDOWN:
         ia64_perf_count(IA64_PERF_FIRMWARE_PAL_SHUTDOWN);
+        break;
+    case IA64_PAL_COPY_PAL:
+    case IA64_PAL_TEST_PROC:
+    case IA64_PAL_CACHE_READ:
+    case IA64_PAL_CACHE_WRITE:
+    case IA64_PAL_VIRTUAL_MEMORY_TR_READ:
+    case IA64_PAL_GET_PSTATE:
+    case IA64_PAL_SET_PSTATE:
+    case IA64_PAL_MACHINE_CHECK_ERROR_INJECT:
+        ia64_perf_count(IA64_PERF_FIRMWARE_PAL_OTHER);
         break;
     case IA64_PAL_HALT_INFO:
         ia64_perf_count(IA64_PERF_FIRMWARE_PAL_HALT_INFO);
