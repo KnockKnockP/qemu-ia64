@@ -26,7 +26,9 @@ bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
 {
     uint64_t offset;
 
-    pc &= IA64_REGION_OFFSET_MASK;
+    if ((pc & ~IA64_REGION_OFFSET_MASK) != 0) {
+        return false;
+    }
     if (pc == VIBTANIUM_EFI_PAL_PROC || pc == VIBTANIUM_EFI_SAL_PROC) {
         return true;
     }

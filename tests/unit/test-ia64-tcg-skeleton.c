@@ -141,6 +141,10 @@ static void test_invalid_template_ends_tb(void)
 static void test_efi_call_gate_ends_tb(void)
 {
     IA64DecodedBundle bundle = make_bundle(0x16, 0, 0, 0);
+    uint64_t region4_pal_alias = UINT64_C(0x4000000000000000) |
+                                 VIBTANIUM_EFI_PAL_PROC;
+    uint64_t region4_service_alias = UINT64_C(0x4000000000000000) |
+                                     VIBTANIUM_EFI_CALL_GATE_BASE;
     uint64_t last_service_gate =
         VIBTANIUM_EFI_CALL_GATE_BASE +
         (IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT - 1) * IA64_BUNDLE_SIZE;
@@ -162,6 +166,10 @@ static void test_efi_call_gate_ends_tb(void)
     g_assert_false(ia64_tcg_pc_is_efi_call_gate(
         VIBTANIUM_EFI_CALL_GATE_BASE + 1));
     g_assert_false(ia64_tcg_pc_is_efi_call_gate(after_last_service_gate));
+    g_assert_false(ia64_tcg_pc_is_efi_call_gate(region4_pal_alias));
+    g_assert_false(ia64_tcg_pc_is_efi_call_gate(region4_service_alias));
+    assert_boundary(IA64_TCG_TB_BOUNDARY_NONE, &bundle, region4_pal_alias);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_NONE, &bundle, region4_service_alias);
 }
 
 static void test_break_and_branch_end_tb(void)
