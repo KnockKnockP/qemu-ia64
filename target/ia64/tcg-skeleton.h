@@ -141,6 +141,7 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle);
 
 typedef struct IA64TcgDirectBranch {
+    IA64TcgFastBundle prefix;
     uint64_t target_ip;
     uint64_t fallthrough_ip;
     uint8_t slot;

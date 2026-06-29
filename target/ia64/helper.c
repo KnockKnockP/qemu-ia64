@@ -43,6 +43,11 @@ void HELPER(perf_tb_exit_main_loop)(void)
     IA64_PERF_INC(IA64_PERF_TB_EXIT_MAIN_LOOP);
 }
 
+void HELPER(perf_tb_exit_chained)(void)
+{
+    IA64_PERF_INC(IA64_PERF_TB_EXIT_CHAINED);
+}
+
 void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip)
 {
     CPUState *cpu = env_cpu(env);
@@ -4730,13 +4735,12 @@ static void ia64_trace_execve(CPUIA64State *env)
             path, ia64_read_gr(env, 13), env->br[0]);
 }
 
-void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
-                               uint32_t op_counts)
+static void ia64_count_fast_tcg_ops(uint32_t slot_count, uint32_t op_counts,
+                                    bool count_bundle)
 {
-    CPUState *cpu = env_cpu(env);
-
-    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
-    IA64_PERF_INC(IA64_PERF_TCG_FAST_BUNDLE);
+    if (count_bundle) {
+        IA64_PERF_INC(IA64_PERF_TCG_FAST_BUNDLE);
+    }
     IA64_PERF_ADD(IA64_PERF_TCG_FAST_SLOT, slot_count);
     IA64_PERF_ADD(IA64_PERF_TCG_FAST_NOP,
                   ia64_perf_fast_count(op_counts,
@@ -4762,6 +4766,15 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
     IA64_PERF_ADD(IA64_PERF_TCG_LDST_STORE,
                   ia64_perf_fast_count(op_counts,
                                        IA64_PERF_FAST_COUNT_LDST_STORE_SHIFT));
+}
+
+void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
+                               uint32_t op_counts)
+{
+    CPUState *cpu = env_cpu(env);
+
+    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    ia64_count_fast_tcg_ops(slot_count, op_counts, true);
 
     cpu->neg.can_do_io = true;
     ia64_trace_execve(env);
@@ -4791,15 +4804,16 @@ void HELPER(finish_fast_store)(CPUIA64State *env, uint64_t address,
 uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
                                              uint64_t next_ip,
                                              uint32_t taken,
-                                             uint32_t nop_count)
+                                             uint32_t prefix_slot_count,
+                                             uint32_t prefix_op_counts,
+                                             uint64_t prefix_dest_mask)
 {
     CPUState *cpu = env_cpu(env);
     bool chain_ok;
 
     IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
     IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_TRANSLATED);
-    IA64_PERF_ADD(IA64_PERF_TCG_FAST_SLOT, nop_count);
-    IA64_PERF_ADD(IA64_PERF_TCG_FAST_NOP, nop_count);
+    ia64_count_fast_tcg_ops(prefix_slot_count, prefix_op_counts, false);
     IA64_PERF_INC(IA64_PERF_OP_BRANCH_DIRECT);
     IA64_PERF_INC(taken ? IA64_PERF_BRANCH_TAKEN :
                            IA64_PERF_BRANCH_FALLTHROUGH);
@@ -4811,6 +4825,11 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
     ia64_progress_trace_bundle(env);
     ia64_state_trace_bundle(env);
 
+    for (unsigned reg = 1; reg < 64; reg++) {
+        if (prefix_dest_mask & (1ULL << reg)) {
+            ia64_alat_invalidate_gr(env, reg);
+        }
+    }
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
 

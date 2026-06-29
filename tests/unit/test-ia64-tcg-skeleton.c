@@ -66,6 +66,7 @@ static const IA64HelperFlagInfo helper_flag_info[] = {
 #define DEF_HELPER_3(name, ret, t1, t2, t3) { #name, 0 },
 #define DEF_HELPER_4(name, ret, t1, t2, t3, t4) { #name, 0 },
 #define DEF_HELPER_5(name, ret, t1, t2, t3, t4, t5) { #name, 0 },
+#define DEF_HELPER_6(name, ret, t1, t2, t3, t4, t5, t6) { #name, 0 },
 #define DEF_HELPER_FLAGS_0(name, flags, ret) { #name, flags },
 #define DEF_HELPER_FLAGS_1(name, flags, ret, t1) { #name, flags },
 #define DEF_HELPER_FLAGS_2(name, flags, ret, t1, t2) { #name, flags },
@@ -73,13 +74,17 @@ static const IA64HelperFlagInfo helper_flag_info[] = {
 #define DEF_HELPER_FLAGS_4(name, flags, ret, t1, t2, t3, t4) { #name, flags },
 #define DEF_HELPER_FLAGS_5(name, flags, ret, t1, t2, t3, t4, t5) \
     { #name, flags },
+#define DEF_HELPER_FLAGS_6(name, flags, ret, t1, t2, t3, t4, t5, t6) \
+    { #name, flags },
 #include "target/ia64/helper.h"
+#undef DEF_HELPER_FLAGS_6
 #undef DEF_HELPER_FLAGS_5
 #undef DEF_HELPER_FLAGS_4
 #undef DEF_HELPER_FLAGS_3
 #undef DEF_HELPER_FLAGS_2
 #undef DEF_HELPER_FLAGS_1
 #undef DEF_HELPER_FLAGS_0
+#undef DEF_HELPER_6
 #undef DEF_HELPER_5
 #undef DEF_HELPER_4
 #undef DEF_HELPER_3
@@ -111,6 +116,8 @@ static void test_helper_flags_are_conservative(void)
     g_assert_cmphex(helper_flags_for("perf_direct_branch_fallback"),
                     ==, TCG_CALL_NO_RWG);
     g_assert_cmphex(helper_flags_for("perf_tcg_ldst_fallback"),
+                    ==, TCG_CALL_NO_RWG);
+    g_assert_cmphex(helper_flags_for("perf_tb_exit_chained"),
                     ==, TCG_CALL_NO_RWG);
     g_assert_cmphex(helper_flags_for("perf_tb_exit_main_loop"),
                     ==, TCG_CALL_NO_RWG);
@@ -675,7 +682,40 @@ static void test_direct_branch_accepts_p0_same_page(void)
     g_assert_cmpuint(branch.slot, ==, 2);
     g_assert_cmpuint(branch.predicate, ==, 0);
     g_assert_cmpuint(branch.nop_count, ==, 2);
+    g_assert_cmpuint(branch.prefix.slot_count, ==, 2);
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         branch.prefix.op_counts,
+                         IA64_PERF_FAST_COUNT_NOP_SHIFT), ==, 2);
     g_assert_false(branch.conditional);
+}
+
+static void test_direct_branch_accepts_fast_prefix(void)
+{
+    const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
+    const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
+    const uint64_t add_r4_r5_r6_raw =
+        (8ULL << 37) | (6ULL << 20) | (5ULL << 13) | (4ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x10, ld8_r2_r3_raw, add_r4_r5_r6_raw, br_cond_raw);
+    IA64TcgDirectBranch branch;
+
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmphex(branch.target_ip, ==, 0x20d0);
+    g_assert_cmphex(branch.fallthrough_ip, ==, 0x2010);
+    g_assert_cmpuint(branch.nop_count, ==, 0);
+    g_assert_cmpuint(branch.prefix.slot_count, ==, 2);
+    g_assert_cmpint(branch.prefix.slot[0].op, ==,
+                    IA64_TCG_FAST_OP_LDST_LOAD);
+    g_assert_cmpint(branch.prefix.slot[1].op, ==,
+                    IA64_TCG_FAST_OP_ALU_ADD);
+    g_assert_cmphex(branch.prefix.dest_mask, ==,
+                    (1ULL << 2) | (1ULL << 4));
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         branch.prefix.op_counts,
+                         IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT), ==, 1);
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         branch.prefix.op_counts,
+                         IA64_PERF_FAST_COUNT_ALU_ADD_SHIFT), ==, 1);
 }
 
 static void test_direct_branch_accepts_predicate_to_next_bundle(void)
@@ -700,6 +740,11 @@ static void test_direct_branch_rejects_unsafe_forms(void)
     const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
     const uint64_t br_cloop_raw = 0x091ffffc140ULL;
     const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    const uint64_t cmp_eq_p6_p7_r20_r21_raw =
+        make_cmp_eq_parallel_p6_p7_r20_r21(0xd);
+    const uint64_t add_r3_r3_r4_raw =
+        (8ULL << 37) | (4ULL << 20) | (3ULL << 13) | (3ULL << 6);
+    const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
     IA64DecodedBundle bundle;
     IA64TcgDirectBranch branch;
 
@@ -715,6 +760,15 @@ static void test_direct_branch_rejects_unsafe_forms(void)
                          IA64_SMOKE_NOP_RAW, br_ret_b0_raw);
     g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
     g_assert_true(ia64_tcg_bundle_has_indirect_branch(&bundle));
+
+    bundle = make_bundle(0x10, cmp_eq_p6_p7_r20_r21_raw,
+                         IA64_SMOKE_NOP_RAW, 0x08600002006ULL);
+    g_assert_false(ia64_tcg_build_direct_branch(
+                       &bundle, 0xa0000001003e9700ULL, &branch));
+
+    bundle = make_bundle(0x18, add_r3_r3_r4_raw,
+                         ld8_r2_r3_raw, br_cond_raw);
+    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
 }
 
 static void test_direct_branch_rejects_page_crossing(void)
@@ -812,6 +866,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_rejects_unsafe_ldst);
     g_test_add_func("/ia64-tcg-skeleton/direct-branch-p0-same-page",
                     test_direct_branch_accepts_p0_same_page);
+    g_test_add_func("/ia64-tcg-skeleton/direct-branch-fast-prefix",
+                    test_direct_branch_accepts_fast_prefix);
     g_test_add_func("/ia64-tcg-skeleton/direct-branch-predicate-next",
                     test_direct_branch_accepts_predicate_to_next_bundle);
     g_test_add_func("/ia64-tcg-skeleton/direct-branch-rejects-unsafe",

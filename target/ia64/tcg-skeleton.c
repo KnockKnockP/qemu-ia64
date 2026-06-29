@@ -976,15 +976,59 @@ static bool ia64_tcg_same_page(uint64_t left, uint64_t right)
     return ((left ^ right) & IA64_TCG_TARGET_PAGE_MASK) == 0;
 }
 
-static bool ia64_tcg_slot_is_direct_branch_nop(IA64SlotType type,
-                                               uint64_t raw)
+static bool ia64_tcg_fast_slot_writes_predicate(const IA64TcgFastSlot *slot,
+                                                uint8_t predicate)
 {
-    if (type == IA64_SLOT_TYPE_M || type == IA64_SLOT_TYPE_I) {
-        return ia64_exec_smoke_slot_supported(type, raw) ||
-               ia64_slot_is_i_nop(type, raw);
+    if (predicate == 0) {
+        return false;
     }
 
-    return false;
+    switch (slot->op) {
+    case IA64_TCG_FAST_OP_COMPARE:
+    case IA64_TCG_FAST_OP_PREDICATE_TEST:
+        return slot->predicate1 == predicate || slot->predicate2 == predicate;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_tcg_build_direct_branch_prefix(
+    const IA64DecodedBundle *bundle, uint8_t predicate,
+    IA64TcgFastBundle *prefix)
+{
+    uint64_t prior_dest_mask = 0;
+
+    memset(prefix, 0, sizeof(*prefix));
+    for (int slot = 0; slot < 2; slot++) {
+        if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
+                                      bundle->slot[slot],
+                                      slot,
+                                      &prefix->slot[slot], prefix)) {
+            return false;
+        }
+        if (ia64_tcg_fast_slot_has_prior_base_dependency(&prefix->slot[slot],
+                                                         prior_dest_mask)) {
+            return false;
+        }
+        if (ia64_tcg_fast_slot_writes_predicate(&prefix->slot[slot],
+                                                predicate)) {
+            return false;
+        }
+        prefix->slot_count++;
+        prefix->source_nat_mask |= prefix->slot[slot].source_nat_mask;
+        prefix->dest_mask |= prefix->slot[slot].dest_mask;
+        prior_dest_mask |= prefix->slot[slot].dest_mask;
+    }
+
+    return true;
+}
+
+static uint8_t ia64_tcg_fast_bundle_nop_count(const IA64TcgFastBundle *fast)
+{
+    unsigned count = ia64_perf_fast_count(fast->op_counts,
+                                          IA64_PERF_FAST_COUNT_NOP_SHIFT);
+
+    return count > UINT8_MAX ? UINT8_MAX : count;
 }
 
 bool ia64_tcg_bundle_has_direct_branch(const IA64DecodedBundle *bundle)
@@ -1037,16 +1081,13 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     }
 
     /*
-     * Keep P05 branch lowering easy to audit: only MIB/MMB-style bundles with
-     * two harmless leading no-ops and a final simple relative branch can use
-     * direct TCG control flow.  Calls, returns, loop branches, branch-register
-     * targets, and rotating predicate reads stay on the helper path.
+     * Keep branch lowering auditably small: only bundles with a final simple
+     * relative branch and two safe fast-prefix slots can use direct TCG
+     * control flow.  Calls, returns, loop branches, branch-register targets,
+     * rotating predicate reads, and branch-predicate producer hazards stay on
+     * the helper path.
      */
-    if (!ia64_tcg_slot_is_direct_branch_nop(bundle->info->slot_type[0],
-                                            bundle->slot[0]) ||
-        !ia64_tcg_slot_is_direct_branch_nop(bundle->info->slot_type[1],
-                                            bundle->slot[1]) ||
-        !ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
+    if (!ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
                                         bundle->slot[2])) {
         return false;
     }
@@ -1066,11 +1107,15 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     }
 
     memset(branch, 0, sizeof(*branch));
+    if (!ia64_tcg_build_direct_branch_prefix(bundle, predicate,
+                                             &branch->prefix)) {
+        return false;
+    }
     branch->target_ip = target;
     branch->fallthrough_ip = fallthrough;
     branch->slot = 2;
     branch->predicate = predicate;
-    branch->nop_count = 2;
+    branch->nop_count = ia64_tcg_fast_bundle_nop_count(&branch->prefix);
     branch->conditional = predicate != 0;
     return true;
 }
