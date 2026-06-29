@@ -69,8 +69,18 @@ const char *ia64_tcg_fallback_reason_name(IA64TcgFallbackReason reason);
 typedef enum IA64TcgFastOp {
     IA64_TCG_FAST_OP_NOP,
     IA64_TCG_FAST_OP_ALU_ADD,
+    IA64_TCG_FAST_OP_ALU_SUB,
     IA64_TCG_FAST_OP_ALU_LOGIC,
+    IA64_TCG_FAST_OP_ALU_ADDP4,
+    IA64_TCG_FAST_OP_ALU_SHLADD,
     IA64_TCG_FAST_OP_ADDL,
+    IA64_TCG_FAST_OP_COMPARE,
+    IA64_TCG_FAST_OP_EXTRACT,
+    IA64_TCG_FAST_OP_DEPOSIT,
+    IA64_TCG_FAST_OP_INTEGER_EXTEND,
+    IA64_TCG_FAST_OP_PREDICATE_TEST,
+    IA64_TCG_FAST_OP_BIT_COUNT,
+    IA64_TCG_FAST_OP_VARIABLE_SHIFT,
     IA64_TCG_FAST_OP_LDST_LOAD,
     IA64_TCG_FAST_OP_LDST_STORE,
 } IA64TcgFastOp;
@@ -82,6 +92,12 @@ typedef enum IA64TcgFastLogicOp {
     IA64_TCG_FAST_LOGIC_XOR,
 } IA64TcgFastLogicOp;
 
+typedef enum IA64TcgFastShiftKind {
+    IA64_TCG_FAST_SHIFT_RIGHT_UNSIGNED,
+    IA64_TCG_FAST_SHIFT_LEFT,
+    IA64_TCG_FAST_SHIFT_RIGHT_SIGNED,
+} IA64TcgFastShiftKind;
+
 typedef struct IA64TcgFastSlot {
     IA64TcgFastOp op;
     IA64TcgFastLogicOp logic_op;
@@ -91,8 +107,21 @@ typedef struct IA64TcgFastSlot {
     uint8_t base;
     uint8_t width;
     uint8_t slot_index;
+    uint8_t predicate1;
+    uint8_t predicate2;
+    uint8_t compare_relation;
+    uint8_t predicate_write_kind;
+    uint8_t predicate_test_kind;
+    uint8_t predicate_test_relation;
+    uint8_t integer_extend_kind;
+    uint8_t shift_kind;
+    uint8_t position;
+    uint8_t length;
     bool source2_immediate;
     bool base_update;
+    bool sign_extend;
+    bool deposit_zero;
+    bool addp4;
     int64_t immediate;
     uint64_t source_nat_mask;
     uint64_t dest_mask;

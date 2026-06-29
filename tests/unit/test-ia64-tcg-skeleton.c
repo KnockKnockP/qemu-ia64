@@ -271,6 +271,208 @@ static void test_fast_bundle_accepts_nop_and_add_immediate(void)
                      ==, 2);
 }
 
+static void test_fast_bundle_accepts_banked_static_gr(void)
+{
+    const uint64_t add_r17_r18_r19_raw =
+        (8ULL << 37) | (19ULL << 20) | (18ULL << 13) | (17ULL << 6);
+    const uint64_t and_r20_r20_r21_raw =
+        (8ULL << 37) | (3ULL << 29) | (21ULL << 20) |
+        (20ULL << 13) | (20ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, add_r17_r18_r19_raw,
+                    and_r20_r20_r21_raw, IA64_SMOKE_NOP_RAW);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_ALU_ADD);
+    g_assert_cmpuint(fast.slot[0].target, ==, 17);
+    g_assert_cmpuint(fast.slot[0].source2, ==, 18);
+    g_assert_cmpuint(fast.slot[0].source3, ==, 19);
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_ALU_LOGIC);
+    g_assert_cmpuint(fast.slot[1].target, ==, 20);
+    g_assert_cmpuint(fast.slot[1].source2, ==, 20);
+    g_assert_cmpuint(fast.slot[1].source3, ==, 21);
+    g_assert_cmphex(fast.source_nat_mask, ==,
+                    (1ULL << 18) | (1ULL << 19) |
+                    (1ULL << 20) | (1ULL << 21));
+    g_assert_cmphex(fast.dest_mask, ==, (1ULL << 17) | (1ULL << 20));
+}
+
+static uint64_t make_cmp_eq_parallel_p6_p7_r20_r21(uint8_t major)
+{
+    return ((uint64_t)major << 37) | (1ULL << 33) | (7ULL << 27) |
+           (21ULL << 20) | (20ULL << 13) | (6ULL << 6);
+}
+
+static void test_fast_bundle_accepts_compare_predicate_writes(void)
+{
+    const uint64_t cmp_eq_p6_p0_0_r16_raw = 0x1c801000180ULL;
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, IA64_SMOKE_NOP_RAW,
+                    cmp_eq_p6_p0_0_r16_raw, IA64_SMOKE_NOP_RAW);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_COMPARE);
+    g_assert_cmpuint(fast.slot[1].predicate1, ==, 6);
+    g_assert_cmpuint(fast.slot[1].predicate2, ==, 0);
+    g_assert_cmpint(fast.slot[1].compare_relation, ==, IA64_CMP_EQ);
+    g_assert_cmpint(fast.slot[1].predicate_write_kind, ==,
+                    IA64_PRED_WRITE_NORMAL);
+    g_assert_true(fast.slot[1].source2_immediate);
+    g_assert_cmpint(fast.slot[1].immediate, ==, 0);
+    g_assert_cmpuint(fast.slot[1].source3, ==, 16);
+    g_assert_cmphex(fast.source_nat_mask, ==, 1ULL << 16);
+    g_assert_cmpuint(ia64_perf_fast_count(fast.op_counts,
+                                          IA64_PERF_FAST_COUNT_COMPARE_SHIFT),
+                     ==, 1);
+
+    bundle = make_bundle(0x00, make_cmp_eq_parallel_p6_p7_r20_r21(0xd),
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_COMPARE);
+    g_assert_cmpuint(fast.slot[0].predicate1, ==, 6);
+    g_assert_cmpuint(fast.slot[0].predicate2, ==, 7);
+    g_assert_cmpint(fast.slot[0].predicate_write_kind, ==, IA64_PRED_WRITE_OR);
+    g_assert_false(fast.slot[0].source2_immediate);
+    g_assert_cmpuint(fast.slot[0].source2, ==, 20);
+    g_assert_cmpuint(fast.slot[0].source3, ==, 21);
+    g_assert_cmphex(fast.source_nat_mask, ==, (1ULL << 20) | (1ULL << 21));
+}
+
+static uint64_t make_extract_raw(bool sign_extend, uint8_t target,
+                                 uint8_t source3, uint8_t position,
+                                 uint8_t length)
+{
+    return (5ULL << 37) | (1ULL << 34) |
+           ((uint64_t)(length - 1) << 27) |
+           ((uint64_t)source3 << 20) |
+           ((uint64_t)position << 14) |
+           ((uint64_t)sign_extend << 13) |
+           ((uint64_t)target << 6);
+}
+
+static void test_fast_bundle_accepts_integer_misc(void)
+{
+    const uint64_t addp4_r16_r17_r18_raw =
+        (8ULL << 37) | (2ULL << 29) | (18ULL << 20) |
+        (17ULL << 13) | (16ULL << 6);
+    const uint64_t sub_r19_r19_r20_raw = 0x100294264c0ULL;
+    const uint64_t zxt1_r8_r8_raw = 0x00080800200ULL;
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, addp4_r16_r17_r18_raw,
+                    sub_r19_r19_r20_raw, zxt1_r8_r8_raw);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_ALU_ADDP4);
+    g_assert_cmpuint(fast.slot[0].target, ==, 16);
+    g_assert_cmpuint(fast.slot[0].source2, ==, 17);
+    g_assert_cmpuint(fast.slot[0].source3, ==, 18);
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_ALU_SUB);
+    g_assert_cmpuint(fast.slot[1].target, ==, 19);
+    g_assert_cmpuint(fast.slot[1].source2, ==, 19);
+    g_assert_cmpuint(fast.slot[1].source3, ==, 20);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_INTEGER_EXTEND);
+    g_assert_cmpint(fast.slot[2].integer_extend_kind, ==, IA64_EXT_ZXT);
+    g_assert_cmpuint(fast.slot[2].width, ==, 1);
+    g_assert_cmphex(fast.source_nat_mask, ==,
+                    (1ULL << 8) | (1ULL << 17) |
+                    (1ULL << 18) | (1ULL << 19) |
+                    (1ULL << 20));
+    g_assert_cmphex(fast.dest_mask, ==,
+                    (1ULL << 8) | (1ULL << 16) | (1ULL << 19));
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         fast.op_counts,
+                         IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT), ==, 3);
+}
+
+static void test_fast_bundle_accepts_shift_misc(void)
+{
+    const uint64_t linux_popcnt_r8_r8_raw = 0x0e690800200ULL;
+    const uint64_t shr_u_r10_r12_r11_raw =
+        (7ULL << 37) | (1ULL << 36) | (1ULL << 33) |
+        (12ULL << 20) | (11ULL << 13) | (10ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, IA64_SMOKE_NOP_RAW,
+                    linux_popcnt_r8_r8_raw, shr_u_r10_r12_r11_raw);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_BIT_COUNT);
+    g_assert_cmpuint(fast.slot[1].target, ==, 8);
+    g_assert_cmpuint(fast.slot[1].source3, ==, 8);
+    g_assert_cmpuint(fast.slot[1].shift_kind, ==, 2);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_VARIABLE_SHIFT);
+    g_assert_cmpuint(fast.slot[2].target, ==, 10);
+    g_assert_cmpuint(fast.slot[2].source2, ==, 11);
+    g_assert_cmpuint(fast.slot[2].source3, ==, 12);
+    g_assert_cmpuint(fast.slot[2].shift_kind, ==,
+                     IA64_TCG_FAST_SHIFT_RIGHT_UNSIGNED);
+    g_assert_cmphex(fast.source_nat_mask, ==,
+                    (1ULL << 8) | (1ULL << 11) | (1ULL << 12));
+    g_assert_cmphex(fast.dest_mask, ==, (1ULL << 8) | (1ULL << 10));
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         fast.op_counts,
+                         IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT), ==, 2);
+}
+
+static void test_fast_bundle_accepts_bitfield_misc(void)
+{
+    const uint64_t extract_r9_r2_25_39_raw =
+        make_extract_raw(false, 9, 2, 25, 39);
+    const uint64_t dep_z_r15_r15_8_56_raw = 0x0a7bb71e3c0ULL;
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, IA64_SMOKE_NOP_RAW,
+                    extract_r9_r2_25_39_raw, dep_z_r15_r15_8_56_raw);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_EXTRACT);
+    g_assert_cmpuint(fast.slot[1].target, ==, 9);
+    g_assert_cmpuint(fast.slot[1].source3, ==, 2);
+    g_assert_cmpuint(fast.slot[1].position, ==, 25);
+    g_assert_cmpuint(fast.slot[1].length, ==, 39);
+    g_assert_false(fast.slot[1].sign_extend);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_DEPOSIT);
+    g_assert_cmpuint(fast.slot[2].target, ==, 15);
+    g_assert_cmpuint(fast.slot[2].source2, ==, 15);
+    g_assert_cmpuint(fast.slot[2].position, ==, 8);
+    g_assert_cmpuint(fast.slot[2].length, ==, 56);
+    g_assert_true(fast.slot[2].deposit_zero);
+    g_assert_cmphex(fast.source_nat_mask, ==, (1ULL << 2) | (1ULL << 15));
+    g_assert_cmphex(fast.dest_mask, ==, (1ULL << 9) | (1ULL << 15));
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         fast.op_counts,
+                         IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT), ==, 2);
+}
+
+static void test_fast_bundle_accepts_predicate_test(void)
+{
+    const uint64_t tbit_nz_or_p10_p11_r20_2_raw =
+        (0x5ULL << 37) | (1ULL << 33) | (11ULL << 27) |
+        (20ULL << 20) | (2ULL << 14) | (1ULL << 12) |
+        (10ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, IA64_SMOKE_NOP_RAW,
+                    tbit_nz_or_p10_p11_r20_2_raw, IA64_SMOKE_NOP_RAW);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_PREDICATE_TEST);
+    g_assert_cmpuint(fast.slot[1].predicate1, ==, 10);
+    g_assert_cmpuint(fast.slot[1].predicate2, ==, 11);
+    g_assert_cmpint(fast.slot[1].predicate_write_kind, ==,
+                    IA64_PRED_WRITE_OR);
+    g_assert_cmpint(fast.slot[1].predicate_test_kind, ==,
+                    IA64_PRED_TEST_BIT);
+    g_assert_cmpint(fast.slot[1].predicate_test_relation, ==,
+                    IA64_PRED_TEST_NONZERO);
+    g_assert_cmpuint(fast.slot[1].source3, ==, 20);
+    g_assert_cmpint(fast.slot[1].immediate, ==, 2);
+    g_assert_cmphex(fast.source_nat_mask, ==, 1ULL << 20);
+}
+
 static void test_fast_bundle_rejects_predicated_or_stacked_gr(void)
 {
     const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
@@ -321,6 +523,7 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
 {
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
     const uint64_t ld8_r2_r3_8_raw = make_ldst_load_update_raw(3, 2, 3, 8);
+    const uint64_t ld8_r16_r17_raw = make_ldst_load_raw(3, 16, 17);
     const uint64_t st8_r4_r5_raw = make_ldst_store_raw(3, 4, 5);
     IA64DecodedBundle bundle;
     IA64TcgFastBundle fast;
@@ -347,6 +550,14 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpint(fast.slot[0].immediate, ==, 8);
     g_assert_cmphex(fast.dest_mask, ==, (1ULL << 2) | (1ULL << 3));
 
+    bundle = make_bundle(0x00, ld8_r16_r17_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_LDST_LOAD);
+    g_assert_cmpuint(fast.slot[0].target, ==, 16);
+    g_assert_cmpuint(fast.slot[0].base, ==, 17);
+    g_assert_cmphex(fast.dest_mask, ==, 1ULL << 16);
+
     bundle = make_bundle(0x00, st8_r4_r5_raw,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
@@ -363,7 +574,7 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
 static void test_fast_bundle_rejects_unsafe_ldst(void)
 {
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
-    const uint64_t ld8_r16_r3_raw = make_ldst_load_raw(3, 16, 3);
+    const uint64_t ld8_r32_r3_raw = make_ldst_load_raw(3, 32, 3);
     const uint64_t ld8_advanced_r2_r3_raw =
         (4ULL << 37) | ((uint64_t)((2 << 2) | 3) << 30) |
         (3ULL << 20) | (2ULL << 6);
@@ -374,7 +585,7 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
-    bundle = make_bundle(0x00, ld8_r16_r3_raw,
+    bundle = make_bundle(0x00, ld8_r32_r3_raw,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
@@ -518,6 +729,18 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_hot_integer_subset);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-nop-add-immediate",
                     test_fast_bundle_accepts_nop_and_add_immediate);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-banked-static-gr",
+                    test_fast_bundle_accepts_banked_static_gr);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-compare",
+                    test_fast_bundle_accepts_compare_predicate_writes);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-integer-misc",
+                    test_fast_bundle_accepts_integer_misc);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-shift-misc",
+                    test_fast_bundle_accepts_shift_misc);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-bitfield-misc",
+                    test_fast_bundle_accepts_bitfield_misc);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-predicate-test",
+                    test_fast_bundle_accepts_predicate_test);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-rejects-unsafe",
                     test_fast_bundle_rejects_predicated_or_stacked_gr);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-ldst-slot0",

@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "bundle.h"
+#include "exec-smoke.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "exec/memop.h"
@@ -17,6 +18,8 @@
 #define HELPER_H "helper.h"
 #include "exec/helper-info.c.inc"
 #undef HELPER_H
+
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 
 typedef struct DisasContext {
     DisasContextBase base;
@@ -89,6 +92,27 @@ static void ia64_tr_load_static_gr(TCGv_i64 dest, uint8_t reg)
         return;
     }
 
+    if (reg >= 16 && reg < 32) {
+        TCGLabel *normal = gen_new_label();
+        TCGLabel *done = gen_new_label();
+        TCGv_i64 psr = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+        tcg_gen_andi_i64(psr, psr, IA64_PSR_BN_BIT);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, psr, 0, normal);
+        tcg_gen_ld_i64(dest, tcg_env,
+                       offsetof(CPUIA64State, banked_gr) +
+                       (reg - 16) * sizeof(uint64_t));
+        tcg_gen_br(done);
+
+        gen_set_label(normal);
+        tcg_gen_ld_i64(dest, tcg_env,
+                       offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
+
+        gen_set_label(done);
+        return;
+    }
+
     tcg_gen_ld_i64(dest, tcg_env,
                    offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
 }
@@ -99,8 +123,268 @@ static void ia64_tr_store_static_gr(uint8_t reg, TCGv_i64 value)
         return;
     }
 
+    if (reg >= 16 && reg < 32) {
+        TCGLabel *normal = gen_new_label();
+        TCGLabel *done = gen_new_label();
+        TCGv_i64 psr = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+        tcg_gen_andi_i64(psr, psr, IA64_PSR_BN_BIT);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, psr, 0, normal);
+        tcg_gen_st_i64(value, tcg_env,
+                       offsetof(CPUIA64State, banked_gr) +
+                       (reg - 16) * sizeof(uint64_t));
+        tcg_gen_br(done);
+
+        gen_set_label(normal);
+        tcg_gen_st_i64(value, tcg_env,
+                       offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
+
+        gen_set_label(done);
+        return;
+    }
+
     tcg_gen_st_i64(value, tcg_env,
                    offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
+}
+
+static TCGCond ia64_tr_compare_cond(uint8_t relation)
+{
+    switch (relation) {
+    case IA64_CMP_EQ:
+        return TCG_COND_EQ;
+    case IA64_CMP_NE:
+        return TCG_COND_NE;
+    case IA64_CMP_LT:
+        return TCG_COND_LT;
+    case IA64_CMP_LE:
+        return TCG_COND_LE;
+    case IA64_CMP_GT:
+        return TCG_COND_GT;
+    case IA64_CMP_GE:
+        return TCG_COND_GE;
+    case IA64_CMP_LTU:
+        return TCG_COND_LTU;
+    case IA64_CMP_LEU:
+        return TCG_COND_LEU;
+    case IA64_CMP_GTU:
+        return TCG_COND_GTU;
+    case IA64_CMP_GEU:
+        return TCG_COND_GEU;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static bool ia64_tr_compare_relation_is_signed(uint8_t relation)
+{
+    return relation == IA64_CMP_LT || relation == IA64_CMP_LE ||
+           relation == IA64_CMP_GT || relation == IA64_CMP_GE;
+}
+
+static void ia64_tr_write_pr_const(uint8_t predicate, bool value)
+{
+    TCGv_i64 pr;
+
+    if (predicate == 0) {
+        pr = tcg_temp_new_i64();
+        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_ori_i64(pr, pr, 1);
+        tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        return;
+    }
+
+    pr = tcg_temp_new_i64();
+    tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    if (value) {
+        tcg_gen_ori_i64(pr, pr, 1ULL << predicate);
+    } else {
+        tcg_gen_andi_i64(pr, pr, ~(1ULL << predicate));
+    }
+    tcg_gen_ori_i64(pr, pr, 1);
+    tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+}
+
+static void ia64_tr_write_pr_bool(uint8_t predicate, TCGv_i64 value)
+{
+    TCGv_i64 pr;
+    TCGv_i64 bit;
+
+    if (predicate == 0) {
+        ia64_tr_write_pr_const(predicate, true);
+        return;
+    }
+
+    pr = tcg_temp_new_i64();
+    bit = tcg_temp_new_i64();
+    tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    tcg_gen_andi_i64(pr, pr, ~(1ULL << predicate));
+    tcg_gen_shli_i64(bit, value, predicate);
+    tcg_gen_or_i64(pr, pr, bit);
+    tcg_gen_ori_i64(pr, pr, 1);
+    tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+}
+
+static void ia64_tr_emit_predicate_pair_write(const IA64TcgFastSlot *slot,
+                                              TCGv_i64 result)
+{
+    TCGv_i64 inverted;
+    TCGLabel *done;
+
+    switch (slot->predicate_write_kind) {
+    case IA64_PRED_WRITE_UNCONDITIONAL:
+    case IA64_PRED_WRITE_NORMAL:
+        ia64_tr_write_pr_bool(slot->predicate1, result);
+        inverted = tcg_temp_new_i64();
+        tcg_gen_xori_i64(inverted, result, 1);
+        ia64_tr_write_pr_bool(slot->predicate2, inverted);
+        break;
+    case IA64_PRED_WRITE_AND:
+        done = gen_new_label();
+        tcg_gen_brcondi_i64(TCG_COND_NE, result, 0, done);
+        ia64_tr_write_pr_const(slot->predicate1, false);
+        ia64_tr_write_pr_const(slot->predicate2, false);
+        gen_set_label(done);
+        break;
+    case IA64_PRED_WRITE_OR:
+        done = gen_new_label();
+        tcg_gen_brcondi_i64(TCG_COND_EQ, result, 0, done);
+        ia64_tr_write_pr_const(slot->predicate1, true);
+        ia64_tr_write_pr_const(slot->predicate2, true);
+        gen_set_label(done);
+        break;
+    case IA64_PRED_WRITE_OR_ANDCM:
+        done = gen_new_label();
+        tcg_gen_brcondi_i64(TCG_COND_EQ, result, 0, done);
+        ia64_tr_write_pr_const(slot->predicate1, true);
+        ia64_tr_write_pr_const(slot->predicate2, false);
+        gen_set_label(done);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void ia64_tr_emit_addp4(TCGv_i64 dest, TCGv_i64 left, TCGv_i64 right)
+{
+    TCGv_i64 low32 = tcg_temp_new_i64();
+    TCGv_i64 region = tcg_temp_new_i64();
+
+    tcg_gen_add_i64(low32, left, right);
+    tcg_gen_ext32u_i64(low32, low32);
+    tcg_gen_shri_i64(region, right, 30);
+    tcg_gen_andi_i64(region, region, 3);
+    tcg_gen_shli_i64(region, region, 61);
+    tcg_gen_or_i64(dest, region, low32);
+}
+
+static void ia64_tr_read_static_gr_nat(TCGv_i64 dest, uint8_t reg)
+{
+    tcg_gen_ld_i64(dest, tcg_env,
+                   offsetof(CPUIA64State, nat.gr_nat) +
+                   (reg / 64) * sizeof(uint64_t));
+    tcg_gen_shri_i64(dest, dest, reg % 64);
+    tcg_gen_andi_i64(dest, dest, 1);
+}
+
+static void ia64_tr_emit_integer_extend(const IA64TcgFastSlot *slot,
+                                        TCGv_i64 dest, TCGv_i64 source)
+{
+    switch (slot->integer_extend_kind) {
+    case IA64_EXT_ZXT:
+        switch (slot->width) {
+        case 1:
+            tcg_gen_ext8u_i64(dest, source);
+            break;
+        case 2:
+            tcg_gen_ext16u_i64(dest, source);
+            break;
+        case 4:
+            tcg_gen_ext32u_i64(dest, source);
+            break;
+        default:
+            g_assert_not_reached();
+        }
+        break;
+    case IA64_EXT_SXT:
+        switch (slot->width) {
+        case 1:
+            tcg_gen_ext8s_i64(dest, source);
+            break;
+        case 2:
+            tcg_gen_ext16s_i64(dest, source);
+            break;
+        case 4:
+            tcg_gen_ext32s_i64(dest, source);
+            break;
+        default:
+            g_assert_not_reached();
+        }
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void ia64_tr_emit_predicate_test(const IA64TcgFastSlot *slot,
+                                        TCGv_i64 result, TCGv_i64 source3)
+{
+    switch (slot->predicate_test_kind) {
+    case IA64_PRED_TEST_BIT:
+        ia64_tr_load_static_gr(source3, slot->source3);
+        tcg_gen_shri_i64(result, source3, slot->immediate);
+        tcg_gen_andi_i64(result, result, 1);
+        break;
+    case IA64_PRED_TEST_NAT:
+        ia64_tr_read_static_gr_nat(result, slot->source3);
+        break;
+    case IA64_PRED_TEST_FEATURE:
+        tcg_gen_movi_i64(result, 0);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    if (slot->predicate_test_relation == IA64_PRED_TEST_ZERO) {
+        tcg_gen_xori_i64(result, result, 1);
+    }
+    ia64_tr_emit_predicate_pair_write(slot, result);
+}
+
+static void ia64_tr_emit_variable_shift(const IA64TcgFastSlot *slot,
+                                        TCGv_i64 result,
+                                        TCGv_i64 source2,
+                                        TCGv_i64 source3)
+{
+    TCGLabel *done = gen_new_label();
+
+    switch (slot->shift_kind) {
+    case IA64_TCG_FAST_SHIFT_LEFT:
+        ia64_tr_load_static_gr(source2, slot->source2);
+        ia64_tr_load_static_gr(source3, slot->source3);
+        tcg_gen_movi_i64(result, 0);
+        tcg_gen_brcondi_i64(TCG_COND_GEU, source3, 64, done);
+        tcg_gen_shl_i64(result, source2, source3);
+        break;
+    case IA64_TCG_FAST_SHIFT_RIGHT_UNSIGNED:
+        ia64_tr_load_static_gr(source2, slot->source2);
+        ia64_tr_load_static_gr(source3, slot->source3);
+        tcg_gen_movi_i64(result, 0);
+        tcg_gen_brcondi_i64(TCG_COND_GEU, source2, 64, done);
+        tcg_gen_shr_i64(result, source3, source2);
+        break;
+    case IA64_TCG_FAST_SHIFT_RIGHT_SIGNED:
+        ia64_tr_load_static_gr(source2, slot->source2);
+        ia64_tr_load_static_gr(source3, slot->source3);
+        tcg_gen_sari_i64(result, source3, 63);
+        tcg_gen_brcondi_i64(TCG_COND_GEU, source2, 64, done);
+        tcg_gen_sar_i64(result, source3, source2);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    gen_set_label(done);
 }
 
 static void ia64_tr_set_psr_ri(uint8_t slot)
@@ -189,6 +473,18 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
             }
         }
         break;
+    case IA64_TCG_FAST_OP_ALU_SUB:
+        ia64_tr_load_static_gr(source3, slot->source3);
+        if (slot->source2_immediate) {
+            tcg_gen_movi_i64(source2, slot->immediate);
+        } else {
+            ia64_tr_load_static_gr(source2, slot->source2);
+        }
+        tcg_gen_sub_i64(result, source2, source3);
+        if (!slot->source2_immediate && slot->immediate != 0) {
+            tcg_gen_subi_i64(result, result, slot->immediate);
+        }
+        break;
     case IA64_TCG_FAST_OP_ALU_LOGIC:
         ia64_tr_load_static_gr(source3, slot->source3);
         ia64_tr_load_fast_source2(source2, slot);
@@ -209,9 +505,83 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
             g_assert_not_reached();
         }
         break;
+    case IA64_TCG_FAST_OP_ALU_ADDP4:
+        ia64_tr_load_static_gr(source3, slot->source3);
+        ia64_tr_load_fast_source2(source2, slot);
+        ia64_tr_emit_addp4(result, source2, source3);
+        break;
+    case IA64_TCG_FAST_OP_ALU_SHLADD:
+        ia64_tr_load_static_gr(source2, slot->source2);
+        ia64_tr_load_static_gr(source3, slot->source3);
+        tcg_gen_shli_i64(source2, source2, slot->immediate);
+        if (slot->addp4) {
+            ia64_tr_emit_addp4(result, source2, source3);
+        } else {
+            tcg_gen_add_i64(result, source2, source3);
+        }
+        break;
     case IA64_TCG_FAST_OP_ADDL:
         ia64_tr_load_static_gr(source3, slot->source3);
         tcg_gen_addi_i64(result, source3, slot->immediate);
+        break;
+    case IA64_TCG_FAST_OP_COMPARE:
+        if (slot->source2_immediate) {
+            tcg_gen_movi_i64(source2, slot->immediate);
+        } else {
+            ia64_tr_load_static_gr(source2, slot->source2);
+        }
+        ia64_tr_load_static_gr(source3, slot->source3);
+        if (slot->width == 4) {
+            if (ia64_tr_compare_relation_is_signed(slot->compare_relation)) {
+                tcg_gen_ext32s_i64(source2, source2);
+                tcg_gen_ext32s_i64(source3, source3);
+            } else {
+                tcg_gen_ext32u_i64(source2, source2);
+                tcg_gen_ext32u_i64(source3, source3);
+            }
+        }
+        tcg_gen_setcond_i64(ia64_tr_compare_cond(slot->compare_relation),
+                            result, source2, source3);
+        ia64_tr_emit_predicate_pair_write(slot, result);
+        return;
+    case IA64_TCG_FAST_OP_EXTRACT:
+        ia64_tr_load_static_gr(source3, slot->source3);
+        if (slot->sign_extend) {
+            tcg_gen_sextract_i64(result, source3,
+                                 slot->position, slot->length);
+        } else {
+            tcg_gen_extract_i64(result, source3,
+                                slot->position, slot->length);
+        }
+        break;
+    case IA64_TCG_FAST_OP_DEPOSIT:
+        ia64_tr_load_fast_source2(source2, slot);
+        if (slot->deposit_zero) {
+            tcg_gen_deposit_z_i64(result, source2,
+                                  slot->position, slot->length);
+        } else {
+            ia64_tr_load_static_gr(source3, slot->source3);
+            tcg_gen_deposit_i64(result, source3, source2,
+                                slot->position, slot->length);
+        }
+        break;
+    case IA64_TCG_FAST_OP_INTEGER_EXTEND:
+        ia64_tr_load_static_gr(source3, slot->source3);
+        ia64_tr_emit_integer_extend(slot, result, source3);
+        break;
+    case IA64_TCG_FAST_OP_PREDICATE_TEST:
+        ia64_tr_emit_predicate_test(slot, result, source3);
+        return;
+    case IA64_TCG_FAST_OP_BIT_COUNT:
+        ia64_tr_load_static_gr(source3, slot->source3);
+        if (slot->shift_kind == 2) {
+            tcg_gen_ctpop_i64(result, source3);
+        } else {
+            tcg_gen_clzi_i64(result, source3, 64);
+        }
+        break;
+    case IA64_TCG_FAST_OP_VARIABLE_SHIFT:
+        ia64_tr_emit_variable_shift(slot, result, source2, source3);
         break;
     case IA64_TCG_FAST_OP_LDST_LOAD:
         g_assert(ldst_address != NULL);

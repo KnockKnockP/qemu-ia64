@@ -8,7 +8,7 @@
 #include "tcg-skeleton.h"
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
-#define IA64_TCG_FAST_GR_LIMIT 16
+#define IA64_TCG_FAST_GR_LIMIT 32
 #define IA64_TCG_TARGET_PAGE_MASK (~((UINT64_C(1) << TARGET_PAGE_BITS) - 1))
 
 enum {
@@ -321,6 +321,11 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     uint8_t x2b;
     uint8_t x4;
     IA64LdstImmediate ldst;
+    IA64CompareInstruction cmp;
+    IA64PredicateTestInstruction pred_test;
+    IA64ExtractInstruction extract;
+    IA64DepositInstruction deposit;
+    IA64IntegerExtendInstruction int_ext;
 
     memset(slot, 0, sizeof(*slot));
     slot->slot_index = slot_index;
@@ -364,6 +369,36 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         return true;
     }
 
+    if (ia64_slot_is_alu_sub(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        x2b = (raw >> 27) & 0x3;
+        x4 = (raw >> 29) & 0xf;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ALU_SUB;
+        slot->source3 = r3;
+        if (x4 == 9) {
+            slot->source2_immediate = true;
+            slot->immediate =
+                ia64_tcg_sign_extend((((raw >> 36) & 0x1) << 7) |
+                                     ((raw >> 13) & 0x7f), 8);
+        } else {
+            if (!ia64_tcg_fast_add_source(slot, r2)) {
+                return false;
+            }
+            slot->source2 = r2;
+            slot->immediate = x2b == 0 ? 1 : 0;
+        }
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
     if (ia64_slot_is_alu_logic(type, raw)) {
         r1 = (raw >> 6) & 0x7f;
         r2 = (raw >> 13) & 0x7f;
@@ -393,6 +428,57 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         return true;
     }
 
+    if (ia64_slot_is_alu_addp4(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        x2a = (raw >> 34) & 0x3;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ALU_ADDP4;
+        slot->source3 = r3;
+        if (x2a == 3) {
+            slot->source2_immediate = true;
+            slot->immediate =
+                ia64_tcg_sign_extend((((raw >> 36) & 0x1) << 13) |
+                                     (((raw >> 27) & 0x3f) << 7) |
+                                     ((raw >> 13) & 0x7f), 14);
+        } else {
+            if (!ia64_tcg_fast_add_source(slot, r2)) {
+                return false;
+            }
+            slot->source2 = r2;
+        }
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_alu_shladd(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        x2b = (raw >> 27) & 0x3;
+        x4 = (raw >> 29) & 0xf;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r2) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ALU_SHLADD;
+        slot->source2 = r2;
+        slot->source3 = r3;
+        slot->immediate = x2b + 1;
+        slot->addp4 = x4 == 6;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
     if (ia64_slot_is_addl(type, raw)) {
         r1 = (raw >> 6) & 0x7f;
         r3 = (raw >> 20) & 0x3;
@@ -405,6 +491,155 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         slot->source3 = r3;
         slot->immediate = ia64_addl_immediate(raw);
         ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_ADDL_SHIFT);
+        return true;
+    }
+
+    if (ia64_decode_extract(type, raw, &extract)) {
+        if (!ia64_tcg_fast_set_target(slot, extract.target) ||
+            !ia64_tcg_fast_add_source(slot, extract.source3)) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_EXTRACT;
+        slot->source3 = extract.source3;
+        slot->position = extract.position;
+        slot->length = MIN((uint8_t)(64 - extract.position),
+                           extract.length);
+        slot->sign_extend = extract.sign_extend;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_decode_deposit(type, raw, &deposit)) {
+        if (!ia64_tcg_fast_set_target(slot, deposit.target) ||
+            (!deposit.source_immediate &&
+             !ia64_tcg_fast_add_source(slot, deposit.source2)) ||
+            (!deposit.deposit_zero &&
+             !ia64_tcg_fast_add_source(slot, deposit.source3))) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_DEPOSIT;
+        slot->source2 = deposit.source2;
+        slot->source3 = deposit.source3;
+        slot->position = deposit.position;
+        slot->length = MIN((uint8_t)(64 - deposit.position),
+                           deposit.length);
+        slot->source2_immediate = deposit.source_immediate;
+        slot->deposit_zero = deposit.deposit_zero;
+        slot->immediate = deposit.immediate;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_decode_integer_extend(type, raw, &int_ext)) {
+        if ((int_ext.kind != IA64_EXT_ZXT && int_ext.kind != IA64_EXT_SXT) ||
+            !ia64_tcg_fast_set_target(slot, int_ext.target) ||
+            !ia64_tcg_fast_add_source(slot, int_ext.source3)) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_INTEGER_EXTEND;
+        slot->integer_extend_kind = int_ext.kind;
+        slot->source3 = int_ext.source3;
+        slot->width = int_ext.width;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_i_bit_count(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_BIT_COUNT;
+        slot->source3 = r3;
+        slot->shift_kind = (raw >> 30) & 0x3;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_i_variable_shift(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        x2b = (raw >> 28) & 0x3;
+        x2a = (raw >> 30) & 0x3;
+
+        if (!ia64_tcg_fast_set_target(slot, r1) ||
+            !ia64_tcg_fast_add_source(slot, r2) ||
+            !ia64_tcg_fast_add_source(slot, r3)) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_VARIABLE_SHIFT;
+        slot->source2 = r2;
+        slot->source3 = r3;
+        if (x2b == 0 && x2a == 1) {
+            slot->shift_kind = IA64_TCG_FAST_SHIFT_LEFT;
+        } else if (x2b == 0 && x2a == 0) {
+            slot->shift_kind = IA64_TCG_FAST_SHIFT_RIGHT_UNSIGNED;
+        } else {
+            slot->shift_kind = IA64_TCG_FAST_SHIFT_RIGHT_SIGNED;
+        }
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_decode_compare(type, raw, &cmp)) {
+        if (cmp.p1 == cmp.p2 || cmp.p1 >= 16 || cmp.p2 >= 16 ||
+            !ia64_tcg_fast_add_source(slot, cmp.source3) ||
+            (!cmp.source_immediate &&
+             !ia64_tcg_fast_add_source(slot, cmp.source2))) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_COMPARE;
+        slot->predicate1 = cmp.p1;
+        slot->predicate2 = cmp.p2;
+        slot->compare_relation = cmp.relation;
+        slot->predicate_write_kind = cmp.write_kind;
+        slot->width = cmp.width;
+        slot->source2 = cmp.source2;
+        slot->source3 = cmp.source3;
+        slot->source2_immediate = cmp.source_immediate;
+        slot->immediate = cmp.immediate;
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_COMPARE_SHIFT);
+        return true;
+    }
+
+    if (ia64_decode_predicate_test(type, raw, &pred_test)) {
+        if (pred_test.p1 == pred_test.p2 ||
+            pred_test.p1 >= 16 || pred_test.p2 >= 16 ||
+            pred_test.immediate >= 64 ||
+            (pred_test.kind != IA64_PRED_TEST_FEATURE &&
+             !ia64_tcg_fast_static_gr(pred_test.source3))) {
+            return false;
+        }
+        if (pred_test.kind == IA64_PRED_TEST_BIT &&
+            !ia64_tcg_fast_add_source(slot, pred_test.source3)) {
+            return false;
+        }
+
+        slot->op = IA64_TCG_FAST_OP_PREDICATE_TEST;
+        slot->predicate1 = pred_test.p1;
+        slot->predicate2 = pred_test.p2;
+        slot->predicate_write_kind = pred_test.write_kind;
+        slot->predicate_test_kind = pred_test.kind;
+        slot->predicate_test_relation = pred_test.relation;
+        slot->source3 = pred_test.source3;
+        slot->immediate = pred_test.immediate;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
         return true;
     }
 
@@ -423,6 +658,11 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     uint32_t r2;
     uint32_t r3;
     IA64LdstImmediate ldst;
+    IA64CompareInstruction cmp;
+    IA64PredicateTestInstruction pred_test;
+    IA64ExtractInstruction extract;
+    IA64DepositInstruction deposit;
+    IA64IntegerExtendInstruction int_ext;
 
     if (ia64_slot_predicate(raw) != 0) {
         return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
@@ -449,6 +689,21 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         return IA64_TCG_FALLBACK_NONE;
     }
 
+    if (ia64_slot_is_alu_sub(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        if (((raw >> 29) & 0xf) != 9 &&
+            !ia64_tcg_fast_static_gr(r2)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
     if (ia64_slot_is_alu_logic(type, raw)) {
         r1 = (raw >> 6) & 0x7f;
         r2 = (raw >> 13) & 0x7f;
@@ -464,11 +719,115 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         return IA64_TCG_FALLBACK_NONE;
     }
 
+    if (ia64_slot_is_alu_addp4(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        if (((raw >> 34) & 0x3) != 3 &&
+            !ia64_tcg_fast_static_gr(r2)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_alu_shladd(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r2) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
     if (ia64_slot_is_addl(type, raw)) {
         r1 = (raw >> 6) & 0x7f;
         r3 = (raw >> 20) & 0x3;
         if (!ia64_tcg_fast_static_gr(r1) ||
             !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_extract(type, raw, &extract)) {
+        if (!ia64_tcg_fast_static_gr(extract.target) ||
+            !ia64_tcg_fast_static_gr(extract.source3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_deposit(type, raw, &deposit)) {
+        if (!ia64_tcg_fast_static_gr(deposit.target) ||
+            (!deposit.source_immediate &&
+             !ia64_tcg_fast_static_gr(deposit.source2)) ||
+            (!deposit.deposit_zero &&
+             !ia64_tcg_fast_static_gr(deposit.source3))) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_integer_extend(type, raw, &int_ext)) {
+        if (int_ext.kind != IA64_EXT_ZXT && int_ext.kind != IA64_EXT_SXT) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr(int_ext.target) ||
+            !ia64_tcg_fast_static_gr(int_ext.source3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_i_bit_count(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_i_variable_shift(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r2) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_compare(type, raw, &cmp)) {
+        if (cmp.p1 == cmp.p2 || cmp.p1 >= 16 || cmp.p2 >= 16) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr(cmp.source3) ||
+            (!cmp.source_immediate &&
+             !ia64_tcg_fast_static_gr(cmp.source2))) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_predicate_test(type, raw, &pred_test)) {
+        if (pred_test.p1 == pred_test.p2 ||
+            pred_test.p1 >= 16 || pred_test.p2 >= 16 ||
+            pred_test.immediate >= 64) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (pred_test.kind != IA64_PRED_TEST_FEATURE &&
+            !ia64_tcg_fast_static_gr(pred_test.source3)) {
             return IA64_TCG_FALLBACK_FAST_STATIC_GR;
         }
         return IA64_TCG_FALLBACK_NONE;

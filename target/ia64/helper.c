@@ -4750,6 +4750,12 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
     IA64_PERF_ADD(IA64_PERF_TCG_FAST_ADDL,
                   ia64_perf_fast_count(op_counts,
                                        IA64_PERF_FAST_COUNT_ADDL_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_COMPARE,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_COMPARE_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_FAST_INTEGER_MISC,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT));
     IA64_PERF_ADD(IA64_PERF_TCG_LDST_LOAD,
                   ia64_perf_fast_count(op_counts,
                                        IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT));
