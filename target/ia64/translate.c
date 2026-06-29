@@ -76,6 +76,12 @@ static void ia64_tr_emit_exec_bundle(const IA64DecodedBundle *bundle,
                            tcg_constant_i64(bundle->slot[2]));
 }
 
+static void ia64_tr_emit_firmware_call_gate(uint64_t pc)
+{
+    tcg_gen_movi_i64(cpu_ip, pc);
+    gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc));
+}
+
 static void ia64_tr_load_static_gr(TCGv_i64 dest, uint8_t reg)
 {
     if (reg == 0) {
@@ -415,6 +421,13 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
 
     ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
     boundary = ia64_tcg_tb_boundary_for_bundle(&bundle, pc);
+    if (boundary == IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE) {
+        ia64_tr_emit_firmware_call_gate(pc);
+        trace_ia64_tcg_tb_boundary(pc, ia64_tcg_tb_boundary_name(boundary));
+        IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
+        ctx->base.is_jmp = DISAS_EXIT;
+        return;
+    }
     if (boundary == IA64_TCG_TB_BOUNDARY_BRANCH &&
         ia64_tr_translate_direct_branch(ctx, &bundle, pc)) {
         ctx->base.is_jmp = DISAS_NORETURN;

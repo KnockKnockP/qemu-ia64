@@ -35,6 +35,10 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_BUNDLE_EXECUTED] = "bundle.executed",
     [IA64_PERF_HELPER_EXEC_BUNDLE] = "helper.exec_bundle",
     [IA64_PERF_HELPER_EFI_DISPATCH] = "helper.efi_dispatch",
+    [IA64_PERF_TCG_FIRMWARE_CALL_GATE_FAST] =
+        "tcg.firmware.call_gate_fast",
+    [IA64_PERF_TCG_FIRMWARE_CALL_GATE_FALLBACK] =
+        "tcg.firmware.call_gate_fallback",
     [IA64_PERF_TCG_FAST_BUNDLE] = "tcg.fast.bundle",
     [IA64_PERF_TCG_FAST_SLOT] = "tcg.fast.slot",
     [IA64_PERF_TCG_FAST_NOP] = "tcg.fast.nop",

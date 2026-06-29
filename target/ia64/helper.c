@@ -21,6 +21,7 @@
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
                                       uint64_t aux0, uint64_t aux1);
+static void ia64_progress_trace_bundle(CPUIA64State *env);
 
 void HELPER(perf_tb_exec)(void)
 {
@@ -40,6 +41,32 @@ void HELPER(perf_tcg_ldst_fallback)(void)
 void HELPER(perf_tb_exit_main_loop)(void)
 {
     IA64_PERF_INC(IA64_PERF_TB_EXIT_MAIN_LOOP);
+}
+
+void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip)
+{
+    CPUState *cpu = env_cpu(env);
+
+    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    IA64_PERF_INC(IA64_PERF_TCG_FIRMWARE_CALL_GATE_FAST);
+
+    /*
+     * Firmware service helpers can legitimately perform guest memory and MMIO
+     * accesses.  The full bundle interpreter used the same relaxed I/O mode.
+     */
+    cpu->neg.can_do_io = true;
+    env->ip = gate_ip;
+    env->cr[IA64_CR_IIP] = gate_ip;
+
+    ia64_progress_trace_bundle(env);
+
+    if (!vibtanium_efi_dispatch_gate(env, gate_ip)) {
+        IA64_PERF_INC(IA64_PERF_TCG_FIRMWARE_CALL_GATE_FALLBACK);
+        cpu_abort(cpu,
+                  "IA-64 firmware call-gate fast path missed "
+                  "IP=0x%016" PRIx64 "\n",
+                  gate_ip);
+    }
 }
 
 #define IA64_LINUX_BREAK_SYSCALL UINT64_C(0x100000)
@@ -1565,14 +1592,28 @@ static void firmware_trace_call(CPUIA64State *env, const char *source,
             result.ret0, result.ret1, result.ret2);
 }
 
+static void firmware_invalidate_result_alat(CPUIA64State *env)
+{
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        IA64AlatEntry *entry = &env->alat.entries[i];
+
+        if (entry->valid && entry->target >= 8 && entry->target <= 11) {
+            entry->valid = false;
+        }
+    }
+}
+
 static void firmware_write_result(CPUIA64State *env,
                                   IA64FirmwareResult result,
                                   bool stacked_return)
 {
-    ia64_write_gr(env, 8, result.status);
-    ia64_write_gr(env, 9, result.ret0);
-    ia64_write_gr(env, 10, result.ret1);
-    ia64_write_gr(env, 11, result.ret2);
+    env->gr[8] = result.status;
+    env->gr[9] = result.ret0;
+    env->gr[10] = result.ret1;
+    env->gr[11] = result.ret2;
+    firmware_invalidate_result_alat(env);
+    env->gr[0] = 0;
+
     if (stacked_return) {
         ia64_return_from_call_frame(env, env->br[0]);
     } else {

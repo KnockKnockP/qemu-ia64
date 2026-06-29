@@ -11,6 +11,17 @@
 #include "target/ia64/tcg-skeleton.h"
 #include "tcg/tcg.h"
 
+enum {
+    IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT =
+        VIBTANIUM_EFI_BOOT_SERVICE_COUNT +
+        VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT +
+        VIBTANIUM_EFI_CON_OUT_SERVICE_COUNT +
+        VIBTANIUM_EFI_CON_IN_SERVICE_COUNT +
+        VIBTANIUM_EFI_BLOCK_IO_SERVICE_COUNT +
+        VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT +
+        VIBTANIUM_EFI_FILE_SERVICE_COUNT,
+};
+
 static IA64DecodedBundle make_bundle(uint8_t tmpl,
                                      uint64_t slot0,
                                      uint64_t slot1,
@@ -91,6 +102,7 @@ static unsigned helper_flags_for(const char *name)
 static void test_helper_flags_are_conservative(void)
 {
     g_assert_cmphex(helper_flags_for("exec_bundle"), ==, 0);
+    g_assert_cmphex(helper_flags_for("firmware_call_gate"), ==, 0);
     g_assert_cmphex(helper_flags_for("start_fast_bundle"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_fast_bundle"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_fast_store"), ==, 0);
@@ -122,15 +134,27 @@ static void test_invalid_template_ends_tb(void)
 static void test_efi_call_gate_ends_tb(void)
 {
     IA64DecodedBundle bundle = make_bundle(0x16, 0, 0, 0);
+    uint64_t last_service_gate =
+        VIBTANIUM_EFI_CALL_GATE_BASE +
+        (IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT - 1) * IA64_BUNDLE_SIZE;
+    uint64_t after_last_service_gate = last_service_gate + IA64_BUNDLE_SIZE;
 
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
                     &bundle, VIBTANIUM_EFI_PAL_PROC);
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
+                    &bundle, VIBTANIUM_EFI_SAL_PROC);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
                     &bundle, VIBTANIUM_EFI_CALL_GATE_BASE);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
+                    &bundle, last_service_gate);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(
+                        &bundle, VIBTANIUM_EFI_PAL_PROC),
+                    ==, IA64_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE);
     g_assert_false(ia64_tcg_pc_is_efi_call_gate(
         VIBTANIUM_EFI_CALL_GATE_BASE - IA64_BUNDLE_SIZE));
     g_assert_false(ia64_tcg_pc_is_efi_call_gate(
         VIBTANIUM_EFI_CALL_GATE_BASE + 1));
+    g_assert_false(ia64_tcg_pc_is_efi_call_gate(after_last_service_gate));
 }
 
 static void test_break_and_branch_end_tb(void)
