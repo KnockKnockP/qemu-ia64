@@ -1294,8 +1294,21 @@ static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,
         if (major == 0x0) {
             uint8_t x6 = (raw >> 27) & 0x3f;
 
-            if (x6 == 0x08 || x6 == 0x20 || x6 == 0x21) {
+            switch (x6) {
+            case 0x02: /* cover */
+                return IA64_TCG_TB_BOUNDARY_RSE_STATE;
+            case 0x04: /* clrrrb */
+            case 0x05: /* clrrrb.pr */
+            case 0x0c: /* bsw.0 */
+            case 0x0d: /* bsw.1 */
+            case 0x10: /* epc */
+                return IA64_TCG_TB_BOUNDARY_CPU_STATE;
+            case 0x08: /* rfi */
+            case 0x20: /* br */
+            case 0x21: /* br.ret */
                 return IA64_TCG_TB_BOUNDARY_BRANCH;
+            default:
+                break;
             }
         }
     }

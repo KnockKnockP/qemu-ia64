@@ -212,6 +212,10 @@ static void test_state_changing_slots_end_tb(void)
         (1ULL << 37) | (0x1aULL << 27) | (2ULL << 20) | (3ULL << 6);
     const uint64_t kernel_invala_raw = 0x00080000000ULL;
     const uint64_t kernel_loadrs_raw = 0x00050000000ULL;
+    const uint64_t cover_raw = 0x02ULL << 27;
+    const uint64_t clrrrb_raw = 0x04ULL << 27;
+    const uint64_t bsw_1_raw = 0x0dULL << 27;
+    const uint64_t epc_raw = 0x10ULL << 27;
     IA64DecodedBundle bundle;
 
     bundle = make_bundle(0x00, chk_s_m_r22_raw, 0, 0);
@@ -234,6 +238,18 @@ static void test_state_changing_slots_end_tb(void)
 
     bundle = make_bundle(0x00, kernel_loadrs_raw, 0, 0);
     assert_boundary(IA64_TCG_TB_BOUNDARY_RSE_STATE, &bundle, 0x1000);
+
+    bundle = make_bundle(0x16, cover_raw, 0, 0);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_RSE_STATE, &bundle, 0x1000);
+
+    bundle = make_bundle(0x16, clrrrb_raw, 0, 0);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
+
+    bundle = make_bundle(0x16, bsw_1_raw, 0, 0);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
+
+    bundle = make_bundle(0x16, epc_raw, 0, 0);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
 }
 
 static void test_fast_bundle_accepts_hot_integer_subset(void)
