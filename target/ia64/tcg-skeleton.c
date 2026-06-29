@@ -118,7 +118,81 @@ static void ia64_tcg_fast_count_op(IA64TcgFastBundle *fast, unsigned shift)
     fast->op_counts += 1u << shift;
 }
 
+static bool ia64_tcg_ldst_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_LDST_TRACE") != NULL ||
+                  g_getenv("VIBTANIUM_LDST_TRACE_ADDR") != NULL ||
+                  g_getenv("VIBTANIUM_LDST_TRACE_PADDR") != NULL ||
+                  g_getenv("VIBTANIUM_LDST_DECODE_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static bool ia64_tcg_fast_set_base_update(IA64TcgFastSlot *slot,
+                                          uint32_t reg)
+{
+    if (!ia64_tcg_fast_static_gr(reg)) {
+        return false;
+    }
+    if (reg != 0) {
+        slot->dest_mask |= 1ULL << reg;
+    }
+    return true;
+}
+
+static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
+                                          unsigned slot_index,
+                                          IA64TcgFastSlot *slot,
+                                          IA64TcgFastBundle *fast)
+{
+    if (slot_index != 0 || ia64_tcg_ldst_trace_enabled()) {
+        return false;
+    }
+    if (ldst->update_from_register ||
+        !ia64_tcg_fast_static_gr(ldst->base)) {
+        return false;
+    }
+
+    switch (ldst->kind) {
+    case IA64_LDST_IMM_LOAD:
+        if (ldst->memory_class != 0 || ldst->target == 0 ||
+            !ia64_tcg_fast_set_target(slot, ldst->target)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_LDST_LOAD;
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT);
+        break;
+    case IA64_LDST_IMM_STORE:
+        if (ldst->memory_class != 0x0c ||
+            !ia64_tcg_fast_static_gr(ldst->source)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_LDST_STORE;
+        slot->source2 = ldst->source;
+        ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_LDST_STORE_SHIFT);
+        break;
+    default:
+        return false;
+    }
+
+    if (ldst->base_update &&
+        !ia64_tcg_fast_set_base_update(slot, ldst->base)) {
+        return false;
+    }
+
+    slot->base = ldst->base;
+    slot->width = ldst->width;
+    slot->base_update = ldst->base_update;
+    slot->immediate = ldst->immediate;
+    slot->slot_index = slot_index;
+    return true;
+}
+
 static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
+                                     unsigned slot_index,
                                      IA64TcgFastSlot *slot,
                                      IA64TcgFastBundle *fast)
 {
@@ -128,8 +202,10 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     uint8_t x2a;
     uint8_t x2b;
     uint8_t x4;
+    IA64LdstImmediate ldst;
 
     memset(slot, 0, sizeof(*slot));
+    slot->slot_index = slot_index;
     if (ia64_slot_predicate(raw) != 0) {
         return false;
     }
@@ -214,6 +290,11 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         return true;
     }
 
+    if (ia64_decode_ldst_immediate(type, raw, &ldst) &&
+        ia64_tcg_build_fast_ldst_slot(&ldst, slot_index, slot, fast)) {
+        return true;
+    }
+
     return false;
 }
 
@@ -228,6 +309,7 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
                                       bundle->slot[slot],
+                                      slot,
                                       &fast->slot[slot], fast)) {
             return false;
         }
@@ -237,6 +319,24 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
     }
 
     return fast->slot_count == IA64_SLOT_COUNT;
+}
+
+bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle)
+{
+    IA64LdstImmediate ldst;
+
+    if (!bundle || !bundle->valid) {
+        return false;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if (ia64_decode_ldst_immediate(bundle->info->slot_type[slot],
+                                       bundle->slot[slot], &ldst)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool ia64_tcg_same_page(uint64_t left, uint64_t right)

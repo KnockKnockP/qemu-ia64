@@ -31,6 +31,11 @@ void HELPER(perf_direct_branch_fallback)(void)
     IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
 }
 
+void HELPER(perf_tcg_ldst_fallback)(void)
+{
+    IA64_PERF_INC(IA64_PERF_TCG_LDST_FALLBACK);
+}
+
 void HELPER(perf_tb_exit_main_loop)(void)
 {
     IA64_PERF_INC(IA64_PERF_TB_EXIT_MAIN_LOOP);
@@ -4635,6 +4640,12 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
     IA64_PERF_ADD(IA64_PERF_TCG_FAST_ADDL,
                   ia64_perf_fast_count(op_counts,
                                        IA64_PERF_FAST_COUNT_ADDL_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_LDST_LOAD,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT));
+    IA64_PERF_ADD(IA64_PERF_TCG_LDST_STORE,
+                  ia64_perf_fast_count(op_counts,
+                                       IA64_PERF_FAST_COUNT_LDST_STORE_SHIFT));
 
     cpu->neg.can_do_io = true;
     ia64_trace_execve(env);
@@ -4653,6 +4664,12 @@ void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
     }
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
+}
+
+void HELPER(finish_fast_store)(CPUIA64State *env, uint64_t address,
+                               uint32_t width)
+{
+    ia64_alat_invalidate_store(env, address, width);
 }
 
 uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,

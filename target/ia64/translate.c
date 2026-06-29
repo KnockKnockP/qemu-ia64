@@ -7,6 +7,7 @@
 #include "exec/helper-gen.h"
 #include "exec/memop.h"
 #include "exec/target_page.h"
+#include "exec/translation-block.h"
 #include "exec/translator.h"
 #include "perf.h"
 #include "tcg-skeleton.h"
@@ -96,6 +97,18 @@ static void ia64_tr_store_static_gr(uint8_t reg, TCGv_i64 value)
                    offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
 }
 
+static void ia64_tr_set_psr_ri(uint8_t slot)
+{
+    TCGv_i64 psr = tcg_temp_new_i64();
+
+    tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+    tcg_gen_andi_i64(psr, psr, ~IA64_PSR_RI_MASK);
+    if (slot != 0) {
+        tcg_gen_ori_i64(psr, psr, (uint64_t)slot << IA64_PSR_RI_SHIFT);
+    }
+    tcg_gen_st_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+}
+
 static void ia64_tr_load_fast_source2(TCGv_i64 dest,
                                       const IA64TcgFastSlot *slot)
 {
@@ -106,7 +119,44 @@ static void ia64_tr_load_fast_source2(TCGv_i64 dest,
     }
 }
 
-static void ia64_tr_emit_fast_slot(const IA64TcgFastSlot *slot)
+static MemOp ia64_tr_ldst_memop(uint8_t width)
+{
+    switch (width) {
+    case 1:
+        return MO_UB;
+    case 2:
+        return MO_LEUW;
+    case 4:
+        return MO_LEUL;
+    case 8:
+        return MO_LEUQ;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static int ia64_tr_data_mmu_index(DisasContext *ctx)
+{
+    return (ctx->base.tb->flags & 1) ? 1 : 0;
+}
+
+static void ia64_tr_emit_ldst_base_update(const IA64TcgFastSlot *slot,
+                                          TCGv_i64 address)
+{
+    TCGv_i64 updated;
+
+    if (!slot->base_update) {
+        return;
+    }
+
+    updated = tcg_temp_new_i64();
+    tcg_gen_addi_i64(updated, address, slot->immediate);
+    ia64_tr_store_static_gr(slot->base, updated);
+}
+
+static void ia64_tr_emit_fast_slot(DisasContext *ctx,
+                                   const IA64TcgFastSlot *slot,
+                                   TCGv_i64 ldst_address)
 {
     TCGv_i64 result;
     TCGv_i64 source2;
@@ -119,10 +169,10 @@ static void ia64_tr_emit_fast_slot(const IA64TcgFastSlot *slot)
     result = tcg_temp_new_i64();
     source2 = tcg_temp_new_i64();
     source3 = tcg_temp_new_i64();
-    ia64_tr_load_static_gr(source3, slot->source3);
 
     switch (slot->op) {
     case IA64_TCG_FAST_OP_ALU_ADD:
+        ia64_tr_load_static_gr(source3, slot->source3);
         if (slot->source2_immediate) {
             tcg_gen_addi_i64(result, source3, slot->immediate);
         } else {
@@ -134,6 +184,7 @@ static void ia64_tr_emit_fast_slot(const IA64TcgFastSlot *slot)
         }
         break;
     case IA64_TCG_FAST_OP_ALU_LOGIC:
+        ia64_tr_load_static_gr(source3, slot->source3);
         ia64_tr_load_fast_source2(source2, slot);
         switch (slot->logic_op) {
         case IA64_TCG_FAST_LOGIC_AND:
@@ -153,8 +204,28 @@ static void ia64_tr_emit_fast_slot(const IA64TcgFastSlot *slot)
         }
         break;
     case IA64_TCG_FAST_OP_ADDL:
+        ia64_tr_load_static_gr(source3, slot->source3);
         tcg_gen_addi_i64(result, source3, slot->immediate);
         break;
+    case IA64_TCG_FAST_OP_LDST_LOAD:
+        g_assert(ldst_address != NULL);
+        ia64_tr_set_psr_ri(slot->slot_index);
+        tcg_gen_qemu_ld_i64(result, ldst_address, ia64_tr_data_mmu_index(ctx),
+                            ia64_tr_ldst_memop(slot->width));
+        ia64_tr_store_static_gr(slot->target, result);
+        ia64_tr_emit_ldst_base_update(slot, ldst_address);
+        return;
+    case IA64_TCG_FAST_OP_LDST_STORE:
+        g_assert(ldst_address != NULL);
+        ia64_tr_load_static_gr(source2, slot->source2);
+        ia64_tr_set_psr_ri(slot->slot_index);
+        tcg_gen_qemu_st_i64(source2, ldst_address,
+                            ia64_tr_data_mmu_index(ctx),
+                            ia64_tr_ldst_memop(slot->width));
+        gen_helper_finish_fast_store(tcg_env, ldst_address,
+                                     tcg_constant_i32(slot->width));
+        ia64_tr_emit_ldst_base_update(slot, ldst_address);
+        return;
     default:
         g_assert_not_reached();
     }
@@ -162,18 +233,30 @@ static void ia64_tr_emit_fast_slot(const IA64TcgFastSlot *slot)
     ia64_tr_store_static_gr(slot->target, result);
 }
 
-static bool ia64_tr_translate_fast_bundle(const IA64DecodedBundle *bundle,
+static bool ia64_tr_fast_bundle_has_ldst(const IA64TcgFastBundle *fast)
+{
+    return ia64_perf_fast_count(fast->op_counts,
+                                IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT) != 0 ||
+           ia64_perf_fast_count(fast->op_counts,
+                                IA64_PERF_FAST_COUNT_LDST_STORE_SHIFT) != 0;
+}
+
+static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
+                                          const IA64DecodedBundle *bundle,
                                           uint64_t pc)
 {
     IA64TcgFastBundle fast;
     TCGLabel *fallback;
     TCGLabel *done;
     TCGv_i64 tmp;
+    TCGv_i64 ldst_address[IA64_SLOT_COUNT] = { NULL, };
+    bool has_ldst;
 
     if (!ia64_tcg_build_fast_bundle(bundle, &fast)) {
         return false;
     }
 
+    has_ldst = ia64_tr_fast_bundle_has_ldst(&fast);
     fallback = gen_new_label();
     done = gen_new_label();
     tmp = tcg_temp_new_i64();
@@ -187,13 +270,25 @@ static bool ia64_tr_translate_fast_bundle(const IA64DecodedBundle *bundle,
         tcg_gen_andi_i64(tmp, tmp, fast.source_nat_mask);
         tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fallback);
     }
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if (fast.slot[slot].op == IA64_TCG_FAST_OP_LDST_LOAD ||
+            fast.slot[slot].op == IA64_TCG_FAST_OP_LDST_STORE) {
+            ldst_address[slot] = tcg_temp_new_i64();
+            ia64_tr_load_static_gr(ldst_address[slot], fast.slot[slot].base);
+            if (fast.slot[slot].width > 1) {
+                tcg_gen_andi_i64(tmp, ldst_address[slot],
+                                 fast.slot[slot].width - 1);
+                tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fallback);
+            }
+        }
+    }
 
     tcg_gen_movi_i64(cpu_ip, pc);
     gen_helper_start_fast_bundle(tcg_env,
                                  tcg_constant_i32(fast.slot_count),
                                  tcg_constant_i32(fast.op_counts));
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
-        ia64_tr_emit_fast_slot(&fast.slot[slot]);
+        ia64_tr_emit_fast_slot(ctx, &fast.slot[slot], ldst_address[slot]);
     }
     gen_helper_finish_fast_bundle(tcg_env,
                                   tcg_constant_i64(pc + IA64_BUNDLE_SIZE),
@@ -201,6 +296,9 @@ static bool ia64_tr_translate_fast_bundle(const IA64DecodedBundle *bundle,
     tcg_gen_br(done);
 
     gen_set_label(fallback);
+    if (has_ldst && ia64_perf_enabled()) {
+        gen_helper_perf_tcg_ldst_fallback();
+    }
     ia64_tr_emit_exec_bundle(bundle, pc);
     gen_set_label(done);
     return true;
@@ -326,7 +424,11 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         ia64_tr_count_branch_fallback(&bundle);
     }
     if (ia64_tcg_tb_boundary_ends_tb(boundary) ||
-        !ia64_tr_translate_fast_bundle(&bundle, pc)) {
+        !ia64_tr_translate_fast_bundle(ctx, &bundle, pc)) {
+        if (!ia64_tcg_tb_boundary_ends_tb(boundary) &&
+            ia64_tcg_bundle_has_ldst_immediate(&bundle)) {
+            IA64_PERF_INC(IA64_PERF_TCG_LDST_FALLBACK);
+        }
         ia64_tr_emit_exec_bundle(&bundle, pc);
     }
     if (ia64_tcg_tb_boundary_ends_tb(boundary)) {

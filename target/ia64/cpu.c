@@ -15,6 +15,7 @@
 #include "exec/target_page.h"
 #include "gdbstub/helpers.h"
 #include "hw/core/sysemu-cpu-ops.h"
+#include "system/memory.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
 
@@ -85,6 +86,27 @@ static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
         : (env->psr & UINT64_C(0x0000000000020000)) != 0;
 
     return translated ? (ifetch ? 2 : 1) : 0;
+}
+
+static void ia64_count_data_tlb_region(CPUState *cs, hwaddr paddr, int size,
+                                       MMUAccessType access_type)
+{
+    MemoryRegion *mr;
+    hwaddr xlat = paddr;
+    hwaddr len = MAX(size, 1);
+    bool store = access_type == MMU_DATA_STORE;
+
+    if (!ia64_perf_enabled() ||
+        (access_type != MMU_DATA_LOAD && access_type != MMU_DATA_STORE)) {
+        return;
+    }
+
+    mr = address_space_translate(cs->as, paddr, &xlat, &len, store,
+                                 MEMTXATTRS_UNSPECIFIED);
+    if (!memory_region_is_ram(mr) && !memory_region_is_romd(mr)) {
+        IA64_PERF_INC(store ? IA64_PERF_LDST_MMIO_STORE :
+                              IA64_PERF_LDST_MMIO_LOAD);
+    }
 }
 
 static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
@@ -194,6 +216,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         tlb_set_page(cs, address & TARGET_PAGE_MASK,
                      result.paddr & TARGET_PAGE_MASK, result.prot, mmu_idx,
                      TARGET_PAGE_SIZE);
+        ia64_count_data_tlb_region(cs, result.paddr, size, access_type);
         IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_SUCCESS);
         return true;
     }
@@ -205,6 +228,11 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     cpu_restore_state(cs, retaddr);
     IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION);
+    if (access_type == MMU_DATA_LOAD) {
+        IA64_PERF_INC(IA64_PERF_LDST_LOAD_FAULT);
+    } else if (access_type == MMU_DATA_STORE) {
+        IA64_PERF_INC(IA64_PERF_LDST_STORE_FAULT);
+    }
 
     if (result.status == IA64_TRANSLATE_TLB_MISS) {
         IA64ExceptionKind kind;

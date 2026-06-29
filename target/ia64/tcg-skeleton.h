@@ -43,6 +43,8 @@ typedef enum IA64TcgFastOp {
     IA64_TCG_FAST_OP_ALU_ADD,
     IA64_TCG_FAST_OP_ALU_LOGIC,
     IA64_TCG_FAST_OP_ADDL,
+    IA64_TCG_FAST_OP_LDST_LOAD,
+    IA64_TCG_FAST_OP_LDST_STORE,
 } IA64TcgFastOp;
 
 typedef enum IA64TcgFastLogicOp {
@@ -58,7 +60,11 @@ typedef struct IA64TcgFastSlot {
     uint8_t target;
     uint8_t source2;
     uint8_t source3;
+    uint8_t base;
+    uint8_t width;
+    uint8_t slot_index;
     bool source2_immediate;
+    bool base_update;
     int64_t immediate;
     uint64_t source_nat_mask;
     uint64_t dest_mask;
@@ -74,6 +80,7 @@ typedef struct IA64TcgFastBundle {
 
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast);
+bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle);
 
 typedef struct IA64TcgDirectBranch {
     uint64_t target_ip;
