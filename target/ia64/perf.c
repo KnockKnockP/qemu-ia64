@@ -388,6 +388,11 @@ void ia64_perf_count_exception_kind(unsigned kind)
     case IA64_EXCEPTION_DATA_NESTED_TLB:
         ia64_perf_count(IA64_PERF_EXCEPTION_TLB_MISS);
         break;
+    case IA64_EXCEPTION_DIRTY_BIT:
+    case IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT:
+    case IA64_EXCEPTION_DATA_ACCESS_BIT:
+    case IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS:
+    case IA64_EXCEPTION_DATA_ACCESS_RIGHTS:
     case IA64_EXCEPTION_PAGE_FAULT:
         ia64_perf_count(IA64_PERF_EXCEPTION_PAGE_FAULT);
         break;

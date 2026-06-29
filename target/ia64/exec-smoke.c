@@ -30,6 +30,8 @@
 #define IA64_INTERRUPT_VECTOR_MASK UINT64_C(0xff)
 #define IA64_INTERRUPT_SPURIOUS_VECTOR UINT64_C(0x0f)
 #define IA64_LOCAL_VECTOR_MASK_BIT UINT64_C(0x0000000000010000)
+#define IA64_TPR_MIC_MASK UINT64_C(0xf0)
+#define IA64_TPR_MMI_BIT UINT64_C(0x0000000000010000)
 
 static bool ia64_read_gr_nat(CPUIA64State *env, uint32_t reg);
 
@@ -1586,7 +1588,39 @@ static bool ia64_valid_external_interrupt_vector(uint64_t vector)
            (vector > IA64_INTERRUPT_SPURIOUS_VECTOR && vector <= 0xff);
 }
 
-static void ia64_refresh_pending_external_interrupt(CPUIA64State *env)
+static bool ia64_external_interrupt_vector_masked_by_tpr(CPUIA64State *env,
+                                                         uint64_t vector)
+{
+    uint64_t tpr = env->cr[IA64_CR_TPR];
+
+    if (vector == 2) {
+        return false;
+    }
+    if (tpr & IA64_TPR_MMI_BIT) {
+        return true;
+    }
+    if (vector <= IA64_INTERRUPT_SPURIOUS_VECTOR) {
+        return false;
+    }
+    return (vector >> 4) <= ((tpr & IA64_TPR_MIC_MASK) >> 4);
+}
+
+static bool ia64_external_interrupt_vector_masked(CPUIA64State *env,
+                                                  uint64_t vector)
+{
+    /*
+     * This local-SAPIC model tracks one in-service vector.  While it is
+     * active, keep further external delivery masked until the guest writes EOI.
+     */
+    if (env->interrupt.pending_interruption) {
+        return true;
+    }
+    return ia64_external_interrupt_vector_masked_by_tpr(env, vector);
+}
+
+static bool ia64_select_pending_external_interrupt(CPUIA64State *env,
+                                                   bool honor_masks,
+                                                   uint64_t *vector_out)
 {
     for (int reg = IA64_CR_IRR3; reg >= IA64_CR_IRR0; reg--) {
         uint64_t pending = env->cr[reg];
@@ -1596,16 +1630,30 @@ static void ia64_refresh_pending_external_interrupt(CPUIA64State *env)
             uint64_t vector = (uint64_t)(reg - IA64_CR_IRR0) * 64 + bit;
 
             if (ia64_valid_external_interrupt_vector(vector)) {
-                env->interrupt.pending = true;
-                env->interrupt.pending_vector = vector;
-                return;
+                if (!honor_masks ||
+                    !ia64_external_interrupt_vector_masked(env, vector)) {
+                    *vector_out = vector;
+                    return true;
+                }
             }
             pending &= ~(UINT64_C(1) << bit);
         }
     }
 
-    env->interrupt.pending = false;
-    env->interrupt.pending_vector = 0;
+    return false;
+}
+
+static void ia64_refresh_pending_external_interrupt(CPUIA64State *env)
+{
+    uint64_t vector;
+
+    if (ia64_select_pending_external_interrupt(env, false, &vector)) {
+        env->interrupt.pending = true;
+        env->interrupt.pending_vector = vector;
+    } else {
+        env->interrupt.pending = false;
+        env->interrupt.pending_vector = 0;
+    }
 }
 
 static void ia64_clear_pending_external_interrupt(CPUIA64State *env,
@@ -1727,8 +1775,12 @@ bool ia64_external_interrupt_pending(CPUIA64State *env)
 
 bool ia64_external_interrupt_enabled(CPUIA64State *env)
 {
+    uint64_t vector;
+
     return ia64_external_interrupt_pending(env) &&
-           (env->psr & IA64_PSR_I_BIT) != 0;
+           (env->psr & (IA64_PSR_I_BIT | IA64_PSR_IC_BIT)) ==
+           (IA64_PSR_I_BIT | IA64_PSR_IC_BIT) &&
+           ia64_select_pending_external_interrupt(env, true, &vector);
 }
 
 uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
@@ -1739,12 +1791,10 @@ uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
 
     switch (reg) {
     case IA64_CR_IVR:
-        if (env->interrupt.pending_interruption) {
-            return env->cr[IA64_CR_IVR] & IA64_INTERRUPT_VECTOR_MASK;
-        }
-        if (env->interrupt.pending) {
-            uint64_t vector = env->interrupt.pending_vector;
+    {
+        uint64_t vector;
 
+        if (ia64_select_pending_external_interrupt(env, true, &vector)) {
             ia64_clear_pending_external_interrupt(env, vector);
             env->interrupt.pending_interruption = 1;
             env->cr[IA64_CR_IVR] = vector;
@@ -1752,6 +1802,7 @@ uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
         }
         env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
         return IA64_INTERRUPT_SPURIOUS_VECTOR;
+    }
     case IA64_CR_IRR0:
     case IA64_CR_IRR1:
     case IA64_CR_IRR2:

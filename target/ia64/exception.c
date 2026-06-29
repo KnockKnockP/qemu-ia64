@@ -81,6 +81,16 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
         return "alternate-data-tlb-miss";
     case IA64_EXCEPTION_DATA_NESTED_TLB:
         return "data-nested-tlb";
+    case IA64_EXCEPTION_DIRTY_BIT:
+        return "dirty-bit";
+    case IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT:
+        return "instruction-access-bit";
+    case IA64_EXCEPTION_DATA_ACCESS_BIT:
+        return "data-access-bit";
+    case IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS:
+        return "instruction-access-rights";
+    case IA64_EXCEPTION_DATA_ACCESS_RIGHTS:
+        return "data-access-rights";
     case IA64_EXCEPTION_ILLEGAL_OPERATION:
         return "illegal-operation";
     case IA64_EXCEPTION_PAGE_FAULT:
@@ -93,6 +103,37 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
         return "external-interrupt";
     default:
         return "unknown";
+    }
+}
+
+IA64ExceptionKind
+ia64_exception_for_translate_result(const IA64TranslateResult *result)
+{
+    if (!result) {
+        return IA64_EXCEPTION_PAGE_FAULT;
+    }
+
+    switch (result->status) {
+    case IA64_TRANSLATE_TLB_MISS:
+        if (result->access_type == MMU_INST_FETCH) {
+            return result->vhpt_enabled ?
+                   IA64_EXCEPTION_INSTRUCTION_TLB_MISS :
+                   IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS;
+        }
+        return result->vhpt_enabled ? IA64_EXCEPTION_DATA_TLB_MISS :
+                                      IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS;
+    case IA64_TRANSLATE_DIRTY_BIT:
+        return IA64_EXCEPTION_DIRTY_BIT;
+    case IA64_TRANSLATE_ACCESS_BIT:
+        return result->access_type == MMU_INST_FETCH ?
+               IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT :
+               IA64_EXCEPTION_DATA_ACCESS_BIT;
+    case IA64_TRANSLATE_ACCESS_DENIED:
+        return result->access_type == MMU_INST_FETCH ?
+               IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS :
+               IA64_EXCEPTION_DATA_ACCESS_RIGHTS;
+    default:
+        return IA64_EXCEPTION_PAGE_FAULT;
     }
 }
 
@@ -132,6 +173,21 @@ static void ia64_record_exception_common(CPUIA64State *env,
         break;
     case IA64_EXCEPTION_DATA_NESTED_TLB:
         record->vector = 0x1400;
+        break;
+    case IA64_EXCEPTION_DIRTY_BIT:
+        record->vector = 0x2000;
+        break;
+    case IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT:
+        record->vector = 0x2400;
+        break;
+    case IA64_EXCEPTION_DATA_ACCESS_BIT:
+        record->vector = 0x2800;
+        break;
+    case IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS:
+        record->vector = 0x5200;
+        break;
+    case IA64_EXCEPTION_DATA_ACCESS_RIGHTS:
+        record->vector = 0x5300;
         break;
     case IA64_EXCEPTION_ILLEGAL_OPERATION:
         record->vector = 0x5400;
@@ -245,6 +301,11 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         kind == IA64_EXCEPTION_DATA_TLB_MISS ||
         kind == IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS ||
+        kind == IA64_EXCEPTION_DIRTY_BIT ||
+        kind == IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT ||
+        kind == IA64_EXCEPTION_DATA_ACCESS_BIT ||
+        kind == IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS ||
+        kind == IA64_EXCEPTION_DATA_ACCESS_RIGHTS ||
         kind == IA64_EXCEPTION_PAGE_FAULT) {
         env->cr[IA64_CR_ITIR] = ia64_default_itir(env, address);
     }

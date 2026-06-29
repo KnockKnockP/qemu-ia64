@@ -98,20 +98,34 @@ static const char *ia64_linux_syscall_name(uint64_t nr)
     case 1027: return "write";
     case 1028: return "open";
     case 1029: return "close";
+    case 1030: return "creat";
+    case 1031: return "link";
+    case 1032: return "unlink";
     case 1033: return "execve";
     case 1034: return "chdir";
+    case 1037: return "mknod";
+    case 1038: return "chmod";
+    case 1039: return "chown";
+    case 1040: return "lseek";
     case 1041: return "getpid";
     case 1042: return "getppid";
     case 1043: return "mount";
     case 1046: return "getuid";
     case 1049: return "access";
+    case 1054: return "rename";
     case 1055: return "mkdir";
+    case 1057: return "dup";
+    case 1058: return "pipe";
     case 1060: return "brk";
     case 1062: return "getgid";
     case 1065: return "ioctl";
     case 1066: return "fcntl";
+    case 1067: return "umask";
     case 1070: return "dup2";
     case 1081: return "setsid";
+    case 1089: return "select";
+    case 1090: return "poll";
+    case 1091: return "symlink";
     case 1092: return "readlink";
     case 1103: return "statfs";
     case 1104: return "fstatfs";
@@ -133,20 +147,53 @@ static const char *ia64_linux_syscall_name(uint64_t nr)
     case 1182: return "rt_sigsuspend";
     case 1183: return "rt_sigtimedwait";
     case 1184: return "getcwd";
+    case 1190: return "socket";
+    case 1191: return "bind";
+    case 1192: return "connect";
+    case 1193: return "listen";
+    case 1194: return "accept";
+    case 1195: return "getsockname";
+    case 1196: return "getpeername";
+    case 1197: return "socketpair";
+    case 1198: return "send";
+    case 1199: return "sendto";
+    case 1200: return "recv";
+    case 1201: return "recvfrom";
+    case 1202: return "shutdown";
+    case 1203: return "setsockopt";
+    case 1204: return "getsockopt";
+    case 1205: return "sendmsg";
+    case 1206: return "recvmsg";
     case 1210: return "stat";
     case 1211: return "lstat";
     case 1212: return "fstat";
     case 1213: return "clone2";
     case 1214: return "getdents64";
     case 1216: return "readahead";
+    case 1229: return "tkill";
+    case 1230: return "futex";
     case 1233: return "set_tid_address";
     case 1236: return "exit_group";
+    case 1243: return "epoll_create";
+    case 1244: return "epoll_ctl";
+    case 1245: return "epoll_wait";
+    case 1254: return "clock_gettime";
     case 1257: return "fstatfs64";
     case 1258: return "statfs64";
     case 1270: return "waitid";
+    case 1277: return "inotify_init";
+    case 1278: return "inotify_add_watch";
+    case 1279: return "inotify_rm_watch";
     case 1281: return "openat";
     case 1282: return "mkdirat";
+    case 1283: return "mknodat";
+    case 1286: return "newfstatat";
     case 1291: return "readlinkat";
+    case 1305: return "epoll_pwait";
+    case 1307: return "signalfd";
+    case 1313: return "signalfd4";
+    case 1315: return "epoll_create1";
+    case 1318: return "inotify_init1";
     case 1327: return "open_by_handle_at";
     default: return "unknown";
     }
@@ -238,6 +285,87 @@ static void ia64_trace_guest_c_string(CPUIA64State *env, uint64_t address,
         buf[out++] = '"';
     }
     buf[out] = '\0';
+}
+
+static void ia64_trace_guest_bytes_escaped(CPUIA64State *env,
+                                           uint64_t address, uint64_t max_len,
+                                           char *buf, size_t buflen)
+{
+    char status[48] = "ok";
+    size_t out = 0;
+
+    if (buflen == 0) {
+        return;
+    }
+    if (address == 0) {
+        g_strlcpy(buf, "<null>", buflen);
+        return;
+    }
+
+    buf[out++] = '"';
+    for (uint64_t i = 0; i < max_len && out + 5 < buflen; i++) {
+        uint8_t ch;
+
+        if (!ia64_trace_guest_read_u8(env, address + i, &ch, status,
+                                      sizeof(status))) {
+            out += snprintf(buf + out, buflen - out, "<unreadable:%s>",
+                            status);
+            break;
+        }
+        if (ch == 0) {
+            buf[out++] = '\\';
+            buf[out++] = '0';
+        } else if (ch == '\\' || ch == '"') {
+            buf[out++] = '\\';
+            buf[out++] = ch;
+        } else if (ch >= 0x20 && ch <= 0x7e) {
+            buf[out++] = ch;
+        } else {
+            out += snprintf(buf + out, buflen - out, "\\x%02x", ch);
+        }
+    }
+    if (out + 2 < buflen) {
+        buf[out++] = '"';
+    }
+    buf[out] = '\0';
+}
+
+static bool ia64_trace_guest_read_u16(CPUIA64State *env, uint64_t address,
+                                      uint16_t *value, char *status,
+                                      size_t status_size)
+{
+    uint8_t byte0;
+    uint8_t byte1;
+
+    if (!ia64_trace_guest_read_u8(env, address, &byte0, status,
+                                  status_size) ||
+        !ia64_trace_guest_read_u8(env, address + 1, &byte1, status,
+                                  status_size)) {
+        return false;
+    }
+
+    *value = (uint16_t)byte0 | ((uint16_t)byte1 << 8);
+    return true;
+}
+
+static bool ia64_trace_guest_read_u32(CPUIA64State *env, uint64_t address,
+                                      uint32_t *value, char *status,
+                                      size_t status_size)
+{
+    uint8_t byte[4];
+
+    for (unsigned i = 0; i < ARRAY_SIZE(byte); i++) {
+        if (!ia64_trace_guest_read_u8(env, address + i, &byte[i], status,
+                                      status_size)) {
+            return false;
+        }
+    }
+
+    *value = (uint32_t)byte[0] |
+             ((uint32_t)byte[1] << 8) |
+             ((uint32_t)byte[2] << 16) |
+             ((uint32_t)byte[3] << 24);
+    return true;
 }
 
 static bool ia64_trace_guest_read_u64(CPUIA64State *env, uint64_t address,
@@ -393,6 +521,91 @@ static void ia64_trace_linux_syscall_paths(CPUIA64State *env,
     }
 }
 
+static void ia64_trace_linux_syscall_socket_details(CPUIA64State *env,
+                                                    const char *mnemonic,
+                                                    uint64_t nr)
+{
+    uint64_t arg[6];
+    bool shifted_m_gate = g_str_equal(mnemonic, "break.m");
+
+    for (unsigned i = 0; i < ARRAY_SIZE(arg); i++) {
+        arg[i] = ia64_read_gr(env, 32 + i + (shifted_m_gate ? 1 : 0));
+    }
+
+    switch (nr) {
+    case 1190: /* socket */
+    {
+        uint64_t type = arg[1];
+
+        fprintf(stderr,
+                " socket domain=%" PRIu64 " type=0x%016" PRIx64
+                " base_type=%" PRIu64 " cloexec=%u nonblock=%u"
+                " protocol=%" PRIu64,
+                arg[0], type, type & 0xf, (type & 02000000) != 0,
+                (type & 00004000) != 0, arg[2]);
+        break;
+    }
+    case 1191: /* bind */
+    {
+        char status[48] = "ok";
+        uint16_t family;
+
+        fprintf(stderr,
+                " bind fd=%" PRIu64 " addr=0x%016" PRIx64
+                " addrlen=%" PRIu64,
+                arg[0], arg[1], arg[2]);
+        if (arg[1] == 0 ||
+            !ia64_trace_guest_read_u16(env, arg[1], &family, status,
+                                       sizeof(status))) {
+            fprintf(stderr, " sockaddr=<unreadable:%s>", status);
+            break;
+        }
+        fprintf(stderr, " sockaddr_family=%u", family);
+        if (family == 16 && arg[2] >= 12) {
+            uint32_t nl_pid;
+            uint32_t nl_groups;
+
+            if (ia64_trace_guest_read_u32(env, arg[1] + 4, &nl_pid, status,
+                                          sizeof(status)) &&
+                ia64_trace_guest_read_u32(env, arg[1] + 8, &nl_groups,
+                                          status, sizeof(status))) {
+                fprintf(stderr,
+                        " sockaddr_nl pid=%" PRIu32
+                        " groups=0x%08" PRIx32,
+                        nl_pid, nl_groups);
+            } else {
+                fprintf(stderr, " sockaddr_nl=<unreadable:%s>", status);
+            }
+        } else if (family == 1 && arg[2] > 2) {
+            char path[176];
+
+            ia64_trace_guest_c_string(env, arg[1] + 2, path, sizeof(path));
+            fprintf(stderr, " sockaddr_un path=%s", path);
+        }
+        break;
+    }
+    case 1203: /* setsockopt */
+    {
+        char status[48] = "ok";
+        uint32_t optval;
+
+        fprintf(stderr,
+                " setsockopt fd=%" PRIu64 " level=%" PRIu64
+                " opt=%" PRIu64 " optval=0x%016" PRIx64
+                " optlen=%" PRIu64,
+                arg[0], arg[1], arg[2], arg[3], arg[4]);
+        if (arg[3] != 0 && arg[4] >= 4 &&
+            ia64_trace_guest_read_u32(env, arg[3], &optval, status,
+                                      sizeof(status))) {
+            fprintf(stderr, " optval_u32=%" PRIu32, optval);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void ia64_trace_linux_syscall_break(CPUIA64State *env,
                                            const char *mnemonic,
                                            uint64_t iim, uint64_t next_ip)
@@ -409,6 +622,7 @@ static void ia64_trace_linux_syscall_break(CPUIA64State *env,
     fprintf(stderr,
             "[ia64-syscall] %s nr=%" PRIu64 "(%s) ip=0x%016" PRIx64
             " next=0x%016" PRIx64 " cpl=%" PRIu64
+            " current=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
             " pr=0x%016" PRIx64 " r8=0x%016" PRIx64
             " r10=0x%016" PRIx64 " r15=0x%016" PRIx64
@@ -420,14 +634,16 @@ static void ia64_trace_linux_syscall_break(CPUIA64State *env,
             " b7=0x%016" PRIx64 " bsp=0x%016" PRIx64
             " bspstore=0x%016" PRIx64,
             mnemonic, nr, ia64_linux_syscall_name(nr), env->ip, next_ip,
-            cpl, env->psr, env->cfm, env->pr, ia64_read_gr(env, 8),
-            ia64_read_gr(env, 10), nr, ia64_read_gr(env, 32),
+            cpl, ia64_read_gr(env, 13), env->psr, env->cfm, env->pr,
+            ia64_read_gr(env, 8), ia64_read_gr(env, 10), nr,
+            ia64_read_gr(env, 32),
             ia64_read_gr(env, 33), ia64_read_gr(env, 34),
             ia64_read_gr(env, 35), ia64_read_gr(env, 36),
             ia64_read_gr(env, 37), ia64_read_gr(env, 38),
             ia64_read_gr(env, 39), env->br[0], env->br[6], env->br[7],
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE]);
     ia64_trace_linux_syscall_paths(env, mnemonic, nr);
+    ia64_trace_linux_syscall_socket_details(env, mnemonic, nr);
     fprintf(stderr, "\n");
 }
 
@@ -541,16 +757,8 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
 static void ia64_deliver_translation_fault(CPUIA64State *env,
                                            const IA64TranslateResult *result)
 {
-    IA64ExceptionKind kind;
-
-    if (result->status == IA64_TRANSLATE_TLB_MISS) {
-        kind = result->vhpt_enabled ? IA64_EXCEPTION_DATA_TLB_MISS
-                                    : IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS;
-    } else {
-        kind = IA64_EXCEPTION_PAGE_FAULT;
-    }
-
-    ia64_deliver_exception(env, kind, result->vaddr, result->access_type,
+    ia64_deliver_exception(env, ia64_exception_for_translate_result(result),
+                           result->vaddr, result->access_type,
                            result->message);
 }
 
@@ -4924,12 +5132,15 @@ static void ia64_trace_epc_syscall(CPUIA64State *env)
     cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
     fprintf(stderr,
             "[ia64-syscall] epc nr=%" PRIu64 "(%s) ip=0x%016" PRIx64
-            " cpl=%" PRIu64 " r32=0x%016" PRIx64 " r33=0x%016" PRIx64
+            " cpl=%" PRIu64 " current=0x%016" PRIx64
+            " r32=0x%016" PRIx64 " r33=0x%016" PRIx64
             " r34=0x%016" PRIx64 " r35=0x%016" PRIx64 " b0=0x%016" PRIx64,
             nr, ia64_linux_syscall_name(nr), env->ip, cpl,
+            ia64_read_gr(env, 13),
             ia64_read_gr(env, 32), ia64_read_gr(env, 33),
             ia64_read_gr(env, 34), ia64_read_gr(env, 35), env->br[0]);
-    ia64_trace_linux_syscall_paths(env, "break.i", nr);
+    ia64_trace_linux_syscall_paths(env, "epc", nr);
+    ia64_trace_linux_syscall_socket_details(env, "epc", nr);
     fprintf(stderr, "\n");
 }
 
@@ -4952,9 +5163,514 @@ static void ia64_trace_syscall_return(CPUIA64State *env)
     r8 = ia64_read_gr(env, 8);
     r10 = ia64_read_gr(env, 10);
     fprintf(stderr,
-            "[ia64-syscall] ret ip=0x%016" PRIx64 " r8=0x%016" PRIx64
+            "[ia64-syscall] ret ip=0x%016" PRIx64
+            " current=0x%016" PRIx64 " r8=0x%016" PRIx64
             " r10=0x%016" PRIx64 "\n",
-            env->ip, r8, r10);
+            env->ip, ia64_read_gr(env, 13), r8, r10);
+}
+
+static bool ia64_uevent_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_UEVENT_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+#define IA64_TRACE_KERNEL_CALL_SLOTS 64
+
+typedef enum IA64TraceKernelCallTag {
+    IA64_TRACE_KERNEL_CALL_NONE = 0,
+    IA64_TRACE_KERNEL_CALL_RECVMSG,
+    IA64_TRACE_KERNEL_CALL_SENDMSG,
+    IA64_TRACE_KERNEL_CALL_SEND,
+    IA64_TRACE_KERNEL_CALL_RECV,
+    IA64_TRACE_KERNEL_CALL_EPOLL_WAIT,
+    IA64_TRACE_KERNEL_CALL_MKNOD,
+    IA64_TRACE_KERNEL_CALL_MKNODAT,
+    IA64_TRACE_KERNEL_CALL_DOFORK,
+} IA64TraceKernelCallTag;
+
+typedef struct IA64TraceKernelCall {
+    bool active;
+    IA64TraceKernelCallTag tag;
+    uint64_t current;
+    uint64_t return_ip;
+    uint64_t arg[6];
+} IA64TraceKernelCall;
+
+static IA64TraceKernelCall ia64_uevent_kernel_calls[
+    IA64_TRACE_KERNEL_CALL_SLOTS];
+
+static IA64TraceKernelCall *ia64_trace_kernel_call_slot(uint64_t current,
+                                                        IA64TraceKernelCallTag tag,
+                                                        bool allocate)
+{
+    IA64TraceKernelCall *free_slot = NULL;
+
+    for (unsigned i = 0; i < ARRAY_SIZE(ia64_uevent_kernel_calls); i++) {
+        IA64TraceKernelCall *slot = &ia64_uevent_kernel_calls[i];
+
+        if (slot->active && slot->current == current && slot->tag == tag) {
+            return slot;
+        }
+        if (!slot->active && free_slot == NULL) {
+            free_slot = slot;
+        }
+    }
+
+    if (!allocate || free_slot == NULL) {
+        return NULL;
+    }
+
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->active = true;
+    free_slot->tag = tag;
+    free_slot->current = current;
+    return free_slot;
+}
+
+static IA64TraceKernelCall *ia64_trace_kernel_call_return_slot(uint64_t current,
+                                                               uint64_t ip)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(ia64_uevent_kernel_calls); i++) {
+        IA64TraceKernelCall *slot = &ia64_uevent_kernel_calls[i];
+
+        if (slot->active && slot->current == current &&
+            slot->return_ip == ip) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static void ia64_trace_record_kernel_call(CPUIA64State *env,
+                                          IA64TraceKernelCallTag tag)
+{
+    IA64TraceKernelCall *slot;
+    uint64_t current = ia64_read_gr(env, 13);
+
+    slot = ia64_trace_kernel_call_slot(current, tag, true);
+    if (slot == NULL) {
+        return;
+    }
+
+    slot->return_ip = env->br[0];
+    for (unsigned i = 0; i < ARRAY_SIZE(slot->arg); i++) {
+        slot->arg[i] = ia64_read_gr(env, 32 + i);
+    }
+}
+
+static void ia64_trace_msghdr_iovs(CPUIA64State *env, uint64_t msg,
+                                   unsigned max_iovs, uint64_t max_each)
+{
+    char status[48] = "ok";
+    uint64_t msg_iov;
+    uint64_t msg_iovlen;
+
+    if (!ia64_trace_guest_read_u64(env, msg + 16, &msg_iov, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u64(env, msg + 24, &msg_iovlen, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " msghdr=<unreadable:%s>", status);
+        return;
+    }
+
+    fprintf(stderr, " msg_iov=0x%016" PRIx64 " msg_iovlen=%" PRIu64,
+            msg_iov, msg_iovlen);
+    if (msg_iov == 0 || msg_iovlen == 0) {
+        return;
+    }
+
+    for (unsigned i = 0; i < max_iovs && i < msg_iovlen; i++) {
+        uint64_t iov = msg_iov + i * 16;
+        uint64_t iov_base;
+        uint64_t iov_len;
+        char payload[512];
+
+        if (!ia64_trace_guest_read_u64(env, iov, &iov_base, status,
+                                       sizeof(status)) ||
+            !ia64_trace_guest_read_u64(env, iov + 8, &iov_len, status,
+                                       sizeof(status))) {
+            fprintf(stderr, " iov%u=<unreadable:%s>", i, status);
+            return;
+        }
+        ia64_trace_guest_bytes_escaped(env, iov_base, MIN(iov_len, max_each),
+                                       payload, sizeof(payload));
+        fprintf(stderr,
+                " iov%u_base=0x%016" PRIx64 " iov%u_len=%" PRIu64
+                " iov%u_payload=%s",
+                i, iov_base, i, iov_len, i, payload);
+    }
+}
+
+static void ia64_trace_recvmsg_payload(CPUIA64State *env,
+                                       IA64TraceKernelCall *slot,
+                                       int64_t retval)
+{
+    char status[48] = "ok";
+    uint64_t msg = slot->arg[1];
+    uint64_t msg_iov;
+    uint64_t msg_iovlen;
+    uint64_t iov_base;
+    uint64_t iov_len;
+    char payload[512];
+
+    if (retval <= 0) {
+        return;
+    }
+    if (!ia64_trace_guest_read_u64(env, msg + 16, &msg_iov, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u64(env, msg + 24, &msg_iovlen, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " msghdr=<unreadable:%s>", status);
+        return;
+    }
+    fprintf(stderr, " msg_iov=0x%016" PRIx64 " msg_iovlen=%" PRIu64,
+            msg_iov, msg_iovlen);
+    if (msg_iov == 0 || msg_iovlen == 0) {
+        return;
+    }
+    if (!ia64_trace_guest_read_u64(env, msg_iov, &iov_base, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u64(env, msg_iov + 8, &iov_len, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " iov=<unreadable:%s>", status);
+        return;
+    }
+    ia64_trace_guest_bytes_escaped(env, iov_base,
+                                   MIN((uint64_t)retval, UINT64_C(220)),
+                                   payload, sizeof(payload));
+    fprintf(stderr, " iov_base=0x%016" PRIx64 " iov_len=%" PRIu64
+            " payload=%s",
+            iov_base, iov_len, payload);
+}
+
+static void ia64_trace_uevent_netlink(CPUIA64State *env)
+{
+    static uint64_t netlink_filtered_return_ip;
+    static unsigned trace_count;
+    IA64TraceKernelCall *call;
+
+    if (!ia64_uevent_trace_enabled()) {
+        return;
+    }
+
+    call = ia64_trace_kernel_call_return_slot(ia64_read_gr(env, 13), env->ip);
+    if (call != NULL) {
+        int64_t retval = (int64_t)ia64_read_gr(env, 8);
+
+        switch (call->tag) {
+        case IA64_TRACE_KERNEL_CALL_RECVMSG:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_recvmsg ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " fd=%" PRIu64
+                    " msg=0x%016" PRIx64 " flags=0x%016" PRIx64
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64,
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            ia64_trace_recvmsg_payload(env, call, retval);
+            fprintf(stderr, "\n");
+            break;
+        case IA64_TRACE_KERNEL_CALL_SENDMSG:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_sendmsg ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " fd=%" PRIu64
+                    " msg=0x%016" PRIx64 " flags=0x%016" PRIx64
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_SEND:
+        {
+            char payload[128];
+
+            ia64_trace_guest_bytes_escaped(env, call->arg[1],
+                                           MIN(call->arg[2], UINT64_C(32)),
+                                           payload, sizeof(payload));
+            fprintf(stderr,
+                    "[ia64-uevent] sys_send ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " fd=%" PRIu64
+                    " buf=0x%016" PRIx64 " len=%" PRIu64
+                    " flags=0x%016" PRIx64 " payload=%s"
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], payload,
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        }
+        case IA64_TRACE_KERNEL_CALL_RECV:
+        {
+            char payload[128];
+
+            if (retval > 0) {
+                ia64_trace_guest_bytes_escaped(env, call->arg[1],
+                                               MIN((uint64_t)retval,
+                                                   UINT64_C(32)),
+                                               payload, sizeof(payload));
+            } else {
+                g_strlcpy(payload, "<none>", sizeof(payload));
+            }
+            fprintf(stderr,
+                    "[ia64-uevent] sys_recv ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " fd=%" PRIu64
+                    " buf=0x%016" PRIx64 " len=%" PRIu64
+                    " flags=0x%016" PRIx64 " payload=%s"
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], payload,
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        }
+        case IA64_TRACE_KERNEL_CALL_EPOLL_WAIT:
+        {
+            char events[512];
+            uint64_t event_bytes = 0;
+
+            if (retval > 0) {
+                event_bytes = MIN((uint64_t)retval * UINT64_C(16),
+                                  UINT64_C(128));
+                ia64_trace_guest_bytes_escaped(env, call->arg[1], event_bytes,
+                                               events, sizeof(events));
+            } else {
+                g_strlcpy(events, "<none>", sizeof(events));
+            }
+            fprintf(stderr,
+                    "[ia64-uevent] sys_epoll_wait ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " epfd=%" PRIu64
+                    " events=0x%016" PRIx64 " maxevents=%" PRIu64
+                    " timeout=%" PRIu64 " event_bytes=%" PRIu64
+                    " event_payload=%s r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], event_bytes, events,
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        }
+        case IA64_TRACE_KERNEL_CALL_MKNOD:
+        {
+            char path[176];
+
+            ia64_trace_guest_c_string(env, call->arg[0], path, sizeof(path));
+            fprintf(stderr,
+                    "[ia64-uevent] sys_mknod ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " path=%s mode=0%llo"
+                    " dev=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, path,
+                    (unsigned long long)call->arg[1], call->arg[2],
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        }
+        case IA64_TRACE_KERNEL_CALL_MKNODAT:
+        {
+            char path[176];
+
+            ia64_trace_guest_c_string(env, call->arg[1], path, sizeof(path));
+            fprintf(stderr,
+                    "[ia64-uevent] sys_mknodat ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " dfd=%" PRIu64
+                    " path=%s mode=0%llo dev=0x%016" PRIx64
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], path,
+                    (unsigned long long)call->arg[2], call->arg[3],
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        }
+        case IA64_TRACE_KERNEL_CALL_DOFORK:
+            fprintf(stderr,
+                    "[ia64-uevent] do_fork ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " clone_flags=0x%016" PRIx64
+                    " stack=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        default:
+            break;
+        }
+        call->active = false;
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001003d7ee0)) {
+        fprintf(stderr,
+            "[ia64-uevent] kobject_uevent_env kobj=0x%016" PRIx64
+            " action=%" PRIu64 " envp=0x%016" PRIx64
+            " current=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+            ia64_read_gr(env, 32), ia64_read_gr(env, 33),
+            ia64_read_gr(env, 34), ia64_read_gr(env, 13), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001000929a0)) {
+        fprintf(stderr,
+                "[ia64-uevent] do_exit current=0x%016" PRIx64
+                " code=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100087360)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_DOFORK);
+        fprintf(stderr,
+                "[ia64-uevent] do_fork entry current=0x%016" PRIx64
+                " clone_flags=0x%016" PRIx64 " stack=0x%016" PRIx64
+                " regs=0x%016" PRIx64 " stack_size=0x%016" PRIx64
+                " parent_tid=0x%016" PRIx64 " child_tid=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), ia64_read_gr(env, 36),
+                ia64_read_gr(env, 37), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001005f9630)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_RECVMSG);
+        fprintf(stderr,
+                "[ia64-uevent] sys_recvmsg entry current=0x%016" PRIx64
+                " fd=%" PRIu64 " msg=0x%016" PRIx64
+                " flags=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001005f9200)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_SENDMSG);
+        fprintf(stderr,
+                "[ia64-uevent] sys_sendmsg entry current=0x%016" PRIx64
+                " fd=%" PRIu64 " msg=0x%016" PRIx64
+                " flags=0x%016" PRIx64 " b0=0x%016" PRIx64,
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34), env->br[0]);
+        ia64_trace_msghdr_iovs(env, ia64_read_gr(env, 33), 2, 220);
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001005f8970)) {
+        char payload[128];
+
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_SEND);
+        ia64_trace_guest_bytes_escaped(env, ia64_read_gr(env, 33),
+                                       MIN(ia64_read_gr(env, 34),
+                                           UINT64_C(32)),
+                                       payload, sizeof(payload));
+        fprintf(stderr,
+                "[ia64-uevent] sys_send entry current=0x%016" PRIx64
+                " fd=%" PRIu64 " buf=0x%016" PRIx64 " len=%" PRIu64
+                " flags=0x%016" PRIx64 " payload=%s"
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), payload, env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001005f8c00)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_RECV);
+        fprintf(stderr,
+                "[ia64-uevent] sys_recv entry current=0x%016" PRIx64
+                " fd=%" PRIu64 " buf=0x%016" PRIx64 " len=%" PRIu64
+                " flags=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100286880)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_EPOLL_WAIT);
+        fprintf(stderr,
+                "[ia64-uevent] sys_epoll_wait entry current=0x%016" PRIx64
+                " epfd=%" PRIu64 " events=0x%016" PRIx64
+                " maxevents=%" PRIu64 " timeout=%" PRIu64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa00000010021ad80)) {
+        char path[176];
+
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_MKNOD);
+        ia64_trace_guest_c_string(env, ia64_read_gr(env, 32), path,
+                                  sizeof(path));
+        fprintf(stderr,
+                "[ia64-uevent] sys_mknod entry current=0x%016" PRIx64
+                " path=%s mode=0%llo dev=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), path,
+                (unsigned long long)ia64_read_gr(env, 33),
+                ia64_read_gr(env, 34), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa00000010021a8a0)) {
+        char path[176];
+
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_MKNODAT);
+        ia64_trace_guest_c_string(env, ia64_read_gr(env, 33), path,
+                                  sizeof(path));
+        fprintf(stderr,
+                "[ia64-uevent] sys_mknodat entry current=0x%016" PRIx64
+                " dfd=%" PRIu64 " path=%s mode=0%llo"
+                " dev=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32), path,
+                (unsigned long long)ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100677690)) {
+        fprintf(stderr,
+            "[ia64-uevent] netlink_broadcast entry ssk=0x%016" PRIx64
+            " skb=0x%016" PRIx64 " pid=%" PRIu64 " group=%" PRIu64
+            " allocation=0x%016" PRIx64 " current=0x%016" PRIx64
+            " b0=0x%016" PRIx64 "\n",
+            ia64_read_gr(env, 32), ia64_read_gr(env, 33),
+            ia64_read_gr(env, 34), ia64_read_gr(env, 35),
+            ia64_read_gr(env, 36), ia64_read_gr(env, 13), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100676d80)) {
+        netlink_filtered_return_ip = env->br[0];
+        fprintf(stderr,
+                "[ia64-uevent] netlink_broadcast_filtered entry"
+                " ssk=0x%016" PRIx64 " skb=0x%016" PRIx64
+            " pid=%" PRIu64 " group=%" PRIu64
+            " allocation=0x%016" PRIx64 " filter=0x%016" PRIx64
+            " data=0x%016" PRIx64 " current=0x%016" PRIx64
+            " b0=0x%016" PRIx64 "\n",
+            ia64_read_gr(env, 32), ia64_read_gr(env, 33),
+            ia64_read_gr(env, 34), ia64_read_gr(env, 35),
+            ia64_read_gr(env, 36), ia64_read_gr(env, 37),
+            ia64_read_gr(env, 38), ia64_read_gr(env, 13), env->br[0]);
+        return;
+    }
+
+    if (netlink_filtered_return_ip != 0 &&
+        env->ip == netlink_filtered_return_ip) {
+        fprintf(stderr,
+            "[ia64-uevent] netlink_broadcast_filtered ret"
+            " ip=0x%016" PRIx64 " current=0x%016" PRIx64
+            " r8=0x%016" PRIx64
+            " r10=0x%016" PRIx64 "\n",
+            env->ip, ia64_read_gr(env, 13), ia64_read_gr(env, 8),
+            ia64_read_gr(env, 10));
+        if (++trace_count > 1024) {
+            netlink_filtered_return_ip = 0;
+        }
+    }
 }
 
 static void ia64_count_fast_tcg_ops(uint32_t slot_count, uint32_t op_counts,
@@ -5002,6 +5718,7 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
     ia64_trace_execve(env);
     ia64_trace_epc_syscall(env);
     ia64_trace_syscall_return(env);
+    ia64_trace_uevent_netlink(env);
     ia64_maybe_apply_linux_cmdline_append(env);
     ia64_progress_trace_bundle(env);
     ia64_state_trace_bundle(env);
@@ -5025,6 +5742,28 @@ void HELPER(finish_fast_store)(CPUIA64State *env, uint64_t address,
     ia64_alat_invalidate_store(env, address, width);
 }
 
+static void ia64_flush_qemu_tlb_for_page(CPUState *cpu, vaddr address,
+                                         uint8_t page_size)
+{
+    vaddr start;
+    uint64_t len;
+
+    /*
+     * QEMU's softmmu TLB is keyed by virtual page and mmu_idx; IA-64 RIDs live
+     * in target RR/TC state.  Any modeled TC/TR change for a VA can therefore
+     * stale a direct qemu_ld/qemu_st mapping even when the new RID is distinct.
+     */
+    if (ia64_host_tlb_flush_span(address, page_size, &start, &len)) {
+        tlb_flush_range_by_mmuidx(cpu, start, len, IA64_MMU_ALL_IDXMAP,
+                                  TARGET_LONG_BITS);
+        IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_RANGE);
+        return;
+    }
+
+    tlb_flush(cpu);
+    IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_FULL);
+}
+
 uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
                                              uint64_t next_ip,
                                              uint32_t taken,
@@ -5045,6 +5784,7 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
 
     cpu->neg.can_do_io = true;
     ia64_trace_execve(env);
+    ia64_trace_uevent_netlink(env);
     ia64_maybe_apply_linux_cmdline_append(env);
     ia64_progress_trace_bundle(env);
     ia64_state_trace_bundle(env);
@@ -5328,6 +6068,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     ia64_trace_execve(env);
     ia64_trace_epc_syscall(env);
     ia64_trace_syscall_return(env);
+    ia64_trace_uevent_netlink(env);
     ia64_maybe_apply_linux_cmdline_append(env);
 
     decoded.tmpl = tmpl & 0x1f;
@@ -5596,7 +6337,10 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         }
         if (ia64_slot_is_m_insert_translation(type, raw) &&
             ia64_exec_m_insert_translation(env, raw)) {
+            uint8_t ps = (env->cr[IA64_CR_ITIR] >> 2) & 0x3f;
+
             IA64_PERF_INC(IA64_PERF_OP_INSERT_TRANSLATION);
+            ia64_flush_qemu_tlb_for_page(cpu, env->cr[IA64_CR_IFA], ps);
             continue;
         }
         if (ia64_slot_is_m_probe(type, raw)) {
@@ -5647,14 +6391,9 @@ void HELPER(exec_bundle)(CPUIA64State *env,
              * userspace crawl. ptc.e and unusual page sizes fall back to a full
              * flush.
              */
-            if (px6 != 0x34 && ps >= TARGET_PAGE_BITS && ps < 40) {
-                uint64_t len = UINT64_C(1) << ps;
-                uint64_t addr = ia64_read_gr(env, (raw >> 20) & 0x7f) &
-                                ~(len - 1);
-
-                tlb_flush_range_by_mmuidx(cpu, addr, len, IA64_MMU_ALL_IDXMAP,
-                                          TARGET_LONG_BITS);
-                IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_RANGE);
+            if (px6 != 0x34) {
+                ia64_flush_qemu_tlb_for_page(
+                    cpu, ia64_read_gr(env, (raw >> 20) & 0x7f), ps);
             } else {
                 tlb_flush(cpu);
                 IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_FULL);

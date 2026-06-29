@@ -251,24 +251,9 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION_INST);
     }
 
-    if (result.status == IA64_TRANSLATE_TLB_MISS) {
-        IA64ExceptionKind kind;
-
-        if (access_type == MMU_INST_FETCH) {
-            kind = result.vhpt_enabled ?
-                   IA64_EXCEPTION_INSTRUCTION_TLB_MISS :
-                   IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS;
-        } else {
-            kind = result.vhpt_enabled ?
-                   IA64_EXCEPTION_DATA_TLB_MISS :
-                   IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS;
-        }
-        ia64_deliver_exception_fast(&cpu->env, kind, address, access_type,
-                                    NULL);
-    } else {
-        ia64_deliver_exception_fast(&cpu->env, IA64_EXCEPTION_PAGE_FAULT,
-                                    address, access_type, NULL);
-    }
+    ia64_deliver_exception_fast(
+        &cpu->env, ia64_exception_for_translate_result(&result), address,
+        access_type, NULL);
     IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
     cpu->env.fault_exit_pending_tb_translate = true;
     cpu_loop_exit(cs);

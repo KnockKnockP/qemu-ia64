@@ -19,6 +19,7 @@
 #define IA64_VHPT_REGION_BITS_MASK UINT64_C(0xe000000000000000)
 #define IA64_VHPT_BASE_ADDRESS_MASK UINT64_C(0x1fffffffffff8000)
 #define IA64_VHPT_VA_HASH_MASK UINT64_C(0x0007ffffffffffff)
+#define IA64_HOST_TLB_MIN_PAGE_BITS 12
 
 #if (IA64_TRANSLATION_LOOKUP_CACHE_COUNT & \
      IA64_TRANSLATION_LOOKUP_CACHE_MASK) != 0
@@ -44,6 +45,10 @@ const char *ia64_translate_status_name(IA64TranslateStatus status)
         return "tlb-miss";
     case IA64_TRANSLATE_NOT_PRESENT:
         return "not-present";
+    case IA64_TRANSLATE_ACCESS_BIT:
+        return "access-bit";
+    case IA64_TRANSLATE_DIRTY_BIT:
+        return "dirty-bit";
     case IA64_TRANSLATE_ACCESS_DENIED:
         return "access-denied";
     default:
@@ -163,6 +168,25 @@ bool ia64_page_size_supported(uint8_t page_size)
     default:
         return false;
     }
+}
+
+bool ia64_host_tlb_flush_span(vaddr address, uint8_t page_size,
+                              vaddr *start, uint64_t *len)
+{
+    uint64_t size;
+
+    if (page_size < IA64_HOST_TLB_MIN_PAGE_BITS || page_size >= 40) {
+        return false;
+    }
+
+    size = UINT64_C(1) << page_size;
+    if (start) {
+        *start = address & ~(size - 1);
+    }
+    if (len) {
+        *len = size;
+    }
+    return true;
 }
 
 static uint64_t ia64_page_mask(uint8_t page_size)
@@ -432,6 +456,10 @@ static int ia64_entry_prot(const IA64TranslationEntry *entry)
 {
     int prot = 0;
 
+    if (!entry->accessed) {
+        return 0;
+    }
+
     if (entry->access_rights == 7) {
         return PAGE_READ | PAGE_EXEC;
     }
@@ -454,6 +482,9 @@ static int ia64_entry_prot(const IA64TranslationEntry *entry)
         break;
     default:
         break;
+    }
+    if (!entry->dirty) {
+        prot &= ~PAGE_WRITE;
     }
     return prot;
 }
@@ -767,6 +798,18 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         goto record;
     }
 
+    if (!debug && !entry->accessed) {
+        result->status = IA64_TRANSLATE_ACCESS_BIT;
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     "%s translation access bit clear address=0x%016" VADDR_PRIx
+                     " ar=%u pl=%u cpl=%d",
+                     instruction ? "instruction" : "data", address,
+                     entry->access_rights, entry->privilege_level, cpl);
+        }
+        goto record;
+    }
+
     if (!ia64_translation_allows(entry, access_type, cpl)) {
         result->status = IA64_TRANSLATE_ACCESS_DENIED;
         if (format_detail) {
@@ -775,6 +818,18 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                      " ar=%u pl=%u cpl=%d",
                      instruction ? "instruction" : "data", address,
                      entry->access_rights, entry->privilege_level, cpl);
+        }
+        goto record;
+    }
+
+    if (!debug && access_type == MMU_DATA_STORE && !entry->dirty) {
+        result->status = IA64_TRANSLATE_DIRTY_BIT;
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     "data translation dirty bit clear address=0x%016" VADDR_PRIx
+                     " ar=%u pl=%u cpl=%d",
+                     address, entry->access_rights, entry->privilege_level,
+                     cpl);
         }
         goto record;
     }

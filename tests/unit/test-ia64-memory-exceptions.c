@@ -283,6 +283,30 @@ static void test_translation_cache_purge_and_same_va_remap(void)
     g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
 }
 
+static void test_host_tlb_flush_span_for_ia64_page(void)
+{
+    const uint8_t min_page_bits = 12;
+    vaddr start = 0;
+    uint64_t len = 0;
+
+    g_assert_true(ia64_host_tlb_flush_span(0x60000fffffc05e48ULL, 16,
+                                           &start, &len));
+    g_assert_cmphex(start, ==, 0x60000fffffc00000ULL);
+    g_assert_cmphex(len, ==, 0x10000ULL);
+
+    g_assert_true(ia64_host_tlb_flush_span(0x60000fffffc05e48ULL,
+                                           min_page_bits, &start, &len));
+    g_assert_cmphex(start, ==,
+                    0x60000fffffc05e48ULL & ~((1ULL << min_page_bits) - 1));
+    g_assert_cmphex(len, ==, 1ULL << min_page_bits);
+
+    g_assert_false(ia64_host_tlb_flush_span(0x60000fffffc05e48ULL,
+                                            min_page_bits - 1,
+                                            &start, &len));
+    g_assert_false(ia64_host_tlb_flush_span(0x60000fffffc05e48ULL, 40,
+                                            &start, &len));
+}
+
 static void test_translation_register_purge_removes_pinned_entry(void)
 {
     CPUIA64State env;
@@ -493,6 +517,83 @@ static void test_fast_exception_delivery_keeps_state_without_message(void)
     g_assert_cmphex(env.cr[IA64_CR_IFA], ==, address);
     g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
                     IA64_ISR_EI_SHIFT, ==, 2);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_W_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_W_BIT);
+}
+
+static void test_translation_fault_vectors(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr address = 0x2000000000211a38ULL;
+
+    memset(&result, 0, sizeof(result));
+    result.vaddr = address;
+    result.status = IA64_TRANSLATE_DIRTY_BIT;
+    result.access_type = MMU_DATA_STORE;
+    g_assert_cmpint(ia64_exception_for_translate_result(&result), ==,
+                    IA64_EXCEPTION_DIRTY_BIT);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = ia64_psr_with_ri(IA64_PSR_IC_BIT | IA64_TB_PSR_DT_BIT, 2);
+    env.ip = 0x2000000000118400ULL;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    ia64_deliver_exception(&env, IA64_EXCEPTION_DIRTY_BIT, address,
+                           MMU_DATA_STORE, "dirty");
+    g_assert_cmphex(env.exception.vector, ==, 0x2000);
+    g_assert_cmphex(env.ip, ==, 0x102000);
+    g_assert_cmphex(env.cr[IA64_CR_ITIR], ==,
+                    ia64_default_itir(&env, address));
+    g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                    IA64_ISR_EI_SHIFT, ==, 2);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_W_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_W_BIT);
+
+    result.status = IA64_TRANSLATE_ACCESS_BIT;
+    result.access_type = MMU_INST_FETCH;
+    g_assert_cmpint(ia64_exception_for_translate_result(&result), ==,
+                    IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_IT_BIT;
+    env.ip = 0x2000000000118400ULL;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    ia64_deliver_exception(&env, IA64_EXCEPTION_INSTRUCTION_ACCESS_BIT,
+                           address, MMU_INST_FETCH, "iaccess");
+    g_assert_cmphex(env.exception.vector, ==, 0x2400);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, address & ~0xfULL);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_X_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_X_BIT);
+
+    result.status = IA64_TRANSLATE_ACCESS_BIT;
+    result.access_type = MMU_DATA_LOAD;
+    g_assert_cmpint(ia64_exception_for_translate_result(&result), ==,
+                    IA64_EXCEPTION_DATA_ACCESS_BIT);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_DT_BIT;
+    env.ip = 0x2000000000118400ULL;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_ACCESS_BIT, address,
+                           MMU_DATA_LOAD, "daccess");
+    g_assert_cmphex(env.exception.vector, ==, 0x2800);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, env.exception.ip);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_R_BIT);
+
+    result.status = IA64_TRANSLATE_ACCESS_DENIED;
+    result.access_type = MMU_DATA_STORE;
+    g_assert_cmpint(ia64_exception_for_translate_result(&result), ==,
+                    IA64_EXCEPTION_DATA_ACCESS_RIGHTS);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_DT_BIT;
+    env.ip = 0x2000000000118400ULL;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_ACCESS_RIGHTS, address,
+                           MMU_DATA_STORE, "rights");
+    g_assert_cmphex(env.exception.vector, ==, 0x5300);
+    g_assert_cmphex(env.ip, ==, 0x105300);
     g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_W_BIT),
                     ==, UINT64_C(1) << IA64_ISR_W_BIT);
 }
@@ -732,6 +833,8 @@ int main(int argc, char **argv)
                     test_region_register_change_selects_new_rid);
     g_test_add_func("/ia64-memory/tc-purge-same-va-remap",
                     test_translation_cache_purge_and_same_va_remap);
+    g_test_add_func("/ia64-memory/host-tlb-flush-span",
+                    test_host_tlb_flush_span_for_ia64_page);
     g_test_add_func("/ia64-memory/tr-purge-pinned-entry",
                     test_translation_register_purge_removes_pinned_entry);
     g_test_add_func("/ia64-memory/demand-data-page-fault",
@@ -744,6 +847,8 @@ int main(int argc, char **argv)
                     test_no_detail_translation_keeps_status_without_message);
     g_test_add_func("/ia64-exception/fast-delivery",
                     test_fast_exception_delivery_keeps_state_without_message);
+    g_test_add_func("/ia64-exception/translation-fault-vectors",
+                    test_translation_fault_vectors);
     g_test_add_func("/ia64-exception/reporting", test_exception_reporting);
     g_test_add_func("/ia64-exception/tlb-miss-delivery",
                     test_tlb_miss_delivery_vectors_to_iva);

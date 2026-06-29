@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "target/ia64/exec-smoke.h"
 #include "target/ia64/mem.h"
+#include "exec/page-protection.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
@@ -17,6 +18,11 @@
 #define IA64_PFS_CFM_MASK UINT64_C(0x0000003fffffffff)
 #define IA64_PFS_PEC_SHIFT 52
 #define IA64_PFS_PPL_SHIFT 62
+#define IA64_TPR_MIC(class) ((uint64_t)(class) << 4)
+#define IA64_TPR_MMI_BIT UINT64_C(0x0000000000010000)
+#define IA64_PTE_P_BIT UINT64_C(0x0000000000000001)
+#define IA64_PTE_A_BIT UINT64_C(0x0000000000000020)
+#define IA64_PTE_D_BIT UINT64_C(0x0000000000000040)
 
 static uint64_t ia64_make_pfs(uint64_t cfm, uint64_t ec, uint64_t cpl)
 {
@@ -1276,6 +1282,53 @@ static void test_m_unit_system_memory_management(void)
                                               kernel_flushrs_raw));
 }
 
+static void test_translation_access_dirty_bits(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    uint64_t address = 0x2000000000042000ULL;
+    uint64_t pte = 0x0000000005000000ULL | (3ULL << 7) | (2ULL << 9) |
+                   IA64_PTE_P_BIT | IA64_PTE_A_BIT;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_DT_BIT | (3ULL << IA64_PSR_CPL_SHIFT);
+
+    g_assert_true(ia64_install_translation(&env, false, true, 0, address,
+                                           pte, 12ULL << 2));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD, 0,
+                                         false, &result));
+    g_assert_cmphex(result.prot & PAGE_READ, !=, 0);
+    g_assert_cmphex(result.prot & PAGE_WRITE, ==, 0);
+
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE, 0,
+                                          false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_DIRTY_BIT);
+    g_assert_nonnull(strstr(result.message, "dirty bit clear"));
+
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_STORE, 0,
+                                         true, &result));
+    g_assert_cmphex(result.prot & PAGE_WRITE, ==, 0);
+
+    g_assert_true(ia64_install_translation(&env, false, true, 0, address,
+                                           pte | IA64_PTE_D_BIT,
+                                           12ULL << 2));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_STORE, 0,
+                                         false, &result));
+    g_assert_cmphex(result.prot & PAGE_WRITE, !=, 0);
+
+    g_assert_true(ia64_install_translation(&env, false, true, 0, address,
+                                           pte & ~IA64_PTE_A_BIT,
+                                           12ULL << 2));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD, 0,
+                                          false, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_ACCESS_BIT);
+    g_assert_nonnull(strstr(result.message, "access bit clear"));
+
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD, 0,
+                                         true, &result));
+    g_assert_cmphex(result.prot, ==, 0);
+}
+
 static void test_interrupt_control_registers(void)
 {
     CPUIA64State env;
@@ -1295,7 +1348,7 @@ static void test_interrupt_control_registers(void)
     g_assert_true(ia64_external_interrupt_pending(&env));
     g_assert_false(ia64_external_interrupt_enabled(&env));
 
-    env.psr |= 0x4000;
+    env.psr |= IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
     g_assert_true(ia64_external_interrupt_enabled(&env));
     g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IRR3) &
                     (1ULL << (0xef & 63)), !=, 0);
@@ -1355,6 +1408,7 @@ static void test_interrupt_unmask_exposes_pending_external_interrupt(void)
     CPUIA64State env;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT;
     g_assert_true(ia64_queue_external_interrupt(&env, 0xef));
     g_assert_true(ia64_external_interrupt_pending(&env));
     g_assert_false(ia64_external_interrupt_enabled(&env));
@@ -1365,6 +1419,52 @@ static void test_interrupt_unmask_exposes_pending_external_interrupt(void)
     g_assert_true(ia64_exec_m_processor_mask(&env, rsm_i_raw));
     g_assert_true(ia64_external_interrupt_pending(&env));
     g_assert_false(ia64_external_interrupt_enabled(&env));
+}
+
+static void test_external_interrupt_delivery_masks(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    g_assert_true(ia64_queue_external_interrupt(&env, 0xef));
+
+    env.psr = IA64_PSR_I_BIT;
+    g_assert_true(ia64_external_interrupt_pending(&env));
+    g_assert_false(ia64_external_interrupt_enabled(&env));
+
+    env.psr = IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
+    env.cr[IA64_CR_TPR] = IA64_TPR_MIC(14);
+    g_assert_false(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x0f);
+    g_assert_true(ia64_external_interrupt_pending(&env));
+
+    env.cr[IA64_CR_TPR] = IA64_TPR_MIC(13);
+    g_assert_true(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
+    g_assert_false(ia64_external_interrupt_pending(&env));
+
+    env.cr[IA64_CR_TPR] = 0;
+    g_assert_true(ia64_queue_external_interrupt(&env, 0x20));
+    g_assert_true(ia64_external_interrupt_pending(&env));
+    g_assert_false(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x0f);
+    g_assert_true(ia64_external_interrupt_pending(&env));
+
+    ia64_write_control_register(&env, IA64_CR_EOI, 0);
+    g_assert_true(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x20);
+    ia64_write_control_register(&env, IA64_CR_EOI, 0);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
+    env.cr[IA64_CR_TPR] = IA64_TPR_MMI_BIT;
+    g_assert_true(ia64_queue_external_interrupt(&env, 0x20));
+    g_assert_false(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x0f);
+
+    g_assert_true(ia64_queue_external_interrupt(&env, 2));
+    g_assert_true(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 2);
 }
 
 static void test_lx_movl_reconstructs_immediate(void)
@@ -2937,10 +3037,14 @@ int main(int argc, char **argv)
                     test_application_register_moves);
     g_test_add_func("/ia64-exec-smoke/m-unit-system-memory-management",
                     test_m_unit_system_memory_management);
+    g_test_add_func("/ia64-exec-smoke/translation-access-dirty-bits",
+                    test_translation_access_dirty_bits);
     g_test_add_func("/ia64-exec-smoke/interrupt-control-registers",
                     test_interrupt_control_registers);
     g_test_add_func("/ia64-exec-smoke/interrupt-unmask-pending",
                     test_interrupt_unmask_exposes_pending_external_interrupt);
+    g_test_add_func("/ia64-exec-smoke/external-interrupt-delivery-masks",
+                    test_external_interrupt_delivery_masks);
     g_test_add_func("/ia64-exec-smoke/lx-movl-reconstructs-immediate",
                     test_lx_movl_reconstructs_immediate);
     g_test_add_func("/ia64-exec-smoke/lx-nop-hint-pair",
