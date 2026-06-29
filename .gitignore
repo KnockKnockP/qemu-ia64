@@ -1,7 +1,10 @@
 /GNUmakefile
 /build/
+/build-*/
+/release-*/
 /.cache/
 /.vscode/
+.idea/
 *.pyc
 .sdk
 .stgit-*
