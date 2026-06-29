@@ -4900,6 +4900,63 @@ static void ia64_trace_execve(CPUIA64State *env)
     fprintf(stderr, "\n");
 }
 
+/*
+ * Diagnostic: the break-based syscall tracer only catches the early dynamic
+ * loader, because glibc switches to the lightweight `epc` fast-system-call
+ * gate (`__kernel_syscall_via_epc`) once AT_SYSINFO is wired up. main()'s
+ * syscalls (open/ioctl/dup2/execve/...) therefore never hit the break path.
+ * Trace them at the fixed gate entry where r15 holds the syscall number and
+ * out0..out7 (r32..) hold the arguments, mirroring the break tracer so the
+ * full per-process syscall stream is visible. Gated behind the same
+ * VIBTANIUM_SYSCALL_TRACE knob, IP-checked so it is free when disabled.
+ */
+static void ia64_trace_epc_syscall(CPUIA64State *env)
+{
+    uint64_t nr;
+    uint64_t cpl;
+
+    if (!ia64_syscall_trace_enabled() ||
+        env->ip != UINT64_C(0xa000000000040a00)) {
+        return;
+    }
+
+    nr = ia64_read_gr(env, 15);
+    cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    fprintf(stderr,
+            "[ia64-syscall] epc nr=%" PRIu64 "(%s) ip=0x%016" PRIx64
+            " cpl=%" PRIu64 " r32=0x%016" PRIx64 " r33=0x%016" PRIx64
+            " r34=0x%016" PRIx64 " r35=0x%016" PRIx64 " b0=0x%016" PRIx64,
+            nr, ia64_linux_syscall_name(nr), env->ip, cpl,
+            ia64_read_gr(env, 32), ia64_read_gr(env, 33),
+            ia64_read_gr(env, 34), ia64_read_gr(env, 35), env->br[0]);
+    ia64_trace_linux_syscall_paths(env, "break.i", nr);
+    fprintf(stderr, "\n");
+}
+
+/*
+ * Diagnostic: log the syscall return value. Both the break and epc heavy
+ * paths funnel through ia64_ret_from_syscall, where r8 = return value and
+ * r10 = 0 (success) / -1 (error). Pairing this with the entry traces above
+ * shows exactly which syscall fails and with what errno.
+ */
+static void ia64_trace_syscall_return(CPUIA64State *env)
+{
+    uint64_t r8;
+    uint64_t r10;
+
+    if (!ia64_syscall_trace_enabled() ||
+        env->ip != UINT64_C(0xa00000010000baa0)) {
+        return;
+    }
+
+    r8 = ia64_read_gr(env, 8);
+    r10 = ia64_read_gr(env, 10);
+    fprintf(stderr,
+            "[ia64-syscall] ret ip=0x%016" PRIx64 " r8=0x%016" PRIx64
+            " r10=0x%016" PRIx64 "\n",
+            env->ip, r8, r10);
+}
+
 static void ia64_count_fast_tcg_ops(uint32_t slot_count, uint32_t op_counts,
                                     bool count_bundle)
 {
@@ -4943,6 +5000,8 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
 
     cpu->neg.can_do_io = true;
     ia64_trace_execve(env);
+    ia64_trace_epc_syscall(env);
+    ia64_trace_syscall_return(env);
     ia64_maybe_apply_linux_cmdline_append(env);
     ia64_progress_trace_bundle(env);
     ia64_state_trace_bundle(env);
@@ -5267,6 +5326,8 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     cpu->neg.can_do_io = true;
 
     ia64_trace_execve(env);
+    ia64_trace_epc_syscall(env);
+    ia64_trace_syscall_return(env);
     ia64_maybe_apply_linux_cmdline_append(env);
 
     decoded.tmpl = tmpl & 0x1f;
