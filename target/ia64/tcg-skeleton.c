@@ -76,6 +76,83 @@ bool ia64_tcg_tb_boundary_ends_tb(IA64TcgTbBoundary boundary)
     return boundary != IA64_TCG_TB_BOUNDARY_NONE;
 }
 
+static IA64TcgFallbackReason ia64_tcg_fallback_reason_for_boundary(
+    IA64TcgTbBoundary boundary)
+{
+    switch (boundary) {
+    case IA64_TCG_TB_BOUNDARY_NONE:
+        return IA64_TCG_FALLBACK_NONE;
+    case IA64_TCG_TB_BOUNDARY_INVALID_TEMPLATE:
+        return IA64_TCG_FALLBACK_INVALID_TEMPLATE;
+    case IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE:
+        return IA64_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE;
+    case IA64_TCG_TB_BOUNDARY_BREAK:
+        return IA64_TCG_FALLBACK_BOUNDARY_BREAK;
+    case IA64_TCG_TB_BOUNDARY_SPECULATION_CHECK:
+        return IA64_TCG_FALLBACK_BOUNDARY_SPECULATION_CHECK;
+    case IA64_TCG_TB_BOUNDARY_VIRTUAL_TRANSLATION:
+        return IA64_TCG_FALLBACK_BOUNDARY_VIRTUAL_TRANSLATION;
+    case IA64_TCG_TB_BOUNDARY_BRANCH:
+        return IA64_TCG_FALLBACK_BOUNDARY_BRANCH;
+    case IA64_TCG_TB_BOUNDARY_CPU_STATE:
+        return IA64_TCG_FALLBACK_BOUNDARY_CPU_STATE;
+    case IA64_TCG_TB_BOUNDARY_TRANSLATION_STATE:
+        return IA64_TCG_FALLBACK_BOUNDARY_TRANSLATION_STATE;
+    case IA64_TCG_TB_BOUNDARY_RSE_STATE:
+        return IA64_TCG_FALLBACK_BOUNDARY_RSE_STATE;
+    default:
+        return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+    }
+}
+
+const char *ia64_tcg_fallback_reason_name(IA64TcgFallbackReason reason)
+{
+    switch (reason) {
+    case IA64_TCG_FALLBACK_NONE:
+        return "none";
+    case IA64_TCG_FALLBACK_INVALID_TEMPLATE:
+        return "invalid-template";
+    case IA64_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE:
+        return "boundary.efi-call-gate";
+    case IA64_TCG_FALLBACK_BOUNDARY_BREAK:
+        return "boundary.break";
+    case IA64_TCG_FALLBACK_BOUNDARY_SPECULATION_CHECK:
+        return "boundary.speculation-check";
+    case IA64_TCG_FALLBACK_BOUNDARY_VIRTUAL_TRANSLATION:
+        return "boundary.virtual-translation";
+    case IA64_TCG_FALLBACK_BOUNDARY_BRANCH:
+        return "boundary.branch";
+    case IA64_TCG_FALLBACK_BOUNDARY_CPU_STATE:
+        return "boundary.cpu-state";
+    case IA64_TCG_FALLBACK_BOUNDARY_TRANSLATION_STATE:
+        return "boundary.translation-state";
+    case IA64_TCG_FALLBACK_BOUNDARY_RSE_STATE:
+        return "boundary.rse-state";
+    case IA64_TCG_FALLBACK_FAST_LONG_IMMEDIATE:
+        return "fast.long-immediate";
+    case IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT:
+        return "fast.predicated-slot";
+    case IA64_TCG_FALLBACK_FAST_STATIC_GR:
+        return "fast.static-gr";
+    case IA64_TCG_FALLBACK_FAST_LDST_SLOT:
+        return "fast.ldst-slot";
+    case IA64_TCG_FALLBACK_FAST_LDST_TRACE:
+        return "fast.ldst-trace";
+    case IA64_TCG_FALLBACK_FAST_LDST_REGISTER_UPDATE:
+        return "fast.ldst-register-update";
+    case IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS:
+        return "fast.ldst-memory-class";
+    case IA64_TCG_FALLBACK_FAST_LDST_TARGET:
+        return "fast.ldst-target";
+    case IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT:
+        return "fast.unsupported-slot";
+    case IA64_TCG_FALLBACK_RUNTIME_GUARD:
+        return "runtime-guard";
+    default:
+        return "unknown";
+    }
+}
+
 static int64_t ia64_tcg_sign_extend(uint64_t value, unsigned bits)
 {
     uint64_t sign = 1ULL << (bits - 1);
@@ -129,6 +206,47 @@ static bool ia64_tcg_ldst_trace_enabled(void)
                   g_getenv("VIBTANIUM_LDST_DECODE_TRACE") != NULL;
     }
     return enabled != 0;
+}
+
+static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
+    const IA64LdstImmediate *ldst, unsigned slot_index)
+{
+    if (slot_index != 0) {
+        return IA64_TCG_FALLBACK_FAST_LDST_SLOT;
+    }
+    if (ia64_tcg_ldst_trace_enabled()) {
+        return IA64_TCG_FALLBACK_FAST_LDST_TRACE;
+    }
+    if (ldst->update_from_register) {
+        return IA64_TCG_FALLBACK_FAST_LDST_REGISTER_UPDATE;
+    }
+    if (!ia64_tcg_fast_static_gr(ldst->base)) {
+        return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+    }
+
+    switch (ldst->kind) {
+    case IA64_LDST_IMM_LOAD:
+        if (ldst->memory_class != 0) {
+            return IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS;
+        }
+        if (ldst->target == 0) {
+            return IA64_TCG_FALLBACK_FAST_LDST_TARGET;
+        }
+        if (!ia64_tcg_fast_static_gr(ldst->target)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    case IA64_LDST_IMM_STORE:
+        if (ldst->memory_class != 0x0c) {
+            return IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS;
+        }
+        if (!ia64_tcg_fast_static_gr(ldst->source)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    default:
+        return IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS;
+    }
 }
 
 static bool ia64_tcg_fast_set_base_update(IA64TcgFastSlot *slot,
@@ -296,6 +414,102 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     }
 
     return false;
+}
+
+static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
+    IA64SlotType type, uint64_t raw, unsigned slot_index)
+{
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    IA64LdstImmediate ldst;
+
+    if (ia64_slot_predicate(raw) != 0) {
+        return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
+    }
+
+    if (ia64_exec_smoke_slot_supported(type, raw) ||
+        ia64_slot_is_i_nop(type, raw)) {
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_alu_add(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        if (((raw >> 34) & 0x3) != 2) {
+            r2 = (raw >> 13) & 0x7f;
+            if (!ia64_tcg_fast_static_gr(r2)) {
+                return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+            }
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_alu_logic(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r2 = (raw >> 13) & 0x7f;
+        r3 = (raw >> 20) & 0x7f;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        if (((raw >> 29) & 0xf) != 0xb &&
+            !ia64_tcg_fast_static_gr(r2)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_addl(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        r3 = (raw >> 20) & 0x3;
+        if (!ia64_tcg_fast_static_gr(r1) ||
+            !ia64_tcg_fast_static_gr(r3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_ldst_immediate(type, raw, &ldst)) {
+        return ia64_tcg_fast_ldst_fallback_reason(&ldst, slot_index);
+    }
+
+    return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+}
+
+IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
+    const IA64DecodedBundle *bundle, uint64_t pc)
+{
+    IA64TcgTbBoundary boundary;
+    IA64TcgFallbackReason reason;
+
+    if (!bundle || !bundle->valid) {
+        return IA64_TCG_FALLBACK_INVALID_TEMPLATE;
+    }
+
+    boundary = ia64_tcg_tb_boundary_for_bundle(bundle, pc);
+    reason = ia64_tcg_fallback_reason_for_boundary(boundary);
+    if (reason != IA64_TCG_FALLBACK_NONE) {
+        return reason;
+    }
+
+    if (bundle->info->long_immediate) {
+        return IA64_TCG_FALLBACK_FAST_LONG_IMMEDIATE;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        reason = ia64_tcg_fast_slot_fallback_reason(
+            bundle->info->slot_type[slot], bundle->slot[slot], slot);
+        if (reason != IA64_TCG_FALLBACK_NONE) {
+            return reason;
+        }
+    }
+
+    return IA64_TCG_FALLBACK_RUNTIME_GUARD;
 }
 
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,

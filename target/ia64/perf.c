@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "mem.h"
 #include "perf.h"
+#include "tcg-skeleton.h"
 
 int ia64_perf_enabled_cached = -1;
 
@@ -46,6 +47,44 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_TCG_BRANCH_DIRECT_TRANSLATED] = "tcg.branch.direct_translated",
     [IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK] = "tcg.branch.direct_fallback",
     [IA64_PERF_TCG_BRANCH_INDIRECT_FALLBACK] = "tcg.branch.indirect_fallback",
+    [IA64_PERF_TCG_FALLBACK_INVALID_TEMPLATE] =
+        "tcg.fallback.invalid_template",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE] =
+        "tcg.fallback.boundary.efi_call_gate",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_BREAK] =
+        "tcg.fallback.boundary.break",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_SPECULATION_CHECK] =
+        "tcg.fallback.boundary.speculation_check",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_VIRTUAL_TRANSLATION] =
+        "tcg.fallback.boundary.virtual_translation",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_BRANCH] =
+        "tcg.fallback.boundary.branch",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_CPU_STATE] =
+        "tcg.fallback.boundary.cpu_state",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_TRANSLATION_STATE] =
+        "tcg.fallback.boundary.translation_state",
+    [IA64_PERF_TCG_FALLBACK_BOUNDARY_RSE_STATE] =
+        "tcg.fallback.boundary.rse_state",
+    [IA64_PERF_TCG_FALLBACK_FAST_LONG_IMMEDIATE] =
+        "tcg.fallback.fast.long_immediate",
+    [IA64_PERF_TCG_FALLBACK_FAST_PREDICATED_SLOT] =
+        "tcg.fallback.fast.predicated_slot",
+    [IA64_PERF_TCG_FALLBACK_FAST_STATIC_GR] =
+        "tcg.fallback.fast.static_gr",
+    [IA64_PERF_TCG_FALLBACK_FAST_LDST_SLOT] =
+        "tcg.fallback.fast.ldst_slot",
+    [IA64_PERF_TCG_FALLBACK_FAST_LDST_TRACE] =
+        "tcg.fallback.fast.ldst_trace",
+    [IA64_PERF_TCG_FALLBACK_FAST_LDST_REGISTER_UPDATE] =
+        "tcg.fallback.fast.ldst_register_update",
+    [IA64_PERF_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS] =
+        "tcg.fallback.fast.ldst_memory_class",
+    [IA64_PERF_TCG_FALLBACK_FAST_LDST_TARGET] =
+        "tcg.fallback.fast.ldst_target",
+    [IA64_PERF_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT] =
+        "tcg.fallback.fast.unsupported_slot",
+    [IA64_PERF_TCG_FALLBACK_RUNTIME_GUARD] =
+        "tcg.fallback.runtime_guard",
     [IA64_PERF_TB_EXIT_DIRECT_BRANCH] = "tb.exit.direct_branch",
     [IA64_PERF_TB_EXIT_CHAINED] = "tb.exit.chained",
     [IA64_PERF_TB_EXIT_MAIN_LOOP] = "tb.exit.main_loop",
@@ -347,5 +386,54 @@ void ia64_perf_count_exception_kind(unsigned kind)
     default:
         ia64_perf_count(IA64_PERF_EXCEPTION_OTHER);
         break;
+    }
+}
+
+void ia64_perf_count_tcg_fallback_reason(unsigned reason)
+{
+    static const IA64PerfCounter counters[IA64_TCG_FALLBACK_COUNT] = {
+        [IA64_TCG_FALLBACK_INVALID_TEMPLATE] =
+            IA64_PERF_TCG_FALLBACK_INVALID_TEMPLATE,
+        [IA64_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_EFI_CALL_GATE,
+        [IA64_TCG_FALLBACK_BOUNDARY_BREAK] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_BREAK,
+        [IA64_TCG_FALLBACK_BOUNDARY_SPECULATION_CHECK] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_SPECULATION_CHECK,
+        [IA64_TCG_FALLBACK_BOUNDARY_VIRTUAL_TRANSLATION] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_VIRTUAL_TRANSLATION,
+        [IA64_TCG_FALLBACK_BOUNDARY_BRANCH] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_BRANCH,
+        [IA64_TCG_FALLBACK_BOUNDARY_CPU_STATE] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_CPU_STATE,
+        [IA64_TCG_FALLBACK_BOUNDARY_TRANSLATION_STATE] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_TRANSLATION_STATE,
+        [IA64_TCG_FALLBACK_BOUNDARY_RSE_STATE] =
+            IA64_PERF_TCG_FALLBACK_BOUNDARY_RSE_STATE,
+        [IA64_TCG_FALLBACK_FAST_LONG_IMMEDIATE] =
+            IA64_PERF_TCG_FALLBACK_FAST_LONG_IMMEDIATE,
+        [IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT] =
+            IA64_PERF_TCG_FALLBACK_FAST_PREDICATED_SLOT,
+        [IA64_TCG_FALLBACK_FAST_STATIC_GR] =
+            IA64_PERF_TCG_FALLBACK_FAST_STATIC_GR,
+        [IA64_TCG_FALLBACK_FAST_LDST_SLOT] =
+            IA64_PERF_TCG_FALLBACK_FAST_LDST_SLOT,
+        [IA64_TCG_FALLBACK_FAST_LDST_TRACE] =
+            IA64_PERF_TCG_FALLBACK_FAST_LDST_TRACE,
+        [IA64_TCG_FALLBACK_FAST_LDST_REGISTER_UPDATE] =
+            IA64_PERF_TCG_FALLBACK_FAST_LDST_REGISTER_UPDATE,
+        [IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS] =
+            IA64_PERF_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS,
+        [IA64_TCG_FALLBACK_FAST_LDST_TARGET] =
+            IA64_PERF_TCG_FALLBACK_FAST_LDST_TARGET,
+        [IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT] =
+            IA64_PERF_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT,
+        [IA64_TCG_FALLBACK_RUNTIME_GUARD] =
+            IA64_PERF_TCG_FALLBACK_RUNTIME_GUARD,
+    };
+
+    if (reason > IA64_TCG_FALLBACK_NONE &&
+        reason < IA64_TCG_FALLBACK_COUNT) {
+        ia64_perf_count(counters[reason]);
     }
 }

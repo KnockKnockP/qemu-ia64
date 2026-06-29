@@ -435,6 +435,45 @@ static void test_direct_branch_rejects_page_crossing(void)
     g_assert_true(ia64_tcg_bundle_has_direct_branch(&bundle));
 }
 
+static void test_fallback_reason_classifies_helper_sources(void)
+{
+    const uint64_t add_r1_r2_r3_raw =
+        (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
+    const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
+    const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
+    const uint64_t br_ret_b0_raw = 0x00108000100ULL;
+    IA64DecodedBundle bundle;
+
+    bundle = make_bundle(0x00, IA64_SMOKE_NOP_RAW,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_RUNTIME_GUARD);
+
+    bundle = make_bundle(0x00, add_r1_r2_r3_raw | 1,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT);
+
+    bundle = make_bundle(0x00, add_r36_r36_r1_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_STATIC_GR);
+
+    bundle = make_bundle(0x08, IA64_SMOKE_NOP_RAW,
+                         ld8_r2_r3_raw, IA64_SMOKE_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_LDST_SLOT);
+
+    bundle = make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                         IA64_SMOKE_NOP_RAW, br_ret_b0_raw);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_BOUNDARY_BRANCH);
+
+    bundle = make_bundle(0x06, 1, 2, 3);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_INVALID_TEMPLATE);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -469,6 +508,8 @@ int main(int argc, char **argv)
                     test_direct_branch_rejects_unsafe_forms);
     g_test_add_func("/ia64-tcg-skeleton/direct-branch-rejects-page-crossing",
                     test_direct_branch_rejects_page_crossing);
+    g_test_add_func("/ia64-tcg-skeleton/fallback-reason-classifies-helper-sources",
+                    test_fallback_reason_classifies_helper_sources);
 
     return g_test_run();
 }

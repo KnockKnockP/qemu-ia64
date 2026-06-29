@@ -16,6 +16,7 @@
 #include "perf.h"
 #include "qemu/error-report.h"
 #include "system/memory.h"
+#include "tcg-skeleton.h"
 #include "trace-target_ia64.h"
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
@@ -4805,6 +4806,11 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     decoded.slot[2] = slot2 & IA64_SLOT_MASK;
     decoded.info = ia64_template_info(decoded.tmpl);
     decoded.valid = decoded.info->valid;
+
+    if (ia64_perf_enabled()) {
+        ia64_perf_count_tcg_fallback_reason(
+            ia64_tcg_fallback_reason_for_bundle(&decoded, env->ip));
+    }
 
     if (!decoded.valid) {
         abort_unsupported_slot(env, &decoded, 0);
