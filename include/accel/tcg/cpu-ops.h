@@ -72,6 +72,25 @@ struct TCGCPUOps {
      */
     TCGTBCPUState (*get_tb_cpu_state)(CPUState *cs);
     /**
+     * @tb_lookup_stats: Optional target-local instrumentation hook for
+     * translation-block cache lookup results.
+     *
+     * This is called after QEMU's jmp-cache/QHT lookup has either found or
+     * missed a TB. Targets must keep the hook cheap when instrumentation is
+     * disabled.
+     */
+    void (*tb_lookup_stats)(CPUState *cpu, bool hit);
+    /**
+     * @tb_flush_stats: Optional target-local instrumentation hook for a full
+     * translation-block cache flush.
+     */
+    void (*tb_flush_stats)(CPUState *cpu);
+    /**
+     * @tb_invalidate_stats: Optional target-local instrumentation hook for
+     * one invalidated translation block.
+     */
+    void (*tb_invalidate_stats)(CPUState *cpu);
+    /**
      * @synchronize_from_tb: Synchronize state from a TCG #TranslationBlock
      *
      * This is called when we abandon execution of a TB before starting it,

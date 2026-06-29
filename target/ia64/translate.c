@@ -137,7 +137,7 @@ static MemOp ia64_tr_ldst_memop(uint8_t width)
 
 static int ia64_tr_data_mmu_index(DisasContext *ctx)
 {
-    return (ctx->base.tb->flags & 1) ? 1 : 0;
+    return ia64_tcg_data_mmu_index_for_tb_flags(ctx->base.tb->flags);
 }
 
 static void ia64_tr_emit_ldst_base_update(const IA64TcgFastSlot *slot,
@@ -472,6 +472,8 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb, int *max_insns,
     DisasContext ctx;
 
     IA64_PERF_INC(IA64_PERF_TB_TRANSLATED);
+    IA64_PERF_INC((IA64PerfCounter)(IA64_PERF_TB_GENERATED_REGION0 +
+                                    (pc >> 61)));
     translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops, &ctx.base,
                     TCG_TYPE_VA);
 }

@@ -54,19 +54,34 @@ static void ia64_restore_state_to_opc(CPUState *cs,
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = IA64_CPU(cs);
-    uint32_t flags = 0;
-
-    if (cpu->env.psr & UINT64_C(0x0000000000020000)) {
-        flags |= 1;
-    }
-    if (cpu->env.psr & UINT64_C(0x0000001000000000)) {
-        flags |= 2;
-    }
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
-        .flags = flags,
+        .flags = ia64_tcg_tb_flags_from_psr(cpu->env.psr),
     };
+}
+
+static void ia64_tb_lookup_stats(CPUState *cs, bool hit)
+{
+    (void)cs;
+
+    IA64_PERF_INC(IA64_PERF_TB_LOOKUP);
+    IA64_PERF_INC(hit ? IA64_PERF_TB_LOOKUP_HIT :
+                        IA64_PERF_TB_LOOKUP_MISS);
+}
+
+static void ia64_tb_flush_stats(CPUState *cs)
+{
+    (void)cs;
+
+    IA64_PERF_INC(IA64_PERF_TB_FLUSH);
+}
+
+static void ia64_tb_invalidate_stats(CPUState *cs)
+{
+    (void)cs;
+
+    IA64_PERF_INC(IA64_PERF_TB_INVALIDATED);
 }
 
 static bool ia64_cpu_has_work(CPUState *cs)
@@ -80,12 +95,8 @@ static bool ia64_cpu_has_work(CPUState *cs)
 static int ia64_cpu_mmu_index(CPUState *cs, bool ifetch)
 {
     IA64CPU *cpu = IA64_CPU(cs);
-    CPUIA64State *env = &cpu->env;
-    bool translated = ifetch
-        ? (env->psr & UINT64_C(0x0000001000000000)) != 0
-        : (env->psr & UINT64_C(0x0000000000020000)) != 0;
 
-    return translated ? (ifetch ? 2 : 1) : 0;
+    return ia64_tcg_mmu_index_for_psr(cpu->env.psr, ifetch);
 }
 
 static void ia64_count_data_tlb_region(CPUState *cs, hwaddr paddr, int size,
@@ -379,19 +390,36 @@ static const struct SysemuCPUOps ia64_sysemu_ops = {
     .get_phys_addr_debug = ia64_cpu_get_phys_addr_debug,
 };
 
+#define IA64_TCG_OPS_COMMON \
+    .initialize = ia64_translate_init, \
+    .translate_code = ia64_translate_code, \
+    .get_tb_cpu_state = ia64_get_tb_cpu_state, \
+    .synchronize_from_tb = ia64_cpu_synchronize_from_tb, \
+    .restore_state_to_opc = ia64_restore_state_to_opc, \
+    .mmu_index = ia64_cpu_mmu_index, \
+    .tlb_fill = ia64_cpu_tlb_fill, \
+    .pointer_wrap = cpu_pointer_wrap_notreached, \
+    .cpu_exec_interrupt = ia64_cpu_exec_interrupt, \
+    .cpu_exec_halt = ia64_cpu_has_work, \
+    .cpu_exec_reset = cpu_reset
+
 static const TCGCPUOps ia64_tcg_ops = {
-    .initialize = ia64_translate_init,
-    .translate_code = ia64_translate_code,
-    .get_tb_cpu_state = ia64_get_tb_cpu_state,
-    .synchronize_from_tb = ia64_cpu_synchronize_from_tb,
-    .restore_state_to_opc = ia64_restore_state_to_opc,
-    .mmu_index = ia64_cpu_mmu_index,
-    .tlb_fill = ia64_cpu_tlb_fill,
-    .pointer_wrap = cpu_pointer_wrap_notreached,
-    .cpu_exec_interrupt = ia64_cpu_exec_interrupt,
-    .cpu_exec_halt = ia64_cpu_has_work,
-    .cpu_exec_reset = cpu_reset,
+    IA64_TCG_OPS_COMMON,
 };
+
+static const TCGCPUOps ia64_tcg_perf_ops = {
+    IA64_TCG_OPS_COMMON,
+    .tb_lookup_stats = ia64_tb_lookup_stats,
+    .tb_flush_stats = ia64_tb_flush_stats,
+    .tb_invalidate_stats = ia64_tb_invalidate_stats,
+};
+
+#undef IA64_TCG_OPS_COMMON
+
+static const TCGCPUOps *ia64_tcg_ops_for_process(void)
+{
+    return ia64_perf_init_enabled() ? &ia64_tcg_perf_ops : &ia64_tcg_ops;
+}
 
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
@@ -415,7 +443,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->gdb_write_register = ia64_cpu_gdb_write_register;
     cc->gdb_num_core_regs = 131;
     cc->gdb_arch_name = ia64_gdb_arch_name;
-    cc->tcg_ops = &ia64_tcg_ops;
+    cc->tcg_ops = ia64_tcg_ops_for_process();
 }
 
 static void ia64_cpu_initfn(Object *obj)

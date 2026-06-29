@@ -30,11 +30,34 @@
 #define IA64_IFS_VALID_BIT UINT64_C(0x8000000000000000)
 #define IA64_PSR_RI_SHIFT 41
 #define IA64_PSR_RI_MASK UINT64_C(0x0000060000000000)
+#define IA64_TB_PSR_DT_BIT UINT64_C(0x0000000000020000)
+#define IA64_TB_PSR_IT_BIT UINT64_C(0x0000001000000000)
+#define IA64_TB_PSR_CPL_SHIFT 32
+#define IA64_TB_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_TB_FLAG_DT (1u << 0)
+#define IA64_TB_FLAG_IT (1u << 1)
+#define IA64_TB_FLAG_CPL_SHIFT 2
+#define IA64_TB_FLAG_CPL_MASK (3u << IA64_TB_FLAG_CPL_SHIFT)
 #define IA64_ISR_X_BIT 32
 #define IA64_ISR_W_BIT 33
 #define IA64_ISR_R_BIT 34
 #define IA64_ISR_EI_SHIFT 41
 #define IA64_ISR_EI_MASK UINT64_C(0x0000060000000000)
+
+typedef enum IA64MmuIndex {
+    IA64_MMU_PHYSICAL = 0,
+    IA64_MMU_DATA_CPL0 = 1,
+    IA64_MMU_DATA_CPL1 = 2,
+    IA64_MMU_DATA_CPL2 = 3,
+    IA64_MMU_DATA_CPL3 = 4,
+    IA64_MMU_INST_CPL0 = 5,
+    IA64_MMU_INST_CPL1 = 6,
+    IA64_MMU_INST_CPL2 = 7,
+    IA64_MMU_INST_CPL3 = 8,
+    IA64_MMU_INDEX_COUNT = 9,
+} IA64MmuIndex;
+
+#define IA64_MMU_ALL_IDXMAP ((uint32_t)((1u << IA64_MMU_INDEX_COUNT) - 1u))
 
 static inline unsigned ia64_psr_ri(uint64_t psr)
 {
@@ -45,6 +68,49 @@ static inline uint64_t ia64_psr_with_ri(uint64_t psr, unsigned ri)
 {
     return (psr & ~IA64_PSR_RI_MASK) |
            (((uint64_t)ri << IA64_PSR_RI_SHIFT) & IA64_PSR_RI_MASK);
+}
+
+static inline unsigned ia64_tcg_psr_cpl(uint64_t psr)
+{
+    return (psr & IA64_TB_PSR_CPL_MASK) >> IA64_TB_PSR_CPL_SHIFT;
+}
+
+static inline uint32_t ia64_tcg_tb_flags_from_psr(uint64_t psr)
+{
+    uint32_t flags = ia64_tcg_psr_cpl(psr) << IA64_TB_FLAG_CPL_SHIFT;
+
+    if (psr & IA64_TB_PSR_DT_BIT) {
+        flags |= IA64_TB_FLAG_DT;
+    }
+    if (psr & IA64_TB_PSR_IT_BIT) {
+        flags |= IA64_TB_FLAG_IT;
+    }
+    return flags;
+}
+
+static inline unsigned ia64_tcg_tb_flags_cpl(uint32_t flags)
+{
+    return (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
+}
+
+static inline int ia64_tcg_mmu_index_for_psr(uint64_t psr, bool ifetch)
+{
+    bool translated = ifetch ? (psr & IA64_TB_PSR_IT_BIT) != 0
+                             : (psr & IA64_TB_PSR_DT_BIT) != 0;
+
+    if (!translated) {
+        return IA64_MMU_PHYSICAL;
+    }
+    return (ifetch ? IA64_MMU_INST_CPL0 : IA64_MMU_DATA_CPL0) +
+           ia64_tcg_psr_cpl(psr);
+}
+
+static inline int ia64_tcg_data_mmu_index_for_tb_flags(uint32_t flags)
+{
+    if ((flags & IA64_TB_FLAG_DT) == 0) {
+        return IA64_MMU_PHYSICAL;
+    }
+    return IA64_MMU_DATA_CPL0 + ia64_tcg_tb_flags_cpl(flags);
 }
 
 enum IA64ApplicationRegister {

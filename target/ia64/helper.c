@@ -5021,7 +5021,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                 uint64_t addr = ia64_read_gr(env, (raw >> 20) & 0x7f) &
                                 ~(len - 1);
 
-                tlb_flush_range_by_mmuidx(cpu, addr, len, 0x7,
+                tlb_flush_range_by_mmuidx(cpu, addr, len, IA64_MMU_ALL_IDXMAP,
                                           TARGET_LONG_BITS);
                 IA64_PERF_INC(IA64_PERF_QEMU_TLB_FLUSH_RANGE);
             } else {

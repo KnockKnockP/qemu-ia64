@@ -762,6 +762,34 @@ static void tb_remove(TranslationBlock *tb)
 }
 #endif /* CONFIG_USER_ONLY */
 
+static void tb_flush_stats(void)
+{
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+
+        if (unlikely(tcg_ops->tb_flush_stats)) {
+            tcg_ops->tb_flush_stats(cpu);
+            return;
+        }
+    }
+}
+
+static void tb_invalidate_stats(void)
+{
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+
+        if (unlikely(tcg_ops->tb_invalidate_stats)) {
+            tcg_ops->tb_invalidate_stats(cpu);
+            return;
+        }
+    }
+}
+
 /*
  * Flush all the translation blocks.
  * Must be called from a context in which no cpus are running,
@@ -783,6 +811,7 @@ void tb_flush__exclusive_or_serial(void)
 
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
     tb_remove_all();
+    tb_flush_stats();
 
     tcg_region_reset_all();
     /* XXX: flush processor icache at this point if cache flush is expensive */
@@ -955,6 +984,7 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
 
         qatomic_set(&tb_ctx.tb_phys_invalidate_count,
                     tb_ctx.tb_phys_invalidate_count + 1);
+        tb_invalidate_stats();
     }
 
     qemu_thread_jit_execute();

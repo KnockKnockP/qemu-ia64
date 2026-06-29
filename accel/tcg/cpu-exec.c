@@ -213,6 +213,15 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
 }
 
+static inline void tb_lookup_stats(CPUState *cpu, bool hit)
+{
+    const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+
+    if (unlikely(tcg_ops->tb_lookup_stats)) {
+        tcg_ops->tb_lookup_stats(cpu, hit);
+    }
+}
+
 /**
  * tb_lookup:
  * @cpu: CPU that will execute the returned translation block
@@ -250,6 +259,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
 
     tb = tb_htable_lookup(cpu, s);
     if (tb == NULL) {
+        tb_lookup_stats(cpu, false);
         return NULL;
     }
 
@@ -257,6 +267,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     qatomic_set(&jc->array[hash].tb, tb);
 
 hit:
+    tb_lookup_stats(cpu, true);
     /*
      * As long as tb is not NULL, the contents are consistent.  Therefore,
      * the virtual PC has to match for non-CF_PCREL translations.

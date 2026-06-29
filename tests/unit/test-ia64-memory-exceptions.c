@@ -18,6 +18,12 @@
     (IA64_PSR_I_BIT | IA64_PSR_IC_BIT | IA64_PSR_RI_MASK | \
      IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK)
 
+static uint64_t test_rr(uint32_t rid, uint8_t page_size, bool vhpt)
+{
+    return ((uint64_t)rid << 8) | ((uint64_t)page_size << 2) |
+           (vhpt ? 1 : 0);
+}
+
 static void test_identity_debug_memory_path(void)
 {
     CPUIA64State env;
@@ -59,6 +65,38 @@ static void test_physical_region_alias_path(void)
     g_assert_nonnull(strstr(result.message, "physical mode region-bit strip"));
     g_assert_cmphex(env.memory.last_vaddr, ==, alias);
     g_assert_cmpint(env.memory.last_status, ==, IA64_TRANSLATE_OK);
+}
+
+static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
+{
+    uint64_t cpl0 = IA64_TB_PSR_DT_BIT | IA64_TB_PSR_IT_BIT;
+    uint64_t cpl3 = cpl0 | IA64_TB_PSR_CPL_MASK;
+    uint32_t cpl0_flags = ia64_tcg_tb_flags_from_psr(cpl0);
+    uint32_t cpl3_flags = ia64_tcg_tb_flags_from_psr(cpl3);
+
+    g_assert_cmpuint(ia64_tcg_psr_cpl(cpl0), ==, 0);
+    g_assert_cmpuint(ia64_tcg_psr_cpl(cpl3), ==, 3);
+    g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_DT, ==, IA64_TB_FLAG_DT);
+    g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_IT, ==, IA64_TB_FLAG_IT);
+    g_assert_cmpuint(ia64_tcg_tb_flags_cpl(cpl3_flags), ==, 3);
+    g_assert_cmphex(cpl0_flags, !=, cpl3_flags);
+
+    g_assert_cmpint(ia64_tcg_mmu_index_for_psr(0, false), ==,
+                    IA64_MMU_PHYSICAL);
+    g_assert_cmpint(ia64_tcg_mmu_index_for_psr(IA64_TB_PSR_DT_BIT, false),
+                    ==, IA64_MMU_DATA_CPL0);
+    g_assert_cmpint(ia64_tcg_mmu_index_for_psr(
+                        IA64_TB_PSR_DT_BIT | IA64_TB_PSR_CPL_MASK, false),
+                    ==, IA64_MMU_DATA_CPL3);
+    g_assert_cmpint(ia64_tcg_mmu_index_for_psr(
+                        IA64_TB_PSR_IT_BIT | IA64_TB_PSR_CPL_MASK, true),
+                    ==, IA64_MMU_INST_CPL3);
+    g_assert_cmpint(ia64_tcg_data_mmu_index_for_tb_flags(cpl0_flags), ==,
+                    IA64_MMU_DATA_CPL0);
+    g_assert_cmpint(ia64_tcg_data_mmu_index_for_tb_flags(cpl3_flags), ==,
+                    IA64_MMU_DATA_CPL3);
+    g_assert_cmphex(IA64_MMU_ALL_IDXMAP,
+                    ==, (1u << IA64_MMU_INDEX_COUNT) - 1u);
 }
 
 static void test_translated_address_misses_without_entry(void)
@@ -142,6 +180,102 @@ static void test_translation_cache_preserves_pinned_register(void)
                                          false, &result));
     g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
     g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+}
+
+static void test_region_register_change_selects_new_rid(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t rid1_translation = 0x0010000004000661ULL;
+    uint64_t rid2_translation = 0x0010000008000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_IT_BIT;
+    env.rr[5] = test_rr(0x100, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, true, false, 0, base,
+                                           rid1_translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                         IA64_MMU_INST_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+
+    env.rr[5] = test_rr(0x200, 26, false);
+    g_assert_false(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                          IA64_MMU_INST_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+
+    g_assert_true(ia64_install_translation(&env, true, false, 0, base,
+                                           rid2_translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                         IA64_MMU_INST_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
+}
+
+static void test_translation_cache_purge_and_same_va_remap(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t first_translation = 0x0010000004000661ULL;
+    uint64_t second_translation = 0x0010000008000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_DT_BIT;
+    env.rr[5] = test_rr(0x300, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           first_translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+
+    ia64_purge_translation_cache(&env, address, 26, false);
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           second_translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
+}
+
+static void test_translation_register_purge_removes_pinned_entry(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t translation = 0x0010000004000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_IT_BIT;
+    env.rr[5] = test_rr(0x400, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, true, true, 2, base,
+                                           translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                         IA64_MMU_INST_CPL0, false,
+                                         &result));
+
+    ia64_purge_translation_register(&env, true, address, 26);
+    g_assert_false(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                          IA64_MMU_INST_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
 }
 
 static void test_exception_reporting(void)
@@ -363,6 +497,8 @@ int main(int argc, char **argv)
                     test_identity_debug_memory_path);
     g_test_add_func("/ia64-memory/physical-region-alias",
                     test_physical_region_alias_path);
+    g_test_add_func("/ia64-memory/tcg-tb-flags-mmu-index-cpl",
+                    test_tcg_tb_flags_and_mmu_indexes_include_cpl);
     g_test_add_func("/ia64-memory/translated-miss",
                     test_translated_address_misses_without_entry);
     g_test_add_func("/ia64-memory/translated-vhpt-miss",
@@ -371,6 +507,12 @@ int main(int argc, char **argv)
                     test_instruction_translation_register_lookup);
     g_test_add_func("/ia64-memory/tc-preserves-pinned-tr",
                     test_translation_cache_preserves_pinned_register);
+    g_test_add_func("/ia64-memory/region-register-rid-change",
+                    test_region_register_change_selects_new_rid);
+    g_test_add_func("/ia64-memory/tc-purge-same-va-remap",
+                    test_translation_cache_purge_and_same_va_remap);
+    g_test_add_func("/ia64-memory/tr-purge-pinned-entry",
+                    test_translation_register_purge_removes_pinned_entry);
     g_test_add_func("/ia64-exception/reporting", test_exception_reporting);
     g_test_add_func("/ia64-exception/tlb-miss-delivery",
                     test_tlb_miss_delivery_vectors_to_iva);
