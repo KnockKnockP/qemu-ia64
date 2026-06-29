@@ -971,6 +971,129 @@ bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle)
     return false;
 }
 
+static IA64TcgFallbackPlanOp ia64_tcg_fallback_plan_for_slot(
+    IA64SlotType type, uint64_t raw)
+{
+    IA64LdstImmediate ldst;
+    IA64FloatingMemoryInstruction fldst;
+    IA64CompareInstruction cmp;
+    IA64PredicateTestInstruction pred_test;
+    IA64ExtractInstruction extract;
+    IA64DepositInstruction deposit;
+    IA64IntegerExtendInstruction int_ext;
+
+    /*
+     * Smoke/NOP slots are already the first cheap checks in the helper ladder.
+     * Leave them generic so the plan only targets slots that skip real work.
+     */
+    if (ia64_slot_is_m34_alloc(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ALLOC;
+    }
+    if (ia64_slot_is_i_mov_from_branch(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_MOV_FROM_BRANCH;
+    }
+    if (ia64_slot_is_i_mov_to_branch(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_MOV_TO_BRANCH;
+    }
+    if (ia64_slot_is_mov_to_application(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION;
+    }
+    if (ia64_slot_is_mov_from_application(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_MOV_FROM_APPLICATION;
+    }
+    if (ia64_slot_is_mov_to_application_immediate(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION_IMM;
+    }
+    if (ia64_decode_extract(type, raw, &extract)) {
+        return IA64_TCG_FALLBACK_PLAN_EXTRACT;
+    }
+    if (ia64_decode_deposit(type, raw, &deposit)) {
+        return IA64_TCG_FALLBACK_PLAN_DEPOSIT;
+    }
+    if (ia64_decode_integer_extend(type, raw, &int_ext)) {
+        return IA64_TCG_FALLBACK_PLAN_INTEGER_EXTEND;
+    }
+    if (ia64_decode_floating_memory(type, raw, &fldst)) {
+        return IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY;
+    }
+    if (ia64_decode_ldst_immediate(type, raw, &ldst)) {
+        return IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE;
+    }
+    if (ia64_decode_compare(type, raw, &cmp)) {
+        return IA64_TCG_FALLBACK_PLAN_COMPARE;
+    }
+    if (ia64_decode_predicate_test(type, raw, &pred_test)) {
+        return IA64_TCG_FALLBACK_PLAN_PREDICATE_TEST;
+    }
+    if (ia64_slot_is_alu_add(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ALU_ADD;
+    }
+    if (ia64_slot_is_alu_sub(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ALU_SUB;
+    }
+    if (ia64_slot_is_alu_logic(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ALU_LOGIC;
+    }
+    if (ia64_slot_is_alu_addp4(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ALU_ADDP4;
+    }
+    if (ia64_slot_is_alu_shladd(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ALU_SHLADD;
+    }
+    if (ia64_slot_is_i_packed_i2(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_I_PACKED_I2;
+    }
+    if (ia64_slot_is_i_mux(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_I_MUX;
+    }
+    if (ia64_slot_is_i_bit_count(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_I_BIT_COUNT;
+    }
+    if (ia64_slot_is_i_variable_shift(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_I_VARIABLE_SHIFT;
+    }
+    if (ia64_slot_is_addl(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_ADDL;
+    }
+    if (ia64_slot_is_b_branch_relative(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE;
+    }
+    if (ia64_slot_is_b_call_relative(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE;
+    }
+    if (ia64_slot_is_b_indirect_branch(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT;
+    }
+    if (ia64_slot_is_b_predict_or_nop(type, raw)) {
+        return IA64_TCG_FALLBACK_PLAN_BRANCH_PREDICT_OR_NOP;
+    }
+
+    return IA64_TCG_FALLBACK_PLAN_GENERIC;
+}
+
+uint32_t ia64_tcg_fallback_plan_for_bundle(const IA64DecodedBundle *bundle)
+{
+    uint32_t plan = 0;
+
+    if (!bundle || !bundle->valid) {
+        return plan;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        IA64TcgFallbackPlanOp op;
+
+        if (bundle->info->long_immediate && slot >= 1) {
+            op = IA64_TCG_FALLBACK_PLAN_GENERIC;
+        } else {
+            op = ia64_tcg_fallback_plan_for_slot(
+                bundle->info->slot_type[slot], bundle->slot[slot]);
+        }
+        plan |= (uint32_t)op << (slot * IA64_TCG_FALLBACK_PLAN_SLOT_BITS);
+    }
+
+    return plan;
+}
+
 static bool ia64_tcg_same_page(uint64_t left, uint64_t right)
 {
     return ((left ^ right) & IA64_TCG_TARGET_PAGE_MASK) == 0;

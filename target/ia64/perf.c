@@ -93,6 +93,8 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
         "tcg.fallback.fast.unsupported_slot",
     [IA64_PERF_TCG_FALLBACK_RUNTIME_GUARD] =
         "tcg.fallback.runtime_guard",
+    [IA64_PERF_TCG_FALLBACK_PLAN_SLOT] = "tcg.fallback.plan.slot",
+    [IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT] = "tcg.fallback.plan.bailout",
     [IA64_PERF_TB_EXIT_DIRECT_BRANCH] = "tb.exit.direct_branch",
     [IA64_PERF_TB_EXIT_CHAINED] = "tb.exit.chained",
     [IA64_PERF_TB_EXIT_MAIN_LOOP] = "tb.exit.main_loop",

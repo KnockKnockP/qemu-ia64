@@ -4840,17 +4840,255 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
     return chain_ok ? 1 : 0;
 }
 
+typedef enum IA64PlannedSlotResult {
+    IA64_PLANNED_SLOT_GENERIC,
+    IA64_PLANNED_SLOT_CONTINUE,
+    IA64_PLANNED_SLOT_BREAK,
+} IA64PlannedSlotResult;
+
+static IA64PlannedSlotResult exec_predecoded_slot(
+    CPUIA64State *env, const IA64DecodedBundle *decoded, int slot,
+    IA64SlotType type, uint64_t raw, IA64TcgFallbackPlanOp op,
+    uint64_t *next_ip, unsigned *next_ri)
+{
+    switch (op) {
+    case IA64_TCG_FALLBACK_PLAN_GENERIC:
+        return IA64_PLANNED_SLOT_GENERIC;
+    case IA64_TCG_FALLBACK_PLAN_ALLOC:
+        IA64_PERF_INC(IA64_PERF_OP_ALLOC);
+        ia64_exec_m34_alloc(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_MOV_FROM_BRANCH:
+        IA64_PERF_INC(IA64_PERF_OP_BRANCH_REGISTER);
+        ia64_exec_i_mov_from_branch(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_MOV_TO_BRANCH:
+        IA64_PERF_INC(IA64_PERF_OP_BRANCH_REGISTER);
+        ia64_exec_i_mov_to_branch(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION:
+        IA64_PERF_INC(IA64_PERF_OP_APPLICATION_REGISTER);
+        ia64_exec_mov_to_application(env, type, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_MOV_FROM_APPLICATION:
+        IA64_PERF_INC(IA64_PERF_OP_APPLICATION_REGISTER);
+        ia64_exec_mov_from_application(env, type, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION_IMM:
+        IA64_PERF_INC(IA64_PERF_OP_APPLICATION_REGISTER);
+        ia64_exec_mov_to_application_immediate(env, type, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_EXTRACT: {
+        IA64ExtractInstruction extract;
+
+        if (!ia64_decode_extract(type, raw, &extract) ||
+            !ia64_exec_extract(env, &extract)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_EXTRACT_DEPOSIT);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_DEPOSIT: {
+        IA64DepositInstruction deposit;
+
+        if (!ia64_decode_deposit(type, raw, &deposit) ||
+            !ia64_exec_deposit(env, &deposit)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_EXTRACT_DEPOSIT);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_INTEGER_EXTEND: {
+        IA64IntegerExtendInstruction int_ext;
+
+        if (!ia64_decode_integer_extend(type, raw, &int_ext) ||
+            !ia64_exec_integer_extend(env, &int_ext)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_SHIFT_EXTEND);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY: {
+        IA64FloatingMemoryInstruction fldst;
+
+        if (!ia64_decode_floating_memory(type, raw, &fldst) ||
+            !exec_floating_memory(env, &fldst)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_FLOAT_MEMORY);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE: {
+        IA64LdstImmediate ldst;
+
+        if (!ia64_decode_ldst_immediate(type, raw, &ldst) ||
+            !exec_ldst_immediate(env, &ldst)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        switch (ldst.kind) {
+        case IA64_LDST_IMM_LOAD:
+            IA64_PERF_INC(IA64_PERF_OP_LOAD);
+            break;
+        case IA64_LDST_IMM_STORE:
+            IA64_PERF_INC(IA64_PERF_OP_STORE);
+            break;
+        case IA64_LDST_IMM_PREFETCH:
+            IA64_PERF_INC(IA64_PERF_OP_PREFETCH);
+            break;
+        default:
+            break;
+        }
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_COMPARE: {
+        IA64CompareInstruction cmp;
+
+        if (!ia64_decode_compare(type, raw, &cmp) ||
+            !ia64_exec_compare(env, &cmp)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_COMPARE);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_PREDICATE_TEST: {
+        IA64PredicateTestInstruction pred_test;
+
+        if (!ia64_decode_predicate_test(type, raw, &pred_test) ||
+            !ia64_exec_predicate_test(env, &pred_test)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_PREDICATE_TEST);
+        if (pred_test.kind == IA64_PRED_TEST_NAT) {
+            IA64_PERF_INC(IA64_PERF_OP_NAT_TEST);
+        }
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_ALU_ADD:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_alu_add(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_ALU_SUB:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_alu_sub(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_ALU_LOGIC:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_alu_logic(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_ALU_ADDP4:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_alu_addp4(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_ALU_SHLADD:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_alu_shladd(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_I_PACKED_I2:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_i_packed_i2(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_I_MUX:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_i_mux(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_I_BIT_COUNT:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_i_bit_count(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_I_VARIABLE_SHIFT:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_i_variable_shift(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_ADDL:
+        IA64_PERF_INC(IA64_PERF_OP_ADDL);
+        ia64_exec_addl(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE: {
+        bool branch_taken = false;
+
+        IA64_PERF_INC(IA64_PERF_OP_BRANCH_DIRECT);
+        ia64_exec_b_branch_relative(env, raw, env->ip, next_ip,
+                                    &branch_taken);
+        if (*next_ip == 0) {
+            abort_zero_branch(env, decoded, slot);
+        }
+        if (branch_taken || *next_ip != env->ip + IA64_BUNDLE_SIZE) {
+            IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
+            return IA64_PLANNED_SLOT_BREAK;
+        }
+        IA64_PERF_INC(IA64_PERF_BRANCH_FALLTHROUGH);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE:
+        IA64_PERF_INC(IA64_PERF_OP_BRANCH_CALL);
+        IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
+        ia64_exec_b_call_relative(env, raw, env->ip, next_ip);
+        if (*next_ip == 0) {
+            abort_zero_branch(env, decoded, slot);
+        }
+        return IA64_PLANNED_SLOT_BREAK;
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT: {
+        uint8_t branch_major = ia64_slot_major_opcode(raw);
+        uint8_t branch_x6 = (raw >> 27) & 0x3f;
+        bool rfi = branch_major == 0x0 && branch_x6 == 0x08;
+        bool rfi_valid_ifs =
+            rfi && (env->cr[IA64_CR_IFS] & IA64_IFS_VALID_BIT) != 0;
+        bool br_ret = branch_major == 0x0 && branch_x6 == 0x21;
+        bool cover = branch_major == 0x0 && branch_x6 == 0x02;
+        bool epc = branch_major == 0x0 && branch_x6 == 0x10;
+        uint64_t old_psr = env->psr;
+
+        IA64_PERF_INC(IA64_PERF_OP_BRANCH_INDIRECT);
+        IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
+        if (cover) {
+            IA64_PERF_INC(IA64_PERF_TRANSITION_COVER);
+        }
+        if (epc) {
+            IA64_PERF_INC(IA64_PERF_TRANSITION_EPC);
+        }
+        ia64_exec_b_indirect_branch(env, raw, env->ip, next_ip);
+        if (br_ret) {
+            ia64_rse_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
+        }
+        if (rfi_valid_ifs) {
+            IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
+            ia64_rse_fill_restored_frame(env, env->rse.sof);
+        }
+        if (rfi) {
+            IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
+            IA64_PERF_INC(ia64_helper_psr_cpl(env->psr) == 3 ?
+                          IA64_PERF_TRANSITION_RFI_TO_USER :
+                          IA64_PERF_TRANSITION_RFI_TO_KERNEL);
+            *next_ri = ia64_psr_ri(env->psr);
+        }
+        ia64_count_psr_transition(env, old_psr, env->psr);
+        if (*next_ip == 0) {
+            abort_zero_branch(env, decoded, slot);
+        }
+        return IA64_PLANNED_SLOT_BREAK;
+    }
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_PREDICT_OR_NOP:
+        IA64_PERF_INC(IA64_PERF_OP_BRANCH_PREDICT);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    default:
+        return IA64_PLANNED_SLOT_GENERIC;
+    }
+}
+
 void HELPER(exec_bundle)(CPUIA64State *env,
                          uint32_t tmpl,
                          uint64_t slot0,
                          uint64_t slot1,
-                         uint64_t slot2)
+                         uint64_t slot2,
+                         uint32_t fallback_plan)
 {
     CPUState *cpu = env_cpu(env);
     IA64DecodedBundle decoded;
     uint64_t next_ip = env->ip + IA64_BUNDLE_SIZE;
     unsigned start_slot = ia64_psr_ri(env->psr);
     unsigned next_ri = 0;
+    uint32_t planned_slot_count = 0;
+    uint32_t planned_bailout_count = 0;
 
     IA64_PERF_INC(IA64_PERF_HELPER_EXEC_BUNDLE);
     IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
@@ -4954,6 +5192,25 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             }
         }
         IA64_PERF_INC(IA64_PERF_INTERP_SLOT_EXECUTED);
+        if (fallback_plan != 0) {
+            IA64TcgFallbackPlanOp planned_op =
+                ia64_tcg_fallback_plan_slot(fallback_plan, slot);
+
+            if (planned_op != IA64_TCG_FALLBACK_PLAN_GENERIC) {
+                IA64PlannedSlotResult planned =
+                    exec_predecoded_slot(env, &decoded, slot, type, raw,
+                                         planned_op, &next_ip, &next_ri);
+
+                if (planned != IA64_PLANNED_SLOT_GENERIC) {
+                    planned_slot_count++;
+                    if (planned == IA64_PLANNED_SLOT_CONTINUE) {
+                        continue;
+                    }
+                    break;
+                }
+                planned_bailout_count++;
+            }
+        }
         if (ia64_exec_smoke_slot_supported(type, raw)) {
             IA64_PERF_INC(IA64_PERF_OP_SMOKE);
             continue;
@@ -5409,5 +5666,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
         abort_unsupported_slot(env, &decoded, slot);
     }
 
+    IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_SLOT, planned_slot_count);
+    IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT, planned_bailout_count);
     ia64_finish_bundle(env, next_ip, next_ri);
 }

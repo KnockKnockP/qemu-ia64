@@ -668,6 +668,51 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
     g_assert_true(ia64_tcg_bundle_has_ldst_immediate(&bundle));
 }
 
+static void test_fallback_plan_classifies_hot_helper_slots(void)
+{
+    const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
+    const uint64_t add_r1_r2_r3_raw =
+        (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
+    const uint64_t br_cond_raw = 0x0800001a006ULL;
+    IA64DecodedBundle bundle;
+    uint32_t plan;
+
+    bundle = make_bundle(0x00, ld8_r2_r3_raw,
+                         add_r1_r2_r3_raw, IA64_SMOKE_NOP_RAW);
+    plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+                    IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+                    IA64_TCG_FALLBACK_PLAN_ALU_ADD);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+
+    bundle = make_bundle(0x10, IA64_SMOKE_NOP_RAW,
+                         IA64_SMOKE_NOP_RAW, br_cond_raw);
+    plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+                    IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE);
+}
+
+static void test_fallback_plan_keeps_long_immediate_tail_generic(void)
+{
+    IA64DecodedBundle bundle =
+        make_bundle(0x04, IA64_SMOKE_NOP_RAW, 0, 0);
+    uint32_t plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
+
+    g_assert_true(bundle.info->long_immediate);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+}
+
 static void test_direct_branch_accepts_p0_same_page(void)
 {
     const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
@@ -864,6 +909,10 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_ldst_slot0);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-ldst-rejects-unsafe",
                     test_fast_bundle_rejects_unsafe_ldst);
+    g_test_add_func("/ia64-tcg-skeleton/fallback-plan-hot-helper-slots",
+                    test_fallback_plan_classifies_hot_helper_slots);
+    g_test_add_func("/ia64-tcg-skeleton/fallback-plan-long-immediate",
+                    test_fallback_plan_keeps_long_immediate_tail_generic);
     g_test_add_func("/ia64-tcg-skeleton/direct-branch-p0-same-page",
                     test_direct_branch_accepts_p0_same_page);
     g_test_add_func("/ia64-tcg-skeleton/direct-branch-fast-prefix",

@@ -71,12 +71,15 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
 static void ia64_tr_emit_exec_bundle(const IA64DecodedBundle *bundle,
                                      uint64_t pc)
 {
+    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+
     tcg_gen_movi_i64(cpu_ip, pc);
     gen_helper_exec_bundle(tcg_env,
                            tcg_constant_i32(bundle->tmpl),
                            tcg_constant_i64(bundle->slot[0]),
                            tcg_constant_i64(bundle->slot[1]),
-                           tcg_constant_i64(bundle->slot[2]));
+                           tcg_constant_i64(bundle->slot[2]),
+                           tcg_constant_i32(fallback_plan));
 }
 
 static void ia64_tr_emit_firmware_call_gate(uint64_t pc)
