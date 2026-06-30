@@ -3041,6 +3041,23 @@ static void test_b_unit_predict_or_nop(void)
     g_assert_false(ia64_slot_is_b_predict_or_nop(IA64_SLOT_TYPE_I, brp_raw));
 }
 
+static void test_b_unit_break_decode(void)
+{
+    const uint64_t centos_break_b_7_raw = 0x000000001c0ULL;
+    const uint64_t break_b_high_immediate_raw =
+        (1ULL << 36) | (0x34567ULL << 6);
+
+    g_assert_true(ia64_slot_is_b_break(IA64_SLOT_TYPE_B,
+                                       centos_break_b_7_raw));
+    g_assert_false(ia64_slot_is_b_break(IA64_SLOT_TYPE_I,
+                                        centos_break_b_7_raw));
+    g_assert_cmphex(ia64_b_break_immediate(centos_break_b_7_raw), ==, 7);
+    g_assert_true(ia64_slot_is_b_break(IA64_SLOT_TYPE_B,
+                                       break_b_high_immediate_raw));
+    g_assert_cmphex(ia64_b_break_immediate(break_b_high_immediate_raw),
+                    ==, 0x134567);
+}
+
 static void test_reserved_template_message(void)
 {
     CPUIA64State env;
@@ -3253,6 +3270,8 @@ int main(int argc, char **argv)
                     test_b_unit_indirect_call_updates_link_and_frame);
     g_test_add_func("/ia64-exec-smoke/b-unit-predict-or-nop",
                     test_b_unit_predict_or_nop);
+    g_test_add_func("/ia64-exec-smoke/b-unit-break-decode",
+                    test_b_unit_break_decode);
     g_test_add_func("/ia64-exec-smoke/reserved-template-message",
                     test_reserved_template_message);
     g_test_add_func("/ia64-exec-smoke/physical-region-alias-translation",

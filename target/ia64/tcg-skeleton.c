@@ -1310,7 +1310,8 @@ static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,
      * bundle in the TB until a later phase represents that state in flags or
      * emits direct TCG for the operation.
      */
-    if (ia64_slot_is_i_break(type, raw) || ia64_slot_is_m_break(type, raw)) {
+    if (ia64_slot_is_i_break(type, raw) || ia64_slot_is_m_break(type, raw) ||
+        ia64_slot_is_b_break(type, raw)) {
         return IA64_TCG_TB_BOUNDARY_BREAK;
     }
     if (ia64_slot_is_check_speculative(type, raw) ||

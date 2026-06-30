@@ -418,6 +418,8 @@ bool ia64_exec_predicate_test_qualified(
     bool qualifying_predicate);
 bool ia64_exec_predicate_test(CPUIA64State *env,
                               const IA64PredicateTestInstruction *decoded);
+bool ia64_slot_is_b_break(IA64SlotType type, uint64_t raw);
+uint64_t ia64_b_break_immediate(uint64_t raw);
 bool ia64_slot_is_b_branch_relative(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_b_call_relative(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_b_indirect_branch(IA64SlotType type, uint64_t raw);

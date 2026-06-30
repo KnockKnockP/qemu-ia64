@@ -6993,6 +6993,12 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             ia64_deliver_break(env, "break.m", iim, &next_ip);
             break;
         }
+        if (ia64_slot_is_b_break(type, raw)) {
+            uint64_t iim = ia64_b_break_immediate(raw);
+
+            ia64_deliver_break(env, "break.b", iim, &next_ip);
+            break;
+        }
         if (ia64_slot_is_m_mov_to_region_register(type, raw) &&
             ia64_exec_m_mov_to_region_register(env, raw)) {
             IA64_PERF_INC(IA64_PERF_OP_REGION_REGISTER);

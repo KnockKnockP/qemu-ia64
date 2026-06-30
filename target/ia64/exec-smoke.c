@@ -4811,6 +4811,18 @@ bool ia64_exec_compare(CPUIA64State *env,
     return ia64_exec_compare_qualified(env, decoded, true);
 }
 
+bool ia64_slot_is_b_break(IA64SlotType type, uint64_t raw)
+{
+    return type == IA64_SLOT_TYPE_B &&
+           ia64_slot_major_opcode(raw) == 0x0 &&
+           ((raw >> 27) & 0x3f) == 0x00;
+}
+
+uint64_t ia64_b_break_immediate(uint64_t raw)
+{
+    return (((raw >> 36) & 0x1) << 20) | ((raw >> 6) & 0xfffff);
+}
+
 bool ia64_slot_is_b_branch_relative(IA64SlotType type, uint64_t raw)
 {
     return type == IA64_SLOT_TYPE_B && ia64_slot_major_opcode(raw) == 0x4;
