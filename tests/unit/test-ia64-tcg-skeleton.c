@@ -546,12 +546,22 @@ static void test_fast_bundle_accepts_static_predicates(void)
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 }
 
+static uint64_t make_ldst_load_class_raw(uint8_t memory_class,
+                                         uint8_t width_code,
+                                         uint8_t target,
+                                         uint8_t base)
+{
+    uint8_t x6 = (memory_class << 2) | width_code;
+
+    return (4ULL << 37) | ((uint64_t)x6 << 30) |
+           ((uint64_t)base << 20) | ((uint64_t)target << 6);
+}
+
 static uint64_t make_ldst_load_raw(uint8_t width_code,
                                    uint8_t target,
                                    uint8_t base)
 {
-    return (4ULL << 37) | ((uint64_t)width_code << 30) |
-           ((uint64_t)base << 20) | ((uint64_t)target << 6);
+    return make_ldst_load_class_raw(0, width_code, target, base);
 }
 
 static uint64_t make_ldst_load_update_raw(uint8_t width_code,
@@ -596,6 +606,10 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
     const uint64_t ld8_r2_r3_8_raw = make_ldst_load_update_raw(3, 2, 3, 8);
     const uint64_t ld8_r16_r17_raw = make_ldst_load_raw(3, 16, 17);
+    const uint64_t ld8_acq_r22_r23_raw =
+        make_ldst_load_class_raw(1, 3, 22, 23);
+    const uint64_t ld8_sa_r24_r25_raw =
+        make_ldst_load_class_raw(8, 3, 24, 25);
     const uint64_t st8_r4_r5_raw = make_ldst_store_raw(3, 4, 5);
     const uint64_t st8_rel_r6_r7_raw =
         make_ldst_store_class_raw(0x0d, 3, 6, 7);
@@ -634,6 +648,20 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpuint(fast.slot[0].target, ==, 16);
     g_assert_cmpuint(fast.slot[0].base, ==, 17);
     g_assert_cmphex(fast.dest_mask, ==, 1ULL << 16);
+
+    bundle = make_bundle(0x00, ld8_acq_r22_r23_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_LDST_LOAD);
+    g_assert_cmpuint(fast.slot[0].target, ==, 22);
+    g_assert_cmpuint(fast.slot[0].base, ==, 23);
+
+    bundle = make_bundle(0x00, ld8_sa_r24_r25_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_LDST_LOAD);
+    g_assert_cmpuint(fast.slot[0].target, ==, 24);
+    g_assert_cmpuint(fast.slot[0].base, ==, 25);
 
     bundle = make_bundle(0x00, st8_r4_r5_raw,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);

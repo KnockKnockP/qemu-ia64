@@ -231,6 +231,27 @@ static bool ia64_tcg_fast_ldst_store_class(uint8_t memory_class)
            memory_class == 0x0e;
 }
 
+static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
+{
+    switch (memory_class) {
+    case 0:
+    case 1:
+    case 4:
+    case 5:
+    case 6:
+    case 8:
+    case 9:
+    case 0x0a:
+        return true;
+    default:
+        /*
+         * Advanced loads (classes 2/3) need ALAT recording after the normal
+         * destination invalidation, so leave them on the helper path for now.
+         */
+        return false;
+    }
+}
+
 static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
     const IA64LdstImmediate *ldst, unsigned slot_index)
 {
@@ -248,7 +269,7 @@ static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
 
     switch (ldst->kind) {
     case IA64_LDST_IMM_LOAD:
-        if (ldst->memory_class != 0) {
+        if (!ia64_tcg_fast_ldst_load_class(ldst->memory_class)) {
             return IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS;
         }
         if (ldst->target == 0) {
@@ -301,7 +322,8 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
 
     switch (ldst->kind) {
     case IA64_LDST_IMM_LOAD:
-        if (ldst->memory_class != 0 || ldst->target == 0 ||
+        if (!ia64_tcg_fast_ldst_load_class(ldst->memory_class) ||
+            ldst->target == 0 ||
             !ia64_tcg_fast_set_target(slot, ldst->target)) {
             return false;
         }
