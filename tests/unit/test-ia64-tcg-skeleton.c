@@ -107,6 +107,7 @@ static unsigned helper_flags_for(const char *name)
 static void test_helper_flags_are_conservative(void)
 {
     g_assert_cmphex(helper_flags_for("exec_bundle"), ==, 0);
+    g_assert_cmphex(helper_flags_for("exec_bundle_lookup_ptr"), ==, 0);
     g_assert_cmphex(helper_flags_for("firmware_call_gate"), ==, 0);
     g_assert_cmphex(helper_flags_for("start_fast_bundle"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_fast_bundle"), ==, 0);

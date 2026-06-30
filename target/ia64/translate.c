@@ -82,6 +82,27 @@ static void ia64_tr_emit_exec_bundle(const IA64DecodedBundle *bundle,
                            tcg_constant_i32(fallback_plan));
 }
 
+static void ia64_tr_emit_exec_bundle_lookup_ptr(const IA64DecodedBundle *bundle,
+                                                uint64_t pc)
+{
+    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    TCGLabel *main_loop_exit = gen_new_label();
+    TCGv_i32 chain_ok = tcg_temp_new_i32();
+
+    tcg_gen_movi_i64(cpu_ip, pc);
+    gen_helper_exec_bundle_lookup_ptr(chain_ok, tcg_env,
+                                      tcg_constant_i32(bundle->tmpl),
+                                      tcg_constant_i64(bundle->slot[0]),
+                                      tcg_constant_i64(bundle->slot[1]),
+                                      tcg_constant_i64(bundle->slot[2]),
+                                      tcg_constant_i32(fallback_plan));
+    tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
+    tcg_gen_lookup_and_goto_ptr();
+
+    gen_set_label(main_loop_exit);
+    tcg_gen_exit_tb(NULL, 0);
+}
+
 static void ia64_tr_emit_firmware_call_gate(uint64_t pc)
 {
     tcg_gen_movi_i64(cpu_ip, pc);
@@ -826,14 +847,6 @@ static void ia64_tr_count_chained_exit(void)
     }
 }
 
-static void ia64_tr_emit_lookup_ptr_exit(void)
-{
-    if (ia64_perf_enabled()) {
-        gen_helper_perf_tb_exit_lookup_ptr();
-    }
-    tcg_gen_lookup_and_goto_ptr();
-}
-
 static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
 {
     if (translator_use_goto_tb(&ctx->base, target)) {
@@ -936,8 +949,7 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     if (has_ldst && ia64_perf_enabled()) {
         gen_helper_perf_tcg_ldst_fallback();
     }
-    ia64_tr_emit_exec_bundle(bundle, pc);
-    ia64_tr_emit_lookup_ptr_exit();
+    ia64_tr_emit_exec_bundle_lookup_ptr(bundle, pc);
     return true;
 }
 
@@ -977,11 +989,10 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     }
     if (boundary == IA64_TCG_TB_BOUNDARY_BRANCH) {
         ia64_tr_count_branch_fallback(&bundle);
-        ia64_tr_emit_exec_bundle(&bundle, pc);
         trace_ia64_tcg_tb_boundary(pc,
                                    ia64_tcg_tb_boundary_name(boundary));
         IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
-        ia64_tr_emit_lookup_ptr_exit();
+        ia64_tr_emit_exec_bundle_lookup_ptr(&bundle, pc);
         ctx->base.is_jmp = DISAS_NORETURN;
         return;
     }

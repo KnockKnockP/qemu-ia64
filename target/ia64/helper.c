@@ -1174,9 +1174,22 @@ static void ia64_progress_trace_bundle(CPUIA64State *env)
             "[ia64-progress] bundles=%" PRIu64 " ip=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
             " lc=0x%016" PRIx64 " ec=0x%016" PRIx64
-            " bspstore=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+            " bspstore=0x%016" PRIx64 " b0=0x%016" PRIx64
+            " itc=0x%016" PRIx64 " itm=0x%016" PRIx64
+            " itv=0x%016" PRIx64 " tpr=0x%016" PRIx64
+            " ivr=0x%016" PRIx64 " irr0=0x%016" PRIx64
+            " irr1=0x%016" PRIx64 " irr2=0x%016" PRIx64
+            " irr3=0x%016" PRIx64 " intr-pending=%u"
+            " intr-active=%" PRIu64 " intr-vector=0x%016" PRIx64 "\n",
             count, env->ip, env->psr, env->cfm, env->ar[IA64_AR_LC],
-            env->ar[IA64_AR_EC], env->ar[IA64_AR_BSPSTORE], env->br[0]);
+            env->ar[IA64_AR_EC], env->ar[IA64_AR_BSPSTORE], env->br[0],
+            env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM],
+            env->cr[IA64_CR_ITV], env->cr[IA64_CR_TPR],
+            env->cr[IA64_CR_IVR], env->cr[IA64_CR_IRR0],
+            env->cr[IA64_CR_IRR1], env->cr[IA64_CR_IRR2],
+            env->cr[IA64_CR_IRR3], env->interrupt.pending,
+            env->interrupt.pending_interruption,
+            env->interrupt.pending_vector);
 }
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
@@ -1331,6 +1344,23 @@ static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
         ia64_latch_timer_interrupt(env);
         cpu_set_interrupt(env_cpu(env), CPU_INTERRUPT_HARD);
     }
+}
+
+static bool ia64_tcg_can_chain(CPUIA64State *env)
+{
+    CPUState *cpu = env_cpu(env);
+
+    return cpu->interrupt_request == 0 &&
+           !qatomic_read(&cpu->exit_request);
+}
+
+static uint32_t ia64_lookup_ptr_chain_ok(CPUIA64State *env)
+{
+    bool chain_ok = ia64_tcg_can_chain(env);
+
+    IA64_PERF_INC(chain_ok ? IA64_PERF_TB_EXIT_LOOKUP_PTR :
+                             IA64_PERF_TB_EXIT_MAIN_LOOP);
+    return chain_ok ? 1 : 0;
 }
 
 void vibtanium_efi_set_linux_cmdline_append(const char *append)
@@ -6249,8 +6279,7 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
 
-    chain_ok = cpu->interrupt_request == 0 &&
-               !qatomic_read(&cpu->exit_request);
+    chain_ok = ia64_tcg_can_chain(env);
     IA64_PERF_INC(chain_ok ? IA64_PERF_TB_EXIT_CHAINED :
                              IA64_PERF_TB_EXIT_MAIN_LOOP);
     return chain_ok ? 1 : 0;
@@ -6492,12 +6521,12 @@ static IA64PlannedSlotResult exec_predecoded_slot(
     }
 }
 
-void HELPER(exec_bundle)(CPUIA64State *env,
-                         uint32_t tmpl,
-                         uint64_t slot0,
-                         uint64_t slot1,
-                         uint64_t slot2,
-                         uint32_t fallback_plan)
+static void ia64_exec_bundle_impl(CPUIA64State *env,
+                                  uint32_t tmpl,
+                                  uint64_t slot0,
+                                  uint64_t slot1,
+                                  uint64_t slot2,
+                                  uint32_t fallback_plan)
 {
     CPUState *cpu = env_cpu(env);
     IA64DecodedBundle decoded;
@@ -7088,4 +7117,25 @@ void HELPER(exec_bundle)(CPUIA64State *env,
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_SLOT, planned_slot_count);
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT, planned_bailout_count);
     ia64_finish_bundle(env, next_ip, next_ri);
+}
+
+void HELPER(exec_bundle)(CPUIA64State *env,
+                         uint32_t tmpl,
+                         uint64_t slot0,
+                         uint64_t slot1,
+                         uint64_t slot2,
+                         uint32_t fallback_plan)
+{
+    ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2, fallback_plan);
+}
+
+uint32_t HELPER(exec_bundle_lookup_ptr)(CPUIA64State *env,
+                                        uint32_t tmpl,
+                                        uint64_t slot0,
+                                        uint64_t slot1,
+                                        uint64_t slot2,
+                                        uint32_t fallback_plan)
+{
+    ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2, fallback_plan);
+    return ia64_lookup_ptr_chain_ok(env);
 }
