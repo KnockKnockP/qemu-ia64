@@ -2679,7 +2679,7 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
         .type = EFI_MEMORY_MAPPED_IO_PORT_SPACE,
         .address = VIBTANIUM_IO_PORT_BASE,
         .pages = VIBTANIUM_IO_PORT_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_UC,
+        .attributes = EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
     };
 
     index = efi_emit_runtime_and_loader(env, map, index, &runtime_firmware,

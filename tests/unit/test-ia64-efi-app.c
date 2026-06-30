@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
+#include "hw/ia64/vibtanium.h"
 #include "target/ia64/exec-smoke.h"
 
 #define SYNTHETIC_PE_SIZE 0x400
@@ -247,6 +248,7 @@ static void test_prepare_cpu_entry_abi(void)
                     VIBTANIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==,
                     VIBTANIUM_EFI_BACKING_STORE_BASE);
+    g_assert_cmphex(env.ar[IA64_AR_KR0], ==, VIBTANIUM_IO_PORT_BASE);
     g_assert_cmphex(env.gr[0], ==, 0);
 
     vibtanium_efi_image_destroy(&image);

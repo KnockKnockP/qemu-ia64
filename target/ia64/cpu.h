@@ -115,6 +115,7 @@ static inline int ia64_tcg_data_mmu_index_for_tb_flags(uint32_t flags)
 }
 
 enum IA64ApplicationRegister {
+    IA64_AR_KR0 = 0,
     IA64_AR_RSC = 16,
     IA64_AR_BSP = 17,
     IA64_AR_BSPSTORE = 18,
