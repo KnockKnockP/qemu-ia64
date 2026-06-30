@@ -514,7 +514,7 @@ static void test_fast_bundle_accepts_predicate_test(void)
     g_assert_cmphex(fast.source_nat_mask, ==, 1ULL << 20);
 }
 
-static void test_fast_bundle_rejects_predicated_or_stacked_gr(void)
+static void test_fast_bundle_accepts_static_predicates(void)
 {
     const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
     const uint64_t add_r1_r2_r3_raw =
@@ -523,6 +523,12 @@ static void test_fast_bundle_rejects_predicated_or_stacked_gr(void)
     IA64TcgFastBundle fast;
 
     bundle = make_bundle(0x00, add_r1_r2_r3_raw | 1,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpuint(fast.slot[0].qualifying_predicate, ==, 1);
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_ALU_ADD);
+
+    bundle = make_bundle(0x00, add_r1_r2_r3_raw | 16,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
@@ -682,6 +688,12 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
     IA64TcgFastBundle fast;
 
     bundle = make_bundle(0x00, ld8_r2_r3_raw | 1,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_LDST_LOAD);
+    g_assert_cmpuint(fast.slot[0].qualifying_predicate, ==, 1);
+
+    bundle = make_bundle(0x00, ld8_r2_r3_raw | 16,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
@@ -883,6 +895,11 @@ static void test_fallback_reason_classifies_helper_sources(void)
     bundle = make_bundle(0x00, add_r1_r2_r3_raw | 1,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_RUNTIME_GUARD);
+
+    bundle = make_bundle(0x00, add_r1_r2_r3_raw | 16,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
                     ==, IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT);
 
     bundle = make_bundle(0x00, add_r36_r36_r1_raw,
@@ -937,8 +954,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_bitfield_misc);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-predicate-test",
                     test_fast_bundle_accepts_predicate_test);
-    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-rejects-unsafe",
-                    test_fast_bundle_rejects_predicated_or_stacked_gr);
+    g_test_add_func("/ia64-tcg-skeleton/fast-bundle-static-predicates",
+                    test_fast_bundle_accepts_static_predicates);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-ldst-slot0",
                     test_fast_bundle_accepts_ldst_slot0);
     g_test_add_func("/ia64-tcg-skeleton/fast-bundle-ldst-rejects-unsafe",

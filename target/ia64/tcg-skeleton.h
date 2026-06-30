@@ -105,6 +105,7 @@ typedef struct IA64TcgFastSlot {
     uint8_t target;
     uint8_t source2;
     uint8_t source3;
+    uint8_t qualifying_predicate;
     uint8_t base;
     uint8_t width;
     uint8_t slot_index;

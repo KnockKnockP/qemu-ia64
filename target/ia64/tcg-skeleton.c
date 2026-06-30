@@ -344,12 +344,15 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     IA64ExtractInstruction extract;
     IA64DepositInstruction deposit;
     IA64IntegerExtendInstruction int_ext;
+    uint8_t qp;
 
     memset(slot, 0, sizeof(*slot));
     slot->slot_index = slot_index;
-    if (ia64_slot_predicate(raw) != 0) {
+    qp = ia64_slot_predicate(raw);
+    if (qp >= 16) {
         return false;
     }
+    slot->qualifying_predicate = qp;
 
     if (ia64_exec_smoke_slot_supported(type, raw) ||
         ia64_slot_is_i_nop(type, raw)) {
@@ -615,6 +618,7 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
 
     if (ia64_decode_compare(type, raw, &cmp)) {
         if (cmp.p1 == cmp.p2 || cmp.p1 >= 16 || cmp.p2 >= 16 ||
+            (qp != 0 && cmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) ||
             !ia64_tcg_fast_add_source(slot, cmp.source3) ||
             (!cmp.source_immediate &&
              !ia64_tcg_fast_add_source(slot, cmp.source2))) {
@@ -639,6 +643,8 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         if (pred_test.p1 == pred_test.p2 ||
             pred_test.p1 >= 16 || pred_test.p2 >= 16 ||
             pred_test.immediate >= 64 ||
+            (qp != 0 &&
+             pred_test.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) ||
             (pred_test.kind != IA64_PRED_TEST_FEATURE &&
              !ia64_tcg_fast_static_gr(pred_test.source3))) {
             return false;
@@ -681,8 +687,9 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     IA64ExtractInstruction extract;
     IA64DepositInstruction deposit;
     IA64IntegerExtendInstruction int_ext;
+    uint8_t qp = ia64_slot_predicate(raw);
 
-    if (ia64_slot_predicate(raw) != 0) {
+    if (qp >= 16) {
         return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
     }
 
@@ -830,6 +837,10 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         if (cmp.p1 == cmp.p2 || cmp.p1 >= 16 || cmp.p2 >= 16) {
             return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
         }
+        if (qp != 0 &&
+            cmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+            return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
+        }
         if (!ia64_tcg_fast_static_gr(cmp.source3) ||
             (!cmp.source_immediate &&
              !ia64_tcg_fast_static_gr(cmp.source2))) {
@@ -843,6 +854,10 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
             pred_test.p1 >= 16 || pred_test.p2 >= 16 ||
             pred_test.immediate >= 64) {
             return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (qp != 0 &&
+            pred_test.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+            return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
         }
         if (pred_test.kind != IA64_PRED_TEST_FEATURE &&
             !ia64_tcg_fast_static_gr(pred_test.source3)) {
@@ -1133,6 +1148,9 @@ static bool ia64_tcg_build_direct_branch_prefix(
                                       bundle->slot[slot],
                                       slot,
                                       &prefix->slot[slot], prefix)) {
+            return false;
+        }
+        if (prefix->slot[slot].qualifying_predicate != 0) {
             return false;
         }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&prefix->slot[slot],
