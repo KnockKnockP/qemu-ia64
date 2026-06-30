@@ -88,8 +88,54 @@ static void ia64_tr_emit_firmware_call_gate(uint64_t pc)
     gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc));
 }
 
+static bool ia64_tr_gr_is_stacked(uint8_t reg)
+{
+    return reg >= IA64_STATIC_GR_COUNT;
+}
+
+static void ia64_tr_stacked_gr_address(TCGv_ptr ptr, TCGv_i64 slot,
+                                       uint8_t reg)
+{
+    TCGv_i32 frame_base = tcg_temp_new_i32();
+    TCGv_i64 byte_offset = tcg_temp_new_i64();
+
+    tcg_gen_ld_i32(frame_base, tcg_env,
+                   offsetof(CPUIA64State, rse.current_frame_base));
+    tcg_gen_extu_i32_i64(slot, frame_base);
+    tcg_gen_addi_i64(slot, slot, reg - IA64_STATIC_GR_COUNT);
+    tcg_gen_andi_i64(slot, slot, IA64_STACKED_GR_MASK);
+    tcg_gen_shli_i64(byte_offset, slot, 3);
+    tcg_gen_addi_i64(byte_offset, byte_offset,
+                     offsetof(CPUIA64State, rse.stacked_gr));
+    tcg_gen_trunc_i64_ptr(ptr, byte_offset);
+    tcg_gen_add_ptr(ptr, tcg_env, ptr);
+}
+
+static void ia64_tr_mark_stacked_gr_dirty(TCGv_i64 slot)
+{
+    TCGv_i32 clean_count = tcg_temp_new_i32();
+    TCGv_i32 slot32 = tcg_temp_new_i32();
+
+    tcg_gen_ld_i32(clean_count, tcg_env,
+                   offsetof(CPUIA64State, rse.clean_count));
+    tcg_gen_extrl_i64_i32(slot32, slot);
+    tcg_gen_movcond_i32(TCG_COND_LTU, clean_count, clean_count, slot32,
+                        clean_count, slot32);
+    tcg_gen_st_i32(clean_count, tcg_env,
+                   offsetof(CPUIA64State, rse.clean_count));
+}
+
 static void ia64_tr_load_static_gr(TCGv_i64 dest, uint8_t reg)
 {
+    if (ia64_tr_gr_is_stacked(reg)) {
+        TCGv_ptr ptr = tcg_temp_new_ptr();
+        TCGv_i64 slot = tcg_temp_new_i64();
+
+        ia64_tr_stacked_gr_address(ptr, slot, reg);
+        tcg_gen_ld_i64(dest, ptr, 0);
+        return;
+    }
+
     if (reg == 0) {
         tcg_gen_movi_i64(dest, 0);
         return;
@@ -122,6 +168,16 @@ static void ia64_tr_load_static_gr(TCGv_i64 dest, uint8_t reg)
 
 static void ia64_tr_store_static_gr(uint8_t reg, TCGv_i64 value)
 {
+    if (ia64_tr_gr_is_stacked(reg)) {
+        TCGv_ptr ptr = tcg_temp_new_ptr();
+        TCGv_i64 slot = tcg_temp_new_i64();
+
+        ia64_tr_stacked_gr_address(ptr, slot, reg);
+        tcg_gen_st_i64(value, ptr, 0);
+        ia64_tr_mark_stacked_gr_dirty(slot);
+        return;
+    }
+
     if (reg == 0) {
         return;
     }
@@ -665,6 +721,16 @@ static bool ia64_tr_fast_bundle_has_ldst(const IA64TcgFastBundle *fast)
                                 IA64_PERF_FAST_COUNT_LDST_STORE_SHIFT) != 0;
 }
 
+static bool ia64_tr_fast_bundle_uses_stacked_gr(const IA64TcgFastBundle *fast)
+{
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if (fast->slot[slot].uses_stacked_gr) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ia64_tr_emit_fast_bundle_guards(
     const IA64TcgFastBundle *fast, TCGLabel *fallback, TCGv_i64 tmp,
     TCGv_i64 ldst_address[IA64_SLOT_COUNT])
@@ -677,6 +743,12 @@ static void ia64_tr_emit_fast_bundle_guards(
                        offsetof(CPUIA64State, nat.gr_nat[0]));
         tcg_gen_andi_i64(tmp, tmp, fast->source_nat_mask);
         tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, fallback);
+    }
+    if (ia64_tr_fast_bundle_uses_stacked_gr(fast)) {
+        TCGv_i32 sor = tcg_temp_new_i32();
+
+        tcg_gen_ld_i32(sor, tcg_env, offsetof(CPUIA64State, rse.sor));
+        tcg_gen_brcondi_i32(TCG_COND_NE, sor, 0, fallback);
     }
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
         if (fast->slot[slot].op == IA64_TCG_FAST_OP_LDST_LOAD ||

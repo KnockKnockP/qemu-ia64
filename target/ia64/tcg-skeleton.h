@@ -124,6 +124,7 @@ typedef struct IA64TcgFastSlot {
     bool sign_extend;
     bool deposit_zero;
     bool addp4;
+    bool uses_stacked_gr;
     int64_t immediate;
     uint64_t source_nat_mask;
     uint64_t dest_mask;

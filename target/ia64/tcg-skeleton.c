@@ -9,7 +9,7 @@
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
-#define IA64_TCG_FAST_GR_LIMIT 32
+#define IA64_TCG_FAST_GR_LIMIT 64
 #define IA64_TCG_TARGET_PAGE_MASK (~((UINT64_C(1) << TARGET_PAGE_BITS) - 1))
 
 enum {
@@ -175,11 +175,19 @@ static bool ia64_tcg_fast_static_gr(uint32_t reg)
     return reg < IA64_TCG_FAST_GR_LIMIT;
 }
 
+static void ia64_tcg_fast_note_gr(IA64TcgFastSlot *slot, uint32_t reg)
+{
+    if (reg >= IA64_STATIC_GR_COUNT && reg < IA64_TCG_FAST_GR_LIMIT) {
+        slot->uses_stacked_gr = true;
+    }
+}
+
 static bool ia64_tcg_fast_add_source(IA64TcgFastSlot *slot, uint32_t reg)
 {
     if (!ia64_tcg_fast_static_gr(reg)) {
         return false;
     }
+    ia64_tcg_fast_note_gr(slot, reg);
     if (reg != 0) {
         slot->source_nat_mask |= 1ULL << reg;
     }
@@ -191,6 +199,7 @@ static bool ia64_tcg_fast_set_target(IA64TcgFastSlot *slot, uint32_t reg)
     if (!ia64_tcg_fast_static_gr(reg)) {
         return false;
     }
+    ia64_tcg_fast_note_gr(slot, reg);
     slot->target = reg;
     if (reg != 0) {
         slot->dest_mask = 1ULL << reg;
@@ -270,6 +279,7 @@ static bool ia64_tcg_fast_set_base_update(IA64TcgFastSlot *slot,
     if (!ia64_tcg_fast_static_gr(reg)) {
         return false;
     }
+    ia64_tcg_fast_note_gr(slot, reg);
     if (reg != 0) {
         slot->dest_mask |= 1ULL << reg;
     }
@@ -285,7 +295,7 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
         return false;
     }
     if (ldst->update_from_register ||
-        !ia64_tcg_fast_static_gr(ldst->base)) {
+        !ia64_tcg_fast_add_source(slot, ldst->base)) {
         return false;
     }
 
@@ -300,7 +310,7 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
         break;
     case IA64_LDST_IMM_STORE:
         if (!ia64_tcg_fast_ldst_store_class(ldst->memory_class) ||
-            !ia64_tcg_fast_static_gr(ldst->source)) {
+            !ia64_tcg_fast_add_source(slot, ldst->source)) {
             return false;
         }
         slot->op = IA64_TCG_FAST_OP_LDST_STORE;

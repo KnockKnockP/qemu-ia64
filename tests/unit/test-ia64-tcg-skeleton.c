@@ -517,6 +517,8 @@ static void test_fast_bundle_accepts_predicate_test(void)
 static void test_fast_bundle_accepts_static_predicates(void)
 {
     const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
+    const uint64_t add_r64_r64_r1_raw =
+        (8ULL << 37) | (1ULL << 20) | (64ULL << 13) | (64ULL << 6);
     const uint64_t add_r1_r2_r3_raw =
         (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
     IA64DecodedBundle bundle;
@@ -533,6 +535,13 @@ static void test_fast_bundle_accepts_static_predicates(void)
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
     bundle = make_bundle(0x00, add_r36_r36_r1_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_true(fast.slot[0].uses_stacked_gr);
+    g_assert_cmphex(fast.source_nat_mask, ==, (1ULL << 36) | (1ULL << 1));
+    g_assert_cmphex(fast.dest_mask, ==, 1ULL << 36);
+
+    bundle = make_bundle(0x00, add_r64_r64_r1_raw,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 }
@@ -679,6 +688,7 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
 {
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
     const uint64_t ld8_r32_r3_raw = make_ldst_load_raw(3, 32, 3);
+    const uint64_t ld8_r64_r3_raw = make_ldst_load_raw(3, 64, 3);
     const uint64_t add_r3_r3_r4_raw =
         (8ULL << 37) | (4ULL << 20) | (3ULL << 13) | (3ULL << 6);
     const uint64_t ld8_advanced_r2_r3_raw =
@@ -698,6 +708,13 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
     bundle = make_bundle(0x00, ld8_r32_r3_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_LDST_LOAD);
+    g_assert_true(fast.slot[0].uses_stacked_gr);
+    g_assert_cmphex(fast.dest_mask, ==, 1ULL << 32);
+
+    bundle = make_bundle(0x00, ld8_r64_r3_raw,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
 
@@ -881,6 +898,8 @@ static void test_fallback_reason_classifies_helper_sources(void)
     const uint64_t add_r1_r2_r3_raw =
         (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
     const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
+    const uint64_t add_r64_r64_r1_raw =
+        (8ULL << 37) | (1ULL << 20) | (64ULL << 13) | (64ULL << 6);
     const uint64_t add_r3_r3_r4_raw =
         (8ULL << 37) | (4ULL << 20) | (3ULL << 13) | (3ULL << 6);
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
@@ -903,6 +922,11 @@ static void test_fallback_reason_classifies_helper_sources(void)
                     ==, IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT);
 
     bundle = make_bundle(0x00, add_r36_r36_r1_raw,
+                         IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_RUNTIME_GUARD);
+
+    bundle = make_bundle(0x00, add_r64_r64_r1_raw,
                          IA64_SMOKE_NOP_RAW, IA64_SMOKE_NOP_RAW);
     g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
                     ==, IA64_TCG_FALLBACK_FAST_STATIC_GR);
