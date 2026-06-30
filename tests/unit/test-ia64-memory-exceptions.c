@@ -13,9 +13,11 @@
 #define IA64_PSR_IC_BIT   UINT64_C(0x0000000000002000)
 #define IA64_PSR_I_BIT    UINT64_C(0x0000000000004000)
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
+#define IA64_PSR_RT_BIT   UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_PSR_DELIVERY_MASK \
     (IA64_PSR_I_BIT | IA64_PSR_IC_BIT | IA64_PSR_RI_MASK | \
+     IA64_TB_PSR_DT_BIT | IA64_PSR_RT_BIT | IA64_TB_PSR_IT_BIT | \
      IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK)
 
 static uint64_t test_rr(uint32_t rid, uint8_t page_size, bool vhpt)
@@ -645,6 +647,34 @@ static void test_exception_reporting(void)
     g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_NONE);
 }
 
+static void test_interruption_delivery_clears_translation_bits(void)
+{
+    CPUIA64State env;
+    uint64_t psr = ia64_psr_with_ri(IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                                    IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK |
+                                    IA64_TB_PSR_DT_BIT |
+                                    IA64_TB_PSR_IT_BIT |
+                                    IA64_PSR_RT_BIT, 2);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = 0xe0000000049acc10ULL;
+    env.psr = psr;
+    env.cr[IA64_CR_IVA] = 0xe000000004400000ULL;
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env.ip,
+                           MMU_DATA_LOAD, "external interrupt");
+
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_EXTERNAL_INTERRUPT);
+    g_assert_cmphex(env.exception.vector, ==, 0x3000);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, psr);
+    g_assert_cmphex(env.ip, ==, 0xe000000004403000ULL);
+    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    g_assert_cmpint(ia64_tcg_mmu_index_for_psr(env.psr, true), ==,
+                    IA64_MMU_PHYSICAL);
+    g_assert_cmpint(ia64_tcg_mmu_index_for_psr(env.psr, false), ==,
+                    IA64_MMU_PHYSICAL);
+}
+
 static void test_tlb_miss_delivery_vectors_to_iva(void)
 {
     CPUIA64State env;
@@ -850,6 +880,8 @@ int main(int argc, char **argv)
     g_test_add_func("/ia64-exception/translation-fault-vectors",
                     test_translation_fault_vectors);
     g_test_add_func("/ia64-exception/reporting", test_exception_reporting);
+    g_test_add_func("/ia64-exception/delivery-clears-translation-bits",
+                    test_interruption_delivery_clears_translation_bits);
     g_test_add_func("/ia64-exception/tlb-miss-delivery",
                     test_tlb_miss_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/alternate-tlb-miss-delivery",

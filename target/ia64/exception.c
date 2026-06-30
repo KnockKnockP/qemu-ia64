@@ -9,6 +9,9 @@
 
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
+#define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
+#define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
+#define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
 
@@ -40,8 +43,8 @@ static bool ia64_exception_from_user(uint64_t psr)
 static uint64_t ia64_psr_clear_interruption_delivery_bits(uint64_t psr)
 {
     return psr & ~(IA64_PSR_I_BIT | IA64_PSR_IC_BIT |
-                   IA64_PSR_BN_BIT | IA64_PSR_RI_MASK |
-                   IA64_PSR_CPL_MASK);
+                   IA64_PSR_DT_BIT | IA64_PSR_RT_BIT | IA64_PSR_IT_BIT |
+                   IA64_PSR_BN_BIT | IA64_PSR_RI_MASK | IA64_PSR_CPL_MASK);
 }
 
 static uint64_t ia64_interruption_isr(uint64_t psr,
