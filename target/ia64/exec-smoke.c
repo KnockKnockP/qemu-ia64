@@ -1019,6 +1019,10 @@ static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)
     }
 
     switch (reg) {
+    case IA64_AR_ITC:
+        env->ar[reg] = value;
+        env->interrupt.timer_compare_latched = 0;
+        break;
     case IA64_AR_RSC:
         env->ar[reg] = value;
         env->rse.rsc = value;
@@ -1778,6 +1782,9 @@ bool ia64_timer_interrupt_due(CPUIA64State *env)
     }
 
     vector = ia64_timer_vector(env);
+    if (env->interrupt.timer_compare_latched) {
+        return false;
+    }
     if (ia64_interrupt_vector_active(env, vector) ||
         ia64_interrupt_vector_pending(env, vector)) {
         return false;
@@ -1805,6 +1812,9 @@ bool ia64_advance_itc_and_check_timer(CPUIA64State *env, uint64_t ticks)
     }
 
     vector = ia64_timer_vector(env);
+    if (env->interrupt.timer_compare_latched) {
+        return false;
+    }
     if (ia64_interrupt_vector_active(env, vector) ||
         ia64_interrupt_vector_pending(env, vector)) {
         return false;
@@ -1817,7 +1827,9 @@ bool ia64_advance_itc_and_check_timer(CPUIA64State *env, uint64_t ticks)
 void ia64_latch_timer_interrupt(CPUIA64State *env)
 {
     IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_LATCHED);
-    ia64_queue_external_interrupt(env, ia64_timer_vector(env));
+    if (ia64_queue_external_interrupt(env, ia64_timer_vector(env))) {
+        env->interrupt.timer_compare_latched = 1;
+    }
 }
 
 bool ia64_queue_external_interrupt(CPUIA64State *env, uint64_t vector)
@@ -1894,6 +1906,7 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
         env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
         break;
     case IA64_CR_ITM:
+        env->interrupt.timer_compare_latched = 0;
         if (!ia64_timer_compare_due(env)) {
             uint64_t vector = ia64_timer_vector(env);
 
@@ -1909,6 +1922,7 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
         env->cr[reg] = old;
         break;
     case IA64_CR_ITV:
+        env->interrupt.timer_compare_latched = 0;
         if (ia64_timer_vector_masked(env)) {
             ia64_clear_pending_external_interrupt(env,
                                                   value &

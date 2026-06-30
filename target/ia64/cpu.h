@@ -208,9 +208,12 @@ typedef struct IA64InterruptState {
      * Minimal local-SAPIC-facing state. Pending external interrupts are
      * reflected through CR.IRR*, accepted through CR.IVR, and completed through
      * CR.EOI; pending_interruption tracks the currently accepted vector.
+     * timer_compare_latched suppresses repeated ITM delivery until the guest
+     * programs the timer again.
      */
     uint64_t pending_interruption;
     uint64_t pending_vector;
+    uint8_t timer_compare_latched;
     uint8_t pending;
 } IA64InterruptState;
 

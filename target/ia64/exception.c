@@ -7,13 +7,27 @@
 #include "perf.h"
 #include "trace-target_ia64.h"
 
-#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
-#define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
-#define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
-#define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
-#define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
+#define IA64_DCR_PP_BIT  UINT64_C(0x0000000000000001)
+#define IA64_DCR_BE_BIT  UINT64_C(0x0000000000000002)
+#define IA64_PSR_BE_BIT  UINT64_C(0x0000000000000002)
+#define IA64_PSR_UP_BIT  UINT64_C(0x0000000000000004)
+#define IA64_PSR_MFL_BIT UINT64_C(0x0000000000000010)
+#define IA64_PSR_MFH_BIT UINT64_C(0x0000000000000020)
+#define IA64_PSR_IC_BIT  UINT64_C(0x0000000000002000)
+#define IA64_PSR_I_BIT   UINT64_C(0x0000000000004000)
+#define IA64_PSR_PK_BIT  UINT64_C(0x0000000000008000)
+#define IA64_PSR_DT_BIT  UINT64_C(0x0000000000020000)
+#define IA64_PSR_PP_BIT  UINT64_C(0x0000000000200000)
+#define IA64_PSR_RT_BIT  UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
-#define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
+#define IA64_PSR_MC_BIT  UINT64_C(0x0000000800000000)
+#define IA64_PSR_IT_BIT  UINT64_C(0x0000001000000000)
+#define IA64_PSR_BN_BIT  UINT64_C(0x0000100000000000)
+
+#define IA64_PSR_INTERRUPTION_PRESERVED_MASK \
+    (IA64_PSR_UP_BIT | IA64_PSR_MFL_BIT | IA64_PSR_MFH_BIT | \
+     IA64_PSR_PK_BIT | IA64_PSR_DT_BIT | IA64_PSR_RT_BIT | \
+     IA64_PSR_MC_BIT | IA64_PSR_IT_BIT)
 
 static bool ia64_exception_trace_enabled(void)
 {
@@ -40,11 +54,21 @@ static bool ia64_exception_from_user(uint64_t psr)
     return (psr & IA64_PSR_CPL_MASK) == IA64_PSR_CPL_MASK;
 }
 
-static uint64_t ia64_psr_clear_interruption_delivery_bits(uint64_t psr)
+static uint64_t ia64_psr_for_interruption_delivery(CPUIA64State *env)
 {
-    return psr & ~(IA64_PSR_I_BIT | IA64_PSR_IC_BIT |
-                   IA64_PSR_DT_BIT | IA64_PSR_RT_BIT | IA64_PSR_IT_BIT |
-                   IA64_PSR_BN_BIT | IA64_PSR_RI_MASK | IA64_PSR_CPL_MASK);
+    uint64_t psr = env->psr & IA64_PSR_INTERRUPTION_PRESERVED_MASK;
+
+    /*
+     * IVA-based interruption delivery preserves only a small set of PSR bits.
+     * DCR.be and DCR.pp supply the replacement values for PSR.be and PSR.pp.
+     */
+    if (env->cr[IA64_CR_DCR] & IA64_DCR_BE_BIT) {
+        psr |= IA64_PSR_BE_BIT;
+    }
+    if (env->cr[IA64_CR_DCR] & IA64_DCR_PP_BIT) {
+        psr |= IA64_PSR_PP_BIT;
+    }
+    return psr;
 }
 
 static uint64_t ia64_interruption_isr(uint64_t psr,
@@ -286,7 +310,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         env->cr[IA64_CR_IFA] = saved_ifa;
         env->cr[IA64_CR_ITIR] = saved_itir;
         env->cr[IA64_CR_IHA] = saved_iha;
-        env->psr = ia64_psr_clear_interruption_delivery_bits(env->psr);
+        env->psr = ia64_psr_for_interruption_delivery(env);
         env->ip = (env->cr[IA64_CR_IVA] & ~0x7fffULL) +
                   env->exception.vector;
         goto trace;
@@ -317,7 +341,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         env->cr[IA64_CR_IHA] = ia64_vhpt_hash_address(env, address);
     }
 
-    env->psr = ia64_psr_clear_interruption_delivery_bits(env->psr);
+    env->psr = ia64_psr_for_interruption_delivery(env);
     env->ip = (env->cr[IA64_CR_IVA] & ~0x7fffULL) + env->exception.vector;
     env->cr[IA64_CR_IIP] &= ~0xfULL;
 

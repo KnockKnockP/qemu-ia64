@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "exec/cputlb.h"
 #include "bundle.h"
@@ -20,7 +21,13 @@
 #include "trace-target_ia64.h"
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
-                                      uint64_t aux0, uint64_t aux1);
+                                      uint64_t value, uint64_t source_ip,
+                                      unsigned source_ri, uint64_t next_ip);
+static void ia64_progress_trace_break_slot(CPUIA64State *env,
+                                           const IA64DecodedBundle *decoded,
+                                           int slot,
+                                           const char *mnemonic,
+                                           uint64_t iim);
 static void ia64_progress_trace_bundle(CPUIA64State *env);
 
 void HELPER(perf_tb_exec)(void)
@@ -746,6 +753,8 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
 {
     char detail[64];
     uint64_t old_psr = env->psr;
+    uint64_t source_ip = env->ip;
+    unsigned source_ri = ia64_psr_ri(env->psr);
 
     snprintf(detail, sizeof(detail), "%s iim=0x%" PRIx64, mnemonic, iim);
     IA64_PERF_INC(IA64_PERF_OP_BREAK);
@@ -756,7 +765,8 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     ia64_trace_linux_syscall_break(env, mnemonic, iim, *next_ip);
     ia64_deliver_break_interruption(env, iim, next_ip, detail);
     ia64_count_psr_transition(env, old_psr, env->psr);
-    ia64_progress_trace_event(env, mnemonic, iim, *next_ip);
+    ia64_progress_trace_event(env, mnemonic, iim, source_ip, source_ri,
+                              *next_ip);
 }
 
 static void ia64_deliver_translation_fault(CPUIA64State *env,
@@ -1203,7 +1213,8 @@ static void ia64_progress_trace_bundle(CPUIA64State *env)
 }
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
-                                      uint64_t value, uint64_t next_ip)
+                                      uint64_t value, uint64_t source_ip,
+                                      unsigned source_ri, uint64_t next_ip)
 {
     static uint64_t event_count;
 
@@ -1219,10 +1230,152 @@ static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
     trace_ia64_progress_event(event, env->ip, value, next_ip, env->psr,
                               env->cfm);
     fprintf(stderr,
-            "[ia64-progress] event=%s ip=0x%016" PRIx64
+            "[ia64-progress] event=%s source=0x%016" PRIx64
+            " sri=%u"
+            " ip=0x%016" PRIx64
             " value=0x%016" PRIx64 " next=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64 "\n",
-            event, env->ip, value, next_ip, env->psr, env->cfm);
+            event, source_ip, source_ri, env->ip, value, next_ip, env->psr,
+            env->cfm);
+}
+
+static void ia64_progress_trace_break_slot(CPUIA64State *env,
+                                           const IA64DecodedBundle *decoded,
+                                           int slot,
+                                           const char *mnemonic,
+                                           uint64_t iim)
+{
+    static uint64_t break_slot_count;
+    char bundle_text[192];
+    char slot_text[256];
+    IA64TranslateResult inst_result = {0};
+    uint8_t live_bytes[IA64_BUNDLE_SIZE];
+    bool have_live_bytes = false;
+    MemTxResult memtx = MEMTX_ERROR;
+
+    if (!ia64_progress_trace_enabled()) {
+        return;
+    }
+
+    break_slot_count++;
+    if (break_slot_count > 16 && (break_slot_count & UINT64_C(0xffff)) != 0) {
+        return;
+    }
+
+    if (ia64_translate_address(
+            env, env->ip, MMU_INST_FETCH,
+            ia64_tcg_mmu_index_for_psr(env->psr, true), true,
+            &inst_result)) {
+        memtx = address_space_read(env_cpu(env)->as, inst_result.paddr,
+                                   MEMTXATTRS_UNSPECIFIED, live_bytes,
+                                   sizeof(live_bytes));
+        have_live_bytes = memtx == MEMTX_OK;
+    }
+
+    ia64_format_decoded_bundle(decoded, bundle_text, sizeof(bundle_text));
+    ia64_format_slot_class(decoded, slot, slot_text, sizeof(slot_text));
+    fprintf(stderr,
+            "[ia64-break-slot] event=%s source=0x%016" PRIx64
+            " sri=%u value=0x%016" PRIx64
+            " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
+            " %s bundle %s\n",
+            mnemonic, env->ip, ia64_psr_ri(env->psr), iim, env->psr,
+            env->cfm, slot_text, bundle_text);
+    if (inst_result.status == IA64_TRANSLATE_OK) {
+        fprintf(stderr,
+                "[ia64-break-live] source=0x%016" PRIx64
+                " mmu=%d paddr=0x%016" HWADDR_PRIx " memtx=%d bytes=",
+                env->ip, inst_result.mmu_idx, inst_result.paddr, memtx);
+        if (have_live_bytes) {
+            for (unsigned i = 0; i < sizeof(live_bytes); i++) {
+                fprintf(stderr, "%02x", live_bytes[i]);
+            }
+        } else {
+            fprintf(stderr, "unavailable");
+        }
+        fputc('\n', stderr);
+    } else {
+        char detail[160];
+
+        ia64_format_translate_result(&inst_result, detail, sizeof(detail));
+        fprintf(stderr,
+                "[ia64-break-live] source=0x%016" PRIx64
+                " translate-failed %s\n",
+                env->ip, detail);
+    }
+}
+
+static bool ia64_bundle_trace_matches(uint64_t ip)
+{
+    static int initialized;
+    static bool enabled;
+    static uint64_t filter_start;
+    static uint64_t filter_end;
+
+    if (!initialized) {
+        const char *addr = g_getenv("VIBTANIUM_BUNDLE_TRACE_IP");
+        const char *size = g_getenv("VIBTANIUM_BUNDLE_TRACE_SIZE");
+
+        if (addr != NULL && *addr != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed_size = IA64_BUNDLE_SIZE;
+
+            filter_start = g_ascii_strtoull(addr, &endptr, 0);
+            enabled = endptr != addr;
+            if (size != NULL && *size != '\0') {
+                endptr = NULL;
+                parsed_size = g_ascii_strtoull(size, &endptr, 0);
+                if (endptr == size || parsed_size == 0) {
+                    parsed_size = IA64_BUNDLE_SIZE;
+                }
+            }
+            filter_end = filter_start + parsed_size - 1;
+        }
+        initialized = 1;
+    }
+
+    return enabled && ip >= filter_start && ip <= filter_end;
+}
+
+static uint64_t ia64_bundle_trace_limit(void)
+{
+    static int initialized;
+    static uint64_t limit;
+
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_BUNDLE_TRACE_LIMIT");
+
+        limit = value != NULL && *value != '\0' ?
+                g_ascii_strtoull(value, NULL, 0) : UINT64_MAX;
+        initialized = 1;
+    }
+    return limit;
+}
+
+static void ia64_bundle_trace_decoded(CPUIA64State *env,
+                                      const IA64DecodedBundle *decoded,
+                                      unsigned start_slot)
+{
+    static uint64_t count;
+    char bundle_text[192];
+
+    if (!ia64_bundle_trace_matches(env->ip)) {
+        return;
+    }
+
+    if (count >= ia64_bundle_trace_limit()) {
+        return;
+    }
+    count++;
+
+    ia64_format_decoded_bundle(decoded, bundle_text, sizeof(bundle_text));
+    fprintf(stderr,
+            "[ia64-bundle] ip=0x%016" PRIx64 " start-ri=%u psr=0x%016" PRIx64
+            " tmpl=0x%02x slot0=0x%011" PRIx64
+            " slot1=0x%011" PRIx64 " slot2=0x%011" PRIx64
+            " %s\n",
+            env->ip, start_slot, env->psr, decoded->tmpl, decoded->slot[0],
+            decoded->slot[1], decoded->slot[2], bundle_text);
 }
 
 static bool ia64_state_trace_matches(uint64_t ip)
@@ -1315,6 +1468,9 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
             " r46=0x%016" PRIx64 " r47=0x%016" PRIx64
             " r48=0x%016" PRIx64 " r49=0x%016" PRIx64
             " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64
+            " itc=0x%016" PRIx64 " itm=0x%016" PRIx64
+            " itv=0x%016" PRIx64 " tpr=0x%016" PRIx64
+            " ivr=0x%016" PRIx64
             " ifa=0x%016" PRIx64 " itir=0x%016" PRIx64
             " iha=0x%016" PRIx64 " ipsr=0x%016" PRIx64
             " iip=0x%016" PRIx64 " ifs=0x%016" PRIx64
@@ -1339,6 +1495,9 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
             ia64_read_gr(env, 46), ia64_read_gr(env, 47),
             ia64_read_gr(env, 48), ia64_read_gr(env, 49),
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+            env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM],
+            env->cr[IA64_CR_ITV], env->cr[IA64_CR_TPR],
+            env->cr[IA64_CR_IVR],
             env->cr[IA64_CR_IFA], env->cr[IA64_CR_ITIR],
             env->cr[IA64_CR_IHA], env->cr[IA64_CR_IPSR],
             env->cr[IA64_CR_IIP], env->cr[IA64_CR_IFS],
@@ -1348,11 +1507,24 @@ static void ia64_state_trace_bundle(CPUIA64State *env)
 static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
                                unsigned next_ri)
 {
+    CPUState *cpu = env_cpu(env);
+
     env->psr = ia64_psr_with_ri(env->psr, next_ri);
     env->ip = next_ip;
     if (ia64_advance_itc_and_check_timer(env, 1)) {
         ia64_latch_timer_interrupt(env);
-        cpu_set_interrupt(env_cpu(env), CPU_INTERRUPT_HARD);
+        cpu_set_interrupt(cpu, CPU_INTERRUPT_HARD);
+    }
+
+    /*
+     * The target timer is advanced by retired bundles, so a helper can make an
+     * external interrupt deliverable while generated code still has later
+     * bundle constants queued in the same TB.  Leave the TB at the precise
+     * post-bundle IP and let the cpu_exec_interrupt hook enter the IVT.
+     */
+    if (ia64_external_interrupt_enabled(env)) {
+        IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+        cpu_loop_exit(cpu);
     }
 }
 
@@ -6788,6 +6960,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
     }
 
     ia64_progress_trace_bundle(env);
+    ia64_bundle_trace_decoded(env, &decoded, start_slot);
     ia64_state_trace_bundle(env);
 
     if (vibtanium_efi_dispatch_gate(env, env->ip)) {
@@ -6889,6 +7062,8 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         if (ia64_slot_is_i_break(type, raw)) {
             uint64_t iim = ia64_i_break_immediate(raw);
 
+            ia64_progress_trace_break_slot(env, &decoded, slot, "break.i",
+                                           iim);
             ia64_deliver_break(env, "break.i", iim, &next_ip);
             break;
         }
@@ -6990,12 +7165,16 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         if (ia64_slot_is_m_break(type, raw)) {
             uint64_t iim = ia64_m_break_immediate(raw);
 
+            ia64_progress_trace_break_slot(env, &decoded, slot, "break.m",
+                                           iim);
             ia64_deliver_break(env, "break.m", iim, &next_ip);
             break;
         }
         if (ia64_slot_is_b_break(type, raw)) {
             uint64_t iim = ia64_b_break_immediate(raw);
 
+            ia64_progress_trace_break_slot(env, &decoded, slot, "break.b",
+                                           iim);
             ia64_deliver_break(env, "break.b", iim, &next_ip);
             break;
         }

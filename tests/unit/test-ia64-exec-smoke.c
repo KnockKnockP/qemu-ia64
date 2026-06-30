@@ -5,14 +5,40 @@
  */
 
 #include "qemu/osdep.h"
+#include "target/ia64/exception.h"
 #include "target/ia64/exec-smoke.h"
 #include "target/ia64/mem.h"
 #include "exec/page-protection.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
-#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
-#define IA64_PSR_I_BIT  UINT64_C(0x0000000000004000)
-#define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
+#define IA64_DCR_PP_BIT  UINT64_C(0x0000000000000001)
+#define IA64_DCR_BE_BIT  UINT64_C(0x0000000000000002)
+#define IA64_PSR_BE_BIT  UINT64_C(0x0000000000000002)
+#define IA64_PSR_UP_BIT  UINT64_C(0x0000000000000004)
+#define IA64_PSR_AC_BIT  UINT64_C(0x0000000000000008)
+#define IA64_PSR_MFL_BIT UINT64_C(0x0000000000000010)
+#define IA64_PSR_MFH_BIT UINT64_C(0x0000000000000020)
+#define IA64_PSR_IC_BIT  UINT64_C(0x0000000000002000)
+#define IA64_PSR_I_BIT   UINT64_C(0x0000000000004000)
+#define IA64_PSR_PK_BIT  UINT64_C(0x0000000000008000)
+#define IA64_PSR_DT_BIT  UINT64_C(0x0000000000020000)
+#define IA64_PSR_DFL_BIT UINT64_C(0x0000000000040000)
+#define IA64_PSR_DFH_BIT UINT64_C(0x0000000000080000)
+#define IA64_PSR_SP_BIT  UINT64_C(0x0000000000100000)
+#define IA64_PSR_PP_BIT  UINT64_C(0x0000000000200000)
+#define IA64_PSR_DI_BIT  UINT64_C(0x0000000000400000)
+#define IA64_PSR_SI_BIT  UINT64_C(0x0000000000800000)
+#define IA64_PSR_DB_BIT  UINT64_C(0x0000000001000000)
+#define IA64_PSR_LP_BIT  UINT64_C(0x0000000002000000)
+#define IA64_PSR_TB_BIT  UINT64_C(0x0000000004000000)
+#define IA64_PSR_RT_BIT  UINT64_C(0x0000000008000000)
+#define IA64_PSR_MC_BIT  UINT64_C(0x0000000800000000)
+#define IA64_PSR_IT_BIT  UINT64_C(0x0000001000000000)
+#define IA64_PSR_ID_BIT  UINT64_C(0x0000002000000000)
+#define IA64_PSR_DA_BIT  UINT64_C(0x0000004000000000)
+#define IA64_PSR_DD_BIT  UINT64_C(0x0000008000000000)
+#define IA64_PSR_SS_BIT  UINT64_C(0x0000010000000000)
+#define IA64_PSR_ED_BIT  UINT64_C(0x0000080000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_PFS_CFM_MASK UINT64_C(0x0000003fffffffff)
@@ -756,6 +782,41 @@ static void test_i_unit_break_delivers_interruption_state(void)
                                IA64_PSR_RI_MASK), ==, 0);
 }
 
+static void test_interruption_delivery_preserves_translation_state(void)
+{
+    const uint64_t bundle_ip = 0x200000;
+    const uint64_t iva = 0x100000;
+    const uint64_t preserved_bits =
+        IA64_PSR_UP_BIT | IA64_PSR_MFL_BIT | IA64_PSR_MFH_BIT |
+        IA64_PSR_PK_BIT | IA64_PSR_DT_BIT | IA64_PSR_RT_BIT |
+        IA64_PSR_MC_BIT | IA64_PSR_IT_BIT;
+    const uint64_t cleared_bits =
+        IA64_PSR_AC_BIT | IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+        IA64_PSR_DFL_BIT | IA64_PSR_DFH_BIT | IA64_PSR_SP_BIT |
+        IA64_PSR_DI_BIT | IA64_PSR_SI_BIT | IA64_PSR_DB_BIT |
+        IA64_PSR_LP_BIT | IA64_PSR_TB_BIT | IA64_PSR_ID_BIT |
+        IA64_PSR_DA_BIT | IA64_PSR_DD_BIT | IA64_PSR_SS_BIT |
+        IA64_PSR_ED_BIT | IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK;
+    const uint64_t psr_before = preserved_bits | cleared_bits;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = bundle_ip;
+    env.psr = ia64_psr_with_ri(psr_before, 1);
+    env.cr[IA64_CR_DCR] = IA64_DCR_BE_BIT | IA64_DCR_PP_BIT;
+    env.cr[IA64_CR_IVA] = iva;
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env.ip,
+                           MMU_DATA_LOAD, "external interrupt");
+
+    g_assert_cmphex(env.ip, ==, iva + 0x3000);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==,
+                    ia64_psr_with_ri(psr_before, 1));
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, bundle_ip);
+    g_assert_cmphex(env.psr, ==,
+                    preserved_bits | IA64_PSR_BE_BIT | IA64_PSR_PP_BIT);
+}
+
 static void test_i_unit_mov_from_predicate(void)
 {
     const uint64_t mov_pr_r62_raw = 0x00198000f80ULL;
@@ -1441,6 +1502,36 @@ static void test_interrupt_control_registers(void)
     g_assert_false(ia64_advance_itc_and_check_timer(&env, 1));
     g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 1001);
     g_assert_false(ia64_external_interrupt_pending(&env));
+}
+
+static void test_timer_compare_rearms_only_on_itm_programming(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
+    env.cr[IA64_CR_ITV] = 0xef;
+    env.cr[IA64_CR_ITM] = 10;
+    env.ar[IA64_AR_ITC] = 10;
+
+    g_assert_true(ia64_timer_interrupt_due(&env));
+    ia64_latch_timer_interrupt(&env);
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
+    ia64_write_control_register(&env, IA64_CR_EOI, 0);
+
+    g_assert_false(ia64_timer_interrupt_due(&env));
+    g_assert_false(ia64_advance_itc_and_check_timer(&env, 1));
+    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 11);
+    g_assert_false(ia64_external_interrupt_pending(&env));
+
+    ia64_write_control_register(&env, IA64_CR_ITM, 13);
+    g_assert_false(ia64_advance_itc_and_check_timer(&env, 1));
+    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 12);
+    g_assert_true(ia64_advance_itc_and_check_timer(&env, 1));
+    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 13);
+    ia64_latch_timer_interrupt(&env);
+    g_assert_true(ia64_external_interrupt_pending(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
 }
 
 static void test_interrupt_unmask_exposes_pending_external_interrupt(void)
@@ -3140,6 +3231,8 @@ int main(int argc, char **argv)
                     test_i_unit_mov_ip_and_nop);
     g_test_add_func("/ia64-exec-smoke/i-unit-break-delivers-interruption-state",
                     test_i_unit_break_delivers_interruption_state);
+    g_test_add_func("/ia64-exec-smoke/interruption-delivery-preserves-translation-state",
+                    test_interruption_delivery_preserves_translation_state);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-from-predicate",
                     test_i_unit_mov_from_predicate);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask",
@@ -3158,6 +3251,8 @@ int main(int argc, char **argv)
                     test_translation_access_dirty_bits);
     g_test_add_func("/ia64-exec-smoke/interrupt-control-registers",
                     test_interrupt_control_registers);
+    g_test_add_func("/ia64-exec-smoke/timer-compare-rearms-on-itm",
+                    test_timer_compare_rearms_only_on_itm_programming);
     g_test_add_func("/ia64-exec-smoke/interrupt-unmask-pending",
                     test_interrupt_unmask_exposes_pending_external_interrupt);
     g_test_add_func("/ia64-exec-smoke/external-interrupt-delivery-masks",
