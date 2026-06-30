@@ -607,6 +607,23 @@ bool vibtanium_efi_image_from_file(const char *path,
                                            length, load_base, image, errp);
 }
 
+bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value)
+{
+    uint32_t low = raw;
+    uint64_t zero_extended = low;
+    uint64_t sign_extended = (low & UINT32_C(0x80000000))
+        ? (UINT64_MAX << 32) | low
+        : zero_extended;
+
+    if (raw != zero_extended && raw != sign_extended) {
+        return false;
+    }
+    if (value) {
+        *value = low;
+    }
+    return true;
+}
+
 void vibtanium_efi_image_destroy(VibtaniumEfiImage *image)
 {
     if (!image) {

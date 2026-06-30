@@ -5,7 +5,7 @@ disable ia64_bundle_decode(uint64_t ip, const char *bundle) "ip=0x%016" PRIx64 "
 disable ia64_tcg_tb_boundary(uint64_t ip, const char *reason) "ip=0x%016" PRIx64 " reason=%s"
 
 # helper.c
-disable ia64_efi_service(uint64_t ip, const char *group, uint32_t index, const char *status, uint64_t r32, uint64_t r33, uint64_t r34, uint64_t r35) "ip=0x%016" PRIx64 " service=%s[%" PRIu32 "] status=%s r32=0x%016" PRIx64 " r33=0x%016" PRIx64 " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
+disable ia64_efi_service(uint64_t ip, const char *group, uint32_t index, const char *status, uint64_t r32, uint64_t r33, uint64_t r34, uint64_t r35, uint64_t r36) "ip=0x%016" PRIx64 " service=%s[%" PRIu32 "] status=%s r32=0x%016" PRIx64 " r33=0x%016" PRIx64 " r34=0x%016" PRIx64 " r35=0x%016" PRIx64 " r36=0x%016" PRIx64
 disable ia64_firmware_call(uint64_t ip, const char *source, const char *function, const char *status, uint64_t function_id, uint64_t arg0, uint64_t arg1, uint64_t ret0, uint64_t ret1, uint64_t ret2) "ip=0x%016" PRIx64 " source=%s function=%s id=0x%016" PRIx64 " status=%s arg0=0x%016" PRIx64 " arg1=0x%016" PRIx64 " ret0=0x%016" PRIx64 " ret1=0x%016" PRIx64 " ret2=0x%016" PRIx64
 disable ia64_efi_file_open_request(uint64_t ip, uint64_t this_ptr, uint64_t out, const char *name, uint64_t mode, const char *parent, const char *path) "ip=0x%016" PRIx64 " this=0x%016" PRIx64 " out=0x%016" PRIx64 " name='%s' mode=0x%" PRIx64 " parent='%s' path='%s'"
 disable ia64_efi_file_open_result(uint64_t ip, const char *path, const char *status, uint64_t handle, uint64_t size, const char *source) "ip=0x%016" PRIx64 " path='%s' status=%s handle=0x%016" PRIx64 " size=0x%" PRIx64 " source=%s"

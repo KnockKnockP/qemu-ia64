@@ -1543,7 +1543,8 @@ static void efi_trace_service(CPUIA64State *env, unsigned service_index,
     group = efi_service_group_name(service_index, &group_index);
     trace_ia64_efi_service(env->ip, group, group_index, status,
                            ia64_read_gr(env, 32), ia64_read_gr(env, 33),
-                           ia64_read_gr(env, 34), ia64_read_gr(env, 35));
+                           ia64_read_gr(env, 34), ia64_read_gr(env, 35),
+                           ia64_read_gr(env, 36));
     if (!efi_trace_enabled()) {
         return;
     }
@@ -1551,10 +1552,11 @@ static void efi_trace_service(CPUIA64State *env, unsigned service_index,
     fprintf(stderr,
             "[efi] ip=0x%016" PRIx64 " service=%s[%u] status=%s "
             "r32=0x%016" PRIx64 " r33=0x%016" PRIx64
-            " r34=0x%016" PRIx64 " r35=0x%016" PRIx64 "\n",
+            " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
+            " r36=0x%016" PRIx64 "\n",
             env->ip, group, group_index, status, ia64_read_gr(env, 32),
             ia64_read_gr(env, 33), ia64_read_gr(env, 34),
-            ia64_read_gr(env, 35));
+            ia64_read_gr(env, 35), ia64_read_gr(env, 36));
 }
 
 static IA64FirmwareResult firmware_success(uint64_t ret0, uint64_t ret1,
@@ -3710,10 +3712,12 @@ static EfiGuestEvent *efi_find_event(uint64_t handle)
 
 static uint64_t efi_create_event(CPUIA64State *env)
 {
-    uint64_t type = ia64_read_gr(env, 32);
+    uint64_t raw_type = ia64_read_gr(env, 32);
     uint64_t event_out = ia64_read_gr(env, 36);
+    uint32_t type;
 
-    if (type > UINT32_MAX || event_out == 0) {
+    if (!vibtanium_efi_decode_uint32_arg(raw_type, &type) ||
+        event_out == 0) {
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 

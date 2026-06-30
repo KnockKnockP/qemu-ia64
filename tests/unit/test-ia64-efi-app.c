@@ -556,6 +556,24 @@ static void test_loads_fixed_ia64_pe_at_preferred_base(void)
     vibtanium_efi_image_destroy(&image);
 }
 
+static void test_decodes_sign_extended_uint32_args(void)
+{
+    uint32_t value = 0;
+
+    g_assert_true(vibtanium_efi_decode_uint32_arg(0, &value));
+    g_assert_cmphex(value, ==, 0);
+    g_assert_true(vibtanium_efi_decode_uint32_arg(UINT64_C(0x80000000),
+                                                 &value));
+    g_assert_cmphex(value, ==, 0x80000000);
+    g_assert_true(vibtanium_efi_decode_uint32_arg(UINT64_C(0xffffffff80000000),
+                                                 &value));
+    g_assert_cmphex(value, ==, 0x80000000);
+    g_assert_true(vibtanium_efi_decode_uint32_arg(UINT64_MAX, &value));
+    g_assert_cmphex(value, ==, 0xffffffff);
+    g_assert_false(vibtanium_efi_decode_uint32_arg(UINT64_C(0x100000000),
+                                                  &value));
+}
+
 static void test_unimplemented_service_log(void)
 {
     VibtaniumEfiServiceCall call;
@@ -607,6 +625,8 @@ int main(int argc, char **argv)
                     test_relocates_ia64_entry_descriptor);
     g_test_add_func("/ia64-efi-app/load-fixed-at-preferred-base",
                     test_loads_fixed_ia64_pe_at_preferred_base);
+    g_test_add_func("/ia64-efi-app/decode-sign-extended-uint32-args",
+                    test_decodes_sign_extended_uint32_args);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",
                     test_unimplemented_service_log);
     g_test_add_func("/ia64-efi-app/frontier-log-format",
