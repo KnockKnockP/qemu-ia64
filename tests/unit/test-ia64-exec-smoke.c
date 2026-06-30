@@ -772,21 +772,63 @@ static void test_i_unit_mov_from_predicate(void)
 
 static void test_i_unit_mov_to_predicate_mask(void)
 {
-    const uint64_t mov_pr_r37_mask_raw = 0x016ff04bfc0ULL;
+    const uint64_t mov_pr_r29_all_mask_raw = 0x016ff03bfc0ULL;
     CPUIA64State env;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.pr = (1ULL << 15) | (1ULL << 1) | 1;
-    ia64_write_gr(&env, 37, 1ULL << 8);
+    ia64_write_gr(&env, 29, (1ULL << 8) | (1ULL << 63));
 
     g_assert_true(ia64_slot_is_i_mov_to_predicate(IA64_SLOT_TYPE_I,
-                                                  mov_pr_r37_mask_raw));
-    g_assert_true(ia64_exec_i_mov_to_predicate(&env, mov_pr_r37_mask_raw));
+                                                  mov_pr_r29_all_mask_raw));
+    g_assert_true(ia64_exec_i_mov_to_predicate(&env,
+                                               mov_pr_r29_all_mask_raw));
     g_assert_cmphex(env.pr & 1, ==, 1);
     g_assert_cmphex(env.pr & (1ULL << 1), ==, 0);
     g_assert_cmphex(env.pr & (1ULL << 8), ==, 1ULL << 8);
+    g_assert_cmphex(env.pr & (1ULL << 15), ==, 0);
+    g_assert_cmphex(env.pr & (1ULL << 63), ==, 1ULL << 63);
+}
+
+static void test_i_unit_mov_to_predicate_mask_fsys_clock(void)
+{
+    const uint64_t mov_pr_r30_c000_raw = 0x006c003c000ULL;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.pr = (1ULL << 16) | (1ULL << 14) | (1ULL << 13) | 1;
+    ia64_write_gr(&env, 30, 1ULL << 15);
+
+    g_assert_true(ia64_slot_is_i_mov_to_predicate(IA64_SLOT_TYPE_I,
+                                                  mov_pr_r30_c000_raw));
+    g_assert_true(ia64_exec_i_mov_to_predicate(&env,
+                                               mov_pr_r30_c000_raw));
+    g_assert_cmphex(env.pr & 1, ==, 1);
+    g_assert_cmphex(env.pr & (1ULL << 13), ==, 1ULL << 13);
+    g_assert_cmphex(env.pr & (1ULL << 14), ==, 0);
+    g_assert_cmphex(env.pr & (1ULL << 15), ==, 1ULL << 15);
+    g_assert_cmphex(env.pr & (1ULL << 16), ==, 1ULL << 16);
+}
+
+static void test_i_unit_mov_to_predicate_mask_high_restore(void)
+{
+    const uint64_t mov_pr_r29_high_mask_raw = 0x0160003a000ULL;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.pr = (1ULL << 16) | (1ULL << 15) | (1ULL << 1) | 1;
+    ia64_write_gr(&env, 29, (1ULL << 17) | (1ULL << 63));
+
+    g_assert_true(ia64_slot_is_i_mov_to_predicate(IA64_SLOT_TYPE_I,
+                                                  mov_pr_r29_high_mask_raw));
+    g_assert_true(ia64_exec_i_mov_to_predicate(&env,
+                                               mov_pr_r29_high_mask_raw));
+    g_assert_cmphex(env.pr & 1, ==, 1);
+    g_assert_cmphex(env.pr & (1ULL << 1), ==, 1ULL << 1);
     g_assert_cmphex(env.pr & (1ULL << 15), ==, 1ULL << 15);
     g_assert_cmphex(env.pr & (1ULL << 16), ==, 0);
+    g_assert_cmphex(env.pr & (1ULL << 17), ==, 1ULL << 17);
+    g_assert_cmphex(env.pr & (1ULL << 63), ==, 1ULL << 63);
 }
 
 static void test_i_unit_mov_to_branch(void)
@@ -3031,6 +3073,10 @@ int main(int argc, char **argv)
                     test_i_unit_mov_from_predicate);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask",
                     test_i_unit_mov_to_predicate_mask);
+    g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask-fsys-clock",
+                    test_i_unit_mov_to_predicate_mask_fsys_clock);
+    g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask-high-restore",
+                    test_i_unit_mov_to_predicate_mask_high_restore);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-branch",
                     test_i_unit_mov_to_branch);
     g_test_add_func("/ia64-exec-smoke/application-register-moves",

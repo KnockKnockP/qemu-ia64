@@ -1126,10 +1126,10 @@ bool ia64_exec_i_mov_to_predicate(CPUIA64State *env, uint64_t raw)
 
     r2 = (raw >> 13) & 0x7f;
     value = ia64_read_gr(env, r2);
-    encoded_mask = (((raw >> 36) & 0x1) << 15) |
-                   (((raw >> 25) & 0xff) << 7) |
-                   ((raw >> 6) & 0x7f);
-    write_mask = (uint64_t)ia64_sign_extend(encoded_mask << 1, 17);
+    encoded_mask = (((raw >> 36) & 0x1) << 16) |
+                   (((raw >> 24) & 0xff) << 8) |
+                   (((raw >> 6) & 0x7f) << 1);
+    write_mask = (uint64_t)ia64_sign_extend(encoded_mask, 17);
     if (ia64_ar_trace_enabled()) {
         fprintf(stderr,
                 "[ia64-pr] ip=0x%016" PRIx64
