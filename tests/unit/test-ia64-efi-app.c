@@ -574,6 +574,16 @@ static void test_decodes_sign_extended_uint32_args(void)
                                                   &value));
 }
 
+static void test_timer_deadline_wraps(void)
+{
+    g_assert_true(vibtanium_efi_timer_due(100, 100));
+    g_assert_true(vibtanium_efi_timer_due(101, 100));
+    g_assert_false(vibtanium_efi_timer_due(99, 100));
+
+    g_assert_true(vibtanium_efi_timer_due(0, UINT64_MAX));
+    g_assert_false(vibtanium_efi_timer_due(UINT64_MAX, 0));
+}
+
 static void test_unimplemented_service_log(void)
 {
     VibtaniumEfiServiceCall call;
@@ -627,6 +637,8 @@ int main(int argc, char **argv)
                     test_loads_fixed_ia64_pe_at_preferred_base);
     g_test_add_func("/ia64-efi-app/decode-sign-extended-uint32-args",
                     test_decodes_sign_extended_uint32_args);
+    g_test_add_func("/ia64-efi-app/timer-deadline-wraps",
+                    test_timer_deadline_wraps);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",
                     test_unimplemented_service_log);
     g_test_add_func("/ia64-efi-app/frontier-log-format",

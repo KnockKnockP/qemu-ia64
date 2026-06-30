@@ -624,6 +624,11 @@ bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value)
     return true;
 }
 
+bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline)
+{
+    return (int64_t)(now - deadline) >= 0;
+}
+
 void vibtanium_efi_image_destroy(VibtaniumEfiImage *image)
 {
     if (!image) {

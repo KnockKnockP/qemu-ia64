@@ -912,6 +912,9 @@ enum {
 #define EFI_MEMORY_RUNTIME UINT64_C(0x8000000000000000)
 #define EFI_UNSPECIFIED_TIMEZONE 0x07ff
 #define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
+#define EFI_TIMER_CANCEL   0
+#define EFI_TIMER_PERIODIC 1
+#define EFI_TIMER_RELATIVE 2
 
 typedef struct EfiInstalledProtocol {
     bool in_use;
@@ -935,7 +938,10 @@ typedef struct EfiGuestEvent {
     uint64_t handle;
     uint32_t type;
     bool signaled;
-    bool timer;
+    bool timer_active;
+    bool timer_periodic;
+    uint64_t timer_period;
+    uint64_t timer_due;
 } EfiGuestEvent;
 
 typedef struct EfiPageAllocation {
@@ -3696,7 +3702,7 @@ static EfiGuestEvent *efi_find_event(uint64_t handle)
             .handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT,
             .type = 0,
             .signaled = efi_conin_enter_pending,
-            .timer = false,
+            .timer_active = false,
         };
         return &conin_event;
     }
@@ -3744,18 +3750,63 @@ static uint64_t efi_set_timer(CPUIA64State *env)
 {
     uint64_t handle = ia64_read_gr(env, 32);
     uint64_t timer_type = ia64_read_gr(env, 33);
+    uint64_t trigger_time = ia64_read_gr(env, 34);
     EfiGuestEvent *event = efi_find_event(handle);
 
     if (!event || handle == VIBTANIUM_EFI_CON_IN_WAIT_EVENT) {
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 
-    event->timer = timer_type != 0;
-    event->signaled = timer_type != 0;
-    return VIBTANIUM_EFI_SUCCESS;
+    switch (timer_type) {
+    case EFI_TIMER_CANCEL:
+        event->timer_active = false;
+        event->timer_periodic = false;
+        event->timer_period = 0;
+        event->timer_due = 0;
+        event->signaled = false;
+        return VIBTANIUM_EFI_SUCCESS;
+    case EFI_TIMER_PERIODIC:
+    case EFI_TIMER_RELATIVE:
+        event->timer_active = true;
+        event->timer_periodic = timer_type == EFI_TIMER_PERIODIC;
+        event->timer_period = trigger_time;
+        event->timer_due = env->ar[IA64_AR_ITC] + trigger_time;
+        event->signaled = trigger_time == 0;
+        return VIBTANIUM_EFI_SUCCESS;
+    default:
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
 }
 
-static bool efi_event_is_ready(EfiGuestEvent *event)
+static bool efi_event_timer_due(CPUIA64State *env, EfiGuestEvent *event)
+{
+    return event->timer_active &&
+           vibtanium_efi_timer_due(env->ar[IA64_AR_ITC], event->timer_due);
+}
+
+static void efi_event_consume(CPUIA64State *env, EfiGuestEvent *event)
+{
+    if (!event || event->handle == VIBTANIUM_EFI_CON_IN_WAIT_EVENT) {
+        return;
+    }
+
+    if (efi_event_timer_due(env, event)) {
+        if (event->timer_periodic && event->timer_period != 0) {
+            do {
+                event->timer_due += event->timer_period;
+            } while (vibtanium_efi_timer_due(env->ar[IA64_AR_ITC],
+                                             event->timer_due));
+        } else {
+            event->timer_active = false;
+            event->timer_periodic = false;
+            event->timer_period = 0;
+            event->timer_due = 0;
+        }
+    }
+    event->signaled = false;
+}
+
+static bool efi_event_is_ready(CPUIA64State *env, EfiGuestEvent *event)
 {
     if (!event) {
         return false;
@@ -3763,21 +3814,70 @@ static bool efi_event_is_ready(EfiGuestEvent *event)
     if (event->handle == VIBTANIUM_EFI_CON_IN_WAIT_EVENT) {
         return efi_conin_enter_pending;
     }
-    return event->signaled || event->timer;
+    if (efi_event_timer_due(env, event)) {
+        event->signaled = true;
+    }
+    return event->signaled;
 }
 
-static uint64_t efi_wait_for_event(CPUIA64State *env)
+static bool efi_timer_before(uint64_t now, uint64_t left, uint64_t right)
 {
-    uint64_t count = ia64_read_gr(env, 32);
-    uint64_t events = ia64_read_gr(env, 33);
-    uint64_t index_out = ia64_read_gr(env, 34);
-    int first_valid = -1;
+    return left - now < right - now;
+}
 
-    if (count == 0 || count > EFI_MAX_EVENTS || events == 0 ||
-        index_out == 0) {
-        return VIBTANIUM_EFI_INVALID_PARAMETER;
+static bool efi_event_next_timer(CPUIA64State *env, EfiGuestEvent *event,
+                                 uint64_t *due)
+{
+    if (!event || event->handle == VIBTANIUM_EFI_CON_IN_WAIT_EVENT ||
+        !event->timer_active) {
+        return false;
     }
 
+    if (efi_event_timer_due(env, event)) {
+        *due = env->ar[IA64_AR_ITC];
+    } else {
+        *due = event->timer_due;
+    }
+    return true;
+}
+
+static void efi_write_event_index(CPUIA64State *env, uint64_t index_out,
+                                  uint64_t index)
+{
+    efi_guest_stq(env, index_out, index);
+}
+
+static bool efi_wait_timer_candidate(CPUIA64State *env, EfiGuestEvent *event,
+                                     uint64_t index, uint64_t *timer_index,
+                                     uint64_t *timer_due)
+{
+    uint64_t due;
+
+    if (!efi_event_next_timer(env, event, &due)) {
+        return false;
+    }
+
+    if (*timer_index == UINT64_MAX ||
+        efi_timer_before(env->ar[IA64_AR_ITC], due, *timer_due)) {
+        *timer_index = index;
+        *timer_due = due;
+    }
+    return true;
+}
+
+static void efi_block_until_timer(CPUIA64State *env, uint64_t timer_due)
+{
+    if (!vibtanium_efi_timer_due(env->ar[IA64_AR_ITC], timer_due)) {
+        env->ar[IA64_AR_ITC] = timer_due;
+    }
+}
+
+static uint64_t efi_wait_ready_event(CPUIA64State *env, uint64_t count,
+                                     uint64_t events, uint64_t index_out,
+                                     bool *found_ready,
+                                     uint64_t *timer_index,
+                                     uint64_t *timer_due)
+{
     for (uint64_t i = 0; i < count; i++) {
         uint64_t handle = efi_guest_ldq(env, events + i * sizeof(uint64_t));
         EfiGuestEvent *event = efi_find_event(handle);
@@ -3785,22 +3885,53 @@ static uint64_t efi_wait_for_event(CPUIA64State *env)
         if (!event) {
             return VIBTANIUM_EFI_INVALID_PARAMETER;
         }
-        if (first_valid < 0) {
-            first_valid = i;
-        }
-        if (efi_event_is_ready(event)) {
-            efi_guest_stq(env, index_out, i);
-            if (event->timer) {
-                event->signaled = false;
-            }
+        if (efi_event_is_ready(env, event)) {
+            efi_write_event_index(env, index_out, i);
+            efi_event_consume(env, event);
+            *found_ready = true;
             return VIBTANIUM_EFI_SUCCESS;
         }
+        efi_wait_timer_candidate(env, event, i, timer_index, timer_due);
+    }
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_wait_for_event(CPUIA64State *env)
+{
+    uint64_t count = ia64_read_gr(env, 32);
+    uint64_t events = ia64_read_gr(env, 33);
+    uint64_t index_out = ia64_read_gr(env, 34);
+    uint64_t timer_index = UINT64_MAX;
+    uint64_t timer_due = 0;
+    bool found_ready = false;
+    uint64_t status;
+
+    if (count == 0 || count > EFI_MAX_EVENTS || events == 0 ||
+        index_out == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 
-    if (first_valid >= 0) {
-        efi_guest_stq(env, index_out, first_valid);
+    status = efi_wait_ready_event(env, count, events, index_out,
+                                  &found_ready, &timer_index, &timer_due);
+    if (status != VIBTANIUM_EFI_SUCCESS || found_ready) {
+        return status;
+    }
+
+    if (timer_index != UINT64_MAX) {
+        uint64_t handle;
+        EfiGuestEvent *event;
+
+        efi_block_until_timer(env, timer_due);
+        handle = efi_guest_ldq(env, events + timer_index * sizeof(uint64_t));
+        event = efi_find_event(handle);
+        if (!event || !efi_event_is_ready(env, event)) {
+            return VIBTANIUM_EFI_NOT_READY;
+        }
+        efi_write_event_index(env, index_out, timer_index);
+        efi_event_consume(env, event);
         return VIBTANIUM_EFI_SUCCESS;
     }
+
     return VIBTANIUM_EFI_NOT_READY;
 }
 
@@ -3835,8 +3966,8 @@ static uint64_t efi_check_event(CPUIA64State *env)
     if (!event) {
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
-    return efi_event_is_ready(event) ? VIBTANIUM_EFI_SUCCESS
-                                     : VIBTANIUM_EFI_NOT_READY;
+    return efi_event_is_ready(env, event) ? VIBTANIUM_EFI_SUCCESS
+                                          : VIBTANIUM_EFI_NOT_READY;
 }
 
 static uint64_t efi_dispatch_boot_service(CPUIA64State *env, unsigned index)

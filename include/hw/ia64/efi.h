@@ -147,6 +147,7 @@ bool vibtanium_efi_image_from_file(const char *path,
                                    VibtaniumEfiImage *image,
                                    Error **errp);
 bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value);
+bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline);
 void vibtanium_efi_image_destroy(VibtaniumEfiImage *image);
 
 void vibtanium_efi_prepare_cpu(CPUIA64State *env,
