@@ -5188,9 +5188,20 @@ typedef enum IA64TraceKernelCallTag {
     IA64_TRACE_KERNEL_CALL_SEND,
     IA64_TRACE_KERNEL_CALL_RECV,
     IA64_TRACE_KERNEL_CALL_EPOLL_WAIT,
+    IA64_TRACE_KERNEL_CALL_EPOLL_CTL,
+    IA64_TRACE_KERNEL_CALL_WAIT4,
+    IA64_TRACE_KERNEL_CALL_KILL,
+    IA64_TRACE_KERNEL_CALL_POLL,
+    IA64_TRACE_KERNEL_CALL_CLOCK_GETTIME,
     IA64_TRACE_KERNEL_CALL_MKNOD,
     IA64_TRACE_KERNEL_CALL_MKNODAT,
     IA64_TRACE_KERNEL_CALL_DOFORK,
+    IA64_TRACE_KERNEL_CALL_NETLINK_RECVMSG,
+    IA64_TRACE_KERNEL_CALL_NETLINK_SENDMSG,
+    IA64_TRACE_KERNEL_CALL_NETLINK_UNICAST,
+    IA64_TRACE_KERNEL_CALL_NETLINK_ATTACHSKB,
+    IA64_TRACE_KERNEL_CALL_NETLINK_SENDSKB,
+    IA64_TRACE_KERNEL_CALL_NETLINK_BROADCAST_FILTERED,
 } IA64TraceKernelCallTag;
 
 typedef struct IA64TraceKernelCall {
@@ -5198,7 +5209,7 @@ typedef struct IA64TraceKernelCall {
     IA64TraceKernelCallTag tag;
     uint64_t current;
     uint64_t return_ip;
-    uint64_t arg[6];
+    uint64_t arg[8];
 } IA64TraceKernelCall;
 
 static IA64TraceKernelCall ia64_uevent_kernel_calls[
@@ -5261,6 +5272,144 @@ static void ia64_trace_record_kernel_call(CPUIA64State *env,
     for (unsigned i = 0; i < ARRAY_SIZE(slot->arg); i++) {
         slot->arg[i] = ia64_read_gr(env, 32 + i);
     }
+}
+
+static void ia64_trace_epoll_event(CPUIA64State *env, uint64_t event,
+                                   const char *label)
+{
+    char status[48] = "ok";
+    uint32_t events;
+    uint64_t data;
+
+    if (event == 0) {
+        fprintf(stderr, " %s=<null>", label);
+        return;
+    }
+    if (!ia64_trace_guest_read_u32(env, event, &events, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u64(env, event + 8, &data, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " %s=<unreadable:%s>", label, status);
+        return;
+    }
+    fprintf(stderr,
+            " %s={events=0x%08" PRIx32 " data=0x%016" PRIx64
+            " data_fd=%" PRIu64 "}",
+            label, events, data, data & UINT64_C(0xffffffff));
+}
+
+static void ia64_trace_epoll_events(CPUIA64State *env, uint64_t events_addr,
+                                    uint64_t count)
+{
+    count = MIN(count, UINT64_C(8));
+    for (uint64_t i = 0; i < count; i++) {
+        char label[24];
+
+        snprintf(label, sizeof(label), "event%" PRIu64, i);
+        ia64_trace_epoll_event(env, events_addr + i * UINT64_C(16), label);
+    }
+}
+
+static uint64_t ia64_trace_socket_sk(CPUIA64State *env, uint64_t sock)
+{
+    char status[48] = "ok";
+    uint64_t sk = 0;
+
+    /*
+     * Linux 3.2 ia64 struct socket layout:
+     * state/type/pad, flags, wq, file, sk, ops.
+     */
+    if (sock != 0) {
+        ia64_trace_guest_read_u64(env, sock + 32, &sk, status,
+                                  sizeof(status));
+    }
+    return sk;
+}
+
+static void ia64_trace_timespec(CPUIA64State *env, uint64_t timespec,
+                                const char *label)
+{
+    char status[48] = "ok";
+    uint64_t tv_sec;
+    uint64_t tv_nsec;
+
+    if (timespec == 0) {
+        fprintf(stderr, " %s=<null>", label);
+        return;
+    }
+    if (!ia64_trace_guest_read_u64(env, timespec, &tv_sec, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u64(env, timespec + 8, &tv_nsec, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " %s=<unreadable:%s>", label, status);
+        return;
+    }
+    fprintf(stderr, " %s={sec=%" PRIu64 " nsec=%" PRIu64 "}",
+            label, tv_sec, tv_nsec);
+}
+
+static void ia64_trace_pollfds(CPUIA64State *env, uint64_t ufds,
+                               uint64_t nfds)
+{
+    char status[48] = "ok";
+
+    nfds = MIN(nfds, UINT64_C(4));
+    for (uint64_t i = 0; i < nfds; i++) {
+        uint64_t pollfd = ufds + i * UINT64_C(8);
+        uint32_t fd;
+        uint16_t events;
+        uint16_t revents;
+
+        if (!ia64_trace_guest_read_u32(env, pollfd, &fd, status,
+                                       sizeof(status)) ||
+            !ia64_trace_guest_read_u16(env, pollfd + 4, &events, status,
+                                       sizeof(status)) ||
+            !ia64_trace_guest_read_u16(env, pollfd + 6, &revents, status,
+                                       sizeof(status))) {
+            fprintf(stderr, " pollfd%" PRIu64 "=<unreadable:%s>",
+                    i, status);
+            return;
+        }
+        fprintf(stderr,
+                " pollfd%" PRIu64 "={fd=%" PRIu32 " events=0x%04" PRIx16
+                " revents=0x%04" PRIx16 "}",
+                i, fd, events, revents);
+    }
+}
+
+static void ia64_trace_msghdr_name(CPUIA64State *env, uint64_t msg)
+{
+    char status[48] = "ok";
+    uint64_t name;
+    uint32_t namelen;
+    uint16_t family;
+    uint32_t nl_pid;
+    uint32_t nl_groups;
+
+    if (!ia64_trace_guest_read_u64(env, msg, &name, status, sizeof(status)) ||
+        !ia64_trace_guest_read_u32(env, msg + 8, &namelen, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " msg_name=<unreadable:%s>", status);
+        return;
+    }
+    fprintf(stderr, " msg_name=0x%016" PRIx64 " msg_namelen=%" PRIu32,
+            name, namelen);
+    if (name == 0 || namelen < 12) {
+        return;
+    }
+    if (!ia64_trace_guest_read_u16(env, name, &family, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u32(env, name + 4, &nl_pid, status,
+                                   sizeof(status)) ||
+        !ia64_trace_guest_read_u32(env, name + 8, &nl_groups, status,
+                                   sizeof(status))) {
+        fprintf(stderr, " sockaddr_nl=<unreadable:%s>", status);
+        return;
+    }
+    fprintf(stderr,
+            " sockaddr_nl={family=%" PRIu16 " pid=%" PRIu32
+            " groups=0x%08" PRIx32 "}",
+            family, nl_pid, nl_groups);
 }
 
 static void ia64_trace_msghdr_iovs(CPUIA64State *env, uint64_t msg,
@@ -5350,8 +5499,6 @@ static void ia64_trace_recvmsg_payload(CPUIA64State *env,
 
 static void ia64_trace_uevent_netlink(CPUIA64State *env)
 {
-    static uint64_t netlink_filtered_return_ip;
-    static unsigned trace_count;
     IA64TraceKernelCall *call;
 
     if (!ia64_uevent_trace_enabled()) {
@@ -5449,8 +5596,72 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
                     env->ip, call->current, call->arg[0], call->arg[1],
                     call->arg[2], call->arg[3], event_bytes, events,
                     ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            if (retval > 0) {
+                fprintf(stderr, "[ia64-uevent] sys_epoll_wait events"
+                        " current=0x%016" PRIx64, call->current);
+                ia64_trace_epoll_events(env, call->arg[1], retval);
+                fprintf(stderr, "\n");
+            }
             break;
         }
+        case IA64_TRACE_KERNEL_CALL_EPOLL_CTL:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_epoll_ctl ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " epfd=%" PRIu64
+                    " op=%" PRIu64 " fd=%" PRIu64
+                    " event=0x%016" PRIx64
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_WAIT4:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_wait4 ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " pid=0x%016" PRIx64
+                    " stat_addr=0x%016" PRIx64 " options=0x%016" PRIx64
+                    " ru=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_KILL:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_kill ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " pid=0x%016" PRIx64
+                    " sig=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_POLL:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_poll ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " ufds=0x%016" PRIx64
+                    " nfds=%" PRIu64 " timeout=%" PRIu64
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64,
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            if (retval >= 0) {
+                ia64_trace_pollfds(env, call->arg[0], call->arg[1]);
+            }
+            fprintf(stderr, "\n");
+            break;
+        case IA64_TRACE_KERNEL_CALL_CLOCK_GETTIME:
+            fprintf(stderr,
+                    "[ia64-uevent] sys_clock_gettime ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " which_clock=%" PRIu64
+                    " tp=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64,
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            if (retval == 0) {
+                ia64_trace_timespec(env, call->arg[1], "tp");
+            }
+            fprintf(stderr, "\n");
+            break;
         case IA64_TRACE_KERNEL_CALL_MKNOD:
         {
             char path[176];
@@ -5489,6 +5700,76 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
                     " r10=0x%016" PRIx64 "\n",
                     env->ip, call->current, call->arg[0], call->arg[1],
                     ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_NETLINK_RECVMSG:
+            fprintf(stderr,
+                    "[ia64-uevent] netlink_recvmsg ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " kiocb=0x%016" PRIx64
+                    " sock=0x%016" PRIx64 " sk=0x%016" PRIx64
+                    " msg=0x%016" PRIx64 " len=%" PRIu64
+                    " flags=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    ia64_trace_socket_sk(env, call->arg[1]), call->arg[2],
+                    call->arg[3], call->arg[4], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_NETLINK_SENDMSG:
+            fprintf(stderr,
+                    "[ia64-uevent] netlink_sendmsg ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " kiocb=0x%016" PRIx64
+                    " sock=0x%016" PRIx64 " sk=0x%016" PRIx64
+                    " msg=0x%016" PRIx64 " len=%" PRIu64
+                    " r8=0x%016" PRIx64 " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    ia64_trace_socket_sk(env, call->arg[1]), call->arg[2],
+                    call->arg[3], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_NETLINK_UNICAST:
+            fprintf(stderr,
+                    "[ia64-uevent] netlink_unicast ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " ssk=0x%016" PRIx64
+                    " skb=0x%016" PRIx64 " pid=%" PRIu64
+                    " nonblock=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_NETLINK_ATTACHSKB:
+            fprintf(stderr,
+                    "[ia64-uevent] netlink_attachskb ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " sk=0x%016" PRIx64
+                    " skb=0x%016" PRIx64 " timeo=0x%016" PRIx64
+                    " ssk=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_NETLINK_SENDSKB:
+            fprintf(stderr,
+                    "[ia64-uevent] netlink_sendskb ret ip=0x%016" PRIx64
+                    " current=0x%016" PRIx64 " sk=0x%016" PRIx64
+                    " skb=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    ia64_read_gr(env, 8), ia64_read_gr(env, 10));
+            break;
+        case IA64_TRACE_KERNEL_CALL_NETLINK_BROADCAST_FILTERED:
+            fprintf(stderr,
+                    "[ia64-uevent] netlink_broadcast_filtered ret"
+                    " ip=0x%016" PRIx64 " current=0x%016" PRIx64
+                    " ssk=0x%016" PRIx64 " skb=0x%016" PRIx64
+                    " pid=%" PRIu64 " group=%" PRIu64
+                    " allocation=0x%016" PRIx64 " filter=0x%016" PRIx64
+                    " data=0x%016" PRIx64 " r8=0x%016" PRIx64
+                    " r10=0x%016" PRIx64 "\n",
+                    env->ip, call->current, call->arg[0], call->arg[1],
+                    call->arg[2], call->arg[3], call->arg[4], call->arg[5],
+                    call->arg[6], ia64_read_gr(env, 8),
+                    ia64_read_gr(env, 10));
             break;
         default:
             break;
@@ -5549,6 +5830,7 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
                 " flags=0x%016" PRIx64 " b0=0x%016" PRIx64,
                 ia64_read_gr(env, 13), ia64_read_gr(env, 32),
                 ia64_read_gr(env, 33), ia64_read_gr(env, 34), env->br[0]);
+        ia64_trace_msghdr_name(env, ia64_read_gr(env, 33));
         ia64_trace_msghdr_iovs(env, ia64_read_gr(env, 33), 2, 220);
         fprintf(stderr, "\n");
         return;
@@ -5598,6 +5880,74 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
         return;
     }
 
+    if (env->ip == UINT64_C(0xa0000001002857d0)) {
+        uint64_t event = ia64_read_gr(env, 35);
+
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_EPOLL_CTL);
+        fprintf(stderr,
+                "[ia64-uevent] sys_epoll_ctl entry current=0x%016" PRIx64
+                " epfd=%" PRIu64 " op=%" PRIu64 " fd=%" PRIu64
+                " event=0x%016" PRIx64 " b0=0x%016" PRIx64,
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34), event,
+                env->br[0]);
+        if (event != 0 && ia64_read_gr(env, 33) != 2) {
+            ia64_trace_epoll_event(env, event, "event");
+        }
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001000947d0)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_WAIT4);
+        fprintf(stderr,
+                "[ia64-uevent] sys_wait4 entry current=0x%016" PRIx64
+                " pid=0x%016" PRIx64 " stat_addr=0x%016" PRIx64
+                " options=0x%016" PRIx64 " ru=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001000ae3d0)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_KILL);
+        fprintf(stderr,
+                "[ia64-uevent] sys_kill entry current=0x%016" PRIx64
+                " pid=0x%016" PRIx64 " sig=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001002233a0)) {
+        ia64_trace_record_kernel_call(env, IA64_TRACE_KERNEL_CALL_POLL);
+        fprintf(stderr,
+                "[ia64-uevent] sys_poll entry current=0x%016" PRIx64
+                " ufds=0x%016" PRIx64 " nfds=%" PRIu64
+                " timeout=%" PRIu64 " b0=0x%016" PRIx64,
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34), env->br[0]);
+        ia64_trace_pollfds(env, ia64_read_gr(env, 32),
+                           ia64_read_gr(env, 33));
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001000c66f0)) {
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_CLOCK_GETTIME);
+        fprintf(stderr,
+                "[ia64-uevent] sys_clock_gettime entry"
+                " current=0x%016" PRIx64 " which_clock=%" PRIu64
+                " tp=0x%016" PRIx64 " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), env->br[0]);
+        return;
+    }
+
     if (env->ip == UINT64_C(0xa00000010021ad80)) {
         char path[176];
 
@@ -5630,6 +5980,106 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
         return;
     }
 
+    if (env->ip == UINT64_C(0xa000000100675e70)) {
+        uint64_t sock = ia64_read_gr(env, 33);
+
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_NETLINK_RECVMSG);
+        fprintf(stderr,
+                "[ia64-uevent] netlink_recvmsg entry current=0x%016" PRIx64
+                " kiocb=0x%016" PRIx64 " sock=0x%016" PRIx64
+                " sk=0x%016" PRIx64 " msg=0x%016" PRIx64
+                " len=%" PRIu64 " flags=0x%016" PRIx64
+                " b0=0x%016" PRIx64,
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32), sock,
+                ia64_trace_socket_sk(env, sock), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), ia64_read_gr(env, 36), env->br[0]);
+        ia64_trace_msghdr_name(env, ia64_read_gr(env, 34));
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa00000010067a360)) {
+        uint64_t sock = ia64_read_gr(env, 33);
+
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_NETLINK_SENDMSG);
+        fprintf(stderr,
+                "[ia64-uevent] netlink_sendmsg entry current=0x%016" PRIx64
+                " kiocb=0x%016" PRIx64 " sock=0x%016" PRIx64
+                " sk=0x%016" PRIx64 " msg=0x%016" PRIx64
+                " len=%" PRIu64 " b0=0x%016" PRIx64,
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32), sock,
+                ia64_trace_socket_sk(env, sock), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        ia64_trace_msghdr_name(env, ia64_read_gr(env, 34));
+        ia64_trace_msghdr_iovs(env, ia64_read_gr(env, 34), 2, 220);
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100679b10)) {
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_NETLINK_UNICAST);
+        fprintf(stderr,
+                "[ia64-uevent] netlink_unicast entry current=0x%016" PRIx64
+                " ssk=0x%016" PRIx64 " skb=0x%016" PRIx64
+                " pid=%" PRIu64 " nonblock=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100679600)) {
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_NETLINK_ATTACHSKB);
+        fprintf(stderr,
+                "[ia64-uevent] netlink_attachskb entry current=0x%016" PRIx64
+                " sk=0x%016" PRIx64 " skb=0x%016" PRIx64
+                " timeo=0x%016" PRIx64 " ssk=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100679a50)) {
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_NETLINK_SENDSKB);
+        fprintf(stderr,
+                "[ia64-uevent] netlink_sendskb entry current=0x%016" PRIx64
+                " sk=0x%016" PRIx64 " skb=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa0000001005fba40)) {
+        fprintf(stderr,
+                "[ia64-uevent] sock_def_readable current=0x%016" PRIx64
+                " sk=0x%016" PRIx64 " len=%" PRIu64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), env->br[0]);
+        return;
+    }
+
+    if (env->ip == UINT64_C(0xa000000100285150)) {
+        fprintf(stderr,
+                "[ia64-uevent] ep_poll_callback current=0x%016" PRIx64
+                " wait=0x%016" PRIx64 " mode=0x%016" PRIx64
+                " sync=0x%016" PRIx64 " key=0x%016" PRIx64
+                " b0=0x%016" PRIx64 "\n",
+                ia64_read_gr(env, 13), ia64_read_gr(env, 32),
+                ia64_read_gr(env, 33), ia64_read_gr(env, 34),
+                ia64_read_gr(env, 35), env->br[0]);
+        return;
+    }
+
     if (env->ip == UINT64_C(0xa000000100677690)) {
         fprintf(stderr,
             "[ia64-uevent] netlink_broadcast entry ssk=0x%016" PRIx64
@@ -5643,7 +6093,8 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
     }
 
     if (env->ip == UINT64_C(0xa000000100676d80)) {
-        netlink_filtered_return_ip = env->br[0];
+        ia64_trace_record_kernel_call(
+            env, IA64_TRACE_KERNEL_CALL_NETLINK_BROADCAST_FILTERED);
         fprintf(stderr,
                 "[ia64-uevent] netlink_broadcast_filtered entry"
                 " ssk=0x%016" PRIx64 " skb=0x%016" PRIx64
@@ -5656,20 +6107,6 @@ static void ia64_trace_uevent_netlink(CPUIA64State *env)
             ia64_read_gr(env, 36), ia64_read_gr(env, 37),
             ia64_read_gr(env, 38), ia64_read_gr(env, 13), env->br[0]);
         return;
-    }
-
-    if (netlink_filtered_return_ip != 0 &&
-        env->ip == netlink_filtered_return_ip) {
-        fprintf(stderr,
-            "[ia64-uevent] netlink_broadcast_filtered ret"
-            " ip=0x%016" PRIx64 " current=0x%016" PRIx64
-            " r8=0x%016" PRIx64
-            " r10=0x%016" PRIx64 "\n",
-            env->ip, ia64_read_gr(env, 13), ia64_read_gr(env, 8),
-            ia64_read_gr(env, 10));
-        if (++trace_count > 1024) {
-            netlink_filtered_return_ip = 0;
-        }
     }
 }
 
