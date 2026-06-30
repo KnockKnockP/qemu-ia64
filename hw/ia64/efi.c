@@ -371,10 +371,12 @@ bool vibtanium_efi_image_from_buffer(const char *path,
     uint32_t reloc_rva = 0;
     uint32_t reloc_size = 0;
     uint64_t preferred_image_base;
+    uint64_t requested_load_base;
     uint64_t entry_descriptor;
     uint64_t code_entry;
     uint64_t global_pointer;
     uint8_t *memory_image;
+    bool fixed_preferred_load = false;
 
     g_return_val_if_fail(image != NULL, false);
     efi_image_reset(image);
@@ -439,6 +441,7 @@ bool vibtanium_efi_image_from_buffer(const char *path,
     entry_rva = rd32(optional + 16);
     preferred_image_base = optional_magic == PE32P_MAGIC ?
                            rd64(optional + 24) : rd32(optional + 28);
+    requested_load_base = load_base;
     section_alignment = rd32(optional + 32);
     size_of_image = rd32(optional + 56);
     size_of_headers = rd32(optional + 60);
@@ -483,6 +486,11 @@ bool vibtanium_efi_image_from_buffer(const char *path,
                    "EFI image IA-64 entry descriptor RVA 0x%x is truncated",
                    entry_rva);
         return false;
+    }
+    if (load_base != preferred_image_base &&
+        reloc_rva == 0 && reloc_size == 0) {
+        load_base = preferred_image_base;
+        fixed_preferred_load = true;
     }
     if (UINT64_MAX - load_base < size_of_image) {
         error_setg(errp, "EFI image load address overflows");
@@ -564,9 +572,12 @@ bool vibtanium_efi_image_from_buffer(const char *path,
               sizeof(image->source_path));
     g_snprintf(image->message, sizeof(image->message),
                "loaded IA-64 EFI image path=%s load=0x%016" PRIx64
+               " requested=0x%016" PRIx64 "%s"
                " descriptor=0x%016" PRIx64 " entry=0x%016" PRIx64
                " gp=0x%016" PRIx64 " size=0x%x sections=%u",
-               image->source_path, image->load_base, image->entry_descriptor,
+               image->source_path, image->load_base, requested_load_base,
+               fixed_preferred_load ? " fixed-preferred-base" : "",
+               image->entry_descriptor,
                image->entry, image->global_pointer, image->size_of_image,
                image->number_of_sections);
 

@@ -807,6 +807,8 @@ enum {
 #define EFI_HIGH_CONVENTIONAL_BASE UINT64_C(0x04000000)
 #define EFI_HIGH_CONVENTIONAL_PAGES \
     ((EFI_GUEST_RAM_TOP - EFI_HIGH_CONVENTIONAL_BASE) / EFI_PAGE_SIZE)
+#define EFI_DEFAULT_LOADER_IMAGE_PAGES \
+    ((VIBTANIUM_EFI_STACK_BASE - VIBTANIUM_EFI_APP_BASE) / EFI_PAGE_SIZE)
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_FIRMWARE_STATUS_SUCCESS UINT64_C(0)
 #define IA64_FIRMWARE_STATUS_UNIMPLEMENTED UINT64_C(0xffffffffffffffff)
@@ -958,6 +960,8 @@ static uint64_t efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
 static uint64_t efi_memory_map_key = 1;
 static uint64_t efi_dynamic_handle_next = UINT64_C(0x00073000);
 static uint64_t efi_next_event_handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT + 1;
+static uint64_t efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
+static uint64_t efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
 static uint32_t efi_high_monotonic_count;
 static bool efi_conin_enter_pending = true;
 static char *efi_linux_cmdline_append;
@@ -2584,9 +2588,49 @@ static unsigned efi_emit_split_conventional(CPUIA64State *env, uint64_t map,
     return index;
 }
 
+static unsigned efi_emit_runtime_and_loader(CPUIA64State *env, uint64_t map,
+                                            unsigned index,
+                                            const EfiMemoryRange *runtime,
+                                            const EfiMemoryRange *loader,
+                                            bool *loader_emitted)
+{
+    uint64_t runtime_end;
+    uint64_t loader_end;
+
+    *loader_emitted = false;
+
+    if (!efi_page_range_end(runtime->address, runtime->pages, &runtime_end) ||
+        !efi_page_range_end(loader->address, loader->pages, &loader_end) ||
+        loader->address >= runtime_end ||
+        loader_end <= runtime->address) {
+        return efi_emit_memory_descriptor(env, map, index, runtime);
+    }
+
+    if (runtime->address < loader->address) {
+        EfiMemoryRange before = *runtime;
+
+        before.pages = (loader->address - runtime->address) / EFI_PAGE_SIZE;
+        index = efi_emit_memory_descriptor(env, map, index, &before);
+    }
+
+    index = efi_emit_memory_descriptor(env, map, index, loader);
+    *loader_emitted = true;
+
+    if (loader_end < runtime_end) {
+        EfiMemoryRange after = *runtime;
+
+        after.address = loader_end;
+        after.pages = (runtime_end - loader_end) / EFI_PAGE_SIZE;
+        index = efi_emit_memory_descriptor(env, map, index, &after);
+    }
+
+    return index;
+}
+
 static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
 {
     unsigned index = 0;
+    bool loader_emitted;
     const EfiMemoryRange runtime_firmware = {
         .type = EFI_RUNTIME_SERVICES_DATA,
         .address = EFI_RUNTIME_GRANULE_BASE,
@@ -2595,8 +2639,8 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
     };
     const EfiMemoryRange loader_image = {
         .type = EFI_LOADER_CODE,
-        .address = VIBTANIUM_EFI_APP_BASE,
-        .pages = 0xf00,
+        .address = efi_loaded_image_base,
+        .pages = efi_loaded_image_pages,
         .attributes = EFI_MEMORY_WB,
     };
     const EfiMemoryRange firmware_work = {
@@ -2630,11 +2674,14 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
         .attributes = EFI_MEMORY_UC,
     };
 
-    index = efi_emit_memory_descriptor(env, map, index, &runtime_firmware);
+    index = efi_emit_runtime_and_loader(env, map, index, &runtime_firmware,
+                                        &loader_image, &loader_emitted);
     index = efi_emit_split_conventional(env, map, index,
                                         EFI_LOW_CONVENTIONAL_BASE,
                                         EFI_LOW_CONVENTIONAL_PAGES);
-    index = efi_emit_memory_descriptor(env, map, index, &loader_image);
+    if (!loader_emitted) {
+        index = efi_emit_memory_descriptor(env, map, index, &loader_image);
+    }
     index = efi_emit_memory_descriptor(env, map, index, &firmware_work);
     index = efi_emit_memory_descriptor(env, map, index, &pool);
     index = efi_emit_memory_descriptor(env, map, index, &page_arena);
@@ -2644,6 +2691,40 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
                                         EFI_HIGH_CONVENTIONAL_PAGES);
     index = efi_emit_memory_descriptor(env, map, index, &io_port_space);
     return index;
+}
+
+void vibtanium_efi_register_loaded_image(uint64_t image_base,
+                                         uint64_t image_size)
+{
+    uint64_t aligned_base;
+    uint64_t image_end;
+    uint64_t aligned_end;
+
+    if (image_size == 0 || image_base > UINT64_MAX - image_size) {
+        efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
+        efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
+        efi_memory_map_key++;
+        return;
+    }
+
+    image_end = image_base + image_size;
+    if (image_end > UINT64_MAX - (EFI_PAGE_SIZE - 1)) {
+        efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
+        efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
+        efi_memory_map_key++;
+        return;
+    }
+
+    aligned_base = image_base & ~(EFI_PAGE_SIZE - 1);
+    aligned_end = QEMU_ALIGN_UP(image_end, EFI_PAGE_SIZE);
+    if (image_base == VIBTANIUM_EFI_APP_BASE) {
+        efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
+        efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
+    } else {
+        efi_loaded_image_base = aligned_base;
+        efi_loaded_image_pages = (aligned_end - aligned_base) / EFI_PAGE_SIZE;
+    }
+    efi_memory_map_key++;
 }
 
 static uint64_t efi_get_memory_map(CPUIA64State *env)
@@ -2715,6 +2796,8 @@ void vibtanium_efi_register_boot_media(
     efi_memory_map_key = 1;
     efi_dynamic_handle_next = UINT64_C(0x00073000);
     efi_next_event_handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT + 1;
+    efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
+    efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
     efi_high_monotonic_count = 0;
     efi_conin_enter_pending = true;
 

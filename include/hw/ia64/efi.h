@@ -154,6 +154,8 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiImage *image,
                                            const struct VibtaniumEfiBlockDevice *boot_media);
 bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
+void vibtanium_efi_register_loaded_image(uint64_t image_base,
+                                         uint64_t image_size);
 void vibtanium_efi_register_boot_media(
     const struct VibtaniumEfiBlockDevice *boot_media);
 void vibtanium_efi_set_linux_cmdline_append(const char *append);

@@ -273,6 +273,70 @@ typedef struct VibtaniumCachedBlockReadOpaque {
     uint64_t size;
 } VibtaniumCachedBlockReadOpaque;
 
+static bool vibtanium_range_end(uint64_t base, uint64_t size, uint64_t *end)
+{
+    if (size == 0 || base > UINT64_MAX - size) {
+        return false;
+    }
+
+    *end = base + size;
+    return true;
+}
+
+static bool vibtanium_ranges_overlap(uint64_t a_base, uint64_t a_size,
+                                     uint64_t b_base, uint64_t b_size)
+{
+    uint64_t a_end;
+    uint64_t b_end;
+
+    if (!vibtanium_range_end(a_base, a_size, &a_end) ||
+        !vibtanium_range_end(b_base, b_size, &b_end)) {
+        return true;
+    }
+
+    return a_base < b_end && b_base < a_end;
+}
+
+static const char *vibtanium_efi_reserved_overlap(
+    const VibtaniumEfiImage *image)
+{
+    static const struct {
+        const char *name;
+        uint64_t base;
+        uint64_t size;
+    } reserved[] = {
+        {
+            "EFI firmware tables",
+            VIBTANIUM_EFI_BLOB_BASE,
+            VIBTANIUM_EFI_BLOB_SIZE,
+        },
+        {
+            "EFI stack",
+            VIBTANIUM_EFI_STACK_BASE,
+            VIBTANIUM_EFI_STACK_SIZE,
+        },
+        {
+            "EFI backing store",
+            VIBTANIUM_EFI_BACKING_STORE_BASE,
+            VIBTANIUM_EFI_BACKING_STORE_SIZE,
+        },
+        {
+            "EFI pool",
+            VIBTANIUM_EFI_POOL_BASE,
+            VIBTANIUM_EFI_POOL_SIZE,
+        },
+    };
+
+    for (size_t i = 0; i < G_N_ELEMENTS(reserved); i++) {
+        if (vibtanium_ranges_overlap(image->load_base, image->size,
+                                     reserved[i].base, reserved[i].size)) {
+            return reserved[i].name;
+        }
+    }
+
+    return NULL;
+}
+
 static int vibtanium_block_pread(void *opaque,
                                  uint64_t offset,
                                  uint32_t bytes,
@@ -362,6 +426,7 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     g_autofree uint8_t *firmware_blob = NULL;
     size_t firmware_blob_size = 0;
     const char *linux_append = machine->kernel_cmdline;
+    const char *overlap;
 
     if (!linux_append || !linux_append[0]) {
         linux_append = VIBTANIUM_DEFAULT_LINUX_APPEND;
@@ -375,10 +440,19 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                      image->load_base);
         exit(1);
     }
+    overlap = vibtanium_efi_reserved_overlap(image);
+    if (overlap) {
+        error_report("IA-64 EFI app '%s' image at 0x%016" PRIx64
+                     " size 0x%" PRIx64 " overlaps reserved %s",
+                     image->source_path, image->load_base,
+                     (uint64_t)image->size, overlap);
+        exit(1);
+    }
 
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
                                                       image, boot_media);
     vibtanium_efi_register_boot_media(boot_media);
+    vibtanium_efi_register_loaded_image(image->load_base, image->size);
     vibtanium_efi_set_linux_cmdline_append(linux_append);
     rom_add_blob_fixed("vibtanium.efi-tables", firmware_blob,
                        firmware_blob_size, VIBTANIUM_EFI_BLOB_BASE);

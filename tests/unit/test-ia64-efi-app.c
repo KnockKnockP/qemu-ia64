@@ -533,6 +533,29 @@ static void test_relocates_ia64_entry_descriptor(void)
     vibtanium_efi_image_destroy(&image);
 }
 
+static void test_loads_fixed_ia64_pe_at_preferred_base(void)
+{
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    VibtaniumEfiImage image;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64, 0, false);
+
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic-fixed.efi", pe,
+                                                 sizeof(pe),
+                                                 VIBTANIUM_EFI_APP_BASE,
+                                                 &image, &err));
+    g_assert_null(err);
+    g_assert_cmphex(image.preferred_image_base, ==, 0);
+    g_assert_cmphex(image.load_base, ==, 0);
+    g_assert_cmphex(image.entry_descriptor, ==, SYNTHETIC_DESCRIPTOR_RVA);
+    g_assert_cmphex(image.entry, ==, SYNTHETIC_TEXT_RVA);
+    g_assert_cmphex(image.global_pointer, ==, SYNTHETIC_GP_RVA);
+    g_assert_nonnull(strstr(image.message, "fixed-preferred-base"));
+
+    vibtanium_efi_image_destroy(&image);
+}
+
 static void test_unimplemented_service_log(void)
 {
     VibtaniumEfiServiceCall call;
@@ -582,6 +605,8 @@ int main(int argc, char **argv)
                     test_builds_guest_firmware_tables);
     g_test_add_func("/ia64-efi-app/relocate-entry-descriptor",
                     test_relocates_ia64_entry_descriptor);
+    g_test_add_func("/ia64-efi-app/load-fixed-at-preferred-base",
+                    test_loads_fixed_ia64_pe_at_preferred_base);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",
                     test_unimplemented_service_log);
     g_test_add_func("/ia64-efi-app/frontier-log-format",
