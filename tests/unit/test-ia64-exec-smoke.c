@@ -1836,6 +1836,60 @@ static void test_m_unit_setf_significand(void)
     g_assert_cmphex(env.fr[8].raw[1], ==, 0x1003e);
 }
 
+static void test_m_unit_setf_exp_frontier(void)
+{
+    const uint64_t centos_setf_exp_f7_r2_raw = 0x0c7480041c0ULL;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_gr(&env, 2, 0xdead000000021234ULL);
+
+    g_assert_true(ia64_slot_is_m_setf(IA64_SLOT_TYPE_M,
+                                      centos_setf_exp_f7_r2_raw));
+    g_assert_true(ia64_exec_m_setf(&env, centos_setf_exp_f7_r2_raw));
+
+    g_assert_cmphex(env.fr[7].raw[0], ==, 0x8000000000000000ULL);
+    g_assert_cmphex(env.fr[7].raw[1], ==, 0x21234);
+}
+
+static void test_m_unit_setf_single_and_double(void)
+{
+    const uint64_t setf_s_f8_r17_raw = 0x0c788022200ULL;
+    const uint64_t setf_d_f8_r17_raw = 0x0c7c8022200ULL;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    ia64_write_gr(&env, 17, 0xbfc00000);
+    g_assert_true(ia64_slot_is_m_setf(IA64_SLOT_TYPE_M,
+                                      setf_s_f8_r17_raw));
+    g_assert_true(ia64_exec_m_setf(&env, setf_s_f8_r17_raw));
+    g_assert_cmphex(env.fr[8].raw[0], ==, 0xc000000000000000ULL);
+    g_assert_cmphex(env.fr[8].raw[1], ==, 0x2ffff);
+
+    ia64_write_gr(&env, 17, 0x4004000000000000ULL);
+    g_assert_true(ia64_slot_is_m_setf(IA64_SLOT_TYPE_M,
+                                      setf_d_f8_r17_raw));
+    g_assert_true(ia64_exec_m_setf(&env, setf_d_f8_r17_raw));
+    g_assert_cmphex(env.fr[8].raw[0], ==, 0xa000000000000000ULL);
+    g_assert_cmphex(env.fr[8].raw[1], ==, 0x10000);
+}
+
+static void test_m_unit_setf_nat_source(void)
+{
+    const uint64_t setf_d_f8_r17_raw = 0x0c7c8022200ULL;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.nat.gr_nat[17 / 64] |= 1ULL << (17 % 64);
+
+    g_assert_true(ia64_slot_is_m_setf(IA64_SLOT_TYPE_M,
+                                      setf_d_f8_r17_raw));
+    g_assert_true(ia64_exec_m_setf(&env, setf_d_f8_r17_raw));
+    g_assert_cmphex(env.fr[8].raw[0], ==, 0);
+    g_assert_cmphex(env.fr[8].raw[1], ==, 0x1fffe);
+}
+
 static void test_m_unit_getf_significand(void)
 {
     const uint64_t getf_sig_r21_f10_raw = 0x08708014540ULL;
@@ -3115,6 +3169,12 @@ int main(int argc, char **argv)
                     test_addl_immediate_form);
     g_test_add_func("/ia64-exec-smoke/m-unit-setf-significand",
                     test_m_unit_setf_significand);
+    g_test_add_func("/ia64-exec-smoke/m-unit-setf-exp-frontier",
+                    test_m_unit_setf_exp_frontier);
+    g_test_add_func("/ia64-exec-smoke/m-unit-setf-single-double",
+                    test_m_unit_setf_single_and_double);
+    g_test_add_func("/ia64-exec-smoke/m-unit-setf-nat-source",
+                    test_m_unit_setf_nat_source);
     g_test_add_func("/ia64-exec-smoke/m-unit-getf-significand",
                     test_m_unit_getf_significand);
     g_test_add_func("/ia64-exec-smoke/floating-spill-format-constants",

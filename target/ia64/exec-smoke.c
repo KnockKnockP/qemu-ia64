@@ -729,6 +729,52 @@ static void ia64_write_fr_natval(CPUIA64State *env, uint32_t reg)
     ia64_write_fr_parts(env, reg, false, IA64_FR_NATVAL_EXPONENT, 0);
 }
 
+static void ia64_write_fr_from_ieee_bits(CPUIA64State *env, uint32_t reg,
+                                         bool sign, uint32_t exponent,
+                                         uint32_t max_exponent,
+                                         uint32_t exponent_bias,
+                                         uint64_t fraction,
+                                         unsigned fraction_bits)
+{
+    uint64_t significand;
+    uint32_t register_exponent;
+
+    if (exponent == 0) {
+        if (fraction == 0) {
+            ia64_write_fr_parts(env, reg, sign, IA64_FR_SPECIAL_EXPONENT, 0);
+            return;
+        }
+        register_exponent = IA64_FR_EXPONENT_BIAS - exponent_bias + 1;
+        significand = fraction << (63 - fraction_bits);
+    } else if (exponent == max_exponent) {
+        register_exponent = IA64_FR_SPECIAL_EXPONENT;
+        significand = IA64_FR_INTEGER_BIT |
+                      (fraction << (63 - fraction_bits));
+    } else {
+        register_exponent = IA64_FR_EXPONENT_BIAS + exponent - exponent_bias;
+        significand = IA64_FR_INTEGER_BIT |
+                      (fraction << (63 - fraction_bits));
+    }
+
+    ia64_write_fr_parts(env, reg, sign, register_exponent, significand);
+}
+
+static void ia64_write_fr_from_single_bits(CPUIA64State *env, uint32_t reg,
+                                           uint32_t bits)
+{
+    ia64_write_fr_from_ieee_bits(env, reg, (bits >> 31) != 0,
+                                 (bits >> 23) & 0xff, 0xff, 127,
+                                 bits & 0x7fffff, 23);
+}
+
+static void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
+                                           uint64_t bits)
+{
+    ia64_write_fr_from_ieee_bits(env, reg, (bits >> 63) != 0,
+                                 (bits >> 52) & 0x7ff, 0x7ff, 1023,
+                                 bits & 0x000fffffffffffffULL, 52);
+}
+
 static uint64_t ia64_float_to_fixed(double value, bool unsigned_form,
                                     bool truncate)
 {
@@ -3428,9 +3474,24 @@ bool ia64_exec_m_setf(CPUIA64State *env, uint64_t raw)
     r2 = (raw >> 13) & 0x7f;
     value = ia64_read_gr(env, r2);
 
+    if (ia64_read_gr_nat(env, r2)) {
+        ia64_write_fr_natval(env, f1);
+        return true;
+    }
+
     switch (format) {
     case 0:
         ia64_write_fr_parts(env, f1, false, IA64_FR_INTEGER_EXPONENT, value);
+        return true;
+    case 1:
+        ia64_write_fr_parts(env, f1, (value & (UINT64_C(1) << 17)) != 0,
+                            value & 0x1ffff, IA64_FR_INTEGER_BIT);
+        return true;
+    case 2:
+        ia64_write_fr_from_single_bits(env, f1, (uint32_t)value);
+        return true;
+    case 3:
+        ia64_write_fr_from_double_bits(env, f1, value);
         return true;
     default:
         return false;
