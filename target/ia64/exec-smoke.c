@@ -1697,7 +1697,9 @@ static bool ia64_timer_compare_due(CPUIA64State *env)
 {
     uint64_t vector;
 
-    if (!env || ia64_timer_vector_masked(env)) {
+    if (!env ||
+        !ia64_time_after_eq(env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM]) ||
+        ia64_timer_vector_masked(env)) {
         return false;
     }
 
@@ -1707,7 +1709,7 @@ static bool ia64_timer_compare_due(CPUIA64State *env)
         return false;
     }
 
-    return ia64_time_after_eq(env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM]);
+    return true;
 }
 
 void ia64_advance_itc(CPUIA64State *env, uint64_t ticks)
