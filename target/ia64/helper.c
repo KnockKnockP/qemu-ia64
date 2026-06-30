@@ -48,6 +48,11 @@ void HELPER(perf_tb_exit_chained)(void)
     IA64_PERF_INC(IA64_PERF_TB_EXIT_CHAINED);
 }
 
+void HELPER(perf_tb_exit_lookup_ptr)(void)
+{
+    IA64_PERF_INC(IA64_PERF_TB_EXIT_LOOKUP_PTR);
+}
+
 void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip)
 {
     CPUState *cpu = env_cpu(env);
@@ -4704,6 +4709,16 @@ static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
     }
 }
 
+static void ia64_rse_maybe_fill_restored_frame(CPUIA64State *env,
+                                               uint32_t count)
+{
+    if (count == 0 || env->rse.bspstore == 0 || env->rse.bsp == 0 ||
+        env->rse.bsp >= env->rse.bspstore) {
+        return;
+    }
+    ia64_rse_fill_restored_frame(env, count);
+}
+
 static void ia64_exec_loadrs(CPUIA64State *env)
 {
     uint64_t bytes = (env->rse.rsc >> 16) & 0x3fff;
@@ -6449,11 +6464,12 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         }
         ia64_exec_b_indirect_branch(env, raw, env->ip, next_ip);
         if (br_ret) {
-            ia64_rse_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
+            ia64_rse_maybe_fill_restored_frame(env,
+                                               (env->cfm >> 7) & 0x7f);
         }
         if (rfi_valid_ifs) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-            ia64_rse_fill_restored_frame(env, env->rse.sof);
+            ia64_rse_maybe_fill_restored_frame(env, env->rse.sof);
         }
         if (rfi) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
@@ -7038,11 +7054,12 @@ void HELPER(exec_bundle)(CPUIA64State *env,
             }
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {
-                ia64_rse_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
+                ia64_rse_maybe_fill_restored_frame(env,
+                                                   (env->cfm >> 7) & 0x7f);
             }
             if (rfi_valid_ifs) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-                ia64_rse_fill_restored_frame(env, env->rse.sof);
+                ia64_rse_maybe_fill_restored_frame(env, env->rse.sof);
             }
             if (rfi) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);

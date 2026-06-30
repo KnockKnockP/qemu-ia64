@@ -97,6 +97,7 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT] = "tcg.fallback.plan.bailout",
     [IA64_PERF_TB_EXIT_DIRECT_BRANCH] = "tb.exit.direct_branch",
     [IA64_PERF_TB_EXIT_CHAINED] = "tb.exit.chained",
+    [IA64_PERF_TB_EXIT_LOOKUP_PTR] = "tb.exit.lookup_ptr",
     [IA64_PERF_TB_EXIT_MAIN_LOOP] = "tb.exit.main_loop",
     [IA64_PERF_INTERP_SLOT_ITERATION] = "interp.slot.iteration",
     [IA64_PERF_INTERP_SLOT_EXECUTED] = "interp.slot.executed",

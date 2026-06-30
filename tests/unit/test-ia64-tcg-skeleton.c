@@ -119,6 +119,8 @@ static void test_helper_flags_are_conservative(void)
                     ==, TCG_CALL_NO_RWG);
     g_assert_cmphex(helper_flags_for("perf_tb_exit_chained"),
                     ==, TCG_CALL_NO_RWG);
+    g_assert_cmphex(helper_flags_for("perf_tb_exit_lookup_ptr"),
+                    ==, TCG_CALL_NO_RWG);
     g_assert_cmphex(helper_flags_for("perf_tb_exit_main_loop"),
                     ==, TCG_CALL_NO_RWG);
     g_assert_cmphex(helper_flags_for("perf_tb_exec"), ==, TCG_CALL_NO_RWG);
