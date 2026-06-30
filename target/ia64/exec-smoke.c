@@ -1535,7 +1535,22 @@ bool ia64_exec_m_mov_to_region_register(CPUIA64State *env, uint64_t raw)
     selector = ia64_read_gr(env, selector_reg);
     region = (selector >> 61) & 0x7;
     env->rr[region] = ia64_read_gr(env, source) & IA64_RR_IMPLEMENTED_MASK;
-    ia64_translation_lookup_cache_flush(env);
+    /*
+     * Do NOT flush the translation lookup cache here. Linux reloads RR0-4 on
+     * every switch_mm, so flushing on each region-register write defeats the
+     * cache exactly during the fork/exec/exit churn where it matters most: the
+     * kernel runs ~90% of the time in region 5 (a constant RR5-7 RID), so its
+     * hot translations are needlessly re-walked after every context switch.
+     *
+     * The cache is keyed by RID (see ia64_entry_matches): a lookup with the new
+     * RID simply misses any entry left from a previous RID and re-walks, so a
+     * stale RID never produces a false hit. Cached entries for the *new* RID
+     * remain valid because an RR write changes which context is current, not
+     * the modeled TC/TR mappings of any context. The only way a RID is reused
+     * for a different mapping is wrap_mmu_context(), which issues flush_tlb_all
+     * (ptc.e) -- and the ptc purge path still flushes the lookup cache. Genuine
+     * mapping changes (itc/itr/ptc/ptr) also still flush it.
+     */
     return true;
 }
 
