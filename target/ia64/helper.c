@@ -2108,8 +2108,38 @@ static bool pal_uses_static_calling_convention(uint64_t function_id)
     return !ia64_pal_uses_stacked_calling_convention(function_id);
 }
 
-static IA64FirmwareResult dispatch_sal(uint64_t function_id)
+static IA64FirmwareResult sal_pci_config_read(uint64_t size)
 {
+    switch (size) {
+    case 1:
+        return firmware_success(0xff, 0, 0);
+    case 2:
+        return firmware_success(0xffff, 0, 0);
+    case 4:
+        return firmware_success(0xffffffff, 0, 0);
+    default:
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+}
+
+static IA64FirmwareResult sal_pci_config_write(uint64_t size)
+{
+    switch (size) {
+    case 1:
+    case 2:
+    case 4:
+        return firmware_success(0, 0, 0);
+    default:
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+}
+
+static IA64FirmwareResult dispatch_sal(uint64_t function_id, uint64_t arg0,
+                                       uint64_t arg1, uint64_t arg2)
+{
+    (void)arg0;
+    (void)arg2;
+
     switch (function_id) {
     case IA64_SAL_GET_STATE_INFO:
     case IA64_SAL_CLEAR_STATE_INFO:
@@ -2127,7 +2157,9 @@ static IA64FirmwareResult dispatch_sal(uint64_t function_id)
     case IA64_SAL_FREQUENCY_BASE:
         return firmware_success(IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY, 0, 0);
     case IA64_SAL_PCI_CONFIG_READ:
+        return sal_pci_config_read(arg1);
     case IA64_SAL_PCI_CONFIG_WRITE:
+        return sal_pci_config_write(arg1);
     default:
         return firmware_status(IA64_FIRMWARE_STATUS_UNIMPLEMENTED);
     }
@@ -2362,7 +2394,7 @@ static bool dispatch_firmware_gate(CPUIA64State *env, uint64_t gate_ip)
         arg0 = ia64_read_gr(env, 33);
         arg1 = ia64_read_gr(env, 34);
         arg2 = ia64_read_gr(env, 35);
-        result = dispatch_sal(function_id);
+        result = dispatch_sal(function_id, arg0, arg1, arg2);
         firmware_trace_call(env, "sal", sal_procedure_name(function_id),
                             function_id, arg0, arg1, arg2, result);
         firmware_write_result(env, result, true);
