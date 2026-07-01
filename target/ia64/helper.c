@@ -3919,10 +3919,10 @@ static uint64_t efi_file_open(CPUIA64State *env)
         .status = VIBTANIUM_EFI_STORAGE_NOT_FOUND,
         .message = "path has not been opened",
     };
-    VibtaniumEfiFile storage_file;
     g_autofree char *source = g_malloc0(384);
     uint8_t *data = NULL;
     size_t size = 0;
+    bool is_directory = false;
     EfiGuestFile *file;
 
     if (!parent || new_handle_out == 0 || name_ptr == 0) {
@@ -3952,42 +3952,9 @@ static uint64_t efi_file_open(CPUIA64State *env)
         return VIBTANIUM_EFI_NOT_FOUND;
     }
 
-    if (vibtanium_efi_iso9660_find_path(&efi_boot_media, storage_path,
-                                        &storage_file, &report,
-                                        &local_err)) {
-        if (storage_file.is_directory) {
-            file = efi_create_file_node(env, path, true, NULL, 0);
-            if (!file) {
-                return VIBTANIUM_EFI_OUT_OF_RESOURCES;
-            }
-
-            efi_guest_stq(env, new_handle_out, file->address);
-            trace_ia64_efi_file_open_result(env->ip, storage_path,
-                                            "success-directory",
-                                            file->address, 0, "directory");
-            if (efi_trace_enabled()) {
-                fprintf(stderr, "[efi-file] open dir='%s' handle=0x%016"
-                        PRIx64 "\n",
-                        path, file->address);
-            }
-            return VIBTANIUM_EFI_SUCCESS;
-        }
-
-        if (vibtanium_efi_iso9660_read_file(&efi_boot_media, &storage_file,
-                                            &data, &size, &report,
-                                            &local_err)) {
-            g_snprintf(source, 384, "%s:%s",
-                       efi_boot_media.name ? efi_boot_media.name : "<unnamed>",
-                       storage_path);
-        }
-    }
-    error_free(local_err);
-    local_err = NULL;
-
-    if (!data &&
-        !vibtanium_efi_cdrom_read_path(&efi_boot_media, storage_path, &data,
-                                       &size, source, 384, &report,
-                                       &local_err)) {
+    if (!vibtanium_efi_media_open_path(&efi_boot_media, storage_path,
+                                       &is_directory, &data, &size, source,
+                                       384, &report, &local_err)) {
         uint64_t status = efi_storage_status_to_efi(report.status);
 
         trace_ia64_efi_file_open_result(
@@ -4000,6 +3967,24 @@ static uint64_t efi_file_open(CPUIA64State *env)
         }
         error_free(local_err);
         return status;
+    }
+
+    if (is_directory) {
+        file = efi_create_file_node(env, path, true, NULL, 0);
+        if (!file) {
+            return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+        }
+
+        efi_guest_stq(env, new_handle_out, file->address);
+        trace_ia64_efi_file_open_result(env->ip, storage_path,
+                                        "success-directory",
+                                        file->address, 0, source);
+        if (efi_trace_enabled()) {
+            fprintf(stderr, "[efi-file] open dir='%s' handle=0x%016"
+                    PRIx64 "\n",
+                    path, file->address);
+        }
+        return VIBTANIUM_EFI_SUCCESS;
     }
 
     if (efi_trace_enabled()) {

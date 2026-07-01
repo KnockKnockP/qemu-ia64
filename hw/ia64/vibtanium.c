@@ -16,6 +16,7 @@
 #include "hw/input/i8042.h"
 #include "hw/core/qdev-properties.h"
 #include "system/block-backend.h"
+#include "system/block-backend-io.h"
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
@@ -780,7 +781,7 @@ static bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
     const char *kind = entry ? "boot-entry" : "discovery";
     const char *boot_path = path && *path ? path : VIBTANIUM_EFI_FALLBACK_PATH;
 
-    if (!vibtanium_efi_cdrom_read_path(dev, boot_path,
+    if (!vibtanium_efi_media_read_path(dev, boot_path,
                                        &file_data, &file_size, source,
                                        sizeof(source), &report, &local_err)) {
         warn_report("vibtanium EFI %s media=%s path=%s status=%s "
@@ -861,7 +862,7 @@ static bool vibtanium_try_boot_entry_on_media(VibtaniumMachineState *vms,
         VibtaniumBlockReadOpaque *read_opaque;
         VibtaniumEfiBlockDevice dev;
 
-        if (!available || !cdrom || length <= 0) {
+        if (!available || length <= 0) {
             continue;
         }
 
@@ -870,8 +871,8 @@ static bool vibtanium_try_boot_entry_on_media(VibtaniumMachineState *vms,
         dev = (VibtaniumEfiBlockDevice) {
             .name = name && *name ? name : "<unnamed>",
             .size = length,
-            .block_size = 2048,
-            .read_only = true,
+            .block_size = cdrom ? 2048 : 512,
+            .read_only = !blk_is_writable(blk),
             .removable = cdrom,
             .cdrom = cdrom,
             .read = vibtanium_block_pread,
@@ -926,7 +927,7 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
 {
     BlockBackend *blk = NULL;
     unsigned media_index = 0;
-    unsigned cdrom_candidates = 0;
+    unsigned media_candidates = 0;
 
     while ((blk = blk_next(blk)) != NULL) {
         DriveInfo *dinfo = blk_legacy_dinfo(blk);
@@ -938,8 +939,8 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
         VibtaniumEfiBlockDevice dev = {
             .name = name && *name ? name : "<unnamed>",
             .size = length > 0 ? length : 0,
-            .block_size = 2048,
-            .read_only = true,
+            .block_size = cdrom ? 2048 : 512,
+            .read_only = !blk_is_writable(blk),
             .removable = cdrom,
             .cdrom = cdrom,
             .read = vibtanium_block_pread,
@@ -949,18 +950,12 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
         read_opaque->blk = blk;
 
         warn_report("vibtanium EFI media[%u] name=%s available=%s cdrom=%s "
-                    "bytes=%" PRId64,
+                    "writable=%s bytes=%" PRId64,
                     media_index++, dev.name, available ? "yes" : "no",
-                    cdrom ? "yes" : "no", length);
+                    cdrom ? "yes" : "no",
+                    dev.read_only ? "no" : "yes", length);
 
         if (!available) {
-            g_free(read_opaque);
-            continue;
-        }
-        if (!cdrom) {
-            warn_report("vibtanium EFI media %s skipped: not read-only "
-                        "CD-ROM media",
-                        dev.name);
             g_free(read_opaque);
             continue;
         }
@@ -972,7 +967,7 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
             continue;
         }
 
-        cdrom_candidates++;
+        media_candidates++;
         if (vibtanium_try_media_efi_app(vms, machine, &dev,
                                         VIBTANIUM_EFI_FALLBACK_PATH, NULL)) {
             g_free(read_opaque);
@@ -982,9 +977,9 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
     }
 
     warn_report("vibtanium EFI discovery found no boot app path=%s "
-                "media=%u cdrom-candidates=%u",
+                "media=%u media-candidates=%u",
                 VIBTANIUM_EFI_FALLBACK_PATH, media_index,
-                cdrom_candidates);
+                media_candidates);
     return false;
 }
 
@@ -1094,13 +1089,14 @@ static void vibtanium_boot_manager_set_status(
     va_end(ap);
 }
 
-static bool vibtanium_blk_cdrom_device(BlockBackend *blk,
+static bool vibtanium_blk_media_device(BlockBackend *blk,
                                        VibtaniumBlockReadOpaque **opaque_out,
                                        VibtaniumEfiBlockDevice *dev)
 {
     DriveInfo *dinfo;
     const char *name;
     int64_t length;
+    bool cdrom;
     VibtaniumBlockReadOpaque *read_opaque;
 
     if (!blk || !blk_is_available(blk)) {
@@ -1108,9 +1104,7 @@ static bool vibtanium_blk_cdrom_device(BlockBackend *blk,
     }
 
     dinfo = blk_legacy_dinfo(blk);
-    if (!dinfo || !dinfo->media_cd) {
-        return false;
-    }
+    cdrom = dinfo && dinfo->media_cd;
 
     length = blk_getlength(blk);
     if (length <= 0) {
@@ -1123,10 +1117,10 @@ static bool vibtanium_blk_cdrom_device(BlockBackend *blk,
     *dev = (VibtaniumEfiBlockDevice) {
         .name = name && *name ? name : "<unnamed>",
         .size = length,
-        .block_size = 2048,
-        .read_only = true,
-        .removable = true,
-        .cdrom = true,
+        .block_size = cdrom ? 2048 : 512,
+        .read_only = !blk_is_writable(blk),
+        .removable = cdrom,
+        .cdrom = cdrom,
         .read = vibtanium_block_pread,
         .opaque = read_opaque,
     };
@@ -1197,12 +1191,12 @@ static void vibtanium_boot_manager_add_fallback_choices(
         size_t file_size = 0;
         Error *local_err = NULL;
 
-        if (!vibtanium_blk_cdrom_device(blk, &read_opaque, &dev)) {
+        if (!vibtanium_blk_media_device(blk, &read_opaque, &dev)) {
             continue;
         }
 
         source = g_malloc0(384);
-        if (vibtanium_efi_cdrom_read_path(&dev, VIBTANIUM_EFI_FALLBACK_PATH,
+        if (vibtanium_efi_media_read_path(&dev, VIBTANIUM_EFI_FALLBACK_PATH,
                                           &file_data, &file_size, source,
                                           384, &report, &local_err)) {
             VibtaniumEfiBootChoice *choice =
@@ -1212,7 +1206,8 @@ static void vibtanium_boot_manager_add_fallback_choices(
             g_strlcpy(choice->loader_path, VIBTANIUM_EFI_FALLBACK_PATH,
                       sizeof(choice->loader_path));
             g_snprintf(choice->label, sizeof(choice->label),
-                       "Removable media  %s", dev.name);
+                       "%s media  %s", dev.cdrom ? "Removable" : "Fixed",
+                       dev.name);
             g_snprintf(choice->detail, sizeof(choice->detail),
                        "%s (%zu bytes)", source, file_size);
             g_ptr_array_add(bm->choices, choice);
@@ -1358,7 +1353,7 @@ static void vibtanium_boot_manager_draw_menu(VibtaniumEfiBootManagerState *bm)
     if (!bm->choices || bm->choices->len == 0) {
         vibtanium_boot_manager_print_line(
             7, VIBTANIUM_EFI_BOOT_MANAGER_ERROR,
-            "No EFI boot entries or removable fallback applications found.");
+            "No EFI boot entries or media fallback applications found.");
     } else {
         size_t visible = MIN((size_t)7, bm->choices->len);
         size_t top = 0;
@@ -1584,7 +1579,7 @@ static bool vibtanium_boot_manager_boot_choice(
         VibtaniumBlockReadOpaque *read_opaque = NULL;
         VibtaniumEfiBlockDevice dev;
 
-        if (vibtanium_blk_cdrom_device(choice->blk, &read_opaque, &dev)) {
+        if (vibtanium_blk_media_device(choice->blk, &read_opaque, &dev)) {
             warn_report("vibtanium EFI boot manager selected media=%s path=%s",
                         dev.name, choice->loader_path);
             ok = vibtanium_try_media_efi_app(vms, machine, &dev,
@@ -1780,7 +1775,7 @@ static void vibtanium_boot_manager_add_selected_fallback(
     choice = g_ptr_array_index(bm->choices, bm->selected);
     if (!vibtanium_boot_choice_is_fallback(choice)) {
         vibtanium_boot_manager_set_status(
-            bm, "Select a discovered removable-media entry to add.");
+            bm, "Select a discovered media entry to add.");
         return;
     }
 
@@ -1792,7 +1787,7 @@ static void vibtanium_boot_manager_add_selected_fallback(
         return;
     }
 
-    g_snprintf(description, sizeof(description), "Removable %s",
+    g_snprintf(description, sizeof(description), "Media %s",
                blk_name(choice->blk));
     if (!vibtanium_efi_vars_write_boot_entry(
             id, description, choice->loader_path, NULL, 0, &local_err)) {

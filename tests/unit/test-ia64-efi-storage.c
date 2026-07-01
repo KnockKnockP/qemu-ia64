@@ -8,7 +8,7 @@
 #include "hw/ia64/efi-storage.h"
 
 #define ISO_SECTOR_SIZE 2048
-#define ISO_SECTORS 80
+#define ISO_SECTORS 256
 #define PVD_SECTOR 16
 #define ROOT_SECTOR 20
 #define EFI_SECTOR 21
@@ -16,6 +16,14 @@
 #define APP_SECTOR 23
 #define CATALOG_SECTOR 39
 #define BOOT_IMAGE_SECTOR 40
+#define FAT_TOTAL_SECTORS 5000
+#define FAT_VOLUME_BYTES (64 * 1024)
+#define FAT32_TOTAL_SECTORS 70000
+#define FAT32_SECTORS_PER_FAT 600
+#define FAT32_VOLUME_BYTES (320 * 1024)
+#define MBR_FAT_LBA 4
+#define GPT_ENTRIES_LBA 2
+#define GPT_FAT_LBA 34
 
 typedef struct MemoryIso {
     uint8_t bytes[ISO_SECTORS * ISO_SECTOR_SIZE];
@@ -40,6 +48,13 @@ static void store_le32(uint8_t *p, uint32_t value)
     p[1] = value >> 8;
     p[2] = value >> 16;
     p[3] = value >> 24;
+}
+
+static void store_le64(uint8_t *p, uint64_t value)
+{
+    for (unsigned i = 0; i < 8; i++) {
+        p[i] = value >> (i * 8);
+    }
 }
 
 static void store_be32(uint8_t *p, uint32_t value)
@@ -162,52 +177,19 @@ static void make_iso(MemoryIso *iso)
     memcpy(iso->bytes + APP_SECTOR * ISO_SECTOR_SIZE, "IA64", 4);
 }
 
-static void make_eltorito_fat_iso(MemoryIso *iso)
+static void make_fat16_volume(uint8_t *image, size_t image_size)
 {
-    uint8_t *pvd;
-    uint8_t *boot_record;
-    uint8_t *catalog;
-    uint8_t *image;
     uint8_t *fat;
     uint8_t *root;
     uint8_t *efi_dir;
     uint8_t *boot_dir;
-    uint32_t image_base = BOOT_IMAGE_SECTOR * ISO_SECTOR_SIZE;
     uint32_t fat_offset = 512;
     uint32_t root_offset = (1 + 20) * 512;
     uint32_t data_offset = (1 + 20 + 1) * 512;
-    static const uint8_t root_name[] = { 0 };
 
-    memset(iso, 0, sizeof(*iso));
-    iso->size = sizeof(iso->bytes);
+    g_assert_cmpuint(image_size, >=, FAT_VOLUME_BYTES);
+    memset(image, 0, FAT_VOLUME_BYTES);
 
-    pvd = iso->bytes + PVD_SECTOR * ISO_SECTOR_SIZE;
-    pvd[0] = 1;
-    memcpy(pvd + 1, "CD001", 5);
-    pvd[6] = 1;
-    write_record(pvd, 156, ROOT_SECTOR, ISO_SECTOR_SIZE, 0x02,
-                 root_name, sizeof(root_name));
-
-    add_dot_records(iso->bytes + ROOT_SECTOR * ISO_SECTOR_SIZE,
-                    ROOT_SECTOR, ROOT_SECTOR);
-
-    boot_record = iso->bytes + (PVD_SECTOR + 1) * ISO_SECTOR_SIZE;
-    boot_record[0] = 0;
-    memcpy(boot_record + 1, "CD001", 5);
-    boot_record[6] = 1;
-    memcpy(boot_record + 7, "EL TORITO SPECIFICATION", 23);
-    store_le32(boot_record + 0x47, CATALOG_SECTOR);
-
-    catalog = iso->bytes + CATALOG_SECTOR * ISO_SECTOR_SIZE;
-    catalog[0] = 1;
-    catalog[0x1e] = 0x55;
-    catalog[0x1f] = 0xaa;
-    catalog[0x20] = 0x88;
-    catalog[0x21] = 0x00;
-    store_le16(catalog + 0x26, 16);
-    store_le32(catalog + 0x28, BOOT_IMAGE_SECTOR);
-
-    image = iso->bytes + image_base;
     image[0] = 0xeb;
     image[1] = 0x3c;
     image[2] = 0x90;
@@ -217,7 +199,7 @@ static void make_eltorito_fat_iso(MemoryIso *iso)
     store_le16(image + 14, 1);
     image[16] = 1;
     store_le16(image + 17, 16);
-    store_le16(image + 19, 5000);
+    store_le16(image + 19, FAT_TOTAL_SECTORS);
     image[21] = 0xf8;
     store_le16(image + 22, 20);
     image[510] = 0x55;
@@ -252,6 +234,170 @@ static void make_eltorito_fat_iso(MemoryIso *iso)
     memcpy(image + data_offset + 3 * 512, "CONF", 4);
 }
 
+static void make_fat32_volume(uint8_t *image, size_t image_size)
+{
+    uint8_t *fat;
+    uint8_t *root;
+    uint8_t *efi_dir;
+    uint8_t *boot_dir;
+    uint32_t fat_offset = 512;
+    uint32_t data_offset = (1 + FAT32_SECTORS_PER_FAT) * 512;
+
+    g_assert_cmpuint(image_size, >=, FAT32_VOLUME_BYTES);
+    memset(image, 0, FAT32_VOLUME_BYTES);
+
+    image[0] = 0xeb;
+    image[1] = 0x58;
+    image[2] = 0x90;
+    memcpy(image + 3, "mkdosfs", 7);
+    store_le16(image + 11, 512);
+    image[13] = 1;
+    store_le16(image + 14, 1);
+    image[16] = 1;
+    store_le16(image + 17, 0);
+    store_le16(image + 19, 0);
+    image[21] = 0xf8;
+    store_le16(image + 22, 0);
+    store_le32(image + 32, FAT32_TOTAL_SECTORS);
+    store_le32(image + 36, FAT32_SECTORS_PER_FAT);
+    store_le32(image + 44, 2);
+    image[510] = 0x55;
+    image[511] = 0xaa;
+
+    fat = image + fat_offset;
+    store_le32(fat + 0 * 4, 0x0ffffff8);
+    store_le32(fat + 1 * 4, 0xffffffff);
+    store_le32(fat + 2 * 4, 0x0fffffff);
+    store_le32(fat + 3 * 4, 0x0fffffff);
+    store_le32(fat + 4 * 4, 0x0fffffff);
+    store_le32(fat + 5 * 4, 0x0fffffff);
+    store_le32(fat + 6 * 4, 0x0fffffff);
+
+    root = image + data_offset;
+    write_fat_entry(root, 0, "EFI        ", 0x10, 3, 0);
+    write_fat_lfn_entry(root, 1, "elilo.conf");
+    write_fat_entry(root, 2, "ELILO~1CON", 0x20, 6, 4);
+
+    efi_dir = image + data_offset + 512;
+    write_fat_entry(efi_dir, 0, ".          ", 0x10, 3, 0);
+    write_fat_entry(efi_dir, 1, "..         ", 0x10, 2, 0);
+    write_fat_entry(efi_dir, 2, "BOOT       ", 0x10, 4, 0);
+
+    boot_dir = image + data_offset + 2 * 512;
+    write_fat_entry(boot_dir, 0, ".          ", 0x10, 4, 0);
+    write_fat_entry(boot_dir, 1, "..         ", 0x10, 3, 0);
+    write_fat_entry(boot_dir, 2, "BOOTIA64EFI", 0x20, 5, 4);
+
+    memcpy(image + data_offset + 3 * 512, "IA64", 4);
+    memcpy(image + data_offset + 4 * 512, "CONF", 4);
+}
+
+static void make_eltorito_fat_iso(MemoryIso *iso)
+{
+    uint8_t *pvd;
+    uint8_t *boot_record;
+    uint8_t *catalog;
+    uint8_t *image;
+    uint32_t image_base = BOOT_IMAGE_SECTOR * ISO_SECTOR_SIZE;
+    static const uint8_t root_name[] = { 0 };
+
+    memset(iso, 0, sizeof(*iso));
+    iso->size = sizeof(iso->bytes);
+
+    pvd = iso->bytes + PVD_SECTOR * ISO_SECTOR_SIZE;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    write_record(pvd, 156, ROOT_SECTOR, ISO_SECTOR_SIZE, 0x02,
+                 root_name, sizeof(root_name));
+
+    add_dot_records(iso->bytes + ROOT_SECTOR * ISO_SECTOR_SIZE,
+                    ROOT_SECTOR, ROOT_SECTOR);
+
+    boot_record = iso->bytes + (PVD_SECTOR + 1) * ISO_SECTOR_SIZE;
+    boot_record[0] = 0;
+    memcpy(boot_record + 1, "CD001", 5);
+    boot_record[6] = 1;
+    memcpy(boot_record + 7, "EL TORITO SPECIFICATION", 23);
+    store_le32(boot_record + 0x47, CATALOG_SECTOR);
+
+    catalog = iso->bytes + CATALOG_SECTOR * ISO_SECTOR_SIZE;
+    catalog[0] = 1;
+    catalog[0x1e] = 0x55;
+    catalog[0x1f] = 0xaa;
+    catalog[0x20] = 0x88;
+    catalog[0x21] = 0x00;
+    store_le16(catalog + 0x26, 16);
+    store_le32(catalog + 0x28, BOOT_IMAGE_SECTOR);
+
+    image = iso->bytes + image_base;
+    make_fat16_volume(image, iso->size - image_base);
+}
+
+static void make_raw_fat_disk(MemoryIso *iso)
+{
+    memset(iso, 0, sizeof(*iso));
+    iso->size = sizeof(iso->bytes);
+    make_fat16_volume(iso->bytes, iso->size);
+}
+
+static void make_mbr_fat_disk(MemoryIso *iso)
+{
+    uint8_t *part;
+
+    memset(iso, 0, sizeof(*iso));
+    iso->size = sizeof(iso->bytes);
+    iso->bytes[510] = 0x55;
+    iso->bytes[511] = 0xaa;
+
+    part = iso->bytes + 446;
+    part[4] = 0xef;
+    store_le32(part + 8, MBR_FAT_LBA);
+    store_le32(part + 12, FAT_TOTAL_SECTORS);
+    make_fat16_volume(iso->bytes + MBR_FAT_LBA * 512,
+                      iso->size - MBR_FAT_LBA * 512);
+}
+
+static void make_gpt_fat32_disk(MemoryIso *iso)
+{
+    uint8_t *pmbr;
+    uint8_t *header;
+    uint8_t *entry;
+    static const uint8_t esp_guid[16] = {
+        0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+        0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+    };
+
+    memset(iso, 0, sizeof(*iso));
+    iso->size = sizeof(iso->bytes);
+
+    pmbr = iso->bytes;
+    pmbr[446 + 4] = 0xee;
+    store_le32(pmbr + 446 + 8, 1);
+    store_le32(pmbr + 446 + 12, (uint32_t)(iso->size / 512 - 1));
+    pmbr[510] = 0x55;
+    pmbr[511] = 0xaa;
+
+    header = iso->bytes + 512;
+    memcpy(header, "EFI PART", 8);
+    store_le32(header + 8, 0x00010000);
+    store_le32(header + 12, 92);
+    store_le64(header + 24, 1);
+    store_le64(header + 32, iso->size / 512 - 1);
+    store_le64(header + 40, GPT_FAT_LBA);
+    store_le64(header + 48, iso->size / 512 - 1);
+    store_le64(header + 72, GPT_ENTRIES_LBA);
+    store_le32(header + 80, 4);
+    store_le32(header + 84, 128);
+
+    entry = iso->bytes + GPT_ENTRIES_LBA * 512;
+    memcpy(entry, esp_guid, sizeof(esp_guid));
+    store_le64(entry + 32, GPT_FAT_LBA);
+    store_le64(entry + 40, iso->size / 512 - 1);
+    make_fat32_volume(iso->bytes + GPT_FAT_LBA * 512,
+                      iso->size - GPT_FAT_LBA * 512);
+}
+
 static int memory_iso_read(void *opaque, uint64_t offset, uint32_t bytes,
                            void *buffer, Error **errp)
 {
@@ -275,6 +421,20 @@ static void init_device(VibtaniumEfiBlockDevice *dev, MemoryIso *iso)
         .read_only = true,
         .removable = true,
         .cdrom = true,
+        .read = memory_iso_read,
+        .opaque = iso,
+    };
+}
+
+static void init_disk_device(VibtaniumEfiBlockDevice *dev, MemoryIso *iso)
+{
+    *dev = (VibtaniumEfiBlockDevice) {
+        .name = "memory.disk",
+        .size = iso->size,
+        .block_size = 512,
+        .read_only = false,
+        .removable = false,
+        .cdrom = false,
         .read = memory_iso_read,
         .opaque = iso,
     };
@@ -385,7 +545,7 @@ static void test_cdrom_read_path_uses_eltorito_fat(void)
     g_assert_cmpuint(size, ==, 4);
     g_assert_cmpmem(data, size, "IA64", 4);
     g_assert_nonnull(strstr(source, "eltorito"));
-    g_assert_nonnull(strstr(report.message, "El Torito FAT16"));
+    g_assert_nonnull(strstr(report.message, "FAT16"));
 }
 
 static void test_cdrom_read_path_uses_eltorito_fat_lfn(void)
@@ -410,6 +570,98 @@ static void test_cdrom_read_path_uses_eltorito_fat_lfn(void)
     g_assert_nonnull(strstr(source, "eltorito"));
 }
 
+static void test_disk_read_path_uses_raw_fat(void)
+{
+    MemoryIso iso;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    char source[256];
+    Error *err = NULL;
+
+    make_raw_fat_disk(&iso);
+    init_disk_device(&dev, &iso);
+
+    g_assert_true(vibtanium_efi_media_read_path(
+                      &dev, VIBTANIUM_EFI_FALLBACK_PATH, &data, &size,
+                      source, sizeof(source), &report, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(size, ==, 4);
+    g_assert_cmpmem(data, size, "IA64", 4);
+    g_assert_nonnull(strstr(source, "fat@0x0"));
+    g_assert_nonnull(strstr(report.message, "FAT16"));
+}
+
+static void test_disk_read_path_uses_mbr_fat(void)
+{
+    MemoryIso iso;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    char source[256];
+    Error *err = NULL;
+
+    make_mbr_fat_disk(&iso);
+    init_disk_device(&dev, &iso);
+
+    g_assert_true(vibtanium_efi_media_read_path(
+                      &dev, "/elilo.conf", &data, &size, source,
+                      sizeof(source), &report, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(size, ==, 4);
+    g_assert_cmpmem(data, size, "CONF", 4);
+    g_assert_nonnull(strstr(source, "mbr1-fat"));
+}
+
+static void test_disk_read_path_uses_gpt_esp(void)
+{
+    MemoryIso iso;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    char source[256];
+    Error *err = NULL;
+
+    make_gpt_fat32_disk(&iso);
+    init_disk_device(&dev, &iso);
+
+    g_assert_true(vibtanium_efi_media_read_path(
+                      &dev, VIBTANIUM_EFI_FALLBACK_PATH, &data, &size,
+                      source, sizeof(source), &report, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(size, ==, 4);
+    g_assert_cmpmem(data, size, "IA64", 4);
+    g_assert_nonnull(strstr(source, "gpt1-fat"));
+    g_assert_nonnull(strstr(report.message, "FAT32"));
+}
+
+static void test_media_open_path_reports_fat_directory(void)
+{
+    MemoryIso iso;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    bool is_directory = false;
+    char source[256];
+    Error *err = NULL;
+
+    make_raw_fat_disk(&iso);
+    init_disk_device(&dev, &iso);
+
+    g_assert_true(vibtanium_efi_media_open_path(
+                      &dev, "/EFI/BOOT", &is_directory, &data, &size,
+                      source, sizeof(source), &report, &err));
+    g_assert_null(err);
+    g_assert_true(is_directory);
+    g_assert_null(data);
+    g_assert_cmpuint(size, ==, 0);
+    g_assert_nonnull(strstr(source, "fat@0x0"));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -426,6 +678,14 @@ int main(int argc, char **argv)
                     test_cdrom_read_path_uses_eltorito_fat);
     g_test_add_func("/ia64-efi-storage/cdrom-read-path-uses-eltorito-fat-lfn",
                     test_cdrom_read_path_uses_eltorito_fat_lfn);
+    g_test_add_func("/ia64-efi-storage/disk-read-path-uses-raw-fat",
+                    test_disk_read_path_uses_raw_fat);
+    g_test_add_func("/ia64-efi-storage/disk-read-path-uses-mbr-fat",
+                    test_disk_read_path_uses_mbr_fat);
+    g_test_add_func("/ia64-efi-storage/disk-read-path-uses-gpt-esp",
+                    test_disk_read_path_uses_gpt_esp);
+    g_test_add_func("/ia64-efi-storage/media-open-path-reports-fat-directory",
+                    test_media_open_path_reports_fat_directory);
 
     return g_test_run();
 }

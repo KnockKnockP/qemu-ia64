@@ -67,5 +67,22 @@ bool vibtanium_efi_cdrom_read_path(VibtaniumEfiBlockDevice *dev,
                                    size_t source_size,
                                    VibtaniumEfiStorageReport *report,
                                    Error **errp);
+bool vibtanium_efi_media_open_path(VibtaniumEfiBlockDevice *dev,
+                                   const char *path,
+                                   bool *is_directory,
+                                   uint8_t **data,
+                                   size_t *size,
+                                   char *source,
+                                   size_t source_size,
+                                   VibtaniumEfiStorageReport *report,
+                                   Error **errp);
+bool vibtanium_efi_media_read_path(VibtaniumEfiBlockDevice *dev,
+                                   const char *path,
+                                   uint8_t **data,
+                                   size_t *size,
+                                   char *source,
+                                   size_t source_size,
+                                   VibtaniumEfiStorageReport *report,
+                                   Error **errp);
 
 #endif
