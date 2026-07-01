@@ -7,12 +7,16 @@
 #include "hw/char/serial-mm.h"
 #include "hw/core/cpu.h"
 #include "hw/core/loader.h"
+#include "hw/core/sysbus.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/vibtanium.h"
+#include "hw/input/i8042.h"
+#include "hw/core/qdev-properties.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
+#include "system/memory.h"
 #include "system/system.h"
 #include "target/ia64/exec-smoke.h"
 
@@ -23,16 +27,64 @@
 #define VIBTANIUM_IOSAPIC_VERSION    0x01
 #define VIBTANIUM_IOSAPIC_RTE_LOW(i)  (0x10 + (i) * 2)
 #define VIBTANIUM_IOSAPIC_RTE_HIGH(i) (0x11 + (i) * 2)
+#define VIBTANIUM_IOSAPIC_RTE_MASK    (1U << 16)
+#define VIBTANIUM_IOSAPIC_DELIVERY_MASK (7U << 8)
+#define VIBTANIUM_IOSAPIC_DELIVERY_FIXED 0
+#define VIBTANIUM_IOSAPIC_VECTOR_MASK 0xff
+#define VIBTANIUM_LEGACY_COM1_IRQ 4
+#define VIBTANIUM_LEGACY_I8042_KEYBOARD_IRQ 1
+#define VIBTANIUM_LEGACY_I8042_MOUSE_IRQ 12
+#define VIBTANIUM_I8042_MMIO_COMMAND_OFFSET 4
+#define VIBTANIUM_VGA_CRTC_REGISTER_COUNT 0x19
+
+static void vibtanium_iosapic_deliver_irq(VibtaniumMachineState *vms,
+                                          unsigned input)
+{
+    CPUIA64State *env = &vms->cpu->env;
+    uint32_t low;
+    uint32_t delivery_mode;
+    uint64_t vector;
+
+    if (input >= VIBTANIUM_IOSAPIC_REDIRECTION_COUNT) {
+        return;
+    }
+
+    low = vms->iosapic_rte_low[input];
+    delivery_mode = low & VIBTANIUM_IOSAPIC_DELIVERY_MASK;
+    vector = low & VIBTANIUM_IOSAPIC_VECTOR_MASK;
+
+    if ((low & VIBTANIUM_IOSAPIC_RTE_MASK) ||
+        delivery_mode != VIBTANIUM_IOSAPIC_DELIVERY_FIXED) {
+        return;
+    }
+
+    if (ia64_queue_external_interrupt(env, vector)) {
+        cpu_interrupt(CPU(vms->cpu), CPU_INTERRUPT_HARD);
+    }
+}
+
+static void vibtanium_iosapic_set_irq(void *opaque, int n, int level)
+{
+    VibtaniumMachineState *vms = opaque;
+    unsigned input = n;
+    bool old_level;
+
+    if (input >= VIBTANIUM_IOSAPIC_REDIRECTION_COUNT) {
+        return;
+    }
+
+    old_level = vms->iosapic_irq_level[input];
+    vms->iosapic_irq_level[input] = level != 0;
+
+    if (level && !old_level) {
+        vibtanium_iosapic_deliver_irq(vms, input);
+    }
+}
 
 static void vibtanium_uart_irq(void *opaque, int n, int level)
 {
-    /*
-     * The local SAPIC IPI path exists, but UART/IOSAPIC routing is still a
-     * later platform step.
-     */
-    (void)opaque;
     (void)n;
-    (void)level;
+    vibtanium_iosapic_set_irq(opaque, VIBTANIUM_LEGACY_COM1_IRQ, level);
 }
 
 static unsigned vibtanium_sparse_io_port(hwaddr offset)
@@ -76,10 +128,100 @@ static bool vibtanium_sparse_io_offset_valid(hwaddr offset, unsigned size)
     return true;
 }
 
+static bool vibtanium_vga_crtc_index_port(unsigned port)
+{
+    return port == VIBTANIUM_LEGACY_VGA_CRTC_INDEX_COLOR ||
+           port == VIBTANIUM_LEGACY_VGA_CRTC_INDEX_MONO;
+}
+
+static bool vibtanium_vga_crtc_data_port(unsigned port)
+{
+    return port == VIBTANIUM_LEGACY_VGA_CRTC_DATA_COLOR ||
+           port == VIBTANIUM_LEGACY_VGA_CRTC_DATA_MONO;
+}
+
+static bool vibtanium_vga_crtc_port(unsigned port)
+{
+    return vibtanium_vga_crtc_index_port(port) ||
+           vibtanium_vga_crtc_data_port(port);
+}
+
+static uint64_t vibtanium_vga_crtc_read(VibtaniumMachineState *vms,
+                                        unsigned port, unsigned size)
+{
+    if (size == 1) {
+        if (vibtanium_vga_crtc_index_port(port)) {
+            return vms->vga_crtc_index;
+        }
+        if (vibtanium_vga_crtc_data_port(port) &&
+            vms->vga_crtc_index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
+            return vms->vga_crtc[vms->vga_crtc_index];
+        }
+        return UINT8_MAX;
+    }
+
+    if (size == 2 && vibtanium_vga_crtc_index_port(port)) {
+        uint8_t data = UINT8_MAX;
+
+        if (vms->vga_crtc_index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
+            data = vms->vga_crtc[vms->vga_crtc_index];
+        }
+        return vms->vga_crtc_index | ((uint16_t)data << 8);
+    }
+
+    return vibtanium_io_port_default_read(size);
+}
+
+static bool vibtanium_vga_crtc_write(VibtaniumMachineState *vms,
+                                     unsigned port, uint64_t value,
+                                     unsigned size)
+{
+    if (size == 1) {
+        if (vibtanium_vga_crtc_index_port(port)) {
+            vms->vga_crtc_index = value & UINT8_MAX;
+            return true;
+        }
+        if (vibtanium_vga_crtc_data_port(port)) {
+            if (vms->vga_crtc_index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
+                vms->vga_crtc[vms->vga_crtc_index] = value & UINT8_MAX;
+            }
+            return true;
+        }
+    }
+
+    if (size == 2 && vibtanium_vga_crtc_index_port(port)) {
+        uint8_t index = value & UINT8_MAX;
+
+        vms->vga_crtc_index = index;
+        if (index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
+            vms->vga_crtc[index] = (value >> 8) & UINT8_MAX;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static bool vibtanium_i8042_port_offset(unsigned port, hwaddr *i8042_offset)
+{
+    switch (port) {
+    case VIBTANIUM_LEGACY_I8042_DATA_PORT:
+        *i8042_offset = 0;
+        return true;
+    case VIBTANIUM_LEGACY_I8042_COMMAND_PORT:
+        *i8042_offset = VIBTANIUM_I8042_MMIO_COMMAND_OFFSET;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static uint64_t vibtanium_io_port_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
     VibtaniumMachineState *vms = opaque;
+    hwaddr i8042_offset;
+    uint64_t value;
     unsigned port;
 
     if (!vibtanium_sparse_io_offset_valid(offset, size)) {
@@ -87,6 +229,15 @@ static uint64_t vibtanium_io_port_read(void *opaque, hwaddr offset,
     }
 
     port = vibtanium_sparse_io_port(offset);
+    if (size == 1 && vms->i8042_mmio &&
+        vibtanium_i8042_port_offset(port, &i8042_offset) &&
+        memory_region_dispatch_read(vms->i8042_mmio, i8042_offset, &value,
+                                    MO_8, MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
+        return value & UINT8_MAX;
+    }
+    if (vibtanium_vga_crtc_port(port)) {
+        return vibtanium_vga_crtc_read(vms, port, size);
+    }
     if (size == 1 && port >= VIBTANIUM_LEGACY_COM1_BASE &&
         port < VIBTANIUM_LEGACY_COM1_BASE + VIBTANIUM_LEGACY_COM1_SIZE) {
         return serial_io_ops.read(&vms->uart->serial,
@@ -100,6 +251,7 @@ static void vibtanium_io_port_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
     VibtaniumMachineState *vms = opaque;
+    hwaddr i8042_offset;
     unsigned port;
 
     if (!vibtanium_sparse_io_offset_valid(offset, size)) {
@@ -107,6 +259,17 @@ static void vibtanium_io_port_write(void *opaque, hwaddr offset,
     }
 
     port = vibtanium_sparse_io_port(offset);
+    if (size == 1 && vms->i8042_mmio &&
+        vibtanium_i8042_port_offset(port, &i8042_offset)) {
+        memory_region_dispatch_write(vms->i8042_mmio, i8042_offset,
+                                     value & UINT8_MAX, MO_8,
+                                     MEMTXATTRS_UNSPECIFIED);
+        return;
+    }
+    if (vibtanium_vga_crtc_port(port) &&
+        vibtanium_vga_crtc_write(vms, port, value, size)) {
+        return;
+    }
     if (size == 1 && port >= VIBTANIUM_LEGACY_COM1_BASE &&
         port < VIBTANIUM_LEGACY_COM1_BASE + VIBTANIUM_LEGACY_COM1_SIZE) {
         serial_io_ops.write(&vms->uart->serial,
@@ -127,6 +290,34 @@ static const MemoryRegionOps vibtanium_io_port_ops = {
         .max_access_size = 4,
     },
 };
+
+static void vibtanium_i8042_init(VibtaniumMachineState *vms)
+{
+    DeviceState *dev = qdev_new(TYPE_I8042_MMIO);
+
+    qdev_prop_set_uint64(dev, "mask", VIBTANIUM_I8042_MMIO_COMMAND_OFFSET);
+    qdev_prop_set_uint32(dev, "size", VIBTANIUM_I8042_MMIO_COMMAND_OFFSET + 1);
+
+    qemu_init_irq_child(OBJECT(vms), "i8042-kbd-irq",
+                        &vms->i8042_irq[I8042_KBD_IRQ],
+                        vibtanium_iosapic_set_irq, vms,
+                        VIBTANIUM_LEGACY_I8042_KEYBOARD_IRQ);
+    qemu_init_irq_child(OBJECT(vms), "i8042-mouse-irq",
+                        &vms->i8042_irq[I8042_MOUSE_IRQ],
+                        vibtanium_iosapic_set_irq, vms,
+                        VIBTANIUM_LEGACY_I8042_MOUSE_IRQ);
+    qdev_connect_gpio_out(dev, I8042_KBD_IRQ,
+                          &vms->i8042_irq[I8042_KBD_IRQ]);
+    qdev_connect_gpio_out(dev, I8042_MOUSE_IRQ,
+                          &vms->i8042_irq[I8042_MOUSE_IRQ]);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(dev), &error_fatal)) {
+        return;
+    }
+    vms->i8042 = dev;
+    vms->i8042_mmio = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+    object_unref(OBJECT(dev));
+}
 
 static uint64_t vibtanium_local_sapic_ipi_read(void *opaque, hwaddr offset,
                                                unsigned size)
@@ -222,6 +413,7 @@ static void vibtanium_iosapic_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
     VibtaniumMachineState *vms = opaque;
+    uint32_t old_low;
     unsigned index;
     bool high;
 
@@ -239,7 +431,14 @@ static void vibtanium_iosapic_write(void *opaque, hwaddr offset,
             if (high) {
                 vms->iosapic_rte_high[index] = value;
             } else {
+                old_low = vms->iosapic_rte_low[index];
                 vms->iosapic_rte_low[index] = value;
+                if ((old_low & VIBTANIUM_IOSAPIC_RTE_MASK) &&
+                    !(vms->iosapic_rte_low[index] &
+                      VIBTANIUM_IOSAPIC_RTE_MASK) &&
+                    vms->iosapic_irq_level[index]) {
+                    vibtanium_iosapic_deliver_irq(vms, index);
+                }
             }
         }
         break;
@@ -701,6 +900,11 @@ static void vibtanium_init(MachineState *machine)
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
 
     memory_region_add_subregion(sysmem, VIBTANIUM_RAM_BASE, machine->ram);
+    memory_region_init_ram(&vms->vga_legacy, NULL, "vibtanium.vga-legacy",
+                           VIBTANIUM_VGA_LEGACY_SIZE, &error_fatal);
+    memory_region_add_subregion_overlap(sysmem, VIBTANIUM_VGA_LEGACY_BASE,
+                                        &vms->vga_legacy, 1);
+
     kernel_alias_size = machine->ram_size - VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET;
     memory_region_init_alias(&vms->kernel_alias, OBJECT(machine),
                              "vibtanium.kernel-region-offset-alias",
@@ -728,6 +932,8 @@ static void vibtanium_init(MachineState *machine)
                         vibtanium_uart_irq, vms, 0);
     vms->uart = serial_mm_init(sysmem, VIBTANIUM_UART_BASE, 0, &vms->uart_irq,
                                115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    vibtanium_i8042_init(vms);
+
     memory_region_init_io(&vms->io_port_space, OBJECT(machine),
                           &vibtanium_io_port_ops, vms,
                           "vibtanium.io-port-space",
@@ -740,7 +946,8 @@ static void vibtanium_init(MachineState *machine)
                            VIBTANIUM_FRAMEBUFFER_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, VIBTANIUM_FRAMEBUFFER_BASE,
                                 &vms->framebuffer);
-    vibtanium_efi_console_init(&vms->framebuffer);
+    vibtanium_efi_console_init(&vms->framebuffer, &vms->vga_legacy,
+                               vms->vga_crtc);
 
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);

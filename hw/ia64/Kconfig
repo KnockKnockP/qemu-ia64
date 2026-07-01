@@ -2,4 +2,6 @@ config VIBTANIUM
     bool
     default y
     depends on IA64
+    select ISA_BUS
+    select PCKBD
     select SERIAL_MM

@@ -10,6 +10,7 @@
 #define TYPE_VIBTANIUM_MACHINE MACHINE_TYPE_NAME("vibtanium")
 OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumMachineState, VIBTANIUM_MACHINE)
 
+typedef struct DeviceState DeviceState;
 typedef struct SerialMM SerialMM;
 
 #define VIBTANIUM_RAM_BASE      UINT64_C(0x00000000)
@@ -23,8 +24,22 @@ typedef struct SerialMM SerialMM;
 #define VIBTANIUM_NVRAM_BASE    UINT64_C(0xffe00000)
 #define VIBTANIUM_FIRMWARE_BASE UINT64_C(0xfff00000)
 
+#define VIBTANIUM_VGA_LEGACY_BASE UINT64_C(0x000a0000)
+#define VIBTANIUM_VGA_LEGACY_SIZE UINT64_C(0x00020000)
+#define VIBTANIUM_VGA_TEXT_BASE   UINT64_C(0x000b8000)
+#define VIBTANIUM_VGA_TEXT_OFFSET \
+    (VIBTANIUM_VGA_TEXT_BASE - VIBTANIUM_VGA_LEGACY_BASE)
+#define VIBTANIUM_VGA_TEXT_SIZE   UINT64_C(0x00008000)
+#define VIBTANIUM_VGA_TEXT_COLUMNS 80
+#define VIBTANIUM_VGA_TEXT_ROWS 25
 #define VIBTANIUM_LEGACY_COM1_BASE 0x3f8
 #define VIBTANIUM_LEGACY_COM1_SIZE 8
+#define VIBTANIUM_LEGACY_I8042_DATA_PORT 0x60
+#define VIBTANIUM_LEGACY_I8042_COMMAND_PORT 0x64
+#define VIBTANIUM_LEGACY_VGA_CRTC_INDEX_COLOR 0x3d4
+#define VIBTANIUM_LEGACY_VGA_CRTC_DATA_COLOR 0x3d5
+#define VIBTANIUM_LEGACY_VGA_CRTC_INDEX_MONO 0x3b4
+#define VIBTANIUM_LEGACY_VGA_CRTC_DATA_MONO 0x3b5
 #define VIBTANIUM_IO_PORT_SIZE  (64 * MiB)
 #define VIBTANIUM_LOCAL_SAPIC_IPI_SIZE (1 * MiB)
 #define VIBTANIUM_IOSAPIC_SIZE  UINT64_C(0x100)
@@ -45,7 +60,11 @@ struct VibtaniumMachineState {
     IA64CPU *cpu;
     SerialMM *uart;
     IRQState uart_irq;
+    IRQState i8042_irq[2];
+    DeviceState *i8042;
+    MemoryRegion *i8042_mmio;
     MemoryRegion kernel_alias;
+    MemoryRegion vga_legacy;
     MemoryRegion io_port_space;
     MemoryRegion local_sapic_ipi;
     MemoryRegion iosapic;
@@ -56,6 +75,9 @@ struct VibtaniumMachineState {
     uint32_t iosapic_select;
     uint32_t iosapic_rte_low[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
     uint32_t iosapic_rte_high[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
+    bool iosapic_irq_level[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
+    uint8_t vga_crtc_index;
+    uint8_t vga_crtc[0x19];
 };
 
 #endif

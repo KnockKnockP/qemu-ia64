@@ -2993,11 +2993,27 @@ static unsigned efi_emit_runtime_and_loader(CPUIA64State *env, uint64_t map,
 static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
 {
     unsigned index = 0;
-    bool loader_emitted;
-    const EfiMemoryRange runtime_firmware = {
+    bool loader_emitted = false;
+    bool range_loader_emitted;
+    const EfiMemoryRange runtime_firmware_before_vga = {
         .type = EFI_RUNTIME_SERVICES_DATA,
         .address = EFI_RUNTIME_GRANULE_BASE,
-        .pages = EFI_RUNTIME_GRANULE_SIZE / EFI_PAGE_SIZE,
+        .pages = (VIBTANIUM_VGA_LEGACY_BASE - EFI_RUNTIME_GRANULE_BASE) /
+                 EFI_PAGE_SIZE,
+        .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+    };
+    const EfiMemoryRange vga_legacy = {
+        .type = EFI_MEMORY_MAPPED_IO,
+        .address = VIBTANIUM_VGA_LEGACY_BASE,
+        .pages = VIBTANIUM_VGA_LEGACY_SIZE / EFI_PAGE_SIZE,
+        .attributes = EFI_MEMORY_UC,
+    };
+    const EfiMemoryRange runtime_firmware_after_vga = {
+        .type = EFI_RUNTIME_SERVICES_DATA,
+        .address = VIBTANIUM_VGA_LEGACY_BASE + VIBTANIUM_VGA_LEGACY_SIZE,
+        .pages = (EFI_RUNTIME_GRANULE_SIZE -
+                  (VIBTANIUM_VGA_LEGACY_BASE +
+                   VIBTANIUM_VGA_LEGACY_SIZE)) / EFI_PAGE_SIZE,
         .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
     };
     const EfiMemoryRange loader_image = {
@@ -3043,8 +3059,17 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
         .attributes = EFI_MEMORY_UC,
     };
 
-    index = efi_emit_runtime_and_loader(env, map, index, &runtime_firmware,
-                                        &loader_image, &loader_emitted);
+    index = efi_emit_runtime_and_loader(env, map, index,
+                                        &runtime_firmware_before_vga,
+                                        &loader_image,
+                                        &range_loader_emitted);
+    loader_emitted |= range_loader_emitted;
+    index = efi_emit_memory_descriptor(env, map, index, &vga_legacy);
+    index = efi_emit_runtime_and_loader(env, map, index,
+                                        &runtime_firmware_after_vga,
+                                        &loader_image,
+                                        &range_loader_emitted);
+    loader_emitted |= range_loader_emitted;
     index = efi_emit_split_conventional(env, map, index,
                                         EFI_LOW_CONVENTIONAL_BASE,
                                         EFI_LOW_CONVENTIONAL_PAGES);
@@ -3148,6 +3173,8 @@ static uint64_t efi_exit_boot_services(CPUIA64State *env)
 
     trace_ia64_efi_exit_boot_services(env->ip, image_handle, map_key,
                                       efi_memory_map_key, "success");
+    vibtanium_efi_console_set_input_active(false);
+    vibtanium_efi_console_set_vga_text_active(true);
     return VIBTANIUM_EFI_SUCCESS;
 }
 

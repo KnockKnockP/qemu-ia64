@@ -180,7 +180,11 @@ void vibtanium_efi_set_linux_cmdline_append(const char *append);
 void vibtanium_efi_input_set_auto_enter(bool enabled);
 bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char);
 
-void vibtanium_efi_console_init(MemoryRegion *framebuffer);
+void vibtanium_efi_console_init(MemoryRegion *framebuffer,
+                                MemoryRegion *vga_legacy,
+                                uint8_t *vga_crtc);
+void vibtanium_efi_console_set_input_active(bool active);
+void vibtanium_efi_console_set_vga_text_active(bool active);
 void vibtanium_efi_console_reset(void);
 void vibtanium_efi_console_clear(void);
 void vibtanium_efi_console_putchar(uint16_t ch);

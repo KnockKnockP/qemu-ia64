@@ -21,6 +21,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumEfiDisplayState, VIBTANIUM_EFI_DISPLAY)
 #define EFI_TEXT_ROWS \
     (VIBTANIUM_FRAMEBUFFER_HEIGHT / FONT_HEIGHT)
 #define EFI_DEFAULT_ATTRIBUTE 0x07
+#define VGA_CRTC_CURSOR_START 0x0a
+#define VGA_CRTC_START_ADDR_HIGH 0x0c
+#define VGA_CRTC_START_ADDR_LOW 0x0d
+#define VGA_CRTC_CURSOR_LOC_HIGH 0x0e
+#define VGA_CRTC_CURSOR_LOC_LOW 0x0f
+#define VGA_TEXT_CELL_BYTES 2
+#define VGA_TEXT_CELL_COUNT \
+    (VIBTANIUM_VGA_TEXT_SIZE / VGA_TEXT_CELL_BYTES)
 
 struct VibtaniumEfiDisplayState {
     SysBusDevice parent_obj;
@@ -36,14 +44,18 @@ typedef struct VibtaniumEfiConsole {
     QemuConsole *con;
     DisplaySurface *surface;
     uint32_t *fb;
+    uint8_t *vga_text;
+    uint8_t *vga_crtc;
     uint32_t attribute;
     uint32_t cursor_column;
     uint32_t cursor_row;
     bool cursor_visible;
     bool initialized;
+    bool vga_text_active;
 } VibtaniumEfiConsole;
 
 static VibtaniumEfiConsole efi_console;
+static VibtaniumEfiDisplayState *efi_display;
 
 static const uint32_t efi_vga_palette[16] = {
     0x00000000, 0x000000aa, 0x0000aa00, 0x0000aaaa,
@@ -74,13 +86,93 @@ static bool efi_key_letter(uint32_t key, const VibtaniumEfiDisplayState *s,
                            uint16_t *unicode_char)
 {
     bool upper;
+    char ch;
 
-    if (key < KEY_A || key > KEY_Z) {
+    switch (key) {
+    case KEY_A:
+        ch = 'a';
+        break;
+    case KEY_B:
+        ch = 'b';
+        break;
+    case KEY_C:
+        ch = 'c';
+        break;
+    case KEY_D:
+        ch = 'd';
+        break;
+    case KEY_E:
+        ch = 'e';
+        break;
+    case KEY_F:
+        ch = 'f';
+        break;
+    case KEY_G:
+        ch = 'g';
+        break;
+    case KEY_H:
+        ch = 'h';
+        break;
+    case KEY_I:
+        ch = 'i';
+        break;
+    case KEY_J:
+        ch = 'j';
+        break;
+    case KEY_K:
+        ch = 'k';
+        break;
+    case KEY_L:
+        ch = 'l';
+        break;
+    case KEY_M:
+        ch = 'm';
+        break;
+    case KEY_N:
+        ch = 'n';
+        break;
+    case KEY_O:
+        ch = 'o';
+        break;
+    case KEY_P:
+        ch = 'p';
+        break;
+    case KEY_Q:
+        ch = 'q';
+        break;
+    case KEY_R:
+        ch = 'r';
+        break;
+    case KEY_S:
+        ch = 's';
+        break;
+    case KEY_T:
+        ch = 't';
+        break;
+    case KEY_U:
+        ch = 'u';
+        break;
+    case KEY_V:
+        ch = 'v';
+        break;
+    case KEY_W:
+        ch = 'w';
+        break;
+    case KEY_X:
+        ch = 'x';
+        break;
+    case KEY_Y:
+        ch = 'y';
+        break;
+    case KEY_Z:
+        ch = 'z';
+        break;
+    default:
         return false;
     }
 
     upper = efi_key_shifted(s) ^ s->caps_lock;
-    *unicode_char = (upper ? 'A' : 'a') + key - KEY_A;
+    *unicode_char = upper ? g_ascii_toupper(ch) : ch;
     return true;
 }
 
@@ -355,12 +447,12 @@ static void efi_console_fill_rect(uint32_t x, uint32_t y,
     efi_console_update_pixels(x, y, width, height);
 }
 
-static void efi_console_draw_glyph(uint32_t column, uint32_t row, uint8_t ch)
+static void efi_console_draw_glyph_colors(uint32_t column, uint32_t row,
+                                          uint8_t ch, uint32_t fg,
+                                          uint32_t bg, bool update)
 {
     uint32_t x = column * FONT_WIDTH;
     uint32_t y = row * FONT_HEIGHT;
-    uint32_t fg = efi_console_fg();
-    uint32_t bg = efi_console_bg();
 
     if (!efi_console.fb || column >= EFI_TEXT_COLUMNS ||
         row >= EFI_TEXT_ROWS) {
@@ -376,7 +468,92 @@ static void efi_console_draw_glyph(uint32_t column, uint32_t row, uint8_t ch)
             dst[glyph_x] = (bits & (0x80 >> glyph_x)) ? fg : bg;
         }
     }
-    efi_console_update_pixels(x, y, FONT_WIDTH, FONT_HEIGHT);
+    if (update) {
+        efi_console_update_pixels(x, y, FONT_WIDTH, FONT_HEIGHT);
+    }
+}
+
+static void efi_console_draw_glyph(uint32_t column, uint32_t row, uint8_t ch)
+{
+    efi_console_draw_glyph_colors(column, row, ch, efi_console_fg(),
+                                  efi_console_bg(), true);
+}
+
+static uint16_t efi_console_vga_word(uint8_t high_reg, uint8_t low_reg)
+{
+    if (!efi_console.vga_crtc) {
+        return 0;
+    }
+
+    return ((uint16_t)efi_console.vga_crtc[high_reg] << 8) |
+           efi_console.vga_crtc[low_reg];
+}
+
+static void efi_console_draw_vga_cursor(uint16_t start_cell)
+{
+    uint16_t cursor;
+    uint16_t relative;
+    uint32_t x;
+    uint32_t y;
+
+    if (!efi_console.fb || !efi_console.vga_crtc ||
+        (efi_console.vga_crtc[VGA_CRTC_CURSOR_START] & 0x20)) {
+        return;
+    }
+
+    cursor = efi_console_vga_word(VGA_CRTC_CURSOR_LOC_HIGH,
+                                  VGA_CRTC_CURSOR_LOC_LOW);
+    relative = (cursor + VGA_TEXT_CELL_COUNT - start_cell) %
+               VGA_TEXT_CELL_COUNT;
+    if (relative >= VIBTANIUM_VGA_TEXT_COLUMNS * VIBTANIUM_VGA_TEXT_ROWS) {
+        return;
+    }
+
+    x = (relative % VIBTANIUM_VGA_TEXT_COLUMNS) * FONT_WIDTH;
+    y = (relative / VIBTANIUM_VGA_TEXT_COLUMNS) * FONT_HEIGHT +
+        FONT_HEIGHT - 2;
+
+    for (uint32_t row = 0; row < 2; row++) {
+        uint32_t *dst =
+            efi_console.fb + (y + row) * VIBTANIUM_FRAMEBUFFER_WIDTH + x;
+
+        for (uint32_t column = 0; column < FONT_WIDTH; column++) {
+            dst[column] = efi_vga_palette[15];
+        }
+    }
+}
+
+static void efi_console_render_vga_text(void)
+{
+    uint16_t start_cell;
+
+    if (!efi_console.fb || !efi_console.vga_text ||
+        !efi_console.vga_text_active) {
+        return;
+    }
+
+    start_cell = efi_console_vga_word(VGA_CRTC_START_ADDR_HIGH,
+                                      VGA_CRTC_START_ADDR_LOW) %
+                 VGA_TEXT_CELL_COUNT;
+
+    for (uint32_t row = 0; row < VIBTANIUM_VGA_TEXT_ROWS; row++) {
+        for (uint32_t column = 0; column < VIBTANIUM_VGA_TEXT_COLUMNS;
+             column++) {
+            uint16_t cell_index =
+                (start_cell + row * VIBTANIUM_VGA_TEXT_COLUMNS + column) %
+                VGA_TEXT_CELL_COUNT;
+            const uint8_t *cell =
+                efi_console.vga_text + cell_index * VGA_TEXT_CELL_BYTES;
+            uint8_t ch = cell[0] >= 0x20 ? cell[0] : ' ';
+            uint8_t attribute = cell[1] ? cell[1] : EFI_DEFAULT_ATTRIBUTE;
+            uint32_t fg = efi_vga_palette[attribute & 0xf];
+            uint32_t bg = efi_vga_palette[(attribute >> 4) & 0x7];
+
+            efi_console_draw_glyph_colors(column, row, ch, fg, bg, false);
+        }
+    }
+
+    efi_console_draw_vga_cursor(start_cell);
 }
 
 static void efi_console_scroll(void)
@@ -414,6 +591,7 @@ static bool vibtanium_efi_console_gfx_update(void *opaque)
     VibtaniumEfiConsole *console = opaque;
 
     if (console->con) {
+        efi_console_render_vga_text();
         qemu_console_update_full(console->con);
     }
     return true;
@@ -424,6 +602,7 @@ static void vibtanium_efi_console_invalidate(void *opaque)
     VibtaniumEfiConsole *console = opaque;
 
     if (console->con) {
+        efi_console_render_vga_text();
         qemu_console_update_full(console->con);
     }
 }
@@ -439,6 +618,7 @@ static void vibtanium_efi_display_realize(DeviceState *dev, Error **errp)
 
     s->keyboard = qemu_input_handler_register(dev,
                                               &vibtanium_efi_keyboard_handler);
+    efi_display = s;
     qemu_input_handler_activate(s->keyboard);
 }
 
@@ -446,6 +626,9 @@ static void vibtanium_efi_display_unrealize(DeviceState *dev)
 {
     VibtaniumEfiDisplayState *s = VIBTANIUM_EFI_DISPLAY(dev);
 
+    if (efi_display == s) {
+        efi_display = NULL;
+    }
     g_clear_pointer(&s->keyboard, qemu_input_handler_unregister);
 }
 
@@ -473,10 +656,13 @@ static void vibtanium_efi_display_register_types(void)
 
 type_init(vibtanium_efi_display_register_types)
 
-void vibtanium_efi_console_init(MemoryRegion *framebuffer)
+void vibtanium_efi_console_init(MemoryRegion *framebuffer,
+                                MemoryRegion *vga_legacy,
+                                uint8_t *vga_crtc)
 {
     DeviceState *dev;
     uint8_t *fb;
+    uint8_t *vga_legacy_ptr = NULL;
 
     if (!framebuffer) {
         return;
@@ -486,9 +672,17 @@ void vibtanium_efi_console_init(MemoryRegion *framebuffer)
     if (!fb) {
         return;
     }
+    if (vga_legacy) {
+        vga_legacy_ptr = memory_region_get_ram_ptr(vga_legacy);
+    }
 
     memset(&efi_console, 0, sizeof(efi_console));
     efi_console.fb = (uint32_t *)fb;
+    if (vga_legacy_ptr) {
+        efi_console.vga_text =
+            vga_legacy_ptr + VIBTANIUM_VGA_TEXT_OFFSET;
+    }
+    efi_console.vga_crtc = vga_crtc;
     efi_console.attribute = EFI_DEFAULT_ATTRIBUTE;
     efi_console.cursor_visible = true;
     efi_console.initialized = true;
@@ -507,6 +701,30 @@ void vibtanium_efi_console_init(MemoryRegion *framebuffer)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     qemu_console_set_surface(efi_console.con, efi_console.surface);
     qemu_console_update_full(efi_console.con);
+}
+
+void vibtanium_efi_console_set_input_active(bool active)
+{
+    if (!efi_display || !efi_display->keyboard) {
+        return;
+    }
+
+    if (active) {
+        qemu_input_handler_activate(efi_display->keyboard);
+    } else {
+        qemu_input_handler_deactivate(efi_display->keyboard);
+    }
+}
+
+void vibtanium_efi_console_set_vga_text_active(bool active)
+{
+    efi_console.vga_text_active = active;
+    if (active) {
+        efi_console_render_vga_text();
+        if (efi_console.con) {
+            qemu_console_update_full(efi_console.con);
+        }
+    }
 }
 
 void vibtanium_efi_console_reset(void)
