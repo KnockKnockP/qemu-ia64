@@ -1308,6 +1308,24 @@ static int gd_get_keycode(GdkEventKey *key)
 #endif
 }
 
+static bool gd_needs_synthetic_shift(VirtualConsole *vc, GdkEventKey *key,
+                                     unsigned int lnx)
+{
+    /*
+     * GTK can report a shifted key event even when QEMU did not see the
+     * standalone Shift press, for example after focus/grab transitions.
+     */
+    if (key->type != GDK_KEY_PRESS || !(key->state & GDK_SHIFT_MASK)) {
+        return false;
+    }
+
+    if (lnx == KEY_LEFTSHIFT || lnx == KEY_RIGHTSHIFT) {
+        return false;
+    }
+
+    return !qkbd_state_modifier_get(vc->gfx.kbd, QKBD_MOD_SHIFT);
+}
+
 static gboolean gd_text_key_down(GtkWidget *widget,
                                  GdkEventKey *key, void *opaque)
 {
@@ -1362,6 +1380,13 @@ static gboolean gd_key_event(GtkWidget *widget, GdkEventKey *key, void *opaque)
 
     trace_gd_key_event(vc->label, keycode, lnx,
                        (key->type == GDK_KEY_PRESS) ? "down" : "up");
+
+    if (gd_needs_synthetic_shift(vc, key, lnx)) {
+        qkbd_state_key_event(vc->gfx.kbd, KEY_LEFTSHIFT, true);
+        qkbd_state_key_event(vc->gfx.kbd, lnx, true);
+        qkbd_state_key_event(vc->gfx.kbd, KEY_LEFTSHIFT, false);
+        return TRUE;
+    }
 
     qkbd_state_key_event(vc->gfx.kbd, lnx, key->type == GDK_KEY_PRESS);
 
