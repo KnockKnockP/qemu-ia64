@@ -87,6 +87,14 @@
 
 #define VIBTANIUM_EFI_PROTOCOL_REVISION UINT64_C(0x0000000000010000)
 
+#define VIBTANIUM_EFI_RESERVED_MEMORY_TYPE 0
+#define VIBTANIUM_EFI_LOADER_CODE          1
+#define VIBTANIUM_EFI_LOADER_DATA          2
+
+#define VIBTANIUM_EFI_ALLOCATE_ANY_PAGES   0
+#define VIBTANIUM_EFI_ALLOCATE_MAX_ADDRESS 1
+#define VIBTANIUM_EFI_ALLOCATE_ADDRESS     2
+
 struct VibtaniumEfiBlockDevice;
 
 typedef enum VibtaniumEfiService {
@@ -147,6 +155,8 @@ bool vibtanium_efi_image_from_file(const char *path,
                                    VibtaniumEfiImage *image,
                                    Error **errp);
 bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value);
+uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
+                                                   uint64_t memory_type);
 bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline);
 void vibtanium_efi_image_destroy(VibtaniumEfiImage *image);
 

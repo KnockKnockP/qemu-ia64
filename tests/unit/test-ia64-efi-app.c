@@ -576,6 +576,22 @@ static void test_decodes_sign_extended_uint32_args(void)
                                                   &value));
 }
 
+static void test_exact_loader_pages_are_reserved(void)
+{
+    g_assert_cmpuint(vibtanium_efi_page_allocation_memory_type(
+                         VIBTANIUM_EFI_ALLOCATE_ADDRESS,
+                         VIBTANIUM_EFI_LOADER_DATA),
+                     ==, VIBTANIUM_EFI_RESERVED_MEMORY_TYPE);
+    g_assert_cmpuint(vibtanium_efi_page_allocation_memory_type(
+                         VIBTANIUM_EFI_ALLOCATE_ADDRESS,
+                         VIBTANIUM_EFI_LOADER_CODE),
+                     ==, VIBTANIUM_EFI_RESERVED_MEMORY_TYPE);
+    g_assert_cmpuint(vibtanium_efi_page_allocation_memory_type(
+                         VIBTANIUM_EFI_ALLOCATE_ANY_PAGES,
+                         VIBTANIUM_EFI_LOADER_DATA),
+                     ==, VIBTANIUM_EFI_LOADER_DATA);
+}
+
 static void test_timer_deadline_wraps(void)
 {
     g_assert_true(vibtanium_efi_timer_due(100, 100));
@@ -639,6 +655,8 @@ int main(int argc, char **argv)
                     test_loads_fixed_ia64_pe_at_preferred_base);
     g_test_add_func("/ia64-efi-app/decode-sign-extended-uint32-args",
                     test_decodes_sign_extended_uint32_args);
+    g_test_add_func("/ia64-efi-app/exact-loader-pages-are-reserved",
+                    test_exact_loader_pages_are_reserved);
     g_test_add_func("/ia64-efi-app/timer-deadline-wraps",
                     test_timer_deadline_wraps);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",

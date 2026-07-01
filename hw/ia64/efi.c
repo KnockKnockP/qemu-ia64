@@ -624,6 +624,18 @@ bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value)
     return true;
 }
 
+uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
+                                                   uint64_t memory_type)
+{
+    if (allocate_type == VIBTANIUM_EFI_ALLOCATE_ADDRESS &&
+        (memory_type == VIBTANIUM_EFI_LOADER_CODE ||
+         memory_type == VIBTANIUM_EFI_LOADER_DATA)) {
+        return VIBTANIUM_EFI_RESERVED_MEMORY_TYPE;
+    }
+
+    return (uint32_t)memory_type;
+}
+
 bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline)
 {
     return (int64_t)(now - deadline) >= 0;

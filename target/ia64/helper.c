@@ -1096,6 +1096,17 @@ static bool efi_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool efi_memory_map_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = efi_trace_enabled() ||
+                  g_getenv("VIBTANIUM_EFI_MAP_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
 static bool ia64_progress_trace_enabled(void)
 {
     static int enabled = -1;
@@ -1210,6 +1221,7 @@ static void ia64_progress_trace_bundle(CPUIA64State *env)
             env->cr[IA64_CR_IRR3], env->interrupt.pending,
             env->interrupt.pending_interruption,
             env->interrupt.pending_vector);
+    fflush(stderr);
 }
 
 static void ia64_progress_trace_event(CPUIA64State *env, const char *event,
@@ -1303,6 +1315,7 @@ static void ia64_progress_trace_break_slot(CPUIA64State *env,
                 " translate-failed %s\n",
                 env->ip, detail);
     }
+    fflush(stderr);
 }
 
 static bool ia64_bundle_trace_matches(uint64_t ip)
@@ -2609,6 +2622,7 @@ static uint64_t efi_allocate_pages(CPUIA64State *env)
     uint64_t memory_type = ia64_read_gr(env, 33);
     uint64_t pages = ia64_read_gr(env, 34);
     uint64_t memory = ia64_read_gr(env, 35);
+    uint32_t recorded_type;
     uint64_t address;
     uint64_t max_address = EFI_GUEST_RAM_TOP - 1;
 
@@ -2639,8 +2653,17 @@ static uint64_t efi_allocate_pages(CPUIA64State *env)
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 
-    if (!efi_record_page_allocation(address, pages, memory_type)) {
+    recorded_type = vibtanium_efi_page_allocation_memory_type(allocate_type,
+                                                              memory_type);
+    if (!efi_record_page_allocation(address, pages, recorded_type)) {
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+    if (efi_memory_map_trace_enabled()) {
+        fprintf(stderr,
+                "[efi-alloc] type=%" PRIu64 " memory-type=%" PRIu64
+                " recorded-type=%u pages=0x%016" PRIx64
+                " phys=0x%016" PRIx64 "\n",
+                allocate_type, memory_type, recorded_type, pages, address);
     }
     efi_guest_stq(env, memory, address);
     return VIBTANIUM_EFI_SUCCESS;
@@ -2676,6 +2699,13 @@ static unsigned efi_emit_memory_descriptor(CPUIA64State *env, uint64_t map,
     }
 
     if (map != 0) {
+        if (efi_memory_map_trace_enabled()) {
+            fprintf(stderr,
+                    "[efi-map] index=%u type=%u phys=0x%016" PRIx64
+                    " pages=0x%016" PRIx64 " attr=0x%016" PRIx64 "\n",
+                    index, range->type, range->address, range->pages,
+                    range->attributes);
+        }
         descriptor = map + index * EFI_MEMORY_DESCRIPTOR_SIZE;
         efi_guest_stl(env, descriptor, range->type);
         efi_guest_stl(env, descriptor + 4, 0);
