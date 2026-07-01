@@ -43,6 +43,8 @@ typedef struct MemoryRegion MemoryRegion;
 #define VIBTANIUM_EFI_GOP               UINT64_C(0x00086d00)
 #define VIBTANIUM_EFI_GOP_MODE          UINT64_C(0x00086d20)
 #define VIBTANIUM_EFI_GOP_MODE_INFO     UINT64_C(0x00086d48)
+#define VIBTANIUM_EFI_LOAD_OPTIONS      UINT64_C(0x00086e00)
+#define VIBTANIUM_EFI_LOAD_OPTIONS_SIZE UINT64_C(0x00001000)
 #define VIBTANIUM_EFI_BLOB_BASE         UINT64_C(0x00070000)
 #define VIBTANIUM_EFI_BLOB_SIZE         UINT64_C(0x00020000)
 #define VIBTANIUM_EFI_STACK_BASE        UINT64_C(0x01f00000)
@@ -125,6 +127,8 @@ typedef struct VibtaniumEfiImage {
     uint32_t size_of_image;
     uint32_t section_alignment;
     uint16_t number_of_sections;
+    uint8_t *load_options;
+    size_t load_options_size;
     char source_path[256];
     char message[256];
 } VibtaniumEfiImage;

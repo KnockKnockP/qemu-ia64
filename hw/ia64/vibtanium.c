@@ -10,6 +10,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
+#include "hw/ia64/efi-vars.h"
 #include "hw/ia64/vibtanium.h"
 #include "hw/input/i8042.h"
 #include "hw/core/qdev-properties.h"
@@ -734,9 +735,11 @@ static bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
     return true;
 }
 
-static bool vibtanium_try_discovered_efi_app(VibtaniumMachineState *vms,
-                                             MachineState *machine,
-                                             VibtaniumEfiBlockDevice *dev)
+static bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
+                                        MachineState *machine,
+                                        VibtaniumEfiBlockDevice *dev,
+                                        const char *path,
+                                        const VibtaniumEfiBootEntry *entry)
 {
     Error *local_err = NULL;
     VibtaniumEfiStorageReport report;
@@ -745,23 +748,27 @@ static bool vibtanium_try_discovered_efi_app(VibtaniumMachineState *vms,
     VibtaniumEfiImage image;
     VibtaniumEfiBlockDevice cached_dev;
     char source[384];
+    const char *kind = entry ? "boot-entry" : "discovery";
+    const char *boot_path = path && *path ? path : VIBTANIUM_EFI_FALLBACK_PATH;
 
-    if (!vibtanium_efi_cdrom_read_path(dev, VIBTANIUM_EFI_FALLBACK_PATH,
+    if (!vibtanium_efi_cdrom_read_path(dev, boot_path,
                                        &file_data, &file_size, source,
                                        sizeof(source), &report, &local_err)) {
-        warn_report("vibtanium EFI discovery media=%s path=%s status=%s "
+        warn_report("vibtanium EFI %s media=%s path=%s status=%s "
                     "reason=%s",
+                    kind,
                     dev->name ? dev->name : "<unnamed>",
-                    VIBTANIUM_EFI_FALLBACK_PATH,
+                    boot_path,
                     vibtanium_efi_storage_status_name(report.status),
                     report.message);
         error_free(local_err);
         return false;
     }
 
-    warn_report("vibtanium EFI discovery media=%s path=%s status=%s %s",
+    warn_report("vibtanium EFI %s media=%s path=%s status=%s %s",
+                kind,
                 dev->name ? dev->name : "<unnamed>",
-                VIBTANIUM_EFI_FALLBACK_PATH,
+                boot_path,
                 vibtanium_efi_storage_status_name(report.status),
                 report.message);
 
@@ -769,22 +776,30 @@ static bool vibtanium_try_discovered_efi_app(VibtaniumMachineState *vms,
     if (!vibtanium_efi_image_from_buffer(source, file_data, file_size,
                                          VIBTANIUM_EFI_APP_BASE, &image,
                                          &local_err)) {
-        warn_report("vibtanium EFI discovery media=%s path=%s status=%s "
+        warn_report("vibtanium EFI %s media=%s path=%s status=%s "
                     "reason=%s",
+                    kind,
                     dev->name ? dev->name : "<unnamed>",
-                    VIBTANIUM_EFI_FALLBACK_PATH,
+                    boot_path,
                     vibtanium_efi_status_name(VIBTANIUM_EFI_LOAD_ERROR),
                     error_get_pretty(local_err));
         error_free(local_err);
         return false;
     }
 
+    if (entry && entry->load_options && entry->load_options->len != 0) {
+        image.load_options_size = entry->load_options->len;
+        image.load_options = g_memdup2(entry->load_options->data,
+                                       entry->load_options->len);
+    }
+
     local_err = NULL;
     if (!vibtanium_cache_boot_media(dev, &cached_dev, &local_err)) {
-        warn_report("vibtanium EFI discovery media=%s path=%s status=%s "
+        warn_report("vibtanium EFI %s media=%s path=%s status=%s "
                     "reason=%s",
+                    kind,
                     dev->name ? dev->name : "<unnamed>",
-                    VIBTANIUM_EFI_FALLBACK_PATH,
+                    boot_path,
                     vibtanium_efi_status_name(VIBTANIUM_EFI_DEVICE_ERROR),
                     error_get_pretty(local_err));
         error_free(local_err);
@@ -800,6 +815,81 @@ static bool vibtanium_try_discovered_efi_app(VibtaniumMachineState *vms,
     vibtanium_trace_loader_frontier(&image);
     vibtanium_efi_image_destroy(&image);
     return true;
+}
+
+static bool vibtanium_try_boot_entry_on_media(VibtaniumMachineState *vms,
+                                              MachineState *machine,
+                                              const VibtaniumEfiBootEntry *entry)
+{
+    BlockBackend *blk = NULL;
+
+    while ((blk = blk_next(blk)) != NULL) {
+        DriveInfo *dinfo = blk_legacy_dinfo(blk);
+        const char *name = blk_name(blk);
+        bool available = blk_is_available(blk);
+        bool cdrom = dinfo && dinfo->media_cd;
+        int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
+        VibtaniumBlockReadOpaque *read_opaque;
+        VibtaniumEfiBlockDevice dev;
+
+        if (!available || !cdrom || length <= 0) {
+            continue;
+        }
+
+        read_opaque = g_new0(VibtaniumBlockReadOpaque, 1);
+        read_opaque->blk = blk;
+        dev = (VibtaniumEfiBlockDevice) {
+            .name = name && *name ? name : "<unnamed>",
+            .size = length,
+            .block_size = 2048,
+            .read_only = true,
+            .removable = cdrom,
+            .cdrom = cdrom,
+            .read = vibtanium_block_pread,
+            .opaque = read_opaque,
+        };
+
+        if (vibtanium_try_media_efi_app(vms, machine, &dev,
+                                        entry->loader_path, entry)) {
+            g_free(read_opaque);
+            return true;
+        }
+        g_free(read_opaque);
+    }
+
+    return false;
+}
+
+static bool vibtanium_boot_nvram_efi_app(VibtaniumMachineState *vms,
+                                         MachineState *machine)
+{
+    g_autoptr(GPtrArray) entries = NULL;
+    Error *local_err = NULL;
+
+    if (!vibtanium_efi_vars_boot_entries(&entries, true, &local_err)) {
+        error_reportf_err(local_err, "could not read IA-64 EFI boot variables: ");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < entries->len; i++) {
+        VibtaniumEfiBootEntry *entry = g_ptr_array_index(entries, i);
+
+        warn_report("vibtanium EFI boot entry Boot%04X path=%s%s",
+                    entry->id, entry->loader_path,
+                    entry->from_boot_next ? " source=BootNext" : "");
+        if (!vibtanium_try_boot_entry_on_media(vms, machine, entry)) {
+            continue;
+        }
+        local_err = NULL;
+        if (!vibtanium_efi_vars_set_boot_current(entry->id, &local_err)) {
+            error_reportf_err(local_err,
+                              "could not set IA-64 EFI BootCurrent: ");
+            exit(1);
+        }
+        return true;
+    }
+
+    return false;
 }
 
 static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
@@ -854,7 +944,8 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
         }
 
         cdrom_candidates++;
-        if (vibtanium_try_discovered_efi_app(vms, machine, &dev)) {
+        if (vibtanium_try_media_efi_app(vms, machine, &dev,
+                                        VIBTANIUM_EFI_FALLBACK_PATH, NULL)) {
             g_free(read_opaque);
             return true;
         }
@@ -875,6 +966,10 @@ static void vibtanium_load_efi_app(VibtaniumMachineState *vms,
         return;
     }
 
+    if (vibtanium_boot_nvram_efi_app(vms, machine)) {
+        return;
+    }
+
     vibtanium_discover_efi_app(vms, machine);
 }
 
@@ -883,6 +978,7 @@ static void vibtanium_init(MachineState *machine)
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
     uint64_t kernel_alias_size;
+    Error *local_err = NULL;
 
     if (machine->ram_size > VIBTANIUM_RAM_LIMIT) {
         error_report("vibtanium RAM must fit below the placeholder MMIO window "
@@ -960,6 +1056,11 @@ static void vibtanium_init(MachineState *machine)
     memory_region_add_subregion(sysmem, VIBTANIUM_FIRMWARE_BASE,
                                 &vms->firmware);
 
+    if (!vibtanium_efi_vars_global_load(vms->nvram_path, &local_err)) {
+        error_reportf_err(local_err, "could not load IA-64 EFI NVRAM: ");
+        exit(1);
+    }
+
     vibtanium_load_efi_app(vms, machine);
 }
 
@@ -975,6 +1076,28 @@ static void vibtanium_set_efi_auto_enter(Object *obj, bool value, Error **errp)
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
     vms->efi_auto_enter = value;
+}
+
+static char *vibtanium_get_nvram(Object *obj, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    return g_strdup(vms->nvram_path ? vms->nvram_path : "");
+}
+
+static void vibtanium_set_nvram(Object *obj, const char *value, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    g_free(vms->nvram_path);
+    vms->nvram_path = g_strdup(value && *value ? value : NULL);
+}
+
+static void vibtanium_machine_finalize(Object *obj)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    g_free(vms->nvram_path);
 }
 
 static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
@@ -996,6 +1119,12 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
                                    vibtanium_set_efi_auto_enter);
     object_class_property_set_description(oc, "efi-auto-enter",
         "Queue one EFI Simple Text Input Enter key at firmware reset");
+
+    object_class_property_add_str(oc, "nvram",
+                                  vibtanium_get_nvram,
+                                  vibtanium_set_nvram);
+    object_class_property_set_description(oc, "nvram",
+        "Path to a QEMU UefiVarStore JSON file for EFI variables");
 }
 
 static const TypeInfo vibtanium_machine_typeinfo = {
@@ -1003,6 +1132,7 @@ static const TypeInfo vibtanium_machine_typeinfo = {
     .parent = TYPE_MACHINE,
     .instance_size = sizeof(VibtaniumMachineState),
     .class_init = vibtanium_machine_class_init,
+    .instance_finalize = vibtanium_machine_finalize,
 };
 
 static void vibtanium_machine_register_types(void)

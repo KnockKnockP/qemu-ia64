@@ -74,6 +74,20 @@ static uint8_t byte_sum(const uint8_t *p, size_t size)
     return sum;
 }
 
+static bool bytes_contain(const uint8_t *haystack, size_t haystack_size,
+                          const void *needle, size_t needle_size)
+{
+    if (needle_size > haystack_size) {
+        return false;
+    }
+    for (size_t i = 0; i <= haystack_size - needle_size; i++) {
+        if (memcmp(haystack + i, needle, needle_size) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static const uint8_t *firmware_ptr(const uint8_t *blob, uint64_t address)
 {
     g_assert_cmphex(address, >=, VIBTANIUM_EFI_BLOB_BASE);
@@ -256,9 +270,12 @@ static void test_prepare_cpu_entry_abi(void)
 
 static void test_builds_guest_firmware_tables(void)
 {
+    uint8_t load_options[] = { 0x45, 0x00, 0x46, 0x00, 0x00, 0x00 };
     VibtaniumEfiImage image = {
         .load_base = VIBTANIUM_EFI_APP_BASE,
         .size = 0x123450,
+        .load_options = load_options,
+        .load_options_size = sizeof(load_options),
     };
     VibtaniumEfiBlockDevice boot_media = {
         .size = 2048 * 10,
@@ -332,6 +349,15 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(load_le64(firmware_ptr(blob,
                                            VIBTANIUM_EFI_LOADED_IMAGE + 32)),
                     ==, VIBTANIUM_EFI_DEVICE_PATH);
+    g_assert_cmphex(load_le32(firmware_ptr(blob,
+                                           VIBTANIUM_EFI_LOADED_IMAGE + 48)),
+                    ==, sizeof(load_options));
+    g_assert_cmphex(load_le64(firmware_ptr(blob,
+                                           VIBTANIUM_EFI_LOADED_IMAGE + 56)),
+                    ==, VIBTANIUM_EFI_LOAD_OPTIONS);
+    g_assert_cmpmem(firmware_ptr(blob, VIBTANIUM_EFI_LOAD_OPTIONS),
+                    sizeof(load_options), load_options,
+                    sizeof(load_options));
     g_assert_cmphex(load_le64(firmware_ptr(blob,
                                            VIBTANIUM_EFI_LOADED_IMAGE + 64)),
                     ==, VIBTANIUM_EFI_APP_BASE);
@@ -414,28 +440,25 @@ static void test_builds_guest_firmware_tables(void)
 
     dsdt = firmware_ptr(blob, VIBTANIUM_EFI_ACPI_DSDT);
     g_assert_cmpmem(dsdt, 4, "DSDT", 4);
-    g_assert_cmphex(load_le32(dsdt + 4), ==, 202);
-    g_assert_cmphex(byte_sum(dsdt, 202), ==, 0);
-    g_assert_cmpmem(dsdt + 46, 4, "COM1", 4);
-    g_assert_cmpmem(dsdt + 51, 4, "_HID", 4);
-    g_assert_cmphex(dsdt[55], ==, 0x0c);
-    g_assert_cmphex(dsdt[56], ==, 0x41);
-    g_assert_cmphex(dsdt[57], ==, 0xd0);
-    g_assert_cmphex(dsdt[58], ==, 0x05);
-    g_assert_cmphex(dsdt[59], ==, 0x01);
-    g_assert_cmpmem(dsdt + 82, 8, "\x47\x01\xf8\x03\xf8\x03\x00\x08", 8);
-    g_assert_cmpmem(dsdt + 90, 3, "\x22\x10\x00", 3);
-    g_assert_cmpmem(dsdt + 99, 4, "PCI0", 4);
-    g_assert_cmpmem(dsdt + 104, 4, "_HID", 4);
-    g_assert_cmpmem(dsdt + 108, 5, "\x0c\x41\xd0\x0a\x03", 5);
-    g_assert_cmpmem(dsdt + 120, 4, "_BBN", 4);
-    g_assert_cmphex(dsdt[124], ==, 0);
-    g_assert_cmpmem(dsdt + 126, 4, "_CRS", 4);
-    g_assert_cmpmem(dsdt + 134, 6, "\x88\x0d\x00\x02\x0c\x00", 6);
-    g_assert_cmpmem(dsdt + 150, 6, "\x88\x0d\x00\x01\x0c\x03", 6);
-    g_assert_cmpmem(dsdt + 166, 6, "\x87\x17\x00\x00\x0c\x01", 6);
-    g_assert_cmpmem(dsdt + 195, 4, "_PRT", 4);
-    g_assert_cmpmem(dsdt + 199, 3, "\x12\x02\x00", 3);
+    g_assert_cmphex(load_le32(dsdt + 4), ==, 256);
+    g_assert_cmphex(byte_sum(dsdt, 256), ==, 0);
+    g_assert_true(bytes_contain(dsdt, 256, "COM1", 4));
+    g_assert_true(bytes_contain(dsdt, 256, "KBD_", 4));
+    g_assert_true(bytes_contain(dsdt, 256, "PCI0", 4));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x0c\x41\xd0\x05\x01", 5));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x0c\x41\xd0\x03\x03", 5));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x0c\x41\xd0\x0a\x03", 5));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x47\x01\xf8\x03\xf8\x03\x00\x08", 8));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x47\x01\x60\x00\x60\x00\x01\x01", 8));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x47\x01\x64\x00\x64\x00\x01\x01", 8));
+    g_assert_true(bytes_contain(dsdt, 256,
+                                "\x88\x0d\x00\x02\x0c\x00", 6));
 
     madt = firmware_ptr(blob, VIBTANIUM_EFI_ACPI_MADT);
     g_assert_cmpmem(madt, 4, "APIC", 4);

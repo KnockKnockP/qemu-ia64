@@ -12,6 +12,7 @@
 #include "hw/core/cpu.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
+#include "hw/ia64/efi-vars.h"
 #include "hw/ia64/vibtanium.h"
 #include "mem.h"
 #include "perf.h"
@@ -845,6 +846,8 @@ enum {
 #define EFI_MAX_EVENTS 64
 #define EFI_MAX_PAGE_ALLOCATIONS 64
 #define EFI_MAX_PATH_CHARS 512
+#define EFI_MAX_VAR_NAME_CHARS 1024
+#define EFI_MAX_VARIABLE_DATA_SIZE (1024 * 1024)
 #define EFI_MAX_FILE_READ_BYTES (128 * 1024 * 1024)
 #define EFI_PAGE_SIZE UINT64_C(4096)
 #define EFI_MEMORY_DESCRIPTOR_SIZE UINT64_C(40)
@@ -2550,6 +2553,11 @@ static uint32_t efi_guest_ldl(CPUIA64State *env, uint64_t address)
     return cpu_ldl_le_data_ra(env, address, GETPC());
 }
 
+static uint16_t efi_guest_ldw(CPUIA64State *env, uint64_t address)
+{
+    return cpu_lduw_le_data_ra(env, address, GETPC());
+}
+
 static uint8_t efi_guest_ldb(CPUIA64State *env, uint64_t address)
 {
     return cpu_ldub_data_ra(env, address, GETPC());
@@ -2584,6 +2592,149 @@ static void efi_guest_read_guid(CPUIA64State *env, uint64_t address,
                                 uint8_t guid[16])
 {
     efi_guest_read_bytes(env, address, guid, 16);
+}
+
+static void efi_format_guid(const uint8_t guid[16], char out[37])
+{
+    g_snprintf(out, 37,
+               "%02x%02x%02x%02x-%02x%02x-%02x%02x-"
+               "%02x%02x-%02x%02x%02x%02x%02x%02x",
+               guid[3], guid[2], guid[1], guid[0],
+               guid[5], guid[4], guid[7], guid[6],
+               guid[8], guid[9], guid[10], guid[11],
+               guid[12], guid[13], guid[14], guid[15]);
+}
+
+static int efi_guid_hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool efi_parse_guid_byte(const char *guid, unsigned offset,
+                                uint8_t *byte)
+{
+    int hi = efi_guid_hex_value(guid[offset]);
+    int lo = efi_guid_hex_value(guid[offset + 1]);
+
+    if (hi < 0 || lo < 0) {
+        return false;
+    }
+    *byte = (hi << 4) | lo;
+    return true;
+}
+
+static bool efi_parse_guid(const char *guid, uint8_t out[16])
+{
+    uint8_t canonical[16];
+    static const unsigned hex_offsets[16] = {
+        0, 2, 4, 6, 9, 11, 14, 16,
+        19, 21, 24, 26, 28, 30, 32, 34,
+    };
+
+    if (!guid || strlen(guid) != 36 ||
+        guid[8] != '-' || guid[13] != '-' ||
+        guid[18] != '-' || guid[23] != '-') {
+        return false;
+    }
+
+    for (unsigned i = 0; i < ARRAY_SIZE(canonical); i++) {
+        if (!efi_parse_guid_byte(guid, hex_offsets[i], &canonical[i])) {
+            return false;
+        }
+    }
+
+    out[0] = canonical[3];
+    out[1] = canonical[2];
+    out[2] = canonical[1];
+    out[3] = canonical[0];
+    out[4] = canonical[5];
+    out[5] = canonical[4];
+    out[6] = canonical[7];
+    out[7] = canonical[6];
+    memcpy(out + 8, canonical + 8, 8);
+    return true;
+}
+
+static char *efi_read_utf16_name(CPUIA64State *env, uint64_t address)
+{
+    g_autofree gunichar2 *chars = NULL;
+    GError *err = NULL;
+    char *name;
+    unsigned count = 0;
+
+    if (address == 0) {
+        return NULL;
+    }
+
+    chars = g_new0(gunichar2, EFI_MAX_VAR_NAME_CHARS + 1);
+    for (; count < EFI_MAX_VAR_NAME_CHARS; count++) {
+        chars[count] = efi_guest_ldw(env, address + count * 2);
+        if (chars[count] == 0) {
+            break;
+        }
+    }
+    if (count == EFI_MAX_VAR_NAME_CHARS) {
+        return NULL;
+    }
+
+    name = g_utf16_to_utf8(chars, count, NULL, NULL, &err);
+    g_clear_error(&err);
+    return name;
+}
+
+static uint64_t efi_utf16_name_size(const char *name, uint64_t *size)
+{
+    g_autofree gunichar2 *chars = NULL;
+    GError *err = NULL;
+    glong written = 0;
+
+    chars = g_utf8_to_utf16(name ? name : "", -1, NULL, &written, &err);
+    if (!chars) {
+        g_clear_error(&err);
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+    *size = (uint64_t)(written + 1) * 2;
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static bool efi_write_utf16_name(CPUIA64State *env, uint64_t address,
+                                 const char *name)
+{
+    g_autofree gunichar2 *chars = NULL;
+    GError *err = NULL;
+    glong written = 0;
+
+    chars = g_utf8_to_utf16(name ? name : "", -1, NULL, &written, &err);
+    if (!chars) {
+        g_clear_error(&err);
+        return false;
+    }
+
+    for (glong i = 0; i < written; i++) {
+        efi_guest_stw(env, address + i * 2, chars[i]);
+    }
+    efi_guest_stw(env, address + written * 2, 0);
+    return true;
+}
+
+static void efi_guest_write_guid(CPUIA64State *env, uint64_t address,
+                                 const char *guid)
+{
+    uint8_t bytes[16];
+
+    if (!efi_parse_guid(guid, bytes)) {
+        memset(bytes, 0, sizeof(bytes));
+    }
+    efi_guest_write_bytes(env, address, bytes, sizeof(bytes));
 }
 
 static uint32_t efi_crc32(const uint8_t *data, size_t size)
@@ -4587,6 +4738,164 @@ static uint64_t efi_runtime_get_next_high_mono_count(CPUIA64State *env)
     return VIBTANIUM_EFI_SUCCESS;
 }
 
+static uint64_t efi_runtime_read_variable_identity(CPUIA64State *env,
+                                                   uint64_t name_ptr,
+                                                   uint64_t guid_ptr,
+                                                   char **name,
+                                                   char guid[37])
+{
+    uint8_t guid_bytes[16];
+
+    if (name_ptr == 0 || guid_ptr == 0 || !name || !guid) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    *name = efi_read_utf16_name(env, name_ptr);
+    if (!*name) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    efi_guest_read_guid(env, guid_ptr, guid_bytes);
+    efi_format_guid(guid_bytes, guid);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_get_variable(CPUIA64State *env)
+{
+    uint64_t name_ptr = ia64_read_gr(env, 32);
+    uint64_t guid_ptr = ia64_read_gr(env, 33);
+    uint64_t attributes_ptr = ia64_read_gr(env, 34);
+    uint64_t data_size_ptr = ia64_read_gr(env, 35);
+    uint64_t data_ptr = ia64_read_gr(env, 36);
+    g_autofree char *name = NULL;
+    char guid[37];
+    uint32_t attributes = 0;
+    const uint8_t *data = NULL;
+    size_t data_size = 0;
+    uint64_t provided;
+    uint64_t status;
+
+    if (data_size_ptr == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    status = efi_runtime_read_variable_identity(env, name_ptr, guid_ptr,
+                                                &name, guid);
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+
+    provided = efi_guest_ldq(env, data_size_ptr);
+    status = vibtanium_efi_vars_get(guid, name, &attributes, &data,
+                                    &data_size);
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+
+    efi_guest_stq(env, data_size_ptr, data_size);
+    if (provided < data_size) {
+        return VIBTANIUM_EFI_BUFFER_TOO_SMALL;
+    }
+    if (data_size != 0 && data_ptr == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    if (attributes_ptr != 0) {
+        efi_guest_stl(env, attributes_ptr, attributes);
+    }
+    if (data_size != 0) {
+        efi_guest_write_bytes(env, data_ptr, data, data_size);
+    }
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_get_next_variable_name(CPUIA64State *env)
+{
+    uint64_t size_ptr = ia64_read_gr(env, 32);
+    uint64_t name_ptr = ia64_read_gr(env, 33);
+    uint64_t guid_ptr = ia64_read_gr(env, 34);
+    g_autofree char *name = NULL;
+    g_autofree char *next_name = NULL;
+    char guid[37];
+    char next_guid[37];
+    uint64_t provided;
+    uint64_t required = 0;
+    uint64_t status;
+
+    if (size_ptr == 0 || name_ptr == 0 || guid_ptr == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    provided = efi_guest_ldq(env, size_ptr);
+    status = efi_runtime_read_variable_identity(env, name_ptr, guid_ptr,
+                                                &name, guid);
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+
+    status = vibtanium_efi_vars_next_name(guid, name, next_guid,
+                                          sizeof(next_guid), &next_name);
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+
+    status = efi_utf16_name_size(next_name, &required);
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+
+    efi_guest_stq(env, size_ptr, required);
+    if (provided < required) {
+        return VIBTANIUM_EFI_BUFFER_TOO_SMALL;
+    }
+
+    if (!efi_write_utf16_name(env, name_ptr, next_name)) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+    efi_guest_write_guid(env, guid_ptr, next_guid);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_runtime_set_variable(CPUIA64State *env)
+{
+    uint64_t name_ptr = ia64_read_gr(env, 32);
+    uint64_t guid_ptr = ia64_read_gr(env, 33);
+    uint64_t raw_attributes = ia64_read_gr(env, 34);
+    uint64_t data_size = ia64_read_gr(env, 35);
+    uint64_t data_ptr = ia64_read_gr(env, 36);
+    g_autofree char *name = NULL;
+    g_autofree uint8_t *data = NULL;
+    char guid[37];
+    uint64_t status;
+    Error *local_err = NULL;
+
+    status = efi_runtime_read_variable_identity(env, name_ptr, guid_ptr,
+                                                &name, guid);
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+    if ((raw_attributes >> 32) != 0 || data_size > EFI_MAX_VARIABLE_DATA_SIZE) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+    if (data_size != 0 && data_ptr == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+
+    if (data_size != 0) {
+        data = g_malloc(data_size);
+        efi_guest_read_bytes(env, data_ptr, data, data_size);
+    }
+
+    status = vibtanium_efi_vars_set(guid, name, raw_attributes, data,
+                                    data_size, &local_err);
+    if (local_err) {
+        warn_report("vibtanium EFI SetVariable %s:%s failed: %s",
+                    guid, name, error_get_pretty(local_err));
+        error_free(local_err);
+    }
+    return status;
+}
+
 static uint64_t efi_dispatch_runtime_service(CPUIA64State *env, unsigned index)
 {
     switch (index) {
@@ -4604,10 +4913,11 @@ static uint64_t efi_dispatch_runtime_service(CPUIA64State *env, unsigned index)
     case 5: /* ConvertPointer */
         return efi_runtime_convert_pointer(env);
     case 6: /* GetVariable */
+        return efi_runtime_get_variable(env);
     case 7: /* GetNextVariableName */
-        return VIBTANIUM_EFI_NOT_FOUND;
+        return efi_runtime_get_next_variable_name(env);
     case 8: /* SetVariable */
-        return VIBTANIUM_EFI_SUCCESS;
+        return efi_runtime_set_variable(env);
     case 9: /* GetNextHighMonotonicCount */
         return efi_runtime_get_next_high_mono_count(env);
     case 10: /* ResetSystem */

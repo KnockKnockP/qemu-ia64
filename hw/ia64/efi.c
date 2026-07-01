@@ -696,6 +696,7 @@ void vibtanium_efi_image_destroy(VibtaniumEfiImage *image)
     }
 
     g_free(image->data);
+    g_free(image->load_options);
     efi_image_reset(image);
 }
 
@@ -754,6 +755,11 @@ static void write_loaded_image(uint8_t *blob, size_t size,
 {
     uint64_t image_base = image ? image->load_base : 0;
     uint64_t image_size = image ? image->size : 0;
+    size_t load_options_size = image ? image->load_options_size : 0;
+
+    if (load_options_size > VIBTANIUM_EFI_LOAD_OPTIONS_SIZE) {
+        load_options_size = VIBTANIUM_EFI_LOAD_OPTIONS_SIZE;
+    }
 
     blob_wr32(blob, size, VIBTANIUM_EFI_LOADED_IMAGE, 0x1000);
     blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 16,
@@ -762,6 +768,15 @@ static void write_loaded_image(uint8_t *blob, size_t size,
               VIBTANIUM_EFI_BOOT_DEVICE_HANDLE);
     blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 32,
               VIBTANIUM_EFI_DEVICE_PATH);
+    if (load_options_size != 0) {
+        memcpy(blob_ptr(blob, size, VIBTANIUM_EFI_LOAD_OPTIONS,
+                        load_options_size),
+               image->load_options, load_options_size);
+        blob_wr32(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 48,
+                  load_options_size);
+        blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 56,
+                  VIBTANIUM_EFI_LOAD_OPTIONS);
+    }
     blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 64, image_base);
     blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 72, image_size);
     blob_wr32(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 80, 1);

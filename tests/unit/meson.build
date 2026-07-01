@@ -84,6 +84,9 @@ tests = {
   'test-ia64-efi-storage': [
     meson.project_source_root() / 'hw/ia64/efi-storage.c',
   ],
+  'test-ia64-efi-vars': [
+    meson.project_source_root() / 'hw/ia64/efi-vars.c',
+  ],
 }
 
 if have_system or have_tools
