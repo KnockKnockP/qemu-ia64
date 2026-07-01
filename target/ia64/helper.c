@@ -1034,14 +1034,9 @@ static EfiGuestFile efi_guest_files[EFI_MAX_FILE_HANDLES];
 static EfiGuestEvent efi_guest_events[EFI_MAX_EVENTS];
 static EfiPageAllocation efi_page_allocations[EFI_MAX_PAGE_ALLOCATIONS];
 
-typedef struct EfiInputKey {
-    uint16_t scan_code;
-    uint16_t unicode_char;
-} EfiInputKey;
-
 #define EFI_INPUT_QUEUE_LENGTH 32
 
-static EfiInputKey efi_conin_queue[EFI_INPUT_QUEUE_LENGTH];
+static VibtaniumEfiInputKey efi_conin_queue[EFI_INPUT_QUEUE_LENGTH];
 static unsigned efi_conin_queue_head;
 static unsigned efi_conin_queue_count;
 static bool efi_conin_auto_enter;
@@ -1062,7 +1057,7 @@ bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char)
 
     index = (efi_conin_queue_head + efi_conin_queue_count) %
             EFI_INPUT_QUEUE_LENGTH;
-    efi_conin_queue[index] = (EfiInputKey) {
+    efi_conin_queue[index] = (VibtaniumEfiInputKey) {
         .scan_code = scan_code,
         .unicode_char = unicode_char,
     };
@@ -1070,7 +1065,12 @@ bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char)
     return true;
 }
 
-static bool efi_conin_dequeue(EfiInputKey *key)
+bool vibtanium_efi_input_has_key(void)
+{
+    return efi_conin_has_key();
+}
+
+bool vibtanium_efi_input_dequeue(VibtaniumEfiInputKey *key)
 {
     if (!efi_conin_has_key()) {
         return false;
@@ -1081,6 +1081,11 @@ static bool efi_conin_dequeue(EfiInputKey *key)
                            EFI_INPUT_QUEUE_LENGTH;
     efi_conin_queue_count--;
     return true;
+}
+
+static bool efi_conin_dequeue(VibtaniumEfiInputKey *key)
+{
+    return vibtanium_efi_input_dequeue(key);
 }
 
 static void efi_conin_reset(void)
@@ -5219,7 +5224,7 @@ static uint64_t efi_dispatch_gop(CPUIA64State *env, unsigned index)
 static uint64_t efi_dispatch_console_in(CPUIA64State *env, unsigned index)
 {
     uint64_t key = ia64_read_gr(env, 33);
-    EfiInputKey input_key;
+    VibtaniumEfiInputKey input_key;
 
     switch (index) {
     case 0: /* Reset */

@@ -63,6 +63,29 @@ bool vibtanium_efi_varstore_boot_entries(VibtaniumEfiVarStore *store,
 bool vibtanium_efi_varstore_set_boot_current(VibtaniumEfiVarStore *store,
                                              uint16_t id,
                                              Error **errp);
+bool vibtanium_efi_varstore_write_boot_entry(VibtaniumEfiVarStore *store,
+                                             uint16_t id,
+                                             const char *description,
+                                             const char *loader_path,
+                                             const uint8_t *load_options,
+                                             size_t load_options_size,
+                                             Error **errp);
+bool vibtanium_efi_varstore_delete_boot_entry(VibtaniumEfiVarStore *store,
+                                              uint16_t id,
+                                              Error **errp);
+bool vibtanium_efi_varstore_boot_order_get(VibtaniumEfiVarStore *store,
+                                           uint16_t **ids,
+                                           size_t *count,
+                                           Error **errp);
+bool vibtanium_efi_varstore_boot_order_set(VibtaniumEfiVarStore *store,
+                                           const uint16_t *ids,
+                                           size_t count,
+                                           Error **errp);
+bool vibtanium_efi_varstore_allocate_boot_entry_id(VibtaniumEfiVarStore *store,
+                                                   uint16_t *id,
+                                                   Error **errp);
+bool vibtanium_efi_varstore_delete_boot_next(VibtaniumEfiVarStore *store,
+                                             Error **errp);
 void vibtanium_efi_boot_entry_free(VibtaniumEfiBootEntry *entry);
 
 bool vibtanium_efi_vars_global_load(const char *path, Error **errp);
@@ -87,5 +110,20 @@ bool vibtanium_efi_vars_boot_entries(GPtrArray **entries,
                                      bool consume_boot_next,
                                      Error **errp);
 bool vibtanium_efi_vars_set_boot_current(uint16_t id, Error **errp);
+bool vibtanium_efi_vars_write_boot_entry(uint16_t id,
+                                         const char *description,
+                                         const char *loader_path,
+                                         const uint8_t *load_options,
+                                         size_t load_options_size,
+                                         Error **errp);
+bool vibtanium_efi_vars_delete_boot_entry(uint16_t id, Error **errp);
+bool vibtanium_efi_vars_boot_order_get(uint16_t **ids,
+                                       size_t *count,
+                                       Error **errp);
+bool vibtanium_efi_vars_boot_order_set(const uint16_t *ids,
+                                       size_t count,
+                                       Error **errp);
+bool vibtanium_efi_vars_allocate_boot_entry_id(uint16_t *id, Error **errp);
+bool vibtanium_efi_vars_delete_boot_next(Error **errp);
 
 #endif

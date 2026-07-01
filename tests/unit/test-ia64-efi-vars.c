@@ -264,6 +264,95 @@ static void test_boot_next_is_one_shot(void)
     cleanup_temp_var_path(dir, path);
 }
 
+static void test_boot_entry_write_edit_and_delete(void)
+{
+    VibtaniumEfiVarStore store;
+    GPtrArray *entries = NULL;
+    VibtaniumEfiBootEntry *entry;
+    const uint8_t first_opts[] = "first";
+    const uint8_t second_opts[] = "second";
+
+    vibtanium_efi_varstore_init(&store);
+
+    g_assert_true(vibtanium_efi_varstore_write_boot_entry(
+        &store, 7, "Firmware entry", "\\EFI\\BOOT\\BOOTIA64.EFI",
+        first_opts, sizeof(first_opts) - 1, &error_abort));
+
+    {
+        uint16_t order[] = { 7 };
+        g_assert_true(vibtanium_efi_varstore_boot_order_set(
+            &store, order, G_N_ELEMENTS(order), &error_abort));
+    }
+
+    g_assert_true(vibtanium_efi_varstore_boot_entries(&store, &entries,
+                                                      false, &error_abort));
+    g_assert_cmpuint(entries->len, ==, 1);
+    entry = g_ptr_array_index(entries, 0);
+    g_assert_cmpuint(entry->id, ==, 7);
+    g_assert_cmpstr(entry->description, ==, "Firmware entry");
+    g_assert_cmpstr(entry->loader_path, ==, "/EFI/BOOT/BOOTIA64.EFI");
+    g_assert_cmpmem(entry->load_options->data, entry->load_options->len,
+                    first_opts, sizeof(first_opts) - 1);
+    g_ptr_array_unref(entries);
+    entries = NULL;
+
+    g_assert_true(vibtanium_efi_varstore_write_boot_entry(
+        &store, 7, "Edited entry", "/EFI/custom/loader.efi",
+        second_opts, sizeof(second_opts) - 1, &error_abort));
+    g_assert_true(vibtanium_efi_varstore_boot_entries(&store, &entries,
+                                                      false, &error_abort));
+    g_assert_cmpuint(entries->len, ==, 1);
+    entry = g_ptr_array_index(entries, 0);
+    g_assert_cmpstr(entry->description, ==, "Edited entry");
+    g_assert_cmpstr(entry->loader_path, ==, "/EFI/custom/loader.efi");
+    g_assert_cmpmem(entry->load_options->data, entry->load_options->len,
+                    second_opts, sizeof(second_opts) - 1);
+    g_ptr_array_unref(entries);
+
+    g_assert_true(vibtanium_efi_varstore_delete_boot_entry(
+        &store, 7, &error_abort));
+    g_assert_true(vibtanium_efi_varstore_boot_entries(&store, &entries,
+                                                      false, &error_abort));
+    g_assert_cmpuint(entries->len, ==, 0);
+    g_ptr_array_unref(entries);
+    vibtanium_efi_varstore_destroy(&store);
+}
+
+static void test_boot_order_helpers_allocate_and_reorder(void)
+{
+    VibtaniumEfiVarStore store;
+    g_autofree uint16_t *order = NULL;
+    size_t order_count = 0;
+    uint16_t id;
+
+    vibtanium_efi_varstore_init(&store);
+
+    g_assert_true(vibtanium_efi_varstore_allocate_boot_entry_id(
+        &store, &id, &error_abort));
+    g_assert_cmpuint(id, ==, 0);
+
+    g_assert_true(vibtanium_efi_varstore_write_boot_entry(
+        &store, 0, "zero", "\\EFI\\zero.efi", NULL, 0, &error_abort));
+    g_assert_true(vibtanium_efi_varstore_write_boot_entry(
+        &store, 1, "one", "\\EFI\\one.efi", NULL, 0, &error_abort));
+    g_assert_true(vibtanium_efi_varstore_allocate_boot_entry_id(
+        &store, &id, &error_abort));
+    g_assert_cmpuint(id, ==, 2);
+
+    {
+        uint16_t new_order[] = { 1, 0 };
+        g_assert_true(vibtanium_efi_varstore_boot_order_set(
+            &store, new_order, G_N_ELEMENTS(new_order), &error_abort));
+    }
+    g_assert_true(vibtanium_efi_varstore_boot_order_get(
+        &store, &order, &order_count, &error_abort));
+    g_assert_cmpuint(order_count, ==, 2);
+    g_assert_cmpuint(order[0], ==, 1);
+    g_assert_cmpuint(order[1], ==, 0);
+
+    vibtanium_efi_varstore_destroy(&store);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -276,6 +365,10 @@ int main(int argc, char **argv)
                     test_boot_order_yields_active_entries);
     g_test_add_func("/ia64-efi-vars/boot-next-is-one-shot",
                     test_boot_next_is_one_shot);
+    g_test_add_func("/ia64-efi-vars/boot-entry-write-edit-delete",
+                    test_boot_entry_write_edit_and_delete);
+    g_test_add_func("/ia64-efi-vars/boot-order-helpers-allocate-reorder",
+                    test_boot_order_helpers_allocate_and_reorder);
 
     return g_test_run();
 }

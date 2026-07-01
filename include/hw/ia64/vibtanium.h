@@ -12,6 +12,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumMachineState, VIBTANIUM_MACHINE)
 
 typedef struct DeviceState DeviceState;
 typedef struct SerialMM SerialMM;
+typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 
 #define VIBTANIUM_RAM_BASE      UINT64_C(0x00000000)
 #define VIBTANIUM_KERNEL_ALIAS_BASE UINT64_C(0x100000000)
@@ -72,6 +73,8 @@ struct VibtaniumMachineState {
     MemoryRegion nvram;
     MemoryRegion firmware;
     char *nvram_path;
+    char *efi_boot_manager;
+    VibtaniumEfiBootManagerState *boot_manager;
     bool efi_auto_enter;
     uint32_t iosapic_select;
     uint32_t iosapic_rte_low[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];

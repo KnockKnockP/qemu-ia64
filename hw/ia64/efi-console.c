@@ -64,19 +64,6 @@ static const uint32_t efi_vga_palette[16] = {
     0x00ff5555, 0x00ff55ff, 0x00ffff55, 0x00ffffff,
 };
 
-#define EFI_SCAN_UP        0x0001
-#define EFI_SCAN_DOWN      0x0002
-#define EFI_SCAN_RIGHT     0x0003
-#define EFI_SCAN_LEFT      0x0004
-#define EFI_SCAN_HOME      0x0005
-#define EFI_SCAN_END       0x0006
-#define EFI_SCAN_INSERT    0x0007
-#define EFI_SCAN_DELETE    0x0008
-#define EFI_SCAN_PAGE_UP   0x0009
-#define EFI_SCAN_PAGE_DOWN 0x000a
-#define EFI_SCAN_F1        0x000b
-#define EFI_SCAN_ESC       0x0017
-
 static bool efi_key_shifted(const VibtaniumEfiDisplayState *s)
 {
     return s->left_shift_down || s->right_shift_down;
@@ -322,40 +309,40 @@ static bool efi_key_to_input_key(uint32_t key,
         *unicode_char = '\t';
         return true;
     case KEY_UP:
-        *scan_code = EFI_SCAN_UP;
+        *scan_code = VIBTANIUM_EFI_SCAN_UP;
         return true;
     case KEY_DOWN:
-        *scan_code = EFI_SCAN_DOWN;
+        *scan_code = VIBTANIUM_EFI_SCAN_DOWN;
         return true;
     case KEY_RIGHT:
-        *scan_code = EFI_SCAN_RIGHT;
+        *scan_code = VIBTANIUM_EFI_SCAN_RIGHT;
         return true;
     case KEY_LEFT:
-        *scan_code = EFI_SCAN_LEFT;
+        *scan_code = VIBTANIUM_EFI_SCAN_LEFT;
         return true;
     case KEY_HOME:
-        *scan_code = EFI_SCAN_HOME;
+        *scan_code = VIBTANIUM_EFI_SCAN_HOME;
         return true;
     case KEY_END:
-        *scan_code = EFI_SCAN_END;
+        *scan_code = VIBTANIUM_EFI_SCAN_END;
         return true;
     case KEY_INSERT:
-        *scan_code = EFI_SCAN_INSERT;
+        *scan_code = VIBTANIUM_EFI_SCAN_INSERT;
         return true;
     case KEY_DELETE:
-        *scan_code = EFI_SCAN_DELETE;
+        *scan_code = VIBTANIUM_EFI_SCAN_DELETE;
         return true;
     case KEY_PAGEUP:
-        *scan_code = EFI_SCAN_PAGE_UP;
+        *scan_code = VIBTANIUM_EFI_SCAN_PAGE_UP;
         return true;
     case KEY_PAGEDOWN:
-        *scan_code = EFI_SCAN_PAGE_DOWN;
+        *scan_code = VIBTANIUM_EFI_SCAN_PAGE_DOWN;
         return true;
     case KEY_F1 ... KEY_F10:
-        *scan_code = EFI_SCAN_F1 + key - KEY_F1;
+        *scan_code = VIBTANIUM_EFI_SCAN_F1 + key - KEY_F1;
         return true;
     case KEY_ESC:
-        *scan_code = EFI_SCAN_ESC;
+        *scan_code = VIBTANIUM_EFI_SCAN_ESC;
         return true;
     default:
         return false;

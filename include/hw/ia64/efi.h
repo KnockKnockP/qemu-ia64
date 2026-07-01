@@ -103,7 +103,25 @@ typedef struct MemoryRegion MemoryRegion;
 #define VIBTANIUM_EFI_ALLOCATE_MAX_ADDRESS 1
 #define VIBTANIUM_EFI_ALLOCATE_ADDRESS     2
 
+#define VIBTANIUM_EFI_SCAN_UP        0x0001
+#define VIBTANIUM_EFI_SCAN_DOWN      0x0002
+#define VIBTANIUM_EFI_SCAN_RIGHT     0x0003
+#define VIBTANIUM_EFI_SCAN_LEFT      0x0004
+#define VIBTANIUM_EFI_SCAN_HOME      0x0005
+#define VIBTANIUM_EFI_SCAN_END       0x0006
+#define VIBTANIUM_EFI_SCAN_INSERT    0x0007
+#define VIBTANIUM_EFI_SCAN_DELETE    0x0008
+#define VIBTANIUM_EFI_SCAN_PAGE_UP   0x0009
+#define VIBTANIUM_EFI_SCAN_PAGE_DOWN 0x000a
+#define VIBTANIUM_EFI_SCAN_F1        0x000b
+#define VIBTANIUM_EFI_SCAN_ESC       0x0017
+
 struct VibtaniumEfiBlockDevice;
+
+typedef struct VibtaniumEfiInputKey {
+    uint16_t scan_code;
+    uint16_t unicode_char;
+} VibtaniumEfiInputKey;
 
 typedef enum VibtaniumEfiService {
     VIBTANIUM_EFI_SERVICE_UNKNOWN,
@@ -183,6 +201,8 @@ void vibtanium_efi_register_boot_media(
 void vibtanium_efi_set_linux_cmdline_append(const char *append);
 void vibtanium_efi_input_set_auto_enter(bool enabled);
 bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char);
+bool vibtanium_efi_input_has_key(void);
+bool vibtanium_efi_input_dequeue(VibtaniumEfiInputKey *key);
 
 void vibtanium_efi_console_init(MemoryRegion *framebuffer,
                                 MemoryRegion *vga_legacy,
