@@ -6,8 +6,10 @@
 #include "hw/ia64/vibtanium.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "standard-headers/linux/input-event-codes.h"
 #include "system/memory.h"
 #include "ui/console.h"
+#include "ui/input.h"
 #include "ui/surface.h"
 #include "ui/vgafont.h"
 
@@ -22,6 +24,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumEfiDisplayState, VIBTANIUM_EFI_DISPLAY)
 
 struct VibtaniumEfiDisplayState {
     SysBusDevice parent_obj;
+
+    QemuInputHandlerState *keyboard;
+    bool left_shift_down;
+    bool right_shift_down;
+    bool caps_lock_down;
+    bool caps_lock;
 };
 
 typedef struct VibtaniumEfiConsole {
@@ -42,6 +50,266 @@ static const uint32_t efi_vga_palette[16] = {
     0x00aa0000, 0x00aa00aa, 0x00aa5500, 0x00aaaaaa,
     0x00555555, 0x005555ff, 0x0055ff55, 0x0055ffff,
     0x00ff5555, 0x00ff55ff, 0x00ffff55, 0x00ffffff,
+};
+
+#define EFI_SCAN_UP        0x0001
+#define EFI_SCAN_DOWN      0x0002
+#define EFI_SCAN_RIGHT     0x0003
+#define EFI_SCAN_LEFT      0x0004
+#define EFI_SCAN_HOME      0x0005
+#define EFI_SCAN_END       0x0006
+#define EFI_SCAN_INSERT    0x0007
+#define EFI_SCAN_DELETE    0x0008
+#define EFI_SCAN_PAGE_UP   0x0009
+#define EFI_SCAN_PAGE_DOWN 0x000a
+#define EFI_SCAN_F1        0x000b
+#define EFI_SCAN_ESC       0x0017
+
+static bool efi_key_shifted(const VibtaniumEfiDisplayState *s)
+{
+    return s->left_shift_down || s->right_shift_down;
+}
+
+static bool efi_key_letter(uint32_t key, const VibtaniumEfiDisplayState *s,
+                           uint16_t *unicode_char)
+{
+    bool upper;
+
+    if (key < KEY_A || key > KEY_Z) {
+        return false;
+    }
+
+    upper = efi_key_shifted(s) ^ s->caps_lock;
+    *unicode_char = (upper ? 'A' : 'a') + key - KEY_A;
+    return true;
+}
+
+static bool efi_key_digit(uint32_t key, const VibtaniumEfiDisplayState *s,
+                          uint16_t *unicode_char)
+{
+    static const char unshifted[] = "1234567890";
+    static const char shifted[] = "!@#$%^&*()";
+
+    if (key < KEY_1 || key > KEY_0) {
+        return false;
+    }
+
+    if (key == KEY_0) {
+        *unicode_char = efi_key_shifted(s) ? shifted[9] : unshifted[9];
+    } else {
+        size_t index = key - KEY_1;
+        *unicode_char = efi_key_shifted(s) ? shifted[index] : unshifted[index];
+    }
+    return true;
+}
+
+static bool efi_key_symbol(uint32_t key, const VibtaniumEfiDisplayState *s,
+                           uint16_t *unicode_char)
+{
+    bool shifted = efi_key_shifted(s);
+
+    switch (key) {
+    case KEY_SPACE:
+        *unicode_char = ' ';
+        return true;
+    case KEY_MINUS:
+        *unicode_char = shifted ? '_' : '-';
+        return true;
+    case KEY_EQUAL:
+        *unicode_char = shifted ? '+' : '=';
+        return true;
+    case KEY_LEFTBRACE:
+        *unicode_char = shifted ? '{' : '[';
+        return true;
+    case KEY_RIGHTBRACE:
+        *unicode_char = shifted ? '}' : ']';
+        return true;
+    case KEY_SEMICOLON:
+        *unicode_char = shifted ? ':' : ';';
+        return true;
+    case KEY_APOSTROPHE:
+        *unicode_char = shifted ? '"' : '\'';
+        return true;
+    case KEY_GRAVE:
+        *unicode_char = shifted ? '~' : '`';
+        return true;
+    case KEY_BACKSLASH:
+        *unicode_char = shifted ? '|' : '\\';
+        return true;
+    case KEY_COMMA:
+        *unicode_char = shifted ? '<' : ',';
+        return true;
+    case KEY_DOT:
+        *unicode_char = shifted ? '>' : '.';
+        return true;
+    case KEY_SLASH:
+        *unicode_char = shifted ? '?' : '/';
+        return true;
+    case KEY_KPASTERISK:
+        *unicode_char = '*';
+        return true;
+    case KEY_KPMINUS:
+        *unicode_char = '-';
+        return true;
+    case KEY_KPPLUS:
+        *unicode_char = '+';
+        return true;
+    case KEY_KPDOT:
+        *unicode_char = '.';
+        return true;
+    case KEY_KPSLASH:
+        *unicode_char = '/';
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool efi_key_keypad_digit(uint32_t key, uint16_t *unicode_char)
+{
+    switch (key) {
+    case KEY_KP0:
+        *unicode_char = '0';
+        return true;
+    case KEY_KP1:
+        *unicode_char = '1';
+        return true;
+    case KEY_KP2:
+        *unicode_char = '2';
+        return true;
+    case KEY_KP3:
+        *unicode_char = '3';
+        return true;
+    case KEY_KP4:
+        *unicode_char = '4';
+        return true;
+    case KEY_KP5:
+        *unicode_char = '5';
+        return true;
+    case KEY_KP6:
+        *unicode_char = '6';
+        return true;
+    case KEY_KP7:
+        *unicode_char = '7';
+        return true;
+    case KEY_KP8:
+        *unicode_char = '8';
+        return true;
+    case KEY_KP9:
+        *unicode_char = '9';
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool efi_key_to_input_key(uint32_t key,
+                                 const VibtaniumEfiDisplayState *s,
+                                 uint16_t *scan_code,
+                                 uint16_t *unicode_char)
+{
+    *scan_code = 0;
+    *unicode_char = 0;
+
+    if (efi_key_letter(key, s, unicode_char) ||
+        efi_key_digit(key, s, unicode_char) ||
+        efi_key_symbol(key, s, unicode_char) ||
+        efi_key_keypad_digit(key, unicode_char)) {
+        return true;
+    }
+
+    switch (key) {
+    case KEY_ENTER:
+    case KEY_KPENTER:
+        *unicode_char = '\r';
+        return true;
+    case KEY_BACKSPACE:
+        *unicode_char = '\b';
+        return true;
+    case KEY_TAB:
+        *unicode_char = '\t';
+        return true;
+    case KEY_UP:
+        *scan_code = EFI_SCAN_UP;
+        return true;
+    case KEY_DOWN:
+        *scan_code = EFI_SCAN_DOWN;
+        return true;
+    case KEY_RIGHT:
+        *scan_code = EFI_SCAN_RIGHT;
+        return true;
+    case KEY_LEFT:
+        *scan_code = EFI_SCAN_LEFT;
+        return true;
+    case KEY_HOME:
+        *scan_code = EFI_SCAN_HOME;
+        return true;
+    case KEY_END:
+        *scan_code = EFI_SCAN_END;
+        return true;
+    case KEY_INSERT:
+        *scan_code = EFI_SCAN_INSERT;
+        return true;
+    case KEY_DELETE:
+        *scan_code = EFI_SCAN_DELETE;
+        return true;
+    case KEY_PAGEUP:
+        *scan_code = EFI_SCAN_PAGE_UP;
+        return true;
+    case KEY_PAGEDOWN:
+        *scan_code = EFI_SCAN_PAGE_DOWN;
+        return true;
+    case KEY_F1 ... KEY_F10:
+        *scan_code = EFI_SCAN_F1 + key - KEY_F1;
+        return true;
+    case KEY_ESC:
+        *scan_code = EFI_SCAN_ESC;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void vibtanium_efi_keyboard_event(DeviceState *dev, QemuConsole *src,
+                                         QemuInputEvent *evt)
+{
+    VibtaniumEfiDisplayState *s = VIBTANIUM_EFI_DISPLAY(dev);
+    uint16_t scan_code;
+    uint16_t unicode_char;
+
+    if (evt->type != INPUT_EVENT_KIND_KEY) {
+        return;
+    }
+
+    switch (evt->key.key) {
+    case KEY_LEFTSHIFT:
+        s->left_shift_down = evt->key.down;
+        return;
+    case KEY_RIGHTSHIFT:
+        s->right_shift_down = evt->key.down;
+        return;
+    case KEY_CAPSLOCK:
+        if (evt->key.down && !s->caps_lock_down) {
+            s->caps_lock = !s->caps_lock;
+        }
+        s->caps_lock_down = evt->key.down;
+        return;
+    default:
+        break;
+    }
+
+    if (!evt->key.down ||
+        !efi_key_to_input_key(evt->key.key, s, &scan_code, &unicode_char)) {
+        return;
+    }
+
+    vibtanium_efi_input_enqueue(scan_code, unicode_char);
+}
+
+static const QemuInputHandler vibtanium_efi_keyboard_handler = {
+    .name = "vibtanium EFI keyboard",
+    .mask = INPUT_EVENT_MASK_KEY,
+    .event = vibtanium_efi_keyboard_event,
 };
 
 static uint32_t efi_console_fg(void)
@@ -165,11 +433,29 @@ static const GraphicHwOps vibtanium_efi_console_ops = {
     .gfx_update = vibtanium_efi_console_gfx_update,
 };
 
+static void vibtanium_efi_display_realize(DeviceState *dev, Error **errp)
+{
+    VibtaniumEfiDisplayState *s = VIBTANIUM_EFI_DISPLAY(dev);
+
+    s->keyboard = qemu_input_handler_register(dev,
+                                              &vibtanium_efi_keyboard_handler);
+    qemu_input_handler_activate(s->keyboard);
+}
+
+static void vibtanium_efi_display_unrealize(DeviceState *dev)
+{
+    VibtaniumEfiDisplayState *s = VIBTANIUM_EFI_DISPLAY(dev);
+
+    g_clear_pointer(&s->keyboard, qemu_input_handler_unregister);
+}
+
 static void vibtanium_efi_display_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->desc = "vibtanium EFI framebuffer display";
+    dc->realize = vibtanium_efi_display_realize;
+    dc->unrealize = vibtanium_efi_display_unrealize;
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 

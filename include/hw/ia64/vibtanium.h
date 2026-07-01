@@ -52,6 +52,7 @@ struct VibtaniumMachineState {
     MemoryRegion framebuffer;
     MemoryRegion nvram;
     MemoryRegion firmware;
+    bool efi_auto_enter;
     uint32_t iosapic_select;
     uint32_t iosapic_rte_low[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
     uint32_t iosapic_rte_high[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];

@@ -451,6 +451,7 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
 
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
                                                       image, boot_media);
+    vibtanium_efi_input_set_auto_enter(vms->efi_auto_enter);
     vibtanium_efi_register_boot_media(boot_media);
     vibtanium_efi_register_loaded_image(image->load_base, image->size);
     vibtanium_efi_set_linux_cmdline_append(linux_append);
@@ -755,6 +756,20 @@ static void vibtanium_init(MachineState *machine)
     vibtanium_load_efi_app(vms, machine);
 }
 
+static bool vibtanium_get_efi_auto_enter(Object *obj, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    return vms->efi_auto_enter;
+}
+
+static void vibtanium_set_efi_auto_enter(Object *obj, bool value, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    vms->efi_auto_enter = value;
+}
+
 static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -768,6 +783,12 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     mc->no_cdrom = 1;
     mc->no_floppy = 1;
     mc->no_parallel = 1;
+
+    object_class_property_add_bool(oc, "efi-auto-enter",
+                                   vibtanium_get_efi_auto_enter,
+                                   vibtanium_set_efi_auto_enter);
+    object_class_property_set_description(oc, "efi-auto-enter",
+        "Queue one EFI Simple Text Input Enter key at firmware reset");
 }
 
 static const TypeInfo vibtanium_machine_typeinfo = {

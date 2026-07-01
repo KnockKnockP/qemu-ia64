@@ -177,6 +177,8 @@ void vibtanium_efi_register_loaded_image(uint64_t image_base,
 void vibtanium_efi_register_boot_media(
     const struct VibtaniumEfiBlockDevice *boot_media);
 void vibtanium_efi_set_linux_cmdline_append(const char *append);
+void vibtanium_efi_input_set_auto_enter(bool enabled);
+bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char);
 
 void vibtanium_efi_console_init(MemoryRegion *framebuffer);
 void vibtanium_efi_console_reset(void);

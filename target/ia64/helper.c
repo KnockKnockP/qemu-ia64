@@ -1024,13 +1024,75 @@ static uint64_t efi_next_event_handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT + 1;
 static uint64_t efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
 static uint64_t efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
 static uint32_t efi_high_monotonic_count;
-static bool efi_conin_enter_pending = true;
 static char *efi_linux_cmdline_append;
 static bool efi_linux_cmdline_append_done;
 static EfiInstalledProtocol efi_installed_protocols[EFI_MAX_INSTALLED_PROTOCOLS];
 static EfiGuestFile efi_guest_files[EFI_MAX_FILE_HANDLES];
 static EfiGuestEvent efi_guest_events[EFI_MAX_EVENTS];
 static EfiPageAllocation efi_page_allocations[EFI_MAX_PAGE_ALLOCATIONS];
+
+typedef struct EfiInputKey {
+    uint16_t scan_code;
+    uint16_t unicode_char;
+} EfiInputKey;
+
+#define EFI_INPUT_QUEUE_LENGTH 32
+
+static EfiInputKey efi_conin_queue[EFI_INPUT_QUEUE_LENGTH];
+static unsigned efi_conin_queue_head;
+static unsigned efi_conin_queue_count;
+static bool efi_conin_auto_enter;
+
+static bool efi_conin_has_key(void)
+{
+    return efi_conin_queue_count != 0;
+}
+
+bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char)
+{
+    unsigned index;
+
+    if ((scan_code == 0 && unicode_char == 0) ||
+        efi_conin_queue_count >= EFI_INPUT_QUEUE_LENGTH) {
+        return false;
+    }
+
+    index = (efi_conin_queue_head + efi_conin_queue_count) %
+            EFI_INPUT_QUEUE_LENGTH;
+    efi_conin_queue[index] = (EfiInputKey) {
+        .scan_code = scan_code,
+        .unicode_char = unicode_char,
+    };
+    efi_conin_queue_count++;
+    return true;
+}
+
+static bool efi_conin_dequeue(EfiInputKey *key)
+{
+    if (!efi_conin_has_key()) {
+        return false;
+    }
+
+    *key = efi_conin_queue[efi_conin_queue_head];
+    efi_conin_queue_head = (efi_conin_queue_head + 1) %
+                           EFI_INPUT_QUEUE_LENGTH;
+    efi_conin_queue_count--;
+    return true;
+}
+
+static void efi_conin_reset(void)
+{
+    efi_conin_queue_head = 0;
+    efi_conin_queue_count = 0;
+    if (efi_conin_auto_enter) {
+        vibtanium_efi_input_enqueue(0, '\r');
+    }
+}
+
+void vibtanium_efi_input_set_auto_enter(bool enabled)
+{
+    efi_conin_auto_enter = enabled;
+}
 
 static const uint8_t efi_loaded_image_guid[16] = {
     0xa1, 0x31, 0x1b, 0x5b, 0x62, 0x95, 0xd2, 0x11,
@@ -3107,7 +3169,7 @@ void vibtanium_efi_register_boot_media(
     efi_loaded_image_base = VIBTANIUM_EFI_APP_BASE;
     efi_loaded_image_pages = EFI_DEFAULT_LOADER_IMAGE_PAGES;
     efi_high_monotonic_count = 0;
-    efi_conin_enter_pending = true;
+    efi_conin_reset();
 
     g_clear_pointer(&efi_boot_media_name, g_free);
     memset(&efi_boot_media, 0, sizeof(efi_boot_media));
@@ -4005,7 +4067,7 @@ static EfiGuestEvent *efi_find_event(uint64_t handle)
             .in_use = true,
             .handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT,
             .type = 0,
-            .signaled = efi_conin_enter_pending,
+            .signaled = efi_conin_has_key(),
             .timer_active = false,
         };
         return &conin_event;
@@ -4116,7 +4178,7 @@ static bool efi_event_is_ready(CPUIA64State *env, EfiGuestEvent *event)
         return false;
     }
     if (event->handle == VIBTANIUM_EFI_CON_IN_WAIT_EVENT) {
-        return efi_conin_enter_pending;
+        return efi_conin_has_key();
     }
     if (efi_event_timer_due(env, event)) {
         event->signaled = true;
@@ -4820,21 +4882,21 @@ static uint64_t efi_dispatch_gop(CPUIA64State *env, unsigned index)
 static uint64_t efi_dispatch_console_in(CPUIA64State *env, unsigned index)
 {
     uint64_t key = ia64_read_gr(env, 33);
+    EfiInputKey input_key;
 
     switch (index) {
     case 0: /* Reset */
-        efi_conin_enter_pending = true;
+        efi_conin_reset();
         return VIBTANIUM_EFI_SUCCESS;
     case 1: /* ReadKeyStroke */
         if (key == 0) {
             return VIBTANIUM_EFI_INVALID_PARAMETER;
         }
-        if (!efi_conin_enter_pending) {
+        if (!efi_conin_dequeue(&input_key)) {
             return VIBTANIUM_EFI_NOT_READY;
         }
-        efi_guest_stw(env, key, 0);
-        efi_guest_stw(env, key + 2, '\r');
-        efi_conin_enter_pending = false;
+        efi_guest_stw(env, key, input_key.scan_code);
+        efi_guest_stw(env, key + 2, input_key.unicode_char);
         return VIBTANIUM_EFI_SUCCESS;
     default:
         return VIBTANIUM_EFI_UNSUPPORTED;
