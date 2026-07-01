@@ -820,6 +820,17 @@ static void ia64_deliver_translation_fault(CPUIA64State *env,
                            result->message);
 }
 
+static G_NORETURN void ia64_exit_after_translation_fault(
+    CPUIA64State *env, const IA64TranslateResult *result)
+{
+    CPUState *cpu = env_cpu(env);
+
+    ia64_deliver_translation_fault(env, result);
+    env->fault_exit_pending_tb_translate = true;
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu_loop_exit(cpu);
+}
+
 enum {
     EFI_BOOT_SERVICE_BASE = 0,
     EFI_RUNTIME_SERVICE_BASE =
@@ -8010,8 +8021,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
 
             if (status == IA64_PROBE_FAULT) {
                 IA64_PERF_INC(IA64_PERF_OP_PROBE_TRANSLATION);
-                ia64_deliver_translation_fault(env, &fault);
-                return;
+                ia64_exit_after_translation_fault(env, &fault);
             }
             if (status == IA64_PROBE_OK) {
                 IA64_PERF_INC(IA64_PERF_OP_PROBE_TRANSLATION);
@@ -8025,8 +8035,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
 
             if (status == IA64_VIRTUAL_TRANSLATION_FAULT) {
                 IA64_PERF_INC(IA64_PERF_OP_VIRTUAL_TRANSLATION);
-                ia64_deliver_translation_fault(env, &fault);
-                return;
+                ia64_exit_after_translation_fault(env, &fault);
             }
             if (status == IA64_VIRTUAL_TRANSLATION_OK) {
                 IA64_PERF_INC(IA64_PERF_OP_VIRTUAL_TRANSLATION);
