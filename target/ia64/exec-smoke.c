@@ -1649,7 +1649,7 @@ static bool ia64_timer_vector_masked(CPUIA64State *env)
 
 static bool ia64_valid_external_interrupt_vector(uint64_t vector)
 {
-    return vector == 0 || vector == 2 ||
+    return vector == 2 ||
            (vector > IA64_INTERRUPT_SPURIOUS_VECTOR && vector <= 0xff);
 }
 
@@ -1856,6 +1856,24 @@ bool ia64_external_interrupt_enabled(CPUIA64State *env)
            (env->psr & (IA64_PSR_I_BIT | IA64_PSR_IC_BIT)) ==
            (IA64_PSR_I_BIT | IA64_PSR_IC_BIT) &&
            ia64_select_pending_external_interrupt(env, true, &vector);
+}
+
+void ia64_reconcile_interrupt_state(CPUIA64State *env)
+{
+    uint64_t active_vector;
+
+    if (!env) {
+        return;
+    }
+
+    active_vector = env->cr[IA64_CR_IVR] & IA64_INTERRUPT_VECTOR_MASK;
+    if (env->interrupt.pending_interruption &&
+        !ia64_valid_external_interrupt_vector(active_vector)) {
+        env->interrupt.pending_interruption = 0;
+        env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
+    }
+
+    ia64_refresh_pending_external_interrupt(env);
 }
 
 uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)

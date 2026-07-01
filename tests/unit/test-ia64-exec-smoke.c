@@ -1439,6 +1439,8 @@ static void test_interrupt_control_registers(void)
     ia64_cpu_reset_synthetic_itanium2(&env);
 
     g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0x0f);
+    g_assert_false(ia64_queue_external_interrupt(&env, 0));
+    g_assert_false(ia64_external_interrupt_pending(&env));
 
     env.cr[IA64_CR_ITV] = 0xef;
     env.cr[IA64_CR_ITM] = 10;
@@ -1598,6 +1600,25 @@ static void test_external_interrupt_delivery_masks(void)
     g_assert_true(ia64_queue_external_interrupt(&env, 2));
     g_assert_true(ia64_external_interrupt_enabled(&env));
     g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 2);
+}
+
+static void test_interrupt_reconcile_drops_invalid_active_vector(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
+    env.interrupt.pending_interruption = 1;
+    env.cr[IA64_CR_IVR] = 0;
+
+    g_assert_true(ia64_queue_external_interrupt(&env, 0xef));
+    g_assert_false(ia64_external_interrupt_enabled(&env));
+
+    ia64_reconcile_interrupt_state(&env);
+
+    g_assert_false(env.interrupt.pending_interruption);
+    g_assert_true(ia64_external_interrupt_enabled(&env));
+    g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
 }
 
 static void test_lx_movl_reconstructs_immediate(void)
@@ -3257,6 +3278,8 @@ int main(int argc, char **argv)
                     test_interrupt_unmask_exposes_pending_external_interrupt);
     g_test_add_func("/ia64-exec-smoke/external-interrupt-delivery-masks",
                     test_external_interrupt_delivery_masks);
+    g_test_add_func("/ia64-exec-smoke/interrupt-reconcile-invalid-active",
+                    test_interrupt_reconcile_drops_invalid_active_vector);
     g_test_add_func("/ia64-exec-smoke/lx-movl-reconstructs-immediate",
                     test_lx_movl_reconstructs_immediate);
     g_test_add_func("/ia64-exec-smoke/lx-nop-hint-pair",

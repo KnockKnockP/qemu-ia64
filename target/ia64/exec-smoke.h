@@ -238,6 +238,7 @@ void ia64_latch_timer_interrupt(CPUIA64State *env);
 bool ia64_queue_external_interrupt(CPUIA64State *env, uint64_t vector);
 bool ia64_external_interrupt_pending(CPUIA64State *env);
 bool ia64_external_interrupt_enabled(CPUIA64State *env);
+void ia64_reconcile_interrupt_state(CPUIA64State *env);
 uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg);
 void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
                                  uint64_t value);

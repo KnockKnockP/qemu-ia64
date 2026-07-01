@@ -188,6 +188,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     ia64_translation_lookup_cache_flush(env);
     ia64_alat_reconstruct_transients(env);
     env->interrupt.timer_compare_latched = 0;
+    ia64_reconcile_interrupt_state(env);
     env->gr[0] = 0;
     env->pr |= 1;
     env->fault_exit_pending_tb_translate = false;

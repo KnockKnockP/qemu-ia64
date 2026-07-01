@@ -15,11 +15,13 @@
 #include "hw/ia64/vibtanium.h"
 #include "hw/input/i8042.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "system/block-backend.h"
 #include "system/block-backend-io.h"
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "system/reset.h"
 #include "system/system.h"
 #include "target/ia64/exec-smoke.h"
 
@@ -39,6 +41,37 @@
 #define VIBTANIUM_LEGACY_I8042_MOUSE_IRQ 12
 #define VIBTANIUM_I8042_MMIO_COMMAND_OFFSET 4
 #define VIBTANIUM_VGA_CRTC_REGISTER_COUNT 0x19
+
+static void vibtanium_iosapic_reset(VibtaniumMachineState *vms)
+{
+    for (unsigned i = 0; i < VIBTANIUM_IOSAPIC_REDIRECTION_COUNT; i++) {
+        vms->iosapic_rte_low[i] = VIBTANIUM_IOSAPIC_RTE_MASK;
+        vms->iosapic_rte_high[i] = 0;
+        vms->iosapic_irq_level[i] = false;
+    }
+    vms->iosapic_select = 0;
+}
+
+static void vibtanium_iosapic_system_reset(void *opaque)
+{
+    vibtanium_iosapic_reset(opaque);
+}
+
+static const VMStateDescription vmstate_vibtanium_iosapic = {
+    .name = "vibtanium-iosapic",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(iosapic_select, VibtaniumMachineState),
+        VMSTATE_UINT32_ARRAY(iosapic_rte_low, VibtaniumMachineState,
+                             VIBTANIUM_IOSAPIC_REDIRECTION_COUNT),
+        VMSTATE_UINT32_ARRAY(iosapic_rte_high, VibtaniumMachineState,
+                             VIBTANIUM_IOSAPIC_REDIRECTION_COUNT),
+        VMSTATE_BOOL_ARRAY(iosapic_irq_level, VibtaniumMachineState,
+                           VIBTANIUM_IOSAPIC_REDIRECTION_COUNT),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static void vibtanium_iosapic_deliver_irq(VibtaniumMachineState *vms,
                                           unsigned input)
@@ -2121,6 +2154,9 @@ static void vibtanium_init(MachineState *machine)
                      (uint64_t)VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET);
         exit(1);
     }
+    vibtanium_iosapic_reset(vms);
+    qemu_register_reset(vibtanium_iosapic_system_reset, vms);
+    vmstate_register(NULL, 0, &vmstate_vibtanium_iosapic, vms);
 
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
 
@@ -2263,6 +2299,8 @@ static void vibtanium_machine_finalize(Object *obj)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
+    vmstate_unregister(NULL, &vmstate_vibtanium_iosapic, vms);
+    qemu_unregister_reset(vibtanium_iosapic_system_reset, vms);
     vibtanium_efi_boot_manager_destroy(vms);
     g_free(vms->nvram_path);
     g_free(vms->efi_boot_manager);
