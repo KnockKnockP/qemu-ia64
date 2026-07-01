@@ -458,6 +458,40 @@ static void ia64_trace_execve_vector(CPUIA64State *env, const char *label,
     }
 }
 
+static bool ia64_trace_ip_list_contains(uint64_t ip, const uint64_t *known,
+                                        size_t known_count,
+                                        const char *env_name)
+{
+    const char *override;
+
+    for (size_t i = 0; i < known_count; i++) {
+        if (ip == known[i]) {
+            return true;
+        }
+    }
+
+    override = g_getenv(env_name);
+    while (override && *override) {
+        char *end = NULL;
+        uint64_t value = g_ascii_strtoull(override, &end, 0);
+
+        if (end != override && ip == value) {
+            return true;
+        }
+        if (end == override) {
+            override++;
+        } else {
+            override = end;
+        }
+        while (*override == ',' || *override == ';' ||
+               g_ascii_isspace(*override)) {
+            override++;
+        }
+    }
+
+    return false;
+}
+
 static bool ia64_linux_syscall_arg_is_path(uint64_t nr, unsigned arg_index,
                                            const char **label)
 {
@@ -505,17 +539,26 @@ static bool ia64_linux_syscall_arg_is_path(uint64_t nr, unsigned arg_index,
     }
 }
 
+static void ia64_trace_linux_syscall_execve_vectors(CPUIA64State *env,
+                                                    uint64_t nr)
+{
+    if (nr != 1033) {
+        return;
+    }
+
+    ia64_trace_execve_vector(env, "argv", ia64_read_gr(env, 33), 6);
+    ia64_trace_execve_vector(env, "envp", ia64_read_gr(env, 34), 4);
+}
+
 static void ia64_trace_linux_syscall_paths(CPUIA64State *env,
-                                           const char *mnemonic,
                                            uint64_t nr)
 {
     uint64_t arg[6];
     char rendered[192];
-    bool shifted_m_gate = g_str_equal(mnemonic, "break.m");
     bool any = false;
 
     for (unsigned i = 0; i < ARRAY_SIZE(arg); i++) {
-        arg[i] = ia64_read_gr(env, 32 + i + (shifted_m_gate ? 1 : 0));
+        arg[i] = ia64_read_gr(env, 32 + i);
     }
 
     for (unsigned i = 0; i < ARRAY_SIZE(arg); i++) {
@@ -534,14 +577,12 @@ static void ia64_trace_linux_syscall_paths(CPUIA64State *env,
 }
 
 static void ia64_trace_linux_syscall_socket_details(CPUIA64State *env,
-                                                    const char *mnemonic,
                                                     uint64_t nr)
 {
     uint64_t arg[6];
-    bool shifted_m_gate = g_str_equal(mnemonic, "break.m");
 
     for (unsigned i = 0; i < ARRAY_SIZE(arg); i++) {
-        arg[i] = ia64_read_gr(env, 32 + i + (shifted_m_gate ? 1 : 0));
+        arg[i] = ia64_read_gr(env, 32 + i);
     }
 
     switch (nr) {
@@ -654,8 +695,9 @@ static void ia64_trace_linux_syscall_break(CPUIA64State *env,
             ia64_read_gr(env, 37), ia64_read_gr(env, 38),
             ia64_read_gr(env, 39), env->br[0], env->br[6], env->br[7],
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE]);
-    ia64_trace_linux_syscall_paths(env, mnemonic, nr);
-    ia64_trace_linux_syscall_socket_details(env, mnemonic, nr);
+    ia64_trace_linux_syscall_paths(env, nr);
+    ia64_trace_linux_syscall_execve_vectors(env, nr);
+    ia64_trace_linux_syscall_socket_details(env, nr);
     fprintf(stderr, "\n");
 }
 
@@ -5577,12 +5619,16 @@ static bool exec_false_predicated_side_effect(CPUIA64State *env,
 }
 
 /*
- * Diagnostic: log do_execve() filenames so a userspace exec loop can be
- * identified. do_execve() in the Debian 3.2.0-4-itanium kernel is at a fixed
- * address; gated behind VIBTANIUM_EXECVE_TRACE so it costs nothing by default.
+ * Diagnostic: log execve() filenames so a userspace exec loop can be
+ * identified. Known fixed kernel entry points are listed here, and
+ * VIBTANIUM_EXECVE_IPS accepts a comma-separated override list for new guests.
  */
 static void ia64_trace_execve(CPUIA64State *env)
 {
+    static const uint64_t known_execve_ips[] = {
+        UINT64_C(0xa0000001002072e0), /* Debian 3.2.0-4-itanium do_execve */
+        UINT64_C(0xe0000000044b7bc0), /* CentOS 3.9 ia64 sys_execve */
+    };
     static int enabled = -1;
     char path[176];
     uint64_t argv;
@@ -5591,7 +5637,10 @@ static void ia64_trace_execve(CPUIA64State *env)
     if (enabled < 0) {
         enabled = g_getenv("VIBTANIUM_EXECVE_TRACE") != NULL;
     }
-    if (enabled == 0 || env->ip != UINT64_C(0xa0000001002072e0)) {
+    if (enabled == 0 ||
+        !ia64_trace_ip_list_contains(env->ip, known_execve_ips,
+                                     ARRAY_SIZE(known_execve_ips),
+                                     "VIBTANIUM_EXECVE_IPS")) {
         return;
     }
     ia64_trace_guest_c_string(env, ia64_read_gr(env, 32), path, sizeof(path));
@@ -5617,11 +5666,16 @@ static void ia64_trace_execve(CPUIA64State *env)
  */
 static void ia64_trace_epc_syscall(CPUIA64State *env)
 {
+    static const uint64_t known_epc_ips[] = {
+        UINT64_C(0xa000000000040a00), /* Debian 3.2.0-4-itanium gate */
+    };
     uint64_t nr;
     uint64_t cpl;
 
     if (!ia64_syscall_trace_enabled() ||
-        env->ip != UINT64_C(0xa000000000040a00)) {
+        !ia64_trace_ip_list_contains(env->ip, known_epc_ips,
+                                     ARRAY_SIZE(known_epc_ips),
+                                     "VIBTANIUM_SYSCALL_EPC_IPS")) {
         return;
     }
 
@@ -5636,8 +5690,9 @@ static void ia64_trace_epc_syscall(CPUIA64State *env)
             ia64_read_gr(env, 13),
             ia64_read_gr(env, 32), ia64_read_gr(env, 33),
             ia64_read_gr(env, 34), ia64_read_gr(env, 35), env->br[0]);
-    ia64_trace_linux_syscall_paths(env, "epc", nr);
-    ia64_trace_linux_syscall_socket_details(env, "epc", nr);
+    ia64_trace_linux_syscall_paths(env, nr);
+    ia64_trace_linux_syscall_execve_vectors(env, nr);
+    ia64_trace_linux_syscall_socket_details(env, nr);
     fprintf(stderr, "\n");
 }
 
@@ -5649,11 +5704,17 @@ static void ia64_trace_epc_syscall(CPUIA64State *env)
  */
 static void ia64_trace_syscall_return(CPUIA64State *env)
 {
+    static const uint64_t known_return_ips[] = {
+        UINT64_C(0xa00000010000baa0), /* Debian 3.2.0-4-itanium */
+        UINT64_C(0xe00000000440ea60), /* CentOS 3.9 ia64 */
+    };
     uint64_t r8;
     uint64_t r10;
 
     if (!ia64_syscall_trace_enabled() ||
-        env->ip != UINT64_C(0xa00000010000baa0)) {
+        !ia64_trace_ip_list_contains(env->ip, known_return_ips,
+                                     ARRAY_SIZE(known_return_ips),
+                                     "VIBTANIUM_SYSCALL_RET_IPS")) {
         return;
     }
 
