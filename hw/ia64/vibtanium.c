@@ -734,6 +734,13 @@ static void vibtanium_init(MachineState *machine)
     memory_region_add_subregion(sysmem, VIBTANIUM_IO_PORT_BASE,
                                 &vms->io_port_space);
 
+    memory_region_init_ram(&vms->framebuffer, NULL,
+                           "vibtanium.efi-framebuffer",
+                           VIBTANIUM_FRAMEBUFFER_SIZE, &error_fatal);
+    memory_region_add_subregion(sysmem, VIBTANIUM_FRAMEBUFFER_BASE,
+                                &vms->framebuffer);
+    vibtanium_efi_console_init(&vms->framebuffer);
+
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, VIBTANIUM_NVRAM_BASE, &vms->nvram);

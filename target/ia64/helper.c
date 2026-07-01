@@ -834,8 +834,10 @@ enum {
     EFI_FILE_SERVICE_BASE =
         EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE +
         VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT,
-    EFI_SERVICE_DESCRIPTOR_COUNT =
+    EFI_GOP_SERVICE_BASE =
         EFI_FILE_SERVICE_BASE + VIBTANIUM_EFI_FILE_SERVICE_COUNT,
+    EFI_SERVICE_DESCRIPTOR_COUNT =
+        EFI_GOP_SERVICE_BASE + VIBTANIUM_EFI_GOP_SERVICE_COUNT,
 };
 
 #define EFI_MAX_INSTALLED_PROTOCOLS 64
@@ -887,6 +889,7 @@ enum {
     EFI_RUNTIME_SERVICES_DATA = 6,
     EFI_CONVENTIONAL_MEMORY = 7,
     EFI_ACPI_RECLAIM_MEMORY = 9,
+    EFI_MEMORY_MAPPED_IO = 11,
     EFI_MEMORY_MAPPED_IO_PORT_SPACE = 12,
 };
 
@@ -1062,6 +1065,11 @@ static const uint8_t efi_simple_file_system_guid[16] = {
 static const uint8_t efi_file_info_guid[16] = {
     0x92, 0x6e, 0x57, 0x09, 0x3f, 0x6d, 0xd2, 0x11,
     0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b,
+};
+
+static const uint8_t efi_graphics_output_guid[16] = {
+    0xde, 0xa9, 0x42, 0x90, 0xdc, 0x23, 0x38, 0x4a,
+    0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a,
 };
 
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
@@ -1762,8 +1770,12 @@ static const char *efi_service_group_name(unsigned service_index,
         *group_index = service_index - EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE;
         return "simplefs";
     }
-    *group_index = service_index - EFI_FILE_SERVICE_BASE;
-    return "file";
+    if (service_index < EFI_GOP_SERVICE_BASE) {
+        *group_index = service_index - EFI_FILE_SERVICE_BASE;
+        return "file";
+    }
+    *group_index = service_index - EFI_GOP_SERVICE_BASE;
+    return "gop";
 }
 
 static void efi_trace_service(CPUIA64State *env, unsigned service_index,
@@ -2471,6 +2483,11 @@ static uint64_t efi_guest_ldq(CPUIA64State *env, uint64_t address)
     return cpu_ldq_le_data_ra(env, address, GETPC());
 }
 
+static uint32_t efi_guest_ldl(CPUIA64State *env, uint64_t address)
+{
+    return cpu_ldl_le_data_ra(env, address, GETPC());
+}
+
 static uint8_t efi_guest_ldb(CPUIA64State *env, uint64_t address)
 {
     return cpu_ldub_data_ra(env, address, GETPC());
@@ -2957,6 +2974,12 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
         .pages = VIBTANIUM_IO_PORT_SIZE / EFI_PAGE_SIZE,
         .attributes = EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
     };
+    const EfiMemoryRange framebuffer = {
+        .type = EFI_MEMORY_MAPPED_IO,
+        .address = VIBTANIUM_FRAMEBUFFER_BASE,
+        .pages = VIBTANIUM_FRAMEBUFFER_SIZE / EFI_PAGE_SIZE,
+        .attributes = EFI_MEMORY_UC,
+    };
 
     index = efi_emit_runtime_and_loader(env, map, index, &runtime_firmware,
                                         &loader_image, &loader_emitted);
@@ -2973,6 +2996,7 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
     index = efi_emit_split_conventional(env, map, index,
                                         EFI_HIGH_CONVENTIONAL_BASE,
                                         EFI_HIGH_CONVENTIONAL_PAGES);
+    index = efi_emit_memory_descriptor(env, map, index, &framebuffer);
     index = efi_emit_memory_descriptor(env, map, index, &io_port_space);
     return index;
 }
@@ -3120,6 +3144,9 @@ static uint64_t efi_preinstalled_interface(uint64_t handle,
     if (efi_guid_bytes_equal(guid, efi_device_path_guid)) {
         return VIBTANIUM_EFI_DEVICE_PATH;
     }
+    if (efi_guid_bytes_equal(guid, efi_graphics_output_guid)) {
+        return VIBTANIUM_EFI_GOP;
+    }
     if (efi_boot_media_valid && efi_guid_bytes_equal(guid, efi_block_io_guid)) {
         return VIBTANIUM_EFI_BLOCK_IO;
     }
@@ -3223,6 +3250,7 @@ static unsigned efi_locate_handles_for_protocol(CPUIA64State *env,
     if (efi_guid_bytes_equal(guid, efi_simple_text_output_guid) ||
         efi_guid_bytes_equal(guid, efi_simple_text_input_guid) ||
         efi_guid_bytes_equal(guid, efi_device_path_guid) ||
+        efi_guid_bytes_equal(guid, efi_graphics_output_guid) ||
         (efi_boot_media_valid &&
          (efi_guid_bytes_equal(guid, efi_block_io_guid) ||
           efi_guid_bytes_equal(guid, efi_simple_file_system_guid)))) {
@@ -4500,6 +4528,18 @@ static uint64_t efi_dispatch_runtime_service(CPUIA64State *env, unsigned index)
     }
 }
 
+static void efi_console_write_mode_state(CPUIA64State *env)
+{
+    efi_guest_stl(env, VIBTANIUM_EFI_CON_OUT_MODE + 8,
+                  vibtanium_efi_console_attribute());
+    efi_guest_stl(env, VIBTANIUM_EFI_CON_OUT_MODE + 12,
+                  vibtanium_efi_console_cursor_column());
+    efi_guest_stl(env, VIBTANIUM_EFI_CON_OUT_MODE + 16,
+                  vibtanium_efi_console_cursor_row());
+    efi_guest_stb(env, VIBTANIUM_EFI_CON_OUT_MODE + 20,
+                  vibtanium_efi_console_cursor_visible());
+}
+
 static void efi_console_output_string(CPUIA64State *env)
 {
     uint64_t text = ia64_read_gr(env, 33);
@@ -4517,23 +4557,29 @@ static void efi_console_output_string(CPUIA64State *env)
             break;
         }
         if (ch == '\r') {
+            vibtanium_efi_console_putchar(ch);
             continue;
         }
+        vibtanium_efi_console_putchar(ch);
         g_string_append_c(line, ch < 0x80 ? (char)ch : '?');
     }
     if (line->len != 0) {
         fprintf(stderr, "%s", line->str);
     }
     g_string_free(line, true);
+    efi_console_write_mode_state(env);
 }
 
 static uint64_t efi_dispatch_console_out(CPUIA64State *env, unsigned index)
 {
-    uint64_t columns = ia64_read_gr(env, 34);
-    uint64_t rows = ia64_read_gr(env, 35);
+    uint64_t arg1 = ia64_read_gr(env, 33);
+    uint64_t arg2 = ia64_read_gr(env, 34);
+    uint64_t arg3 = ia64_read_gr(env, 35);
 
     switch (index) {
     case 0: /* Reset */
+        vibtanium_efi_console_reset();
+        efi_console_write_mode_state(env);
         return VIBTANIUM_EFI_SUCCESS;
     case 1: /* OutputString */
         efi_console_output_string(env);
@@ -4541,18 +4587,231 @@ static uint64_t efi_dispatch_console_out(CPUIA64State *env, unsigned index)
     case 2: /* TestString */
         return VIBTANIUM_EFI_SUCCESS;
     case 3: /* QueryMode */
-        if (columns == 0 || rows == 0) {
+        if (arg1 != 0 || arg2 == 0 || arg3 == 0) {
             return VIBTANIUM_EFI_INVALID_PARAMETER;
         }
-        efi_guest_stq(env, columns, 80);
-        efi_guest_stq(env, rows, 25);
+        efi_guest_stq(env, arg2, 80);
+        efi_guest_stq(env, arg3, 25);
         return VIBTANIUM_EFI_SUCCESS;
     case 4: /* SetMode */
-    case 5: /* SetAttribute */
-    case 6: /* ClearScreen */
-    case 7: /* SetCursorPosition */
-    case 8: /* EnableCursor */
+        if (arg1 != 0) {
+            return VIBTANIUM_EFI_UNSUPPORTED;
+        }
+        vibtanium_efi_console_clear();
+        efi_guest_stl(env, VIBTANIUM_EFI_CON_OUT_MODE + 4, 0);
+        efi_console_write_mode_state(env);
         return VIBTANIUM_EFI_SUCCESS;
+    case 5: /* SetAttribute */
+        vibtanium_efi_console_set_attribute(arg1);
+        efi_console_write_mode_state(env);
+        return VIBTANIUM_EFI_SUCCESS;
+    case 6: /* ClearScreen */
+        vibtanium_efi_console_clear();
+        efi_console_write_mode_state(env);
+        return VIBTANIUM_EFI_SUCCESS;
+    case 7: /* SetCursorPosition */
+        if (!vibtanium_efi_console_set_cursor_position(arg1, arg2)) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+        efi_console_write_mode_state(env);
+        return VIBTANIUM_EFI_SUCCESS;
+    case 8: /* EnableCursor */
+        vibtanium_efi_console_enable_cursor(arg1 != 0);
+        efi_console_write_mode_state(env);
+        return VIBTANIUM_EFI_SUCCESS;
+    default:
+        return VIBTANIUM_EFI_UNSUPPORTED;
+    }
+}
+
+static void efi_gop_write_mode_info(CPUIA64State *env, uint64_t info)
+{
+    efi_guest_stl(env, info, 0);
+    efi_guest_stl(env, info + 4, VIBTANIUM_FRAMEBUFFER_WIDTH);
+    efi_guest_stl(env, info + 8, VIBTANIUM_FRAMEBUFFER_HEIGHT);
+    efi_guest_stl(env, info + 12, 1);
+    efi_guest_stl(env, info + 16, 0);
+    efi_guest_stl(env, info + 20, 0);
+    efi_guest_stl(env, info + 24, 0);
+    efi_guest_stl(env, info + 28, 0);
+    efi_guest_stl(env, info + 32, VIBTANIUM_FRAMEBUFFER_WIDTH);
+}
+
+static bool efi_gop_rect_valid(uint64_t x, uint64_t y,
+                               uint64_t width, uint64_t height)
+{
+    return width <= VIBTANIUM_FRAMEBUFFER_WIDTH &&
+           height <= VIBTANIUM_FRAMEBUFFER_HEIGHT &&
+           x <= VIBTANIUM_FRAMEBUFFER_WIDTH - width &&
+           y <= VIBTANIUM_FRAMEBUFFER_HEIGHT - height;
+}
+
+static uint64_t efi_gop_pixel_address(uint64_t x, uint64_t y)
+{
+    return VIBTANIUM_FRAMEBUFFER_BASE +
+           (y * VIBTANIUM_FRAMEBUFFER_WIDTH + x) * sizeof(uint32_t);
+}
+
+static uint64_t efi_gop_query_mode(CPUIA64State *env)
+{
+    uint64_t mode_number = ia64_read_gr(env, 33);
+    uint64_t size_of_info = ia64_read_gr(env, 34);
+    uint64_t info_ptr = ia64_read_gr(env, 35);
+    uint64_t info;
+
+    if (size_of_info == 0 || info_ptr == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+    if (mode_number != 0) {
+        return VIBTANIUM_EFI_UNSUPPORTED;
+    }
+
+    info = efi_pool_alloc_raw(36);
+    if (info == 0) {
+        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    efi_gop_write_mode_info(env, info);
+    efi_guest_stq(env, size_of_info, 36);
+    efi_guest_stq(env, info_ptr, info);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_gop_set_mode(CPUIA64State *env)
+{
+    uint64_t mode_number = ia64_read_gr(env, 33);
+
+    if (mode_number != 0) {
+        return VIBTANIUM_EFI_UNSUPPORTED;
+    }
+
+    efi_guest_stl(env, VIBTANIUM_EFI_GOP_MODE + 4, 0);
+    vibtanium_efi_console_clear();
+    efi_console_write_mode_state(env);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_gop_blt(CPUIA64State *env)
+{
+    uint64_t blt_buffer = ia64_read_gr(env, 33);
+    uint64_t operation = ia64_read_gr(env, 34);
+    uint64_t source_x = ia64_read_gr(env, 35);
+    uint64_t source_y = ia64_read_gr(env, 36);
+    uint64_t dest_x = ia64_read_gr(env, 37);
+    uint64_t dest_y = ia64_read_gr(env, 38);
+    uint64_t width = ia64_read_gr(env, 39);
+    uint64_t height = ia64_read_gr(env, 40);
+    uint64_t delta = ia64_read_gr(env, 41);
+
+    if (width == 0 || height == 0) {
+        return VIBTANIUM_EFI_SUCCESS;
+    }
+
+    switch (operation) {
+    case 0: { /* EfiBltVideoFill */
+        uint32_t pixel;
+
+        if (blt_buffer == 0 ||
+            !efi_gop_rect_valid(dest_x, dest_y, width, height)) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+
+        pixel = efi_guest_ldl(env, blt_buffer);
+        for (uint64_t row = 0; row < height; row++) {
+            for (uint64_t col = 0; col < width; col++) {
+                efi_guest_stl(env, efi_gop_pixel_address(dest_x + col,
+                                                         dest_y + row),
+                              pixel);
+            }
+        }
+        vibtanium_efi_console_update_rect(dest_x, dest_y, width, height);
+        return VIBTANIUM_EFI_SUCCESS;
+    }
+    case 1: { /* EfiBltVideoToBltBuffer */
+        if (blt_buffer == 0 ||
+            !efi_gop_rect_valid(source_x, source_y, width, height)) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+        if (delta == 0) {
+            delta = width * sizeof(uint32_t);
+        }
+        for (uint64_t row = 0; row < height; row++) {
+            for (uint64_t col = 0; col < width; col++) {
+                uint32_t pixel =
+                    efi_guest_ldl(env, efi_gop_pixel_address(source_x + col,
+                                                             source_y + row));
+                efi_guest_stl(env,
+                              blt_buffer + row * delta +
+                              col * sizeof(uint32_t),
+                              pixel);
+            }
+        }
+        return VIBTANIUM_EFI_SUCCESS;
+    }
+    case 2: { /* EfiBltBufferToVideo */
+        if (blt_buffer == 0 ||
+            !efi_gop_rect_valid(dest_x, dest_y, width, height)) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+        if (delta == 0) {
+            delta = width * sizeof(uint32_t);
+        }
+        for (uint64_t row = 0; row < height; row++) {
+            for (uint64_t col = 0; col < width; col++) {
+                uint32_t pixel =
+                    efi_guest_ldl(env,
+                                  blt_buffer + (source_y + row) * delta +
+                                  (source_x + col) * sizeof(uint32_t));
+                efi_guest_stl(env, efi_gop_pixel_address(dest_x + col,
+                                                         dest_y + row),
+                              pixel);
+            }
+        }
+        vibtanium_efi_console_update_rect(dest_x, dest_y, width, height);
+        return VIBTANIUM_EFI_SUCCESS;
+    }
+    case 3: { /* EfiBltVideoToVideo */
+        g_autofree uint32_t *pixels = NULL;
+
+        if (!efi_gop_rect_valid(source_x, source_y, width, height) ||
+            !efi_gop_rect_valid(dest_x, dest_y, width, height) ||
+            width > SIZE_MAX / height ||
+            width * height > SIZE_MAX / sizeof(uint32_t)) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+
+        pixels = g_new(uint32_t, width * height);
+        for (uint64_t row = 0; row < height; row++) {
+            for (uint64_t col = 0; col < width; col++) {
+                pixels[row * width + col] =
+                    efi_guest_ldl(env, efi_gop_pixel_address(source_x + col,
+                                                             source_y + row));
+            }
+        }
+        for (uint64_t row = 0; row < height; row++) {
+            for (uint64_t col = 0; col < width; col++) {
+                efi_guest_stl(env, efi_gop_pixel_address(dest_x + col,
+                                                         dest_y + row),
+                              pixels[row * width + col]);
+            }
+        }
+        vibtanium_efi_console_update_rect(dest_x, dest_y, width, height);
+        return VIBTANIUM_EFI_SUCCESS;
+    }
+    default:
+        return VIBTANIUM_EFI_UNSUPPORTED;
+    }
+}
+
+static uint64_t efi_dispatch_gop(CPUIA64State *env, unsigned index)
+{
+    switch (index) {
+    case 0:
+        return efi_gop_query_mode(env);
+    case 1:
+        return efi_gop_set_mode(env);
+    case 2:
+        return efi_gop_blt(env);
     default:
         return VIBTANIUM_EFI_UNSUPPORTED;
     }
@@ -4623,9 +4882,13 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         result = efi_dispatch_simple_file_system(
             env, service_index - EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE);
     } else if (service_index >= EFI_FILE_SERVICE_BASE &&
-               service_index < EFI_SERVICE_DESCRIPTOR_COUNT) {
+               service_index < EFI_GOP_SERVICE_BASE) {
         result = efi_dispatch_file(env,
                                    service_index - EFI_FILE_SERVICE_BASE);
+    } else if (service_index >= EFI_GOP_SERVICE_BASE &&
+               service_index < EFI_SERVICE_DESCRIPTOR_COUNT) {
+        result = efi_dispatch_gop(env,
+                                  service_index - EFI_GOP_SERVICE_BASE);
     }
 
     ia64_write_gr(env, 8, result);

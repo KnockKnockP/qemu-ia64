@@ -698,8 +698,10 @@ enum {
     EFI_FILE_SERVICE_BASE =
         EFI_SIMPLE_FILE_SYSTEM_SERVICE_BASE +
         VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT,
-    EFI_SERVICE_DESCRIPTOR_COUNT =
+    EFI_GOP_SERVICE_BASE =
         EFI_FILE_SERVICE_BASE + VIBTANIUM_EFI_FILE_SERVICE_COUNT,
+    EFI_SERVICE_DESCRIPTOR_COUNT =
+        EFI_GOP_SERVICE_BASE + VIBTANIUM_EFI_GOP_SERVICE_COUNT,
 };
 
 static const uint8_t efi_sal_system_table_guid[16] = {
@@ -1013,6 +1015,33 @@ static void write_console_protocols(uint8_t *blob, size_t size)
               VIBTANIUM_EFI_CON_IN_WAIT_EVENT);
 }
 
+static void write_gop_protocol(uint8_t *blob, size_t size)
+{
+    uint8_t *info = blob_ptr(blob, size, VIBTANIUM_EFI_GOP_MODE_INFO, 36);
+
+    for (unsigned i = 0; i < VIBTANIUM_EFI_GOP_SERVICE_COUNT; i++) {
+        blob_wr64(blob, size, VIBTANIUM_EFI_GOP + i * sizeof(uint64_t),
+                  service_descriptor_address(EFI_GOP_SERVICE_BASE + i));
+    }
+    blob_wr64(blob, size, VIBTANIUM_EFI_GOP + 24, VIBTANIUM_EFI_GOP_MODE);
+
+    blob_wr32(blob, size, VIBTANIUM_EFI_GOP_MODE, 1);
+    blob_wr32(blob, size, VIBTANIUM_EFI_GOP_MODE + 4, 0);
+    blob_wr64(blob, size, VIBTANIUM_EFI_GOP_MODE + 8,
+              VIBTANIUM_EFI_GOP_MODE_INFO);
+    blob_wr64(blob, size, VIBTANIUM_EFI_GOP_MODE + 16, 36);
+    blob_wr64(blob, size, VIBTANIUM_EFI_GOP_MODE + 24,
+              VIBTANIUM_FRAMEBUFFER_BASE);
+    blob_wr64(blob, size, VIBTANIUM_EFI_GOP_MODE + 32,
+              VIBTANIUM_FRAMEBUFFER_SIZE);
+
+    wr32(info, 0);
+    wr32(info + 4, VIBTANIUM_FRAMEBUFFER_WIDTH);
+    wr32(info + 8, VIBTANIUM_FRAMEBUFFER_HEIGHT);
+    wr32(info + 12, 1); /* PixelBlueGreenRedReserved8BitPerColor */
+    wr32(info + 32, VIBTANIUM_FRAMEBUFFER_WIDTH);
+}
+
 static void write_device_path(uint8_t *blob, size_t size)
 {
     uint8_t *path = blob_ptr(blob, size, VIBTANIUM_EFI_DEVICE_PATH, 4);
@@ -1083,6 +1112,7 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
 
     write_loaded_image(blob, VIBTANIUM_EFI_BLOB_SIZE, image);
     write_console_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    write_gop_protocol(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_media_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE, boot_media);
     write_service_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
                         VIBTANIUM_EFI_BOOT_SERVICES,

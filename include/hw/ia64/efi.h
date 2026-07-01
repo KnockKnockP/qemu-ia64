@@ -5,6 +5,8 @@
 #include "qapi/error.h"
 #include "target/ia64/cpu.h"
 
+typedef struct MemoryRegion MemoryRegion;
+
 #define VIBTANIUM_EFI_PE_MACHINE_IA64 0x0200
 
 #define VIBTANIUM_EFI_APP_BASE          UINT64_C(0x01000000)
@@ -38,6 +40,9 @@
 #define VIBTANIUM_EFI_ACPI_DSDT         UINT64_C(0x00086a00)
 #define VIBTANIUM_EFI_ACPI_MADT         UINT64_C(0x00086b00)
 #define VIBTANIUM_EFI_ACPI_FACS         UINT64_C(0x00086c00)
+#define VIBTANIUM_EFI_GOP               UINT64_C(0x00086d00)
+#define VIBTANIUM_EFI_GOP_MODE          UINT64_C(0x00086d20)
+#define VIBTANIUM_EFI_GOP_MODE_INFO     UINT64_C(0x00086d48)
 #define VIBTANIUM_EFI_BLOB_BASE         UINT64_C(0x00070000)
 #define VIBTANIUM_EFI_BLOB_SIZE         UINT64_C(0x00020000)
 #define VIBTANIUM_EFI_STACK_BASE        UINT64_C(0x01f00000)
@@ -54,6 +59,7 @@
 #define VIBTANIUM_EFI_BLOCK_IO_SERVICE_COUNT 4
 #define VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT 1
 #define VIBTANIUM_EFI_FILE_SERVICE_COUNT 10
+#define VIBTANIUM_EFI_GOP_SERVICE_COUNT 3
 
 #define VIBTANIUM_EFI_BOOT_ALLOCATE_PAGES_INDEX       2
 #define VIBTANIUM_EFI_BOOT_FREE_PAGES_INDEX           3
@@ -171,6 +177,20 @@ void vibtanium_efi_register_loaded_image(uint64_t image_base,
 void vibtanium_efi_register_boot_media(
     const struct VibtaniumEfiBlockDevice *boot_media);
 void vibtanium_efi_set_linux_cmdline_append(const char *append);
+
+void vibtanium_efi_console_init(MemoryRegion *framebuffer);
+void vibtanium_efi_console_reset(void);
+void vibtanium_efi_console_clear(void);
+void vibtanium_efi_console_putchar(uint16_t ch);
+void vibtanium_efi_console_set_attribute(uint64_t attribute);
+bool vibtanium_efi_console_set_cursor_position(uint64_t column, uint64_t row);
+void vibtanium_efi_console_enable_cursor(bool visible);
+uint32_t vibtanium_efi_console_attribute(void);
+uint32_t vibtanium_efi_console_cursor_column(void);
+uint32_t vibtanium_efi_console_cursor_row(void);
+bool vibtanium_efi_console_cursor_visible(void);
+void vibtanium_efi_console_update_rect(uint64_t x, uint64_t y,
+                                       uint64_t width, uint64_t height);
 
 const char *vibtanium_efi_status_name(uint64_t status);
 const char *vibtanium_efi_service_name(VibtaniumEfiService service);
