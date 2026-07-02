@@ -132,6 +132,126 @@ typedef struct EfiMemoryRange {
     uint64_t attributes;
 } EfiMemoryRange;
 
+typedef enum EfiMemoryMapRecordKind {
+    EFI_MEMORY_MAP_RECORD_DIRECT,
+    EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
+    EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
+    EFI_MEMORY_MAP_RECORD_LOADER_IF_NEEDED,
+} EfiMemoryMapRecordKind;
+
+typedef struct EfiMemoryMapRecord {
+    EfiMemoryMapRecordKind kind;
+    EfiMemoryRange range;
+} EfiMemoryMapRecord;
+
+static const EfiMemoryMapRecord efi_memory_map_records[] = {
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
+        .range = {
+            .type = EFI_RUNTIME_SERVICES_DATA,
+            .address = EFI_RUNTIME_GRANULE_BASE,
+            .pages = (VIBTANIUM_VGA_LEGACY_BASE - EFI_RUNTIME_GRANULE_BASE) /
+                     EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_MEMORY_MAPPED_IO,
+            .address = VIBTANIUM_VGA_LEGACY_BASE,
+            .pages = VIBTANIUM_VGA_LEGACY_SIZE / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_UC,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
+        .range = {
+            .type = EFI_RUNTIME_SERVICES_DATA,
+            .address = VIBTANIUM_VGA_LEGACY_BASE + VIBTANIUM_VGA_LEGACY_SIZE,
+            .pages = (EFI_RUNTIME_GRANULE_SIZE -
+                      (VIBTANIUM_VGA_LEGACY_BASE +
+                       VIBTANIUM_VGA_LEGACY_SIZE)) / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
+        .range = {
+            .type = EFI_CONVENTIONAL_MEMORY,
+            .address = EFI_LOW_CONVENTIONAL_BASE,
+            .pages = EFI_LOW_CONVENTIONAL_PAGES,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_LOADER_IF_NEEDED,
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_BOOT_SERVICES_DATA,
+            .address = VIBTANIUM_EFI_STACK_BASE,
+            .pages = 0x100,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_BOOT_SERVICES_DATA,
+            .address = VIBTANIUM_EFI_POOL_BASE,
+            .pages = VIBTANIUM_EFI_POOL_SIZE / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_BOOT_SERVICES_DATA,
+            .address = EFI_PAGE_ALLOC_BASE,
+            .pages = EFI_PAGE_ALLOC_SIZE / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_ACPI_RECLAIM_MEMORY,
+            .address = EFI_LINUX_APPEND_BASE,
+            .pages = EFI_LINUX_APPEND_SIZE / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
+        .range = {
+            .type = EFI_CONVENTIONAL_MEMORY,
+            .address = EFI_HIGH_CONVENTIONAL_BASE,
+            .pages = EFI_HIGH_CONVENTIONAL_PAGES,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_MEMORY_MAPPED_IO,
+            .address = VIBTANIUM_FRAMEBUFFER_BASE,
+            .pages = VIBTANIUM_FRAMEBUFFER_SIZE / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_UC,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .range = {
+            .type = EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+            .address = VIBTANIUM_IO_PORT_BASE,
+            .pages = VIBTANIUM_IO_PORT_SIZE / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
+        },
+    },
+};
+
 static VibtaniumEfiBlockDevice efi_boot_media;
 static char *efi_boot_media_name;
 static bool efi_boot_media_valid;
@@ -1159,97 +1279,43 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
 {
     unsigned index = 0;
     bool loader_emitted = false;
-    bool range_loader_emitted;
-    const EfiMemoryRange runtime_firmware_before_vga = {
-        .type = EFI_RUNTIME_SERVICES_DATA,
-        .address = EFI_RUNTIME_GRANULE_BASE,
-        .pages = (VIBTANIUM_VGA_LEGACY_BASE - EFI_RUNTIME_GRANULE_BASE) /
-                 EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
-    };
-    const EfiMemoryRange vga_legacy = {
-        .type = EFI_MEMORY_MAPPED_IO,
-        .address = VIBTANIUM_VGA_LEGACY_BASE,
-        .pages = VIBTANIUM_VGA_LEGACY_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_UC,
-    };
-    const EfiMemoryRange runtime_firmware_after_vga = {
-        .type = EFI_RUNTIME_SERVICES_DATA,
-        .address = VIBTANIUM_VGA_LEGACY_BASE + VIBTANIUM_VGA_LEGACY_SIZE,
-        .pages = (EFI_RUNTIME_GRANULE_SIZE -
-                  (VIBTANIUM_VGA_LEGACY_BASE +
-                   VIBTANIUM_VGA_LEGACY_SIZE)) / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
-    };
     const EfiMemoryRange loader_image = {
         .type = EFI_LOADER_CODE,
         .address = efi_loaded_image_base,
         .pages = efi_loaded_image_pages,
         .attributes = EFI_MEMORY_WB,
     };
-    const EfiMemoryRange firmware_work = {
-        .type = EFI_BOOT_SERVICES_DATA,
-        .address = VIBTANIUM_EFI_STACK_BASE,
-        .pages = 0x100,
-        .attributes = EFI_MEMORY_WB,
-    };
-    const EfiMemoryRange pool = {
-        .type = EFI_BOOT_SERVICES_DATA,
-        .address = VIBTANIUM_EFI_POOL_BASE,
-        .pages = VIBTANIUM_EFI_POOL_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB,
-    };
-    const EfiMemoryRange page_arena = {
-        .type = EFI_BOOT_SERVICES_DATA,
-        .address = EFI_PAGE_ALLOC_BASE,
-        .pages = EFI_PAGE_ALLOC_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB,
-    };
-    const EfiMemoryRange linux_append = {
-        .type = EFI_ACPI_RECLAIM_MEMORY,
-        .address = EFI_LINUX_APPEND_BASE,
-        .pages = EFI_LINUX_APPEND_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_WB,
-    };
-    const EfiMemoryRange io_port_space = {
-        .type = EFI_MEMORY_MAPPED_IO_PORT_SPACE,
-        .address = VIBTANIUM_IO_PORT_BASE,
-        .pages = VIBTANIUM_IO_PORT_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_UC | EFI_MEMORY_RUNTIME,
-    };
-    const EfiMemoryRange framebuffer = {
-        .type = EFI_MEMORY_MAPPED_IO,
-        .address = VIBTANIUM_FRAMEBUFFER_BASE,
-        .pages = VIBTANIUM_FRAMEBUFFER_SIZE / EFI_PAGE_SIZE,
-        .attributes = EFI_MEMORY_UC,
-    };
 
-    index = efi_emit_runtime_and_loader(env, map, index,
-                                        &runtime_firmware_before_vga,
-                                        &loader_image,
-                                        &range_loader_emitted);
-    loader_emitted |= range_loader_emitted;
-    index = efi_emit_memory_descriptor(env, map, index, &vga_legacy);
-    index = efi_emit_runtime_and_loader(env, map, index,
-                                        &runtime_firmware_after_vga,
-                                        &loader_image,
-                                        &range_loader_emitted);
-    loader_emitted |= range_loader_emitted;
-    index = efi_emit_split_conventional(env, map, index,
-                                        EFI_LOW_CONVENTIONAL_BASE,
-                                        EFI_LOW_CONVENTIONAL_PAGES);
-    if (!loader_emitted) {
-        index = efi_emit_memory_descriptor(env, map, index, &loader_image);
+    for (unsigned i = 0; i < ARRAY_SIZE(efi_memory_map_records); i++) {
+        const EfiMemoryMapRecord *record = &efi_memory_map_records[i];
+        bool range_loader_emitted;
+
+        switch (record->kind) {
+        case EFI_MEMORY_MAP_RECORD_DIRECT:
+            index = efi_emit_memory_descriptor(env, map, index,
+                                               &record->range);
+            break;
+        case EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT:
+            index = efi_emit_split_conventional(env, map, index,
+                                                record->range.address,
+                                                record->range.pages);
+            break;
+        case EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER:
+            index = efi_emit_runtime_and_loader(env, map, index,
+                                                &record->range,
+                                                &loader_image,
+                                                &range_loader_emitted);
+            loader_emitted |= range_loader_emitted;
+            break;
+        case EFI_MEMORY_MAP_RECORD_LOADER_IF_NEEDED:
+            if (!loader_emitted) {
+                index = efi_emit_memory_descriptor(env, map, index,
+                                                   &loader_image);
+            }
+            break;
+        }
     }
-    index = efi_emit_memory_descriptor(env, map, index, &firmware_work);
-    index = efi_emit_memory_descriptor(env, map, index, &pool);
-    index = efi_emit_memory_descriptor(env, map, index, &page_arena);
-    index = efi_emit_memory_descriptor(env, map, index, &linux_append);
-    index = efi_emit_split_conventional(env, map, index,
-                                        EFI_HIGH_CONVENTIONAL_BASE,
-                                        EFI_HIGH_CONVENTIONAL_PAGES);
-    index = efi_emit_memory_descriptor(env, map, index, &framebuffer);
-    index = efi_emit_memory_descriptor(env, map, index, &io_port_space);
+
     return index;
 }
 

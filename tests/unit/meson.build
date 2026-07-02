@@ -74,6 +74,8 @@ tests = {
     meson.project_source_root() / 'target/ia64/perf.c',
   ],
   'test-ia64-efi-app': [
+    'test-ia64-efi-acpi-stubs.c',
+    meson.project_source_root() / 'hw/acpi/aml-build.c',
     meson.project_source_root() / 'hw/ia64/efi.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
@@ -219,6 +221,8 @@ slow_tests = {
 foreach test_name, extra: tests
   src = [test_name + '.c']
   deps = [qemuutil]
+  test_c_args = []
+  test_link_args = []
   if extra.length() > 0
     # use a sourceset to quickly separate sources and deps
     test_ss = ss.source_set()
@@ -226,7 +230,14 @@ foreach test_name, extra: tests
     src += test_ss.all_sources()
     deps += test_ss.all_dependencies()
   endif
-  exe = executable(test_name, src, genh, dependencies: deps)
+  if test_name == 'test-ia64-efi-app'
+    test_c_args += ['-ffunction-sections', '-fdata-sections']
+    test_link_args += ['-Wl,--gc-sections']
+  endif
+  exe = executable(test_name, src, genh,
+                   c_args: test_c_args,
+                   link_args: test_link_args,
+                   dependencies: deps)
 
   test(test_name, exe,
        depends: test_deps.get(test_name, []),

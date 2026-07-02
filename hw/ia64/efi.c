@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "hw/acpi/aml-build.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/vibtanium.h"
@@ -28,93 +29,38 @@
 #define HCDP_TABLE_LENGTH 88
 #define HCDP_UART_OFFSET 40
 #define HCDP_UART_LENGTH 48
+#define ACPI_TABLE_HEADER_LENGTH 36
 #define ACPI_RSDP_LENGTH 36
 #define ACPI_RSDT_ENTRY_COUNT 2
-#define ACPI_RSDT_LENGTH (36 + ACPI_RSDT_ENTRY_COUNT * 4)
-#define ACPI_XSDT_LENGTH (36 + ACPI_RSDT_ENTRY_COUNT * 8)
+#define ACPI_RSDT_LENGTH (ACPI_TABLE_HEADER_LENGTH + \
+                          ACPI_RSDT_ENTRY_COUNT * 4)
+#define ACPI_XSDT_LENGTH (ACPI_TABLE_HEADER_LENGTH + \
+                          ACPI_RSDT_ENTRY_COUNT * 8)
 #define ACPI_FADT_LENGTH 244
-#define ACPI_DSDT_AML_LENGTH 220
-#define ACPI_DSDT_LENGTH (36 + ACPI_DSDT_AML_LENGTH)
 #define ACPI_MADT_LOCAL_SAPIC_LENGTH 16
 #define ACPI_MADT_IO_SAPIC_LENGTH 16
 #define ACPI_MADT_LENGTH \
-    (36 + 8 + ACPI_MADT_LOCAL_SAPIC_LENGTH + ACPI_MADT_IO_SAPIC_LENGTH)
+    (ACPI_TABLE_HEADER_LENGTH + 8 + ACPI_MADT_LOCAL_SAPIC_LENGTH + \
+     ACPI_MADT_IO_SAPIC_LENGTH)
 #define ACPI_FACS_LENGTH 64
 #define ACPI_ADR_SPACE_SYSTEM_IO 1
+#define ACPI_OEM_ID "VIBTAN"
+#define ACPI_OEM_TABLE_ID "VIBTANIU"
 #define PCDP_CONSOLE_UART 0
 #define PCDP_UART_PRIMARY_CONSOLE (1 << 2)
+#define VIBTANIUM_FIRMWARE_TABLE_LIMIT VIBTANIUM_EFI_GOP
 
-static const uint8_t vibtanium_dsdt_aml[ACPI_DSDT_AML_LENGTH] = {
-    /*
-     * Scope (_SB) {
-     *     Device (COM1) {
-     *         Name (_HID, EisaId ("PNP0501"))
-     *         Name (_UID, One)
-     *         Name (_STA, 0x0f)
-     *         Name (_CRS, ResourceTemplate () {
-     *             IO (Decode16, 0x03f8, 0x03f8, 0x00, 0x08)
-     *             IRQNoFlags () {4}
-     *         })
-     *     }
-     *     Device (KBD) {
-     *         Name (_HID, EisaId ("PNP0303"))
-     *         Name (_STA, 0x0f)
-     *         Name (_CRS, ResourceTemplate () {
-     *             IO (Decode16, 0x0060, 0x0060, 0x01, 0x01)
-     *             IO (Decode16, 0x0064, 0x0064, 0x01, 0x01)
-     *             IRQNoFlags () {1}
-     *         })
-     *     }
-     *     Device (PCI0) {
-     *         Name (_HID, EisaId ("PNP0A03"))
-     *         Name (_ADR, Zero)
-     *         Name (_BBN, Zero)
-     *         Name (_CRS, ResourceTemplate () {
-     *             WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
-     *                            PosDecode, 0x0000, 0x0000, 0x00ff,
-     *                            0x0000, 0x0100)
-     *             WordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-     *                     EntireRange, 0x0000, 0x0000, 0xffff, 0x0000,
-     *                     0x0000)
-     *             DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
-     *                          NonCacheable, ReadWrite, 0x00000000,
-     *                          0x80000000, 0xefffffff, 0x00000000,
-     *                          0x70000000)
-     *         })
-     *         Name (_PRT, Package () {})
-     *     }
-     * }
-     */
-    0x10, 0x4b, 0x0d, 0x5f, 0x53, 0x42, 0x5f,
-    0x5b, 0x82, 0x32, 0x43, 0x4f, 0x4d, 0x31,
-    0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x05, 0x01,
-    0x08, 0x5f, 0x55, 0x49, 0x44, 0x01,
-    0x08, 0x5f, 0x53, 0x54, 0x41, 0x0a, 0x0f,
-    0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x10, 0x0a, 0x0d,
-    0x47, 0x01, 0xf8, 0x03, 0xf8, 0x03, 0x00, 0x08,
-    0x22, 0x10, 0x00, 0x79, 0x00,
-    0x5b, 0x82, 0x34, 0x4b, 0x42, 0x44, 0x5f,
-    0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03,
-    0x08, 0x5f, 0x53, 0x54, 0x41, 0x0a, 0x0f,
-    0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x18, 0x0a, 0x15,
-    0x47, 0x01, 0x60, 0x00, 0x60, 0x00, 0x01, 0x01,
-    0x47, 0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01,
-    0x22, 0x02, 0x00, 0x79, 0x00,
-    0x5b, 0x82, 0x49, 0x06, 0x50, 0x43, 0x49, 0x30,
-    0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0a, 0x03,
-    0x08, 0x5f, 0x41, 0x44, 0x52, 0x00,
-    0x08, 0x5f, 0x42, 0x42, 0x4e, 0x00,
-    0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x3f, 0x0a, 0x3c,
-    0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01,
-    0x88, 0x0d, 0x00, 0x01, 0x0c, 0x03,
-    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
-    0x87, 0x17, 0x00, 0x00, 0x0c, 0x01,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
-    0xff, 0xff, 0xff, 0xef, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x70, 0x79, 0x00,
-    0x08, 0x5f, 0x50, 0x52, 0x54, 0x12, 0x02, 0x00,
-};
+typedef struct VibtaniumFirmwareLayout {
+    uint64_t sal_system_table;
+    uint64_t hcdp_table;
+    uint64_t acpi_rsdp;
+    uint64_t acpi_rsdt;
+    uint64_t acpi_xsdt;
+    uint64_t acpi_fadt;
+    uint64_t acpi_dsdt;
+    uint64_t acpi_madt;
+    uint64_t acpi_facs;
+} VibtaniumFirmwareLayout;
 
 static bool range_ok(size_t size, uint64_t offset, uint64_t length)
 {
@@ -185,6 +131,51 @@ static uint8_t *blob_ptr(uint8_t *blob, size_t size, uint64_t address,
     return blob + (address - VIBTANIUM_EFI_BLOB_BASE);
 }
 
+static uint64_t firmware_alloc_range(uint64_t *cursor, uint64_t length,
+                                     uint64_t alignment)
+{
+    uint64_t address;
+
+    g_assert(is_power_of_2(alignment));
+    address = ROUND_UP(*cursor, alignment);
+    g_assert_cmphex(address, >=, VIBTANIUM_EFI_BLOB_BASE);
+    g_assert_cmphex(address + length, <=, VIBTANIUM_FIRMWARE_TABLE_LIMIT);
+    *cursor = address + length;
+    return address;
+}
+
+static void firmware_layout_build(VibtaniumFirmwareLayout *layout,
+                                  size_t dsdt_length)
+{
+    uint64_t cursor = VIBTANIUM_EFI_SAL_SYSTEM_TABLE;
+
+    layout->sal_system_table =
+        firmware_alloc_range(&cursor, SAL_SYSTEM_TABLE_LENGTH, 0x100);
+    layout->hcdp_table =
+        firmware_alloc_range(&cursor, HCDP_TABLE_LENGTH, 0x100);
+    layout->acpi_rsdp =
+        firmware_alloc_range(&cursor, ACPI_RSDP_LENGTH, 0x100);
+    layout->acpi_rsdt =
+        firmware_alloc_range(&cursor, ACPI_RSDT_LENGTH, 0x40);
+    layout->acpi_xsdt =
+        firmware_alloc_range(&cursor, ACPI_XSDT_LENGTH, 0x40);
+    layout->acpi_fadt =
+        firmware_alloc_range(&cursor, ACPI_FADT_LENGTH, 0x80);
+    layout->acpi_dsdt =
+        firmware_alloc_range(&cursor, dsdt_length, 0x100);
+    layout->acpi_madt =
+        firmware_alloc_range(&cursor, ACPI_MADT_LENGTH, 0x100);
+    layout->acpi_facs =
+        firmware_alloc_range(&cursor, ACPI_FACS_LENGTH, 0x40);
+}
+
+static void firmware_copy_table(uint8_t *blob, size_t size, uint64_t address,
+                                const GArray *table)
+{
+    memcpy(blob_ptr(blob, size, address, table->len), table->data,
+           table->len);
+}
+
 static uint32_t efi_crc32(const uint8_t *data, size_t size)
 {
     uint32_t crc = 0xffffffff;
@@ -218,21 +209,6 @@ static void write_table_header(uint8_t *table, size_t size,
     wr32(table + 16, 0);
     wr32(table + 20, 0);
     wr32(table + 16, efi_crc32(table, size));
-}
-
-static void write_acpi_table_header(uint8_t *table, const char *signature,
-                                    uint32_t length, uint8_t revision)
-{
-    memcpy(table, signature, 4);
-    wr32(table + 4, length);
-    table[8] = revision;
-    table[9] = 0;
-    memcpy(table + 10, "VIBTAN", 6);
-    memcpy(table + 16, "VIBTANIU", 8);
-    wr32(table + 24, 1);
-    memcpy(table + 28, "VIBT", 4);
-    wr32(table + 32, 1);
-    table[9] = byte_checksum(table, length);
 }
 
 static void write_acpi_gas(uint8_t *gas, uint8_t address_space,
@@ -784,27 +760,29 @@ static void write_loaded_image(uint8_t *blob, size_t size,
 }
 
 static void write_configuration_table(uint8_t *blob, size_t size,
+                                      const VibtaniumFirmwareLayout *layout,
                                       bool hcdp_serial_console)
 {
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE,
                efi_acpi20_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 16,
-              VIBTANIUM_EFI_ACPI_RSDP);
+              layout->acpi_rsdp);
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 24,
                efi_sal_system_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 40,
-              VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
+              layout->sal_system_table);
     if (hcdp_serial_console) {
         write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 48,
                    efi_hcdp_table_guid);
         blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 64,
-                  VIBTANIUM_EFI_HCDP_TABLE);
+                  layout->hcdp_table);
     }
 }
 
-static void write_sal_system_table(uint8_t *blob, size_t size)
+static void write_sal_system_table(uint8_t *blob, size_t size,
+                                   const VibtaniumFirmwareLayout *layout)
 {
-    uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_SAL_SYSTEM_TABLE,
+    uint8_t *table = blob_ptr(blob, size, layout->sal_system_table,
                               SAL_SYSTEM_TABLE_LENGTH);
     uint8_t *entry = table + SAL_SYSTEM_TABLE_HEADER_LENGTH;
 
@@ -832,9 +810,10 @@ static void write_sal_system_table(uint8_t *blob, size_t size)
     blob_wr64(blob, size, VIBTANIUM_EFI_SAL_GP, 0);
 }
 
-static void write_hcdp_table(uint8_t *blob, size_t size)
+static void write_hcdp_table(uint8_t *blob, size_t size,
+                             const VibtaniumFirmwareLayout *layout)
 {
-    uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_HCDP_TABLE,
+    uint8_t *table = blob_ptr(blob, size, layout->hcdp_table,
                               HCDP_TABLE_LENGTH);
     uint8_t *uart = table + HCDP_UART_OFFSET;
 
@@ -865,44 +844,82 @@ static void write_hcdp_table(uint8_t *blob, size_t size)
     table[9] = sal_checksum(table, HCDP_TABLE_LENGTH);
 }
 
-static void write_acpi_root_pointer(uint8_t *blob, size_t size)
+static GArray *acpi_table_array_new(void)
 {
-    uint8_t *rsdp = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_RSDP,
+    return g_array_new(false, true, 1);
+}
+
+static void write_acpi_root_pointer(uint8_t *blob, size_t size,
+                                    const VibtaniumFirmwareLayout *layout)
+{
+    uint8_t *rsdp = blob_ptr(blob, size, layout->acpi_rsdp,
                              ACPI_RSDP_LENGTH);
 
     memcpy(rsdp, "RSD PTR ", 8);
-    memcpy(rsdp + 9, "VIBTAN", 6);
+    memcpy(rsdp + 9, ACPI_OEM_ID, 6);
     rsdp[15] = 2;
-    wr32(rsdp + 16, VIBTANIUM_EFI_ACPI_RSDT);
+    wr32(rsdp + 16, layout->acpi_rsdt);
     wr32(rsdp + 20, ACPI_RSDP_LENGTH);
-    wr64(rsdp + 24, VIBTANIUM_EFI_ACPI_XSDT);
+    wr64(rsdp + 24, layout->acpi_xsdt);
     rsdp[8] = byte_checksum(rsdp, 20);
     rsdp[32] = byte_checksum(rsdp, ACPI_RSDP_LENGTH);
 }
 
-static void write_acpi_root_tables(uint8_t *blob, size_t size)
+static GArray *build_acpi_rsdt_table(const VibtaniumFirmwareLayout *layout)
 {
-    uint8_t *rsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_RSDT,
-                             ACPI_RSDT_LENGTH);
-    uint8_t *xsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_XSDT,
-                             ACPI_XSDT_LENGTH);
+    GArray *table_data = acpi_table_array_new();
+    AcpiTable table = {
+        .sig = "RSDT",
+        .rev = 1,
+        .oem_id = ACPI_OEM_ID,
+        .oem_table_id = ACPI_OEM_TABLE_ID,
+    };
 
-    wr32(rsdt + 36, VIBTANIUM_EFI_ACPI_FADT);
-    wr32(rsdt + 40, VIBTANIUM_EFI_ACPI_MADT);
-    write_acpi_table_header(rsdt, "RSDT", ACPI_RSDT_LENGTH, 1);
-
-    wr64(xsdt + 36, VIBTANIUM_EFI_ACPI_FADT);
-    wr64(xsdt + 44, VIBTANIUM_EFI_ACPI_MADT);
-    write_acpi_table_header(xsdt, "XSDT", ACPI_XSDT_LENGTH, 1);
+    g_assert_cmphex(layout->acpi_fadt, <=, UINT32_MAX);
+    g_assert_cmphex(layout->acpi_madt, <=, UINT32_MAX);
+    acpi_table_begin(&table, table_data);
+    build_append_int_noprefix(table_data, layout->acpi_fadt, 4);
+    build_append_int_noprefix(table_data, layout->acpi_madt, 4);
+    acpi_table_end(NULL, &table);
+    return table_data;
 }
 
-static void write_acpi_fadt(uint8_t *blob, size_t size)
+static GArray *build_acpi_xsdt_table(const VibtaniumFirmwareLayout *layout)
 {
-    uint8_t *fadt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_FADT,
-                             ACPI_FADT_LENGTH);
+    GArray *table_data = acpi_table_array_new();
+    AcpiTable table = {
+        .sig = "XSDT",
+        .rev = 1,
+        .oem_id = ACPI_OEM_ID,
+        .oem_table_id = ACPI_OEM_TABLE_ID,
+    };
 
-    wr32(fadt + 36, VIBTANIUM_EFI_ACPI_FACS);
-    wr32(fadt + 40, VIBTANIUM_EFI_ACPI_DSDT);
+    acpi_table_begin(&table, table_data);
+    build_append_int_noprefix(table_data, layout->acpi_fadt, 8);
+    build_append_int_noprefix(table_data, layout->acpi_madt, 8);
+    acpi_table_end(NULL, &table);
+    return table_data;
+}
+
+static GArray *build_acpi_fadt_table(const VibtaniumFirmwareLayout *layout)
+{
+    GArray *table_data = acpi_table_array_new();
+    AcpiTable table = {
+        .sig = "FACP",
+        .rev = 3,
+        .oem_id = ACPI_OEM_ID,
+        .oem_table_id = ACPI_OEM_TABLE_ID,
+    };
+    uint8_t *fadt;
+
+    g_assert_cmphex(layout->acpi_facs, <=, UINT32_MAX);
+    g_assert_cmphex(layout->acpi_dsdt, <=, UINT32_MAX);
+    acpi_table_begin(&table, table_data);
+    g_array_set_size(table_data, ACPI_FADT_LENGTH);
+    fadt = (uint8_t *)table_data->data + table.table_offset;
+
+    wr32(fadt + 36, layout->acpi_facs);
+    wr32(fadt + 40, layout->acpi_dsdt);
     fadt[45] = 4; /* Enterprise server. */
     wr16(fadt + 46, 9);
     wr32(fadt + 56, 0x400);
@@ -915,29 +932,112 @@ static void write_acpi_fadt(uint8_t *blob, size_t size)
     wr32(fadt + 112, (1 << 0) | (1 << 2) | (1 << 4) |
                        (1 << 5) | (1 << 6) | (1 << 8) |
                        (1 << 12));
-    wr64(fadt + 132, VIBTANIUM_EFI_ACPI_FACS);
-    wr64(fadt + 140, VIBTANIUM_EFI_ACPI_DSDT);
+    wr64(fadt + 132, layout->acpi_facs);
+    wr64(fadt + 140, layout->acpi_dsdt);
     write_acpi_gas(fadt + 148, ACPI_ADR_SPACE_SYSTEM_IO, 32, 1, 0x400);
     write_acpi_gas(fadt + 172, ACPI_ADR_SPACE_SYSTEM_IO, 16, 1, 0x404);
     write_acpi_gas(fadt + 208, ACPI_ADR_SPACE_SYSTEM_IO, 32, 1, 0x408);
-    write_acpi_table_header(fadt, "FACP", ACPI_FADT_LENGTH, 3);
+    acpi_table_end(NULL, &table);
+    return table_data;
 }
 
-static void write_acpi_dsdt(uint8_t *blob, size_t size)
+static Aml *build_acpi_com1_device(void)
 {
-    uint8_t *dsdt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_DSDT,
-                             ACPI_DSDT_LENGTH);
+    Aml *dev = aml_device("COM1");
+    Aml *crs = aml_resource_template();
 
-    memcpy(dsdt + 36, vibtanium_dsdt_aml, sizeof(vibtanium_dsdt_aml));
-    write_acpi_table_header(dsdt, "DSDT", ACPI_DSDT_LENGTH, 2);
+    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0501")));
+    aml_append(dev, aml_name_decl("_UID", aml_int(1)));
+    aml_append(dev, aml_name_decl("_STA", aml_int(0x0f)));
+    aml_append(crs, aml_io(AML_DECODE16, 0x03f8, 0x03f8, 0x00, 0x08));
+    aml_append(crs, aml_irq_no_flags(4));
+    aml_append(dev, aml_name_decl("_CRS", crs));
+    return dev;
 }
 
-static void write_acpi_madt(uint8_t *blob, size_t size)
+static Aml *build_acpi_keyboard_device(void)
 {
-    uint8_t *madt = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_MADT,
-                             ACPI_MADT_LENGTH);
-    uint8_t *lsapic = madt + 44;
-    uint8_t *iosapic = lsapic + ACPI_MADT_LOCAL_SAPIC_LENGTH;
+    Aml *dev = aml_device("KBD_");
+    Aml *crs = aml_resource_template();
+
+    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0303")));
+    aml_append(dev, aml_name_decl("_STA", aml_int(0x0f)));
+    aml_append(crs, aml_io(AML_DECODE16, 0x0060, 0x0060, 0x01, 0x01));
+    aml_append(crs, aml_io(AML_DECODE16, 0x0064, 0x0064, 0x01, 0x01));
+    aml_append(crs, aml_irq_no_flags(1));
+    aml_append(dev, aml_name_decl("_CRS", crs));
+    return dev;
+}
+
+static Aml *build_acpi_pci0_device(void)
+{
+    Aml *dev = aml_device("PCI0");
+    Aml *crs = aml_resource_template();
+
+    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A03")));
+    aml_append(dev, aml_name_decl("_ADR", aml_int(0)));
+    aml_append(dev, aml_name_decl("_BBN", aml_int(0)));
+    aml_append(crs,
+               aml_word_bus_number(AML_MIN_FIXED, AML_MAX_FIXED,
+                                   AML_POS_DECODE, 0x0000, 0x0000, 0x00ff,
+                                   0x0000, 0x0100));
+    aml_append(crs,
+               aml_word_io(AML_MIN_FIXED, AML_MAX_FIXED, AML_POS_DECODE,
+                           AML_ENTIRE_RANGE, 0x0000, 0x0000, 0xffff,
+                           0x0000, 0x0000));
+    aml_append(crs,
+               aml_dword_memory(AML_POS_DECODE, AML_MIN_FIXED,
+                                AML_MAX_FIXED, AML_NON_CACHEABLE,
+                                AML_READ_WRITE, 0x00000000, 0x80000000,
+                                0xefffffff, 0x00000000, 0x70000000));
+    aml_append(dev, aml_name_decl("_CRS", crs));
+    aml_append(dev, aml_name_decl("_PRT", aml_package(0)));
+    return dev;
+}
+
+static GArray *build_acpi_dsdt_table(void)
+{
+    GArray *table_data = acpi_table_array_new();
+    AcpiTable table = {
+        .sig = "DSDT",
+        .rev = 2,
+        .oem_id = ACPI_OEM_ID,
+        .oem_table_id = ACPI_OEM_TABLE_ID,
+    };
+    Aml *dsdt;
+    Aml *scope;
+
+    acpi_table_begin(&table, table_data);
+    dsdt = init_aml_allocator();
+    scope = aml_scope("_SB");
+    aml_append(scope, build_acpi_com1_device());
+    aml_append(scope, build_acpi_keyboard_device());
+    aml_append(scope, build_acpi_pci0_device());
+    aml_append(dsdt, scope);
+    g_array_append_vals(table_data, dsdt->buf->data, dsdt->buf->len);
+    acpi_table_end(NULL, &table);
+    free_aml_allocator();
+    return table_data;
+}
+
+static GArray *build_acpi_madt_table(void)
+{
+    GArray *table_data = acpi_table_array_new();
+    AcpiTable table = {
+        .sig = "APIC",
+        .rev = 3,
+        .oem_id = ACPI_OEM_ID,
+        .oem_table_id = ACPI_OEM_TABLE_ID,
+    };
+    uint8_t *madt;
+    uint8_t *lsapic;
+    uint8_t *iosapic;
+
+    acpi_table_begin(&table, table_data);
+    g_array_set_size(table_data, ACPI_MADT_LENGTH);
+    madt = (uint8_t *)table_data->data + table.table_offset;
+    lsapic = madt + 44;
+    iosapic = lsapic + ACPI_MADT_LOCAL_SAPIC_LENGTH;
 
     wr32(madt + 36, VIBTANIUM_LOCAL_SAPIC_IPI_BASE);
     wr32(madt + 40, 1);
@@ -956,12 +1056,14 @@ static void write_acpi_madt(uint8_t *blob, size_t size)
     wr32(iosapic + 4, 0);
     wr64(iosapic + 8, VIBTANIUM_IOSAPIC_BASE);
 
-    write_acpi_table_header(madt, "APIC", ACPI_MADT_LENGTH, 3);
+    acpi_table_end(NULL, &table);
+    return table_data;
 }
 
-static void write_acpi_facs(uint8_t *blob, size_t size)
+static void write_acpi_facs(uint8_t *blob, size_t size,
+                            const VibtaniumFirmwareLayout *layout)
 {
-    uint8_t *facs = blob_ptr(blob, size, VIBTANIUM_EFI_ACPI_FACS,
+    uint8_t *facs = blob_ptr(blob, size, layout->acpi_facs,
                              ACPI_FACS_LENGTH);
 
     memcpy(facs, "FACS", 4);
@@ -969,14 +1071,27 @@ static void write_acpi_facs(uint8_t *blob, size_t size)
     facs[32] = 2;
 }
 
-static void write_acpi_tables(uint8_t *blob, size_t size)
+static void write_acpi_tables(uint8_t *blob, size_t size,
+                              const VibtaniumFirmwareLayout *layout,
+                              const GArray *dsdt)
 {
-    write_acpi_root_pointer(blob, size);
-    write_acpi_root_tables(blob, size);
-    write_acpi_fadt(blob, size);
-    write_acpi_dsdt(blob, size);
-    write_acpi_madt(blob, size);
-    write_acpi_facs(blob, size);
+    GArray *rsdt = build_acpi_rsdt_table(layout);
+    GArray *xsdt = build_acpi_xsdt_table(layout);
+    GArray *fadt = build_acpi_fadt_table(layout);
+    GArray *madt = build_acpi_madt_table();
+
+    write_acpi_root_pointer(blob, size, layout);
+    firmware_copy_table(blob, size, layout->acpi_rsdt, rsdt);
+    firmware_copy_table(blob, size, layout->acpi_xsdt, xsdt);
+    firmware_copy_table(blob, size, layout->acpi_fadt, fadt);
+    firmware_copy_table(blob, size, layout->acpi_dsdt, dsdt);
+    firmware_copy_table(blob, size, layout->acpi_madt, madt);
+    write_acpi_facs(blob, size, layout);
+
+    g_array_free(rsdt, true);
+    g_array_free(xsdt, true);
+    g_array_free(fadt, true);
+    g_array_free(madt, true);
 }
 
 static void write_system_table(uint8_t *blob, size_t size,
@@ -1135,11 +1250,16 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiFirmwareOptions *options)
 {
     uint8_t *blob;
+    VibtaniumFirmwareLayout layout;
+    GArray *dsdt;
     bool hcdp_serial_console = options && options->hcdp_serial_console;
 
     if (size) {
         *size = VIBTANIUM_EFI_BLOB_SIZE;
     }
+
+    dsdt = build_acpi_dsdt_table();
+    firmware_layout_build(&layout, dsdt->len);
 
     blob = g_malloc0(VIBTANIUM_EFI_BLOB_SIZE);
     write_utf16_ascii(blob, VIBTANIUM_EFI_BLOB_SIZE,
@@ -1163,15 +1283,17 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                         EFI_RUNTIME_SERVICE_BASE,
                         VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT, -1);
     write_configuration_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
+                              &layout,
                               hcdp_serial_console);
-    write_acpi_tables(blob, VIBTANIUM_EFI_BLOB_SIZE);
-    write_sal_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    write_acpi_tables(blob, VIBTANIUM_EFI_BLOB_SIZE, &layout, dsdt);
+    write_sal_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE, &layout);
     if (hcdp_serial_console) {
-        write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+        write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE, &layout);
     }
     write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
                        hcdp_serial_console ? 3 : 2);
 
+    g_array_free(dsdt, true);
     return blob;
 }
 

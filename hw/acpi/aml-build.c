@@ -163,6 +163,7 @@ void crs_replace_with_free_ranges(GPtrArray *ranges,
  * crs_range_merge - merges adjacent ranges in the given array.
  * Array elements are deleted and replaced with the merged ranges.
  */
+#ifdef CONFIG_PCI
 static void crs_range_merge(GPtrArray *range)
 {
     g_autoptr(GPtrArray) tmp = g_ptr_array_new_with_free_func(crs_range_free);
@@ -197,6 +198,7 @@ static void crs_range_merge(GPtrArray *range)
         crs_range_insert(range, entry->base, entry->limit);
     }
 }
+#endif
 
 static void
 build_append_nameseg(GArray *array, const char *seg)
@@ -2653,6 +2655,7 @@ void build_tpm2(GArray *table_data, BIOSLinker *linker, GArray *tcpalog,
 }
 #endif
 
+#ifdef CONFIG_PCI
 Aml *build_crs(PCIHostState *host, CrsRangeSet *range_set, uint32_t io_offset,
                uint32_t mmio32_offset, uint64_t mmio64_offset,
                uint16_t bus_nr_offset)
@@ -2814,6 +2817,7 @@ Aml *build_crs(PCIHostState *host, CrsRangeSet *range_set, uint32_t io_offset,
 
     return crs;
 }
+#endif
 
 /* ACPI 5.0: 6.4.3.8.2 Serial Bus Connection Descriptors */
 static Aml *aml_serial_bus_device(uint8_t serial_bus_type, uint8_t flags,
