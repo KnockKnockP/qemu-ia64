@@ -968,7 +968,17 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         ia64_tr_emit_fast_slot(ctx, &branch.prefix.slot[slot],
                                ldst_address[slot], NULL, pc);
     }
-    if (branch.conditional) {
+    if (branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP) {
+        not_taken = gen_new_label();
+        tcg_gen_ld_i64(tmp, tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       IA64_AR_LC * sizeof(uint64_t));
+        tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, not_taken);
+        tcg_gen_subi_i64(tmp, tmp, 1);
+        tcg_gen_st_i64(tmp, tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       IA64_AR_LC * sizeof(uint64_t));
+    } else if (branch.conditional) {
         not_taken = gen_new_label();
         tcg_gen_ld_i64(tmp, tcg_env, offsetof(CPUIA64State, pr));
         tcg_gen_andi_i64(tmp, tmp, 1ULL << branch.predicate);

@@ -6,6 +6,7 @@
 #include "hw/ia64/efi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
+#include "qemu/main-loop.h"
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
 #include "target/ia64/perf.h"
@@ -17,6 +18,8 @@
 #define IA64_FIRMWARE_STATUS_INVALID_ARGUMENT UINT64_C(0xfffffffffffffffe)
 #define IA64_FIRMWARE_STATUS_REQUIRES_MEMORY UINT64_C(0xfffffffffffffff7)
 #define IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY UINT64_C(100000000)
+#define IA64_PAL_FREQ_RATIO(den, num) \
+    ((((uint64_t)(num)) << 32) | (uint32_t)(den))
 #define IA64_PAL_VERSION UINT64_C(0x0000002300000000)
 #define IA64_PAL_CACHE_LEVELS UINT64_C(2)
 #define IA64_PAL_UNIQUE_CACHES UINT64_C(2)
@@ -456,9 +459,16 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_FREQUENCY_BASE:
         return firmware_success(IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY, 0, 0);
     case IA64_PAL_FREQUENCY_RATIOS:
-        return firmware_success(UINT64_C(0x0000000100000001),
-                                UINT64_C(0x0000000100000001),
-                                UINT64_C(0x0000000100000064));
+        /*
+         * PAL encodes frequency ratios as { uint32_t den, num }.  Linux uses
+         * ITC frequency = SAL_FREQ_BASE_PLATFORM * num / den for scheduling
+         * and watchdog time, while this target advances ITC by retired guest
+         * bundles.  Keep the advertised ITC frequency consistent with that
+         * model instead of accidentally reporting a 1 MHz interval timer.
+         */
+        return firmware_success(IA64_PAL_FREQ_RATIO(1, 1),
+                                IA64_PAL_FREQ_RATIO(1, 1),
+                                IA64_PAL_FREQ_RATIO(1, 1));
     case IA64_PAL_PERFORMANCE_MONITOR_INFO:
         return firmware_success(IA64_IMPLEMENTED_PERF_MON_REGISTER_COUNT,
                                 IA64_MAXIMUM_PERF_MON_REGISTER_COUNT, 0);
@@ -537,6 +547,37 @@ static uint64_t sal_pci_config_default_read(uint64_t size)
     }
 }
 
+static uint32_t sal_pci_data_read_locked(uint32_t pci_addr, unsigned size)
+{
+    uint32_t value;
+    bool locked = bql_locked();
+
+    if (!locked) {
+        bql_lock();
+    }
+    value = pci_data_read(firmware_pci_bus, pci_addr, size);
+    if (!locked) {
+        bql_unlock();
+    }
+
+    return value;
+}
+
+static void sal_pci_data_write_locked(uint32_t pci_addr,
+                                      uint32_t value,
+                                      unsigned size)
+{
+    bool locked = bql_locked();
+
+    if (!locked) {
+        bql_lock();
+    }
+    pci_data_write(firmware_pci_bus, pci_addr, value, size);
+    if (!locked) {
+        bql_unlock();
+    }
+}
+
 static IA64FirmwareResult sal_pci_config_read(uint64_t sal_addr,
                                               uint64_t size,
                                               uint64_t mode)
@@ -556,7 +597,7 @@ static IA64FirmwareResult sal_pci_config_read(uint64_t sal_addr,
         return firmware_success(sal_pci_config_default_read(size), 0, 0);
     }
 
-    return firmware_success(pci_data_read(firmware_pci_bus, pci_addr, size),
+    return firmware_success(sal_pci_data_read_locked(pci_addr, size),
                             0, 0);
 }
 
@@ -577,7 +618,7 @@ static IA64FirmwareResult sal_pci_config_write(uint64_t sal_addr,
     }
 
     if (sal_pci_config_address(sal_addr, mode, &pci_addr)) {
-        pci_data_write(firmware_pci_bus, pci_addr, value, size);
+        sal_pci_data_write_locked(pci_addr, value, size);
     }
 
     return firmware_success(0, 0, 0);

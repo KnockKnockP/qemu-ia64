@@ -13,6 +13,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumMachineState, VIBTANIUM_MACHINE)
 typedef struct DeviceState DeviceState;
 typedef struct ISABus ISABus;
 typedef struct PCIBus PCIBus;
+typedef struct PCIDevice PCIDevice;
 typedef struct SerialMM SerialMM;
 typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 
@@ -41,6 +42,11 @@ typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 #define VIBTANIUM_LEGACY_ISA_IRQS 16
 #define VIBTANIUM_PCI_INTX_IRQ_BASE 16
 #define VIBTANIUM_PCI_INTX_IRQS 4
+#define VIBTANIUM_IDE_PRIMARY_CMD_BASE 0x1f0
+#define VIBTANIUM_IDE_PRIMARY_CTL_BAR_BASE 0x3f4
+#define VIBTANIUM_IDE_SECONDARY_CMD_BASE 0x170
+#define VIBTANIUM_IDE_SECONDARY_CTL_BAR_BASE 0x374
+#define VIBTANIUM_IDE_BMDMA_BASE 0x1000
 #define VIBTANIUM_LEGACY_I8042_DATA_PORT 0x60
 #define VIBTANIUM_LEGACY_I8042_COMMAND_PORT 0x64
 #define VIBTANIUM_LEGACY_I8042_KEYBOARD_IRQ 1
@@ -74,6 +80,7 @@ struct VibtaniumMachineState {
     qemu_irq isa_irqs[VIBTANIUM_LEGACY_ISA_IRQS];
     DeviceState *pci_host;
     PCIBus *pci_bus;
+    PCIDevice *pci_ide;
     qemu_irq pci_irqs[VIBTANIUM_PCI_INTX_IRQS];
     SerialMM *uart;
     DeviceState *i8042;

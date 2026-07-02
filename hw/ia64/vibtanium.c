@@ -9,7 +9,6 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
-#include "hw/ide/piix.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/efi-vars.h"
@@ -26,6 +25,7 @@
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "system/reset.h"
 #include "system/system.h"
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
@@ -33,6 +33,7 @@
 
 #define VIBTANIUM_DEFAULT_LINUX_APPEND ""
 #define TYPE_VIBTANIUM_PCI_HOST "vibtanium-pci-host"
+#define TYPE_VIBTANIUM_IDE "cmd646-ide"
 
 typedef struct VibtaniumPciHostState {
     PCIHostState parent_obj;
@@ -61,10 +62,43 @@ static void vibtanium_pci_set_irq(void *opaque, int irq_num, int level)
     qemu_set_irq(vms->pci_irqs[irq_num], level);
 }
 
+static void vibtanium_configure_firmware_pci(VibtaniumMachineState *vms)
+{
+    if (!vms->pci_ide) {
+        return;
+    }
+
+    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_0,
+                             VIBTANIUM_IDE_PRIMARY_CMD_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_1,
+                             VIBTANIUM_IDE_PRIMARY_CTL_BAR_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_2,
+                             VIBTANIUM_IDE_SECONDARY_CMD_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_3,
+                             VIBTANIUM_IDE_SECONDARY_CTL_BAR_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_4,
+                             VIBTANIUM_IDE_BMDMA_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(vms->pci_ide, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MASTER,
+                             2);
+}
+
+static void vibtanium_reset(MachineState *machine, ResetType type)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
+
+    qemu_devices_reset(type);
+    vibtanium_configure_firmware_pci(vms);
+}
+
 static void vibtanium_pci_init(VibtaniumMachineState *vms)
 {
     PCIHostState *host;
-    PCIDevice *ide;
 
     vms->pci_host = qdev_new(TYPE_VIBTANIUM_PCI_HOST);
     host = PCI_HOST_BRIDGE(vms->pci_host);
@@ -81,8 +115,10 @@ static void vibtanium_pci_init(VibtaniumMachineState *vms)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(vms->pci_host), &error_fatal);
     ia64_firmware_set_pci_bus(vms->pci_bus);
 
-    ide = pci_create_simple(vms->pci_bus, PCI_DEVFN(1, 0), TYPE_PIIX3_IDE);
-    pci_ide_create_devs(ide);
+    vms->pci_ide = pci_new(PCI_DEVFN(1, 0), TYPE_VIBTANIUM_IDE);
+    qdev_prop_set_uint32(&vms->pci_ide->qdev, "secondary", 1);
+    pci_realize_and_unref(vms->pci_ide, vms->pci_bus, &error_fatal);
+    pci_ide_create_devs(vms->pci_ide);
 }
 
 static void vibtanium_i8042_init(VibtaniumMachineState *vms)
@@ -888,6 +924,7 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     mc->desc = "Synthetic IA-64 machine skeleton";
     mc->init = vibtanium_init;
     mc->max_cpus = 1;
+    mc->reset = vibtanium_reset;
     mc->default_cpu_type = TYPE_ITANIUM2_CPU;
     mc->default_ram_size = 512 * MiB;
     mc->default_ram_id = "vibtanium.ram";

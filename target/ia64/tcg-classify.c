@@ -1294,10 +1294,10 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
 
     /*
      * Keep branch lowering auditably small: only bundles with a final simple
-     * relative branch and two safe fast-prefix slots can use direct TCG
-     * control flow.  Calls, returns, loop branches, branch-register targets,
-     * rotating predicate reads, and branch-predicate producer hazards stay on
-     * the helper path.
+     * relative branch or simple counted-loop branch and two safe fast-prefix
+     * slots can use direct TCG control flow.  Calls, returns, modulo-scheduled
+     * loop branches, branch-register targets, rotating predicate reads, and
+     * branch-predicate producer hazards stay on the helper path.
      */
     if (!ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
                                         bundle->slot[2])) {
@@ -1307,7 +1307,19 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     raw = bundle->slot[2];
     btype = (raw >> 6) & 0x7;
     predicate = ia64_slot_predicate(raw);
-    if (btype > 1 || predicate >= 16) {
+    switch (btype) {
+    case 0:
+    case 1:
+        if (predicate >= 16) {
+            return false;
+        }
+        break;
+    case 5:
+        if (predicate != 0) {
+            return false;
+        }
+        break;
+    default:
         return false;
     }
 
@@ -1325,10 +1337,12 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     }
     branch->target_ip = target;
     branch->fallthrough_ip = fallthrough;
+    branch->kind = btype == 5 ? IA64_TCG_DIRECT_BRANCH_CLOOP :
+                                IA64_TCG_DIRECT_BRANCH_COND;
     branch->slot = 2;
     branch->predicate = predicate;
     branch->nop_count = ia64_tcg_fast_bundle_nop_count(&branch->prefix);
-    branch->conditional = predicate != 0;
+    branch->conditional = btype == 5 || predicate != 0;
     return true;
 }
 
