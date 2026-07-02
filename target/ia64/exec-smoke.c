@@ -210,6 +210,8 @@ uint32_t ia64_rse_dirty_partition_first_slot(CPUIA64State *env,
     return ia64_rse_wrap_slot(env->rse.current_frame_base - count);
 }
 
+static void ia64_rse_sync_ar(CPUIA64State *env);
+
 void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
                                    uint64_t load_end,
                                    IA64RSEReadRegisterFn read_register,
@@ -244,6 +246,58 @@ void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
     }
 }
 
+uint32_t ia64_rse_load_restored_frame(CPUIA64State *env, uint32_t count,
+                                      IA64RSEReadRegisterFn read_register,
+                                      void *opaque)
+{
+    uint64_t frame_base;
+    uint64_t frame_end;
+    uint64_t load_end;
+    uint64_t address;
+    uint32_t filled = 0;
+
+    if (!env || !read_register || count == 0 || env->rse.bsp == 0) {
+        return 0;
+    }
+
+    count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
+    frame_base = env->rse.bsp;
+    frame_end = ia64_rse_skip_regs(frame_base, count);
+    load_end = env->rse.bsp_load != 0 ? env->rse.bsp_load
+                                      : env->rse.bspstore;
+
+    if (load_end > frame_end) {
+        load_end = frame_end;
+    }
+    if (load_end <= frame_base) {
+        return 0;
+    }
+
+    address = frame_base;
+    for (uint32_t i = 0; i < count; i++) {
+        address = ia64_rse_reg_address(address);
+        if (address >= load_end) {
+            break;
+        }
+        env->rse.stacked_gr[
+            ia64_rse_wrap_slot(env->rse.current_frame_base + i)] =
+            read_register(env, address, opaque);
+        filled++;
+        address += 8;
+    }
+
+    if (filled == 0) {
+        return 0;
+    }
+
+    env->rse.bspstore = frame_base;
+    env->rse.bsp_load = frame_base;
+    env->rse.clean_count = MIN(env->rse.clean_count,
+                               env->rse.current_frame_base);
+    ia64_rse_sync_ar(env);
+    return filled;
+}
+
 void ia64_rse_reconstruct_transients(CPUIA64State *env)
 {
     uint32_t dirty;
@@ -252,8 +306,12 @@ void ia64_rse_reconstruct_transients(CPUIA64State *env)
         return;
     }
     if (env->rse.bspstore == 0) {
+        env->rse.bsp_load = 0;
         env->rse.clean_count = 0;
         return;
+    }
+    if (env->rse.bsp_load == 0) {
+        env->rse.bsp_load = env->rse.bspstore;
     }
 
     dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
@@ -261,8 +319,6 @@ void ia64_rse_reconstruct_transients(CPUIA64State *env)
         ? env->rse.current_frame_base - dirty
         : 0;
 }
-
-static void ia64_rse_sync_ar(CPUIA64State *env);
 
 void ia64_rse_mark_dirty_partition(CPUIA64State *env, uint32_t count)
 {
@@ -294,6 +350,7 @@ void ia64_rse_set_dirty_partition(CPUIA64State *env, uint64_t start,
 
     env->rse.bspstore = start;
     env->rse.bsp = end;
+    env->rse.bsp_load = start;
     dirty = ia64_rse_num_regs(start, end);
     env->rse.clean_count = dirty < env->rse.current_frame_base
         ? env->rse.current_frame_base - dirty
@@ -1037,6 +1094,7 @@ static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)
         uint32_t dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
 
         env->rse.bspstore = value & ~7ULL;
+        env->rse.bsp_load = env->rse.bspstore;
         env->rse.bsp = ia64_rse_skip_regs(env->rse.bspstore, dirty);
         env->rse.clean_count = dirty == 0
             ? MIN(env->rse.clean_count, env->rse.current_frame_base)

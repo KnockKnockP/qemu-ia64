@@ -209,6 +209,7 @@ void vibtanium_efi_console_init(MemoryRegion *framebuffer,
                                 uint8_t *vga_crtc);
 void vibtanium_efi_console_set_input_active(bool active);
 void vibtanium_efi_console_set_vga_text_active(bool active);
+void vibtanium_efi_console_recover_post_load(uint64_t ip);
 void vibtanium_efi_console_reset(void);
 void vibtanium_efi_console_clear(void);
 void vibtanium_efi_console_putchar(uint16_t ch);

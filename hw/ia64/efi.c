@@ -1187,6 +1187,7 @@ void vibtanium_efi_prepare_cpu(CPUIA64State *env,
 
     env->rse.bsp = VIBTANIUM_EFI_BACKING_STORE_BASE;
     env->rse.bspstore = VIBTANIUM_EFI_BACKING_STORE_BASE;
+    env->rse.bsp_load = VIBTANIUM_EFI_BACKING_STORE_BASE;
     env->ar[IA64_AR_BSP] = env->rse.bsp;
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;

@@ -227,6 +227,9 @@ void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
                                    uint64_t load_end,
                                    IA64RSEReadRegisterFn read_register,
                                    void *opaque);
+uint32_t ia64_rse_load_restored_frame(CPUIA64State *env, uint32_t count,
+                                      IA64RSEReadRegisterFn read_register,
+                                      void *opaque);
 uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg);
 void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value);
 bool ia64_read_pr(CPUIA64State *env, uint32_t predicate);

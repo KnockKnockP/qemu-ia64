@@ -4,6 +4,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/vibtanium.h"
+#include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "standard-headers/linux/input-event-codes.h"
@@ -38,6 +39,8 @@ struct VibtaniumEfiDisplayState {
     bool right_shift_down;
     bool caps_lock_down;
     bool caps_lock;
+    bool input_active;
+    bool vga_text_active;
 };
 
 typedef struct VibtaniumEfiConsole {
@@ -603,6 +606,8 @@ static void vibtanium_efi_display_realize(DeviceState *dev, Error **errp)
 {
     VibtaniumEfiDisplayState *s = VIBTANIUM_EFI_DISPLAY(dev);
 
+    s->input_active = true;
+    s->vga_text_active = false;
     s->keyboard = qemu_input_handler_register(dev,
                                               &vibtanium_efi_keyboard_handler);
     efi_display = s;
@@ -619,6 +624,49 @@ static void vibtanium_efi_display_unrealize(DeviceState *dev)
     g_clear_pointer(&s->keyboard, qemu_input_handler_unregister);
 }
 
+static void vibtanium_efi_display_apply_state(VibtaniumEfiDisplayState *s)
+{
+    efi_console.vga_text_active = s->vga_text_active;
+
+    if (s->keyboard) {
+        if (s->input_active) {
+            qemu_input_handler_activate(s->keyboard);
+        } else {
+            qemu_input_handler_deactivate(s->keyboard);
+        }
+    }
+    if (s->vga_text_active) {
+        efi_console_render_vga_text();
+        if (efi_console.con) {
+            qemu_console_update_full(efi_console.con);
+        }
+    }
+}
+
+static int vibtanium_efi_display_post_load(void *opaque, int version_id)
+{
+    VibtaniumEfiDisplayState *s = opaque;
+
+    vibtanium_efi_display_apply_state(s);
+    return 0;
+}
+
+static const VMStateDescription vmstate_vibtanium_efi_display = {
+    .name = TYPE_VIBTANIUM_EFI_DISPLAY,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = vibtanium_efi_display_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(left_shift_down, VibtaniumEfiDisplayState),
+        VMSTATE_BOOL(right_shift_down, VibtaniumEfiDisplayState),
+        VMSTATE_BOOL(caps_lock_down, VibtaniumEfiDisplayState),
+        VMSTATE_BOOL(caps_lock, VibtaniumEfiDisplayState),
+        VMSTATE_BOOL(input_active, VibtaniumEfiDisplayState),
+        VMSTATE_BOOL(vga_text_active, VibtaniumEfiDisplayState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void vibtanium_efi_display_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -626,6 +674,7 @@ static void vibtanium_efi_display_class_init(ObjectClass *oc, const void *data)
     dc->desc = "vibtanium EFI framebuffer display";
     dc->realize = vibtanium_efi_display_realize;
     dc->unrealize = vibtanium_efi_display_unrealize;
+    dc->vmsd = &vmstate_vibtanium_efi_display;
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
@@ -696,6 +745,7 @@ void vibtanium_efi_console_set_input_active(bool active)
         return;
     }
 
+    efi_display->input_active = active;
     if (active) {
         qemu_input_handler_activate(efi_display->keyboard);
     } else {
@@ -706,12 +756,38 @@ void vibtanium_efi_console_set_input_active(bool active)
 void vibtanium_efi_console_set_vga_text_active(bool active)
 {
     efi_console.vga_text_active = active;
+    if (efi_display) {
+        efi_display->vga_text_active = active;
+    }
     if (active) {
         efi_console_render_vga_text();
         if (efi_console.con) {
             qemu_console_update_full(efi_console.con);
         }
     }
+}
+
+void vibtanium_efi_console_recover_post_load(uint64_t ip)
+{
+    bool in_efi_blob = ip >= VIBTANIUM_EFI_BLOB_BASE &&
+                       ip < VIBTANIUM_EFI_BLOB_BASE +
+                            VIBTANIUM_EFI_BLOB_SIZE;
+    bool in_efi_image = ip >= VIBTANIUM_EFI_APP_BASE &&
+                        ip < VIBTANIUM_EFI_POOL_BASE +
+                             VIBTANIUM_EFI_POOL_SIZE;
+
+    if (!efi_display) {
+        return;
+    }
+
+    if (in_efi_blob || in_efi_image) {
+        efi_display->input_active = true;
+        efi_display->vga_text_active = false;
+    } else {
+        efi_display->input_active = false;
+        efi_display->vga_text_active = true;
+    }
+    vibtanium_efi_display_apply_state(efi_display);
 }
 
 void vibtanium_efi_console_reset(void)

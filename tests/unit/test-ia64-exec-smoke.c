@@ -686,6 +686,44 @@ static void test_rse_loadrs_reads_clean_prefix_only(void)
     g_assert_cmpuint(env.rse.clean_count, ==, 4);
 }
 
+static void test_rse_restored_frame_uses_bsp_load(void)
+{
+    TestRSEBackingStore store = {
+        .first_address = 0x6000,
+        .value = {
+            0xa100000000000000ULL, 0xa211111111111111ULL,
+            0xa322222222222222ULL, 0xa433333333333333ULL,
+        },
+    };
+    CPUIA64State env;
+    uint32_t filled;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 12;
+    env.rse.bsp = store.first_address;
+    env.rse.bspstore = store.first_address;
+    env.rse.bsp_load = ia64_rse_skip_regs(store.first_address, 4);
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
+        env.rse.stacked_gr[i] = 0xdead000000000000ULL | i;
+    }
+
+    filled = ia64_rse_load_restored_frame(
+        &env, 4, test_rse_read_backing_store_register, &store);
+
+    g_assert_cmpuint(filled, ==, 4);
+    g_assert_cmpuint(store.read_count, ==, 4);
+    for (uint32_t i = 0; i < 4; i++) {
+        g_assert_cmphex(env.rse.stacked_gr[12 + i], ==, store.value[i]);
+    }
+    g_assert_cmphex(env.rse.bsp, ==, store.first_address);
+    g_assert_cmphex(env.rse.bspstore, ==, store.first_address);
+    g_assert_cmphex(env.rse.bsp_load, ==, store.first_address);
+    g_assert_cmphex(env.ar[IA64_AR_BSP], ==, store.first_address);
+    g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==, store.first_address);
+}
+
 static void test_rse_reconstructs_clean_partition_after_load(void)
 {
     CPUIA64State env;
@@ -3246,6 +3284,8 @@ int main(int argc, char **argv)
                     test_rse_loadrs_preserves_dirty_frame_uncovered_by_rfi);
     g_test_add_func("/ia64-exec-smoke/rse-loadrs-reads-clean-prefix-only",
                     test_rse_loadrs_reads_clean_prefix_only);
+    g_test_add_func("/ia64-exec-smoke/rse-restored-frame-uses-bsp-load",
+                    test_rse_restored_frame_uses_bsp_load);
     g_test_add_func("/ia64-exec-smoke/rse-reconstructs-clean-partition-after-load",
                     test_rse_reconstructs_clean_partition_after_load);
     g_test_add_func("/ia64-exec-smoke/i-unit-mov-ip-and-nop",

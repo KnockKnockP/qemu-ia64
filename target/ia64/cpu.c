@@ -158,10 +158,12 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                     "  CFM %016" PRIx64 "\n",
                  env->psr, env->pr, env->cfm);
     qemu_fprintf(f, "RSE RSC %016" PRIx64 "  BSP %016" PRIx64
-                    "  BSPSTORE %016" PRIx64 "  RNAT %016" PRIx64
+                    "  BSPSTORE %016" PRIx64 "  BSPLOAD %016" PRIx64
+                    "  RNAT %016" PRIx64
                     "  BASE %u\n",
                  env->rse.rsc, env->rse.bsp, env->rse.bspstore,
-                 env->rse.rnat, env->rse.current_frame_base);
+                 env->rse.bsp_load, env->rse.rnat,
+                 env->rse.current_frame_base);
     qemu_fprintf(f, "NaT %016" PRIx64 ":%016" PRIx64
                     "  UNAT %016" PRIx64 "  RNAT %016" PRIx64 "\n",
                  env->nat.gr_nat[1], env->nat.gr_nat[0],

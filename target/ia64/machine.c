@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "exec/cputlb.h"
 #include "exec-smoke.h"
+#include "hw/ia64/efi.h"
 #include "mem.h"
 #include "migration/vmstate.h"
 
@@ -192,6 +193,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     env->gr[0] = 0;
     env->pr |= 1;
     env->fault_exit_pending_tb_translate = false;
+    vibtanium_efi_console_recover_post_load(env->ip);
     return 0;
 }
 
@@ -242,12 +244,13 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = ia64_cpu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(parent_obj, IA64CPU, 0, vmstate_cpu_common, CPUState),
         VMSTATE_STRUCT(env, IA64CPU, 0, vmstate_env, CPUIA64State),
+        VMSTATE_UINT64_V(env.rse.bsp_load, IA64CPU, 2),
         VMSTATE_END_OF_LIST()
     }
 };

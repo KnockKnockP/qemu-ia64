@@ -5774,6 +5774,16 @@ static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
     ia64_alat_invalidate_store(env, address, width);
 }
 
+static void ia64_probe_store_access(CPUIA64State *env, uint64_t address)
+{
+    IA64TranslateResult result;
+
+    if (!ia64_translate_address(env, address, MMU_DATA_STORE, 0, false,
+                                &result)) {
+        ia64_exit_after_translation_fault(env, &result);
+    }
+}
+
 static void ia64_exec_flushrs(CPUIA64State *env)
 {
     uint32_t dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
@@ -5782,6 +5792,7 @@ static void ia64_exec_flushrs(CPUIA64State *env)
 
     IA64_PERF_INC(IA64_PERF_OP_RSE_FLUSHRS);
     if (dirty == 0 || env->rse.bspstore == 0) {
+        env->rse.bsp_load = env->rse.bspstore;
         env->rse.clean_count = MIN(env->rse.clean_count,
                                    env->rse.current_frame_base);
         return;
@@ -5798,6 +5809,7 @@ static void ia64_exec_flushrs(CPUIA64State *env)
 
     env->rse.bspstore = address;
     env->rse.bsp = address;
+    env->rse.bsp_load = address;
     env->rse.clean_count = env->rse.current_frame_base;
     env->ar[IA64_AR_BSPSTORE] = address;
     env->ar[IA64_AR_BSP] = address;
@@ -5847,60 +5859,45 @@ static void ia64_rse_sync_ar_after_fill(CPUIA64State *env)
  */
 static void ia64_rse_fill_restored_frame(CPUIA64State *env, uint32_t count)
 {
-    uint64_t bspstore = env->rse.bspstore;
-    uint64_t frame_base = env->rse.bsp;
-    uint64_t address;
-    uint32_t filled = 0;
+    uint64_t old_bspstore = env->rse.bspstore;
+    uint64_t old_bsp_load = env->rse.bsp_load;
+    uint32_t filled;
     bool trace = ia64_rse_trace_enabled();
 
     IA64_PERF_INC(IA64_PERF_OP_RSE_FILL_RESTORED);
-    if (count == 0 || bspstore == 0 || frame_base == 0) {
-        return;
-    }
-    count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
-    address = ia64_rse_reg_address(ia64_rse_skip_regs(frame_base, 0));
-    if (address >= bspstore) {
+    if (count == 0 || env->rse.bsp == 0) {
         return;
     }
 
-    for (uint32_t i = 0; i < count; i++) {
-        if (address >= bspstore) {
-            /* This register and every higher one are still resident. */
-            break;
-        }
-        env->rse.stacked_gr[
-            ia64_rse_wrap_slot(env->rse.current_frame_base + i)] =
-            ia64_ldst_read(env, address, 8);
-        filled++;
-        address = ia64_rse_reg_address(address + 8);
-    }
-
+    filled = ia64_rse_load_restored_frame(
+        env, count, ia64_rse_read_backing_store_register, NULL);
     if (filled == 0) {
         return;
     }
     IA64_PERF_INC(IA64_PERF_OP_RSE_FILL_RESTORED_MEM);
     IA64_PERF_ADD(IA64_PERF_OP_RSE_FILL_RESTORED_REG, filled);
 
-    /* The reloaded registers are now resident; lower the store pointer. */
-    env->rse.bspstore = frame_base;
-    env->rse.clean_count = MIN(env->rse.clean_count,
-                               env->rse.current_frame_base);
     ia64_rse_sync_ar_after_fill(env);
 
     if (trace) {
         fprintf(stderr,
                 "[ia64-rse] ip=0x%016" PRIx64
                 " fill-restored count=%u filled=%u"
-                " bspstore=0x%016" PRIx64 " bsp=0x%016" PRIx64 "\n",
-                env->ip, count, filled, env->rse.bspstore, env->rse.bsp);
+                " bspstore=0x%016" PRIx64 "->0x%016" PRIx64
+                " bspload=0x%016" PRIx64 "->0x%016" PRIx64
+                " bsp=0x%016" PRIx64 "\n",
+                env->ip, count, filled, old_bspstore, env->rse.bspstore,
+                old_bsp_load, env->rse.bsp_load, env->rse.bsp);
     }
 }
 
 static void ia64_rse_maybe_fill_restored_frame(CPUIA64State *env,
                                                uint32_t count)
 {
-    if (count == 0 || env->rse.bspstore == 0 || env->rse.bsp == 0 ||
-        env->rse.bsp >= env->rse.bspstore) {
+    uint64_t load_end = env->rse.bsp_load != 0 ? env->rse.bsp_load
+                                               : env->rse.bspstore;
+
+    if (count == 0 || env->rse.bsp == 0 || load_end <= env->rse.bsp) {
         return;
     }
     ia64_rse_fill_restored_frame(env, count);
@@ -6007,13 +6004,23 @@ static bool exec_m_atomic(CPUIA64State *env,
                           const IA64AtomicInstruction *decoded)
 {
     uint64_t address = ia64_read_gr(env, decoded->base);
-    uint64_t old_value = ia64_ldst_read(env, address, decoded->width);
+    uint64_t old_value;
     uint64_t store_value = 0;
     uint64_t compare_value = 0;
     uint64_t mask = ia64_width_mask(decoded->width);
     bool write_memory = false;
 
     IA64_PERF_INC(IA64_PERF_ATOMIC_MEMORY_OP);
+    if (decoded->kind == IA64_ATOMIC_CMPXCHG) {
+        /*
+         * cmpxchg requires write privilege even when the compare fails and
+         * no store is performed, so let access/dirty faults retire first.
+         */
+        ia64_probe_store_access(env, address);
+    }
+
+    old_value = ia64_ldst_read(env, address, decoded->width);
+
     switch (decoded->kind) {
     case IA64_ATOMIC_CMPXCHG:
         store_value = ia64_read_gr(env, decoded->source);

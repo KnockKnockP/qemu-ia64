@@ -175,6 +175,7 @@ typedef struct IA64RSEState {
     uint64_t rsc;
     uint64_t bsp;
     uint64_t bspstore;
+    uint64_t bsp_load;
     uint64_t rnat;
     uint64_t loadrs;
     uint32_t sof;
