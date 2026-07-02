@@ -31,14 +31,22 @@
 #define LOCALEDIR "po"
 
 #include "qemu/osdep.h"
+#include "block/block-global-state.h"
+#include "hw/core/boards.h"
+#include "migration/snapshot.h"
 #include "qapi/error.h"
+#include "qapi/qapi-commands-block-core.h"
 #include "qapi/qapi-commands-control.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
+#include "qapi/qapi-types-block-core.h"
+#include "qapi/util.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "qemu/units.h"
 #include "qemu-main.h"
+#include "qobject/qobject.h"
 
 #include "ui/console.h"
 #include "ui/gtk.h"
@@ -70,6 +78,9 @@
 #define VC_SCALE_MIN    0.25
 #define VC_SCALE_MAX       4
 #define VC_SCALE_STEP   0.25
+#define GD_SNAPSHOT_TAG "gtk-snapshot"
+#define GD_SNAPSHOT_MIN_SIZE (2 * GiB)
+#define GD_SNAPSHOT_RAM_HEADROOM (512 * MiB)
 
 #ifdef GDK_WINDOWING_X11
 #include "x_keymap.h"
@@ -1436,6 +1447,218 @@ static void gd_menu_pause(GtkMenuItem *item, void *opaque)
     }
 }
 
+static void gd_snapshot_message(GtkDisplayState *s, GtkMessageType type,
+                                const char *primary, const char *secondary)
+{
+    GtkWidget *dialog;
+
+    dialog = gtk_message_dialog_new(GTK_WINDOW(s->window),
+                                    GTK_DIALOG_DESTROY_WITH_PARENT,
+                                    type,
+                                    GTK_BUTTONS_OK,
+                                    "%s", primary);
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog),
+                                             "%s", secondary);
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+}
+
+static uint64_t gd_snapshot_image_size(void)
+{
+    uint64_t size = GD_SNAPSHOT_MIN_SIZE;
+
+    if (current_machine) {
+        uint64_t ram_size = current_machine->ram_size;
+
+        if (ram_size <= UINT64_MAX - GD_SNAPSHOT_RAM_HEADROOM) {
+            size = MAX(size, ram_size + GD_SNAPSHOT_RAM_HEADROOM);
+        }
+    }
+
+    return size;
+}
+
+static BlockdevOptions *gd_snapshot_file_options(const char *filename,
+                                                 const char *node_name)
+{
+    BlockdevOptions *options = g_new0(BlockdevOptions, 1);
+
+    options->driver = BLOCKDEV_DRIVER_FILE;
+    options->node_name = g_strdup(node_name);
+    options->u.file.filename = g_strdup(filename);
+
+    return options;
+}
+
+static BlockdevOptions *gd_snapshot_qcow2_options(const char *file_node_name,
+                                                  const char *node_name)
+{
+    BlockdevOptions *options = g_new0(BlockdevOptions, 1);
+    BlockdevRef *file = g_new0(BlockdevRef, 1);
+
+    file->type = QTYPE_QSTRING;
+    file->u.reference = g_strdup(file_node_name);
+
+    options->driver = BLOCKDEV_DRIVER_QCOW2;
+    options->node_name = g_strdup(node_name);
+    options->u.qcow2.file = file;
+
+    return options;
+}
+
+static void gd_snapshot_cleanup_node(const char *node_name, Error **errp)
+{
+    Error *local_err = NULL;
+
+    qmp_blockdev_del(node_name, &local_err);
+    if (local_err) {
+        if (errp && !*errp) {
+            error_propagate(errp, local_err);
+        } else {
+            error_report("%s", error_get_pretty(local_err));
+            error_free(local_err);
+        }
+    }
+}
+
+static bool gd_snapshot_save_file(const char *filename, char **details)
+{
+    static unsigned int serial;
+    Error *err = NULL;
+    Error *cleanup_err = NULL;
+    g_autofree char *file_node_name = NULL;
+    g_autofree char *vmstate_node_name = NULL;
+    g_autoptr(BlockdevOptions) file_options = NULL;
+    g_autoptr(BlockdevOptions) qcow2_options = NULL;
+    strList *devices = NULL;
+    unsigned int local_serial;
+    bool file_node_added = false;
+    bool vmstate_node_added = false;
+    bool image_created = false;
+    bool snapshot_saved = false;
+
+    local_serial = ++serial;
+    file_node_name = g_strdup_printf("gtk-snapshot-file-%u", local_serial);
+    vmstate_node_name = g_strdup_printf("gtk-snapshot-vmstate-%u",
+                                        local_serial);
+
+    if (g_file_test(filename, G_FILE_TEST_EXISTS) &&
+        qemu_unlink(filename) < 0) {
+        error_setg_errno(&err, errno, "Could not replace '%s'", filename);
+        goto out;
+    }
+
+    bdrv_img_create(filename, "qcow2", NULL, NULL, NULL,
+                    gd_snapshot_image_size(),
+                    BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_NO_BACKING,
+                    true, &err);
+    if (err) {
+        goto out;
+    }
+    image_created = true;
+
+    file_options = gd_snapshot_file_options(filename, file_node_name);
+    qmp_blockdev_add(file_options, &err);
+    if (err) {
+        goto out;
+    }
+    file_node_added = true;
+
+    qcow2_options = gd_snapshot_qcow2_options(file_node_name,
+                                              vmstate_node_name);
+    qmp_blockdev_add(qcow2_options, &err);
+    if (err) {
+        goto out;
+    }
+    vmstate_node_added = true;
+
+    QAPI_LIST_PREPEND(devices, g_strdup(vmstate_node_name));
+    snapshot_saved = save_snapshot(GD_SNAPSHOT_TAG, true,
+                                   vmstate_node_name, true, devices, &err);
+
+out:
+    qapi_free_strList(devices);
+
+    if (vmstate_node_added) {
+        gd_snapshot_cleanup_node(vmstate_node_name, &cleanup_err);
+    }
+    if (file_node_added) {
+        gd_snapshot_cleanup_node(file_node_name, &cleanup_err);
+    }
+
+    if (!snapshot_saved && image_created) {
+        qemu_unlink(filename);
+    }
+
+    if (err) {
+        *details = g_strdup(error_get_pretty(err));
+        error_free(err);
+        return false;
+    }
+
+    if (cleanup_err) {
+        *details = g_strdup_printf(
+            "Snapshot saved, but QEMU could not close the snapshot file: %s",
+            error_get_pretty(cleanup_err));
+        error_free(cleanup_err);
+        return false;
+    }
+
+    *details = g_strdup_printf("Saved to %s with tag '%s'.",
+                               filename, GD_SNAPSHOT_TAG);
+    return true;
+}
+
+static void gd_menu_save_snapshot(GtkMenuItem *item, void *opaque)
+{
+    GtkDisplayState *s = opaque;
+    GtkWidget *dialog;
+    GtkFileFilter *filter;
+    g_autofree gchar *filename = NULL;
+    g_autofree char *details = NULL;
+    bool ok;
+
+    dialog = gtk_file_chooser_dialog_new(_("Save VM Snapshot"),
+                                         GTK_WINDOW(s->window),
+                                         GTK_FILE_CHOOSER_ACTION_SAVE,
+                                         _("_Cancel"), GTK_RESPONSE_CANCEL,
+                                         _("_Save"), GTK_RESPONSE_ACCEPT,
+                                         NULL);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog),
+                                                   TRUE);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog),
+                                      "qemu-snapshot.qcow2");
+
+    filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, _("QEMU snapshots (*.qcow2)"));
+    gtk_file_filter_add_pattern(filter, "*.qcow2");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+    }
+    gtk_widget_destroy(dialog);
+
+    if (!filename) {
+        return;
+    }
+
+    gtk_widget_set_sensitive(s->save_snapshot_item, false);
+    ok = gd_snapshot_save_file(filename, &details);
+    gtk_widget_set_sensitive(s->save_snapshot_item, true);
+
+    if (ok) {
+        gd_snapshot_message(s, GTK_MESSAGE_INFO,
+                            _("Snapshot saved"), details);
+    } else {
+        const char *failure = details ? details :
+            _("No error details were reported.");
+
+        gd_snapshot_message(s, GTK_MESSAGE_ERROR,
+                            _("Snapshot save failed"), failure);
+    }
+}
+
 static void gd_menu_reset(GtkMenuItem *item, void *opaque)
 {
     qmp_system_reset(NULL);
@@ -2209,6 +2432,8 @@ static void gd_connect_signals(GtkDisplayState *s)
 
     g_signal_connect(s->pause_item, "activate",
                      G_CALLBACK(gd_menu_pause), s);
+    g_signal_connect(s->save_snapshot_item, "activate",
+                     G_CALLBACK(gd_menu_save_snapshot), s);
     g_signal_connect(s->reset_item, "activate",
                      G_CALLBACK(gd_menu_reset), s);
     g_signal_connect(s->powerdown_item, "activate",
@@ -2245,6 +2470,14 @@ static GtkWidget *gd_create_menu_machine(GtkDisplayState *s)
 
     s->pause_item = gtk_check_menu_item_new_with_mnemonic(_("_Pause"));
     gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), s->pause_item);
+
+    separator = gtk_separator_menu_item_new();
+    gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), separator);
+
+    s->save_snapshot_item =
+        gtk_menu_item_new_with_mnemonic(_("Save _Snapshot..."));
+    gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu),
+                          s->save_snapshot_item);
 
     separator = gtk_separator_menu_item_new();
     gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), separator);
