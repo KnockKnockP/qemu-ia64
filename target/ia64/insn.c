@@ -64,7 +64,7 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
     env->pr = 1;
     env->gr[0] = 0;
     env->ip = 0;
-    env->psr = 0;
+    ia64_env_set_psr(env, 0);
     ia64_set_cfm(env, 0);
     env->fr[0].raw[1] = IA64_FR_SPECIAL_EXPONENT;
     env->fr[1].raw[0] = IA64_FR_INTEGER_BIT;
@@ -417,7 +417,8 @@ uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg)
         return 0;
     }
     if (reg < IA64_STATIC_GR_COUNT) {
-        if (reg >= 16 && reg < 32 && (env->psr & IA64_PSR_BN_BIT)) {
+        if (reg >= 16 && reg < 32 &&
+            (ia64_env_psr(env) & IA64_PSR_BN_BIT)) {
             return env->banked_gr[reg - 16];
         }
         return env->gr[reg];
@@ -508,7 +509,8 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
         return;
     }
     if (reg < IA64_STATIC_GR_COUNT) {
-        if (reg >= 16 && reg < 32 && (env->psr & IA64_PSR_BN_BIT)) {
+        if (reg >= 16 && reg < 32 &&
+            (ia64_env_psr(env) & IA64_PSR_BN_BIT)) {
             env->banked_gr[reg - 16] = value;
         } else {
             env->gr[reg] = value;
@@ -1030,7 +1032,7 @@ static void ia64_trace_branch_write(CPUIA64State *env, const char *op,
             " aux=0x%016" PRIx64
             " cfm=0x%016" PRIx64 " pfs=0x%016" PRIx64
             " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 "\n",
-            env->ip, ia64_psr_ri(env->psr), op, reg, env->br[reg],
+            env->ip, ia64_env_ri(env), op, reg, env->br[reg],
             value, aux, env->cfm, env->ar[IA64_AR_PFS], env->rse.bsp,
             env->rse.bspstore);
 }
@@ -1058,7 +1060,7 @@ static void ia64_trace_branch_return(CPUIA64State *env, const char *op,
             " target=0x%016" PRIx64 " aux=0x%016" PRIx64
             " cfm=0x%016" PRIx64 " pfs=0x%016" PRIx64
             " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 "\n",
-            env->ip, ia64_psr_ri(env->psr), op, reg, target, bundle_ip,
+            env->ip, ia64_env_ri(env), op, reg, target, bundle_ip,
             env->cfm, env->ar[IA64_AR_PFS], env->rse.bsp,
             env->rse.bspstore);
 }
@@ -1510,21 +1512,21 @@ bool ia64_exec_m_processor_mask(CPUIA64State *env, uint64_t raw)
     x4 = (raw >> 27) & 0xf;
     mask = ia64_processor_mask_immediate(raw);
     mask &= x4 == 4 || x4 == 5 ? UINT64_C(0x3f) : UINT64_C(0x00ffffff);
-    old_psr = env->psr;
+    old_psr = ia64_env_psr(env);
     if (x4 == 4 || x4 == 6) {
-        env->psr |= mask;
+        ia64_env_set_psr(env, old_psr | mask);
     } else {
-        env->psr &= ~mask;
+        ia64_env_set_psr(env, old_psr & ~mask);
     }
     trace_ia64_processor_mask(env->ip, x4 == 4 || x4 == 6 ? "ssm" : "rsm",
-                              mask, old_psr, env->psr);
+                              mask, old_psr, ia64_env_psr(env));
     if (ia64_psr_trace_enabled()) {
         fprintf(stderr,
                 "[ia64-psr-mask] ip=0x%016" PRIx64 " op=%s"
                 " mask=0x%016" PRIx64 " old=0x%016" PRIx64
                 " new=0x%016" PRIx64 "\n",
                 env->ip, x4 == 4 || x4 == 6 ? "ssm" : "rsm",
-                mask, old_psr, env->psr);
+                mask, old_psr, ia64_env_psr(env));
     }
     return true;
 }
@@ -1561,10 +1563,11 @@ bool ia64_exec_m_mov_from_processor_status(CPUIA64State *env, uint64_t raw)
 
     x6 = (raw >> 27) & 0x3f;
     target = (raw >> 6) & 0x7f;
+    value = ia64_env_psr(env);
     value = x6 == 0x21
-                ? (env->psr & IA64_PSR_USER_MASK)
-                : ((env->psr & IA64_PSR_LOWER_MASK) |
-                   (env->psr & (IA64_PSR_MC_BIT | IA64_PSR_IT_BIT)));
+                ? (value & IA64_PSR_USER_MASK)
+                : ((value & IA64_PSR_LOWER_MASK) |
+                   (value & (IA64_PSR_MC_BIT | IA64_PSR_IT_BIT)));
     ia64_write_gr(env, target, value);
     return true;
 }
@@ -1599,7 +1602,8 @@ bool ia64_exec_m_mov_to_processor_status(CPUIA64State *env, uint64_t raw)
     source = (raw >> 13) & 0x7f;
     value = ia64_read_gr(env, source);
     write_mask = x6 == 0x29 ? IA64_PSR_USER_MASK : IA64_PSR_LOWER_MASK;
-    env->psr = (env->psr & ~write_mask) | (value & write_mask);
+    ia64_env_set_psr(env, (ia64_env_psr(env) & ~write_mask) |
+                          (value & write_mask));
     return true;
 }
 
@@ -1911,7 +1915,7 @@ bool ia64_external_interrupt_enabled(CPUIA64State *env)
     uint64_t vector;
 
     return ia64_external_interrupt_pending(env) &&
-           (env->psr & (IA64_PSR_I_BIT | IA64_PSR_IC_BIT)) ==
+           (ia64_env_psr(env) & (IA64_PSR_I_BIT | IA64_PSR_IC_BIT)) ==
            (IA64_PSR_I_BIT | IA64_PSR_IC_BIT) &&
            ia64_select_pending_external_interrupt(env, true, &vector);
 }
@@ -2372,7 +2376,8 @@ IA64ProbeStatus ia64_exec_m_probe_checked(CPUIA64State *env, uint64_t raw,
     } else {
         requested_cpl = (raw >> 13) & 0x3;
     }
-    current_cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    current_cpl = (ia64_env_psr(env) & IA64_PSR_CPL_MASK) >>
+                  IA64_PSR_CPL_SHIFT;
     effective_cpl = requested_cpl < current_cpl ? current_cpl : requested_cpl;
 
     if (ia64_translate_address_with_cpl(env, address, access_type, 0,
@@ -5220,7 +5225,7 @@ static void ia64_enter_call_frame(CPUIA64State *env)
     uint64_t caller_cfm = env->cfm;
     uint64_t caller_ec = ia64_read_ar(env, IA64_AR_EC) & 0x3f;
     uint64_t caller_cpl =
-        (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+        (ia64_env_psr(env) & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
     uint32_t caller_sof = ia64_cfm_sof(caller_cfm);
     uint32_t caller_sol = ia64_cfm_sol(caller_cfm);
     uint32_t output_count = caller_sof >= caller_sol
@@ -5257,8 +5262,8 @@ static void ia64_restore_frame_from_pfs(CPUIA64State *env)
                                env->rse.current_frame_base);
     ia64_set_cfm(env, restored_cfm);
     ia64_write_ar(env, IA64_AR_EC, restored_ec);
-    env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
-               (restored_cpl << IA64_PSR_CPL_SHIFT);
+    ia64_env_set_psr(env, (ia64_env_psr(env) & ~IA64_PSR_CPL_MASK) |
+                          (restored_cpl << IA64_PSR_CPL_SHIFT));
 }
 
 bool ia64_return_from_call_frame(CPUIA64State *env, uint64_t target_ip)
@@ -5325,15 +5330,15 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
             *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
             return true;
         case 0x0c: /* bsw.0 */
-            env->psr &= ~IA64_PSR_BN_BIT;
+            ia64_env_set_psr(env, ia64_env_psr(env) & ~IA64_PSR_BN_BIT);
             *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
             return true;
         case 0x0d: /* bsw.1 */
-            env->psr |= IA64_PSR_BN_BIT;
+            ia64_env_set_psr(env, ia64_env_psr(env) | IA64_PSR_BN_BIT);
             *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
             return true;
         case 0x10: /* epc */
-            env->psr &= ~IA64_PSR_CPL_MASK;
+            ia64_env_set_psr(env, ia64_env_psr(env) & ~IA64_PSR_CPL_MASK);
             *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
             return true;
         default:
@@ -5355,7 +5360,7 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
                     bundle_ip, target, env->cr[IA64_CR_IPSR],
                     env->cr[IA64_CR_IFS], env->psr, env->cfm);
         }
-        env->psr = env->cr[IA64_CR_IPSR];
+        ia64_env_set_psr(env, env->cr[IA64_CR_IPSR]);
         if (env->cr[IA64_CR_IFS] & IA64_IFS_VALID_BIT) {
             ia64_uncover_stack_frame(env,
                                      env->cr[IA64_CR_IFS] & IA64_CFM_MASK);

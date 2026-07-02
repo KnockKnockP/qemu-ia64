@@ -832,7 +832,7 @@ void ia64_progress_trace_break_slot(CPUIA64State *env,
             " sri=%u value=0x%016" PRIx64
             " psr=0x%016" PRIx64 " cfm=0x%016" PRIx64
             " %s bundle %s\n",
-            mnemonic, env->ip, ia64_psr_ri(env->psr), iim, env->psr,
+            mnemonic, env->ip, ia64_env_ri(env), iim, ia64_env_psr(env),
             env->cfm, slot_text, bundle_text);
     if (inst_result.status == IA64_TRANSLATE_OK) {
         fprintf(stderr,

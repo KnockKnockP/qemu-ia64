@@ -176,9 +176,9 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
                                uint64_t iim, uint64_t *next_ip)
 {
     char detail[64];
-    uint64_t old_psr = env->psr;
+    uint64_t old_psr = ia64_env_psr(env);
     uint64_t source_ip = env->ip;
-    unsigned source_ri = ia64_psr_ri(env->psr);
+    unsigned source_ri = ia64_env_ri(env);
 
     snprintf(detail, sizeof(detail), "%s iim=0x%" PRIx64, mnemonic, iim);
     IA64_PERF_INC(IA64_PERF_OP_BREAK);
@@ -188,7 +188,7 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     }
     ia64_trace_linux_syscall_break(env, mnemonic, iim, *next_ip);
     ia64_deliver_break_interruption(env, iim, next_ip, detail);
-    ia64_count_psr_transition(env, old_psr, env->psr);
+    ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
     ia64_progress_trace_event(env, mnemonic, iim, source_ip, source_ri,
                               *next_ip);
 }
@@ -215,7 +215,7 @@ static G_NORETURN void ia64_exit_after_translation_fault(
 static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
                                unsigned next_ri)
 {
-    env->psr = ia64_psr_with_ri(env->psr, next_ri);
+    ia64_env_set_psr(env, ia64_psr_with_ri(ia64_env_psr(env), next_ri));
     env->ip = next_ip;
 }
 
@@ -687,7 +687,7 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         bool br_ret = branch_major == 0x0 && branch_x6 == 0x21;
         bool cover = branch_major == 0x0 && branch_x6 == 0x02;
         bool epc = branch_major == 0x0 && branch_x6 == 0x10;
-        uint64_t old_psr = env->psr;
+        uint64_t old_psr = ia64_env_psr(env);
 
         IA64_PERF_INC(IA64_PERF_OP_BRANCH_INDIRECT);
         IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
@@ -708,12 +708,12 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         }
         if (rfi) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
-            IA64_PERF_INC(ia64_helper_psr_cpl(env->psr) == 3 ?
+            IA64_PERF_INC(ia64_helper_psr_cpl(ia64_env_psr(env)) == 3 ?
                           IA64_PERF_TRANSITION_RFI_TO_USER :
                           IA64_PERF_TRANSITION_RFI_TO_KERNEL);
-            *next_ri = ia64_psr_ri(env->psr);
+            *next_ri = ia64_env_ri(env);
         }
-        ia64_count_psr_transition(env, old_psr, env->psr);
+        ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
         if (*next_ip == 0) {
             abort_zero_branch(env, decoded, slot);
         }
@@ -737,7 +737,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
     CPUState *cpu = env_cpu(env);
     IA64DecodedBundle decoded;
     uint64_t next_ip = env->ip + IA64_BUNDLE_SIZE;
-    unsigned start_slot = ia64_psr_ri(env->psr);
+    unsigned start_slot = ia64_env_ri(env);
     unsigned next_ri = 0;
     uint32_t planned_slot_count = 0;
     uint32_t planned_bailout_count = 0;
@@ -786,11 +786,6 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         ia64_state_trace_bundle(env);
     }
 
-    if (ia64_firmware_dispatch_gate(env, env->ip)) {
-        IA64_PERF_INC(IA64_PERF_HELPER_EFI_DISPATCH);
-        return;
-    }
-
     {
         IA64CountedStoreLoop store_loop;
 
@@ -820,7 +815,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         IA64DepositInstruction deposit;
         IA64IntegerExtendInstruction int_ext;
 
-        env->psr = ia64_psr_with_ri(env->psr, slot);
+        ia64_env_set_ri(env, slot);
         IA64_PERF_INC(IA64_PERF_INTERP_SLOT_ITERATION);
         if (ia64_perf_enabled()) {
             ia64_perf_count_slot_type(type);
@@ -963,11 +958,11 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_m_processor_mask(type, raw)) {
-            uint64_t old_psr = env->psr;
+            uint64_t old_psr = ia64_env_psr(env);
 
             if (ia64_exec_m_processor_mask(env, raw)) {
                 IA64_PERF_INC(IA64_PERF_OP_PROCESSOR_MASK);
-                ia64_count_psr_transition(env, old_psr, env->psr);
+                ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
                 continue;
             }
         }
@@ -977,11 +972,11 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_m_mov_to_processor_status(type, raw)) {
-            uint64_t old_psr = env->psr;
+            uint64_t old_psr = ia64_env_psr(env);
 
             if (ia64_exec_m_mov_to_processor_status(env, raw)) {
                 IA64_PERF_INC(IA64_PERF_OP_PROCESSOR_STATUS);
-                ia64_count_psr_transition(env, old_psr, env->psr);
+                ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
                 continue;
             }
         }
@@ -1295,7 +1290,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             bool br_ret = branch_major == 0x0 && branch_x6 == 0x21;
             bool cover = branch_major == 0x0 && branch_x6 == 0x02;
             bool epc = branch_major == 0x0 && branch_x6 == 0x10;
-            uint64_t old_psr = env->psr;
+            uint64_t old_psr = ia64_env_psr(env);
 
             IA64_PERF_INC(IA64_PERF_OP_BRANCH_INDIRECT);
             IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
@@ -1316,12 +1311,12 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             }
             if (rfi) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
-                IA64_PERF_INC(ia64_helper_psr_cpl(env->psr) == 3 ?
+                IA64_PERF_INC(ia64_helper_psr_cpl(ia64_env_psr(env)) == 3 ?
                               IA64_PERF_TRANSITION_RFI_TO_USER :
                               IA64_PERF_TRANSITION_RFI_TO_KERNEL);
-                next_ri = ia64_psr_ri(env->psr);
+                next_ri = ia64_env_ri(env);
             }
-            ia64_count_psr_transition(env, old_psr, env->psr);
+            ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }

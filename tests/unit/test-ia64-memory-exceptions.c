@@ -73,14 +73,20 @@ static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
 {
     uint64_t cpl0 = IA64_TB_PSR_DT_BIT | IA64_TB_PSR_IT_BIT;
     uint64_t cpl3 = cpl0 | IA64_TB_PSR_CPL_MASK;
+    uint64_t banked_ri2 = cpl0 | IA64_TB_PSR_BN_BIT |
+                          (2ULL << IA64_PSR_RI_SHIFT);
     uint32_t cpl0_flags = ia64_tcg_tb_flags_from_psr(cpl0);
     uint32_t cpl3_flags = ia64_tcg_tb_flags_from_psr(cpl3);
+    uint32_t banked_ri2_flags = ia64_tcg_tb_flags_from_psr(banked_ri2);
 
     g_assert_cmpuint(ia64_tcg_psr_cpl(cpl0), ==, 0);
     g_assert_cmpuint(ia64_tcg_psr_cpl(cpl3), ==, 3);
     g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_DT, ==, IA64_TB_FLAG_DT);
     g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_IT, ==, IA64_TB_FLAG_IT);
     g_assert_cmpuint(ia64_tcg_tb_flags_cpl(cpl3_flags), ==, 3);
+    g_assert_cmphex(banked_ri2_flags & IA64_TB_FLAG_BN, ==,
+                    IA64_TB_FLAG_BN);
+    g_assert_cmpuint(ia64_tcg_tb_flags_ri(banked_ri2_flags), ==, 2);
     g_assert_cmphex(cpl0_flags, !=, cpl3_flags);
 
     g_assert_cmpint(ia64_tcg_mmu_index_for_psr(0, false), ==,

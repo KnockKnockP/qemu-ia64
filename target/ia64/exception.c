@@ -56,7 +56,7 @@ static bool ia64_exception_from_user(uint64_t psr)
 
 static uint64_t ia64_psr_for_interruption_delivery(CPUIA64State *env)
 {
-    uint64_t psr = env->psr & IA64_PSR_INTERRUPTION_PRESERVED_MASK;
+    uint64_t psr = ia64_env_psr(env) & IA64_PSR_INTERRUPTION_PRESERVED_MASK;
 
     /*
      * IVA-based interruption delivery preserves only a small set of PSR bits.
@@ -178,6 +178,7 @@ static void ia64_record_exception_common(CPUIA64State *env,
 {
     IA64ExceptionRecord *record = &env->exception;
 
+    ia64_env_sync_psr_ri(env);
     memset(record, 0, sizeof(*record));
     record->kind = kind;
     record->ip = env->ip;
@@ -252,7 +253,8 @@ static void ia64_record_exception_common(CPUIA64State *env,
     env->cr[IA64_CR_IIP] = env->ip;
     env->cr[IA64_CR_IFA] = address;
     env->cr[IA64_CR_IIPA] = address;
-    env->cr[IA64_CR_ISR] = ia64_interruption_isr(env->psr, access_type);
+    env->cr[IA64_CR_ISR] = ia64_interruption_isr(ia64_env_psr(env),
+                                                 access_type);
 }
 
 void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
@@ -270,23 +272,39 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
                                           const char *detail,
                                           bool format_detail)
 {
-    uint64_t source_ip = env->ip;
-    uint64_t old_psr = env->psr;
-    uint64_t saved_ipsr = env->cr[IA64_CR_IPSR];
-    uint64_t saved_iip = env->cr[IA64_CR_IIP];
-    uint64_t saved_iipa = env->cr[IA64_CR_IIPA];
-    uint64_t saved_ifs = env->cr[IA64_CR_IFS];
-    uint64_t saved_isr = env->cr[IA64_CR_ISR];
-    uint64_t saved_ifa = env->cr[IA64_CR_IFA];
-    uint64_t saved_itir = env->cr[IA64_CR_ITIR];
-    uint64_t saved_iha = env->cr[IA64_CR_IHA];
-    uint64_t rr = env->rr[ia64_va_region(address)];
-    bool nested_data_tlb =
-        (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
-         kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS) &&
-        (old_psr & IA64_PSR_IC_BIT) == 0;
-    bool trace_enabled = ia64_exception_trace_enabled();
-    bool user_trace_enabled = ia64_user_exception_trace_enabled();
+    uint64_t source_ip;
+    uint64_t old_psr;
+    uint64_t saved_ipsr;
+    uint64_t saved_iip;
+    uint64_t saved_iipa;
+    uint64_t saved_ifs;
+    uint64_t saved_isr;
+    uint64_t saved_ifa;
+    uint64_t saved_itir;
+    uint64_t saved_iha;
+    uint64_t rr;
+    bool nested_data_tlb;
+    bool trace_enabled;
+    bool user_trace_enabled;
+
+    ia64_env_sync_psr_ri(env);
+
+    source_ip = env->ip;
+    old_psr = ia64_env_psr(env);
+    saved_ipsr = env->cr[IA64_CR_IPSR];
+    saved_iip = env->cr[IA64_CR_IIP];
+    saved_iipa = env->cr[IA64_CR_IIPA];
+    saved_ifs = env->cr[IA64_CR_IFS];
+    saved_isr = env->cr[IA64_CR_ISR];
+    saved_ifa = env->cr[IA64_CR_IFA];
+    saved_itir = env->cr[IA64_CR_ITIR];
+    saved_iha = env->cr[IA64_CR_IHA];
+    rr = env->rr[ia64_va_region(address)];
+    nested_data_tlb = (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
+                       kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS) &&
+                      (old_psr & IA64_PSR_IC_BIT) == 0;
+    trace_enabled = ia64_exception_trace_enabled();
+    user_trace_enabled = ia64_user_exception_trace_enabled();
 
     if (nested_data_tlb) {
         kind = IA64_EXCEPTION_DATA_NESTED_TLB;
@@ -310,20 +328,21 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         env->cr[IA64_CR_IFA] = saved_ifa;
         env->cr[IA64_CR_ITIR] = saved_itir;
         env->cr[IA64_CR_IHA] = saved_iha;
-        env->psr = ia64_psr_for_interruption_delivery(env);
+        ia64_env_set_psr(env, ia64_psr_for_interruption_delivery(env));
         env->ip = (env->cr[IA64_CR_IVA] & ~0x7fffULL) +
                   env->exception.vector;
         goto trace;
     }
 
-    env->cr[IA64_CR_IPSR] = env->psr;
+    env->cr[IA64_CR_IPSR] = ia64_env_psr(env);
     if (old_psr & IA64_PSR_IC_BIT) {
         env->cr[IA64_CR_IFS] = 0;
     }
     env->cr[IA64_CR_IIP] = access_type == MMU_INST_FETCH ?
                            (address & ~0xfULL) : env->ip;
     env->cr[IA64_CR_IFA] = address;
-    env->cr[IA64_CR_ISR] = ia64_interruption_isr(env->psr, access_type);
+    env->cr[IA64_CR_ISR] = ia64_interruption_isr(ia64_env_psr(env),
+                                                 access_type);
     if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_DATA_TLB_MISS ||
         kind == IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS ||
@@ -341,7 +360,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         env->cr[IA64_CR_IHA] = ia64_vhpt_hash_address(env, address);
     }
 
-    env->psr = ia64_psr_for_interruption_delivery(env);
+    ia64_env_set_psr(env, ia64_psr_for_interruption_delivery(env));
     env->ip = (env->cr[IA64_CR_IVA] & ~0x7fffULL) + env->exception.vector;
     env->cr[IA64_CR_IIP] &= ~0xfULL;
 

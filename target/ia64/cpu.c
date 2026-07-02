@@ -37,9 +37,11 @@ static void ia64_cpu_synchronize_from_tb(CPUState *cs,
                                          const TranslationBlock *tb)
 {
     IA64CPU *cpu = IA64_CPU(cs);
+    unsigned ri = ia64_tcg_tb_flags_ri(tb->flags);
 
     tcg_debug_assert(!tcg_cflags_has(cs, CF_PCREL));
     cpu->env.ip = tb->pc;
+    ia64_env_set_psr(&cpu->env, ia64_psr_with_ri(cpu->env.psr, ri));
 }
 
 static void ia64_restore_state_to_opc(CPUState *cs,
@@ -47,8 +49,10 @@ static void ia64_restore_state_to_opc(CPUState *cs,
                                       const uint64_t *data)
 {
     IA64CPU *cpu = IA64_CPU(cs);
+    unsigned ri = data[1] & 3;
 
     cpu->env.ip = data[0];
+    ia64_env_set_psr(&cpu->env, ia64_psr_with_ri(cpu->env.psr, ri));
 }
 
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
@@ -57,7 +61,7 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
-        .flags = ia64_tcg_tb_flags_from_psr(cpu->env.psr),
+        .flags = ia64_tcg_tb_flags_from_psr(ia64_env_psr(&cpu->env)),
     };
 }
 
@@ -156,7 +160,7 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
     qemu_fprintf(f, "IP  %016" PRIx64 "\n", env->ip);
     qemu_fprintf(f, "PSR %016" PRIx64 "  PR %016" PRIx64
                     "  CFM %016" PRIx64 "\n",
-                 env->psr, env->pr, env->cfm);
+                 ia64_env_psr(env), env->pr, env->cfm);
     qemu_fprintf(f, "RSE RSC %016" PRIx64 "  BSP %016" PRIx64
                     "  BSPSTORE %016" PRIx64 "  BSPLOAD %016" PRIx64
                     "  RNAT %016" PRIx64
@@ -279,7 +283,7 @@ int ia64_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
     case 128:
         return gdb_get_reg64(mem_buf, env->ip);
     case 129:
-        return gdb_get_reg64(mem_buf, env->psr);
+        return gdb_get_reg64(mem_buf, ia64_env_psr(env));
     case 130:
         return gdb_get_reg64(mem_buf, env->pr);
     default:
@@ -306,7 +310,7 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
         env->ip = ldq_le_p(mem_buf);
         return 8;
     case 129:
-        env->psr = ldq_le_p(mem_buf);
+        ia64_env_set_psr(env, ldq_le_p(mem_buf));
         return 8;
     case 130:
         env->pr = ldq_le_p(mem_buf);

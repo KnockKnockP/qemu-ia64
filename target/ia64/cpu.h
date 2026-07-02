@@ -33,12 +33,16 @@
 #define IA64_PSR_RI_MASK UINT64_C(0x0000060000000000)
 #define IA64_TB_PSR_DT_BIT UINT64_C(0x0000000000020000)
 #define IA64_TB_PSR_IT_BIT UINT64_C(0x0000001000000000)
+#define IA64_TB_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_TB_PSR_CPL_SHIFT 32
 #define IA64_TB_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_TB_FLAG_DT (1u << 0)
 #define IA64_TB_FLAG_IT (1u << 1)
 #define IA64_TB_FLAG_CPL_SHIFT 2
 #define IA64_TB_FLAG_CPL_MASK (3u << IA64_TB_FLAG_CPL_SHIFT)
+#define IA64_TB_FLAG_BN (1u << 4)
+#define IA64_TB_FLAG_RI_SHIFT 5
+#define IA64_TB_FLAG_RI_MASK (3u << IA64_TB_FLAG_RI_SHIFT)
 #define IA64_ISR_X_BIT 32
 #define IA64_ISR_W_BIT 33
 #define IA64_ISR_R_BIT 34
@@ -86,12 +90,21 @@ static inline uint32_t ia64_tcg_tb_flags_from_psr(uint64_t psr)
     if (psr & IA64_TB_PSR_IT_BIT) {
         flags |= IA64_TB_FLAG_IT;
     }
+    if (psr & IA64_TB_PSR_BN_BIT) {
+        flags |= IA64_TB_FLAG_BN;
+    }
+    flags |= ia64_psr_ri(psr) << IA64_TB_FLAG_RI_SHIFT;
     return flags;
 }
 
 static inline unsigned ia64_tcg_tb_flags_cpl(uint32_t flags)
 {
     return (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
+}
+
+static inline unsigned ia64_tcg_tb_flags_ri(uint32_t flags)
+{
+    return (flags & IA64_TB_FLAG_RI_MASK) >> IA64_TB_FLAG_RI_SHIFT;
 }
 
 static inline int ia64_tcg_mmu_index_for_psr(uint64_t psr, bool ifetch)
@@ -345,6 +358,8 @@ typedef struct CPUArchState {
 
     uint64_t ip;
     uint64_t psr;
+    uint8_t ri;
+    bool ri_dirty;
     uint64_t cfm;
 
     IA64RSEState rse;
@@ -369,6 +384,36 @@ struct ArchCPU {
     CPUIA64State env;
     IA64CPUModel model;
 };
+
+static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)
+{
+    env->psr = psr;
+    env->ri = ia64_psr_ri(psr);
+    env->ri_dirty = false;
+}
+
+static inline uint64_t ia64_env_psr(CPUIA64State *env)
+{
+    return env->ri_dirty ? ia64_psr_with_ri(env->psr, env->ri) : env->psr;
+}
+
+static inline unsigned ia64_env_ri(CPUIA64State *env)
+{
+    return env->ri_dirty ? env->ri : ia64_psr_ri(env->psr);
+}
+
+static inline void ia64_env_set_ri(CPUIA64State *env, unsigned ri)
+{
+    env->ri = ri & 3;
+    env->ri_dirty = true;
+}
+
+static inline void ia64_env_sync_psr_ri(CPUIA64State *env)
+{
+    if (env->ri_dirty) {
+        ia64_env_set_psr(env, ia64_psr_with_ri(env->psr, env->ri));
+    }
+}
 
 #define CPU_RESOLVING_TYPE TYPE_IA64_CPU
 

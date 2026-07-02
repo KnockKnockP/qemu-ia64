@@ -192,6 +192,8 @@ static int ia64_env_post_load(void *opaque, int version_id)
     ia64_reconcile_interrupt_state(env);
     env->gr[0] = 0;
     env->pr |= 1;
+    env->ri = ia64_psr_ri(env->psr);
+    env->ri_dirty = false;
     env->fault_exit_pending_tb_translate = false;
     ia64_firmware_recover_post_load(env->ip);
     return 0;
@@ -238,6 +240,8 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
     cpu->env.gr[0] = 0;
     cpu->env.pr |= 1;
+    cpu->env.ri = ia64_psr_ri(cpu->env.psr);
+    cpu->env.ri_dirty = false;
     tlb_flush(CPU(cpu));
     return 0;
 }
