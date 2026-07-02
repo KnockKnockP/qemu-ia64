@@ -35,12 +35,17 @@ typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 #define VIBTANIUM_VGA_TEXT_ROWS 25
 #define VIBTANIUM_LEGACY_COM1_BASE 0x3f8
 #define VIBTANIUM_LEGACY_COM1_SIZE 8
+#define VIBTANIUM_LEGACY_COM1_IRQ 4
 #define VIBTANIUM_LEGACY_I8042_DATA_PORT 0x60
 #define VIBTANIUM_LEGACY_I8042_COMMAND_PORT 0x64
+#define VIBTANIUM_LEGACY_I8042_KEYBOARD_IRQ 1
+#define VIBTANIUM_LEGACY_I8042_MOUSE_IRQ 12
+#define VIBTANIUM_I8042_MMIO_COMMAND_OFFSET 4
 #define VIBTANIUM_LEGACY_VGA_CRTC_INDEX_COLOR 0x3d4
 #define VIBTANIUM_LEGACY_VGA_CRTC_DATA_COLOR 0x3d5
 #define VIBTANIUM_LEGACY_VGA_CRTC_INDEX_MONO 0x3b4
 #define VIBTANIUM_LEGACY_VGA_CRTC_DATA_MONO 0x3b5
+#define VIBTANIUM_VGA_CRTC_REGISTER_COUNT 0x19
 #define VIBTANIUM_IO_PORT_SIZE  (64 * MiB)
 #define VIBTANIUM_LOCAL_SAPIC_IPI_SIZE (1 * MiB)
 #define VIBTANIUM_IOSAPIC_SIZE  UINT64_C(0x100)
@@ -59,16 +64,14 @@ struct VibtaniumMachineState {
     MachineState parent_obj;
 
     IA64CPU *cpu;
+    DeviceState *iosapic;
     SerialMM *uart;
-    IRQState uart_irq;
-    IRQState i8042_irq[2];
     DeviceState *i8042;
     MemoryRegion *i8042_mmio;
     MemoryRegion kernel_alias;
     MemoryRegion vga_legacy;
     MemoryRegion io_port_space;
     MemoryRegion local_sapic_ipi;
-    MemoryRegion iosapic;
     MemoryRegion framebuffer;
     MemoryRegion nvram;
     MemoryRegion firmware;
@@ -77,10 +80,6 @@ struct VibtaniumMachineState {
     VibtaniumEfiBootManagerState *boot_manager;
     bool efi_auto_enter;
     bool hcdp_serial_console;
-    uint32_t iosapic_select;
-    uint32_t iosapic_rte_low[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
-    uint32_t iosapic_rte_high[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
-    bool iosapic_irq_level[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
     uint8_t vga_crtc_index;
     uint8_t vga_crtc[0x19];
 };
