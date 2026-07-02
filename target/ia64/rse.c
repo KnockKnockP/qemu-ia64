@@ -119,6 +119,49 @@ static void ia64_rse_maybe_fill_restored_frame(CPUIA64State *env,
     ia64_rse_fill_restored_frame(env, count);
 }
 
+/*
+ * br.ret and rfi must be restartable.  The frame pop commits BSP, CFM and
+ * the physical frame base before the mandatory RSE fill runs, and the fill
+ * reads the backing store, which can fault (TLB miss or unmapped RBS page).
+ * If the fault were raised from inside the fill, the guest kernel would
+ * resolve it and re-execute the branch, popping the frame a second time and
+ * reloading the restored frame from one frame lower in the backing store.
+ * Probe the exact range the fill will read while the pre-branch state is
+ * still intact, so any fault is delivered restart-clean.
+ */
+static void ia64_rse_probe_restored_frame_fill(CPUIA64State *env,
+                                               uint32_t count)
+{
+    uint64_t frame_base;
+    uint64_t frame_end;
+    uint64_t load_end;
+    uint64_t address;
+
+    if (count == 0 || env->rse.bsp == 0) {
+        return;
+    }
+
+    count = MIN(count, (uint32_t)IA64_STACKED_GR_COUNT);
+    frame_base = ia64_rse_skip_regs(env->rse.bsp, -(int64_t)count);
+    frame_end = env->rse.bsp;
+    load_end = env->rse.bsp_load != 0 ? env->rse.bsp_load
+                                      : env->rse.bspstore;
+    if (load_end > frame_end) {
+        load_end = frame_end;
+    }
+
+    address = ia64_rse_reg_address(frame_base);
+    while (address < load_end) {
+        IA64TranslateResult result;
+
+        if (!ia64_translate_address(env, address, MMU_DATA_LOAD, 0, false,
+                                    &result)) {
+            ia64_exit_after_translation_fault(env, &result);
+        }
+        address = (address | ((UINT64_C(1) << TARGET_PAGE_BITS) - 1)) + 1;
+    }
+}
+
 static void ia64_exec_loadrs(CPUIA64State *env)
 {
     uint64_t bytes = (env->rse.rsc >> 16) & 0x3fff;

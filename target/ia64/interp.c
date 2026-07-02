@@ -697,6 +697,14 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         if (epc) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_EPC);
         }
+        if (br_ret) {
+            ia64_rse_probe_restored_frame_fill(
+                env, (env->ar[IA64_AR_PFS] >> 7) & 0x7f);
+        }
+        if (rfi_valid_ifs) {
+            ia64_rse_probe_restored_frame_fill(
+                env, env->cr[IA64_CR_IFS] & 0x7f);
+        }
         ia64_exec_b_indirect_branch(env, raw, env->ip, next_ip);
         if (br_ret) {
             ia64_rse_maybe_fill_restored_frame(env,
@@ -1299,6 +1307,14 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             }
             if (epc) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_EPC);
+            }
+            if (br_ret) {
+                ia64_rse_probe_restored_frame_fill(
+                    env, (env->ar[IA64_AR_PFS] >> 7) & 0x7f);
+            }
+            if (rfi_valid_ifs) {
+                ia64_rse_probe_restored_frame_fill(
+                    env, env->cr[IA64_CR_IFS] & 0x7f);
             }
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {
