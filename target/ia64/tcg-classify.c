@@ -1058,6 +1058,7 @@ static IA64TcgFallbackPlanOp ia64_tcg_fallback_plan_for_slot(
 {
     IA64LdstImmediate ldst;
     IA64FloatingMemoryInstruction fldst;
+    IA64FloatingCompareInstruction fcmp;
     IA64CompareInstruction cmp;
     IA64PredicateTestInstruction pred_test;
     IA64ExtractInstruction extract;
@@ -1097,6 +1098,9 @@ static IA64TcgFallbackPlanOp ia64_tcg_fallback_plan_for_slot(
     }
     if (ia64_decode_floating_memory(type, raw, &fldst)) {
         return IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY;
+    }
+    if (ia64_decode_floating_compare(type, raw, &fcmp)) {
+        return IA64_TCG_FALLBACK_PLAN_FLOATING_COMPARE;
     }
     if (ia64_decode_ldst_immediate(type, raw, &ldst)) {
         return IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE;

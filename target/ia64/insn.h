@@ -114,6 +114,13 @@ typedef struct IA64FloatingMemoryInstruction {
     int64_t immediate;
 } IA64FloatingMemoryInstruction;
 
+typedef enum IA64FloatingCompareRelation {
+    IA64_FLOAT_CMP_EQ,
+    IA64_FLOAT_CMP_LT,
+    IA64_FLOAT_CMP_LE,
+    IA64_FLOAT_CMP_UNORD,
+} IA64FloatingCompareRelation;
+
 typedef enum IA64CompareRelation {
     IA64_CMP_EQ,
     IA64_CMP_NE,
@@ -167,6 +174,16 @@ typedef struct IA64CompareInstruction {
     bool source_immediate;
     int64_t immediate;
 } IA64CompareInstruction;
+
+typedef struct IA64FloatingCompareInstruction {
+    IA64FloatingCompareRelation relation;
+    IA64PredicateWriteKind write_kind;
+    uint8_t status_field;
+    uint8_t p1;
+    uint8_t p2;
+    uint8_t source2;
+    uint8_t source3;
+} IA64FloatingCompareInstruction;
 
 typedef struct IA64ExtractInstruction {
     uint8_t target;
@@ -385,6 +402,15 @@ bool ia64_decode_m_atomic(IA64SlotType type, uint64_t raw,
                           IA64AtomicInstruction *decoded);
 bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
                                  IA64FloatingMemoryInstruction *decoded);
+bool ia64_decode_floating_compare(IA64SlotType type, uint64_t raw,
+                                  IA64FloatingCompareInstruction *decoded);
+bool ia64_exec_floating_compare_qualified(
+    CPUIA64State *env,
+    const IA64FloatingCompareInstruction *decoded,
+    bool qualifying_predicate);
+bool ia64_exec_floating_compare(
+    CPUIA64State *env,
+    const IA64FloatingCompareInstruction *decoded);
 bool ia64_decode_extract(IA64SlotType type, uint64_t raw,
                          IA64ExtractInstruction *decoded);
 bool ia64_exec_extract(CPUIA64State *env,

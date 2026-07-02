@@ -329,11 +329,20 @@ static bool exec_false_predicated_side_effect(CPUIA64State *env,
     IA64SlotType type = decoded->info->slot_type[slot];
     uint64_t raw = decoded->slot[slot];
     IA64CompareInstruction cmp;
+    IA64FloatingCompareInstruction fcmp;
     IA64PredicateTestInstruction pred_test;
 
     if (ia64_decode_compare(type, raw, &cmp) &&
         cmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
         if (!ia64_exec_compare_qualified(env, &cmp, false)) {
+            abort_unsupported_slot(env, decoded, slot);
+        }
+        return true;
+    }
+
+    if (ia64_decode_floating_compare(type, raw, &fcmp) &&
+        fcmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+        if (!ia64_exec_floating_compare_qualified(env, &fcmp, false)) {
             abort_unsupported_slot(env, decoded, slot);
         }
         return true;
@@ -567,6 +576,16 @@ static IA64PlannedSlotResult exec_predecoded_slot(
             return IA64_PLANNED_SLOT_GENERIC;
         }
         IA64_PERF_INC(IA64_PERF_OP_FLOAT_MEMORY);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_COMPARE: {
+        IA64FloatingCompareInstruction fcmp;
+
+        if (!ia64_decode_floating_compare(type, raw, &fcmp) ||
+            !ia64_exec_floating_compare(env, &fcmp)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_FLOAT);
         return IA64_PLANNED_SLOT_CONTINUE;
     }
     case IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE: {
@@ -816,6 +835,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         uint8_t qp = ia64_slot_predicate(raw);
         IA64LdstImmediate ldst;
         IA64FloatingMemoryInstruction fldst;
+        IA64FloatingCompareInstruction fcmp;
         IA64AtomicInstruction atomic;
         IA64CompareInstruction cmp;
         IA64PredicateTestInstruction pred_test;
@@ -1176,6 +1196,11 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         }
         if (ia64_slot_is_f_select_or_xma(type, raw) &&
             ia64_exec_f_select_or_xma(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT);
+            continue;
+        }
+        if (ia64_decode_floating_compare(type, raw, &fcmp) &&
+            ia64_exec_floating_compare(env, &fcmp)) {
             IA64_PERF_INC(IA64_PERF_OP_FLOAT);
             continue;
         }

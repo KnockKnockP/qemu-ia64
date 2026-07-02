@@ -4718,6 +4718,42 @@ bool ia64_decode_compare(IA64SlotType type, uint64_t raw,
     return true;
 }
 
+bool ia64_decode_floating_compare(IA64SlotType type, uint64_t raw,
+                                  IA64FloatingCompareInstruction *decoded)
+{
+    uint8_t major = ia64_slot_major_opcode(raw);
+    uint8_t ra;
+    uint8_t rb;
+
+    if (!decoded || type != IA64_SLOT_TYPE_F || major != 0x4) {
+        return false;
+    }
+
+    memset(decoded, 0, sizeof(*decoded));
+    ra = (raw >> 33) & 0x1;
+    rb = (raw >> 36) & 0x1;
+
+    if (ra == 0 && rb == 0) {
+        decoded->relation = IA64_FLOAT_CMP_EQ;
+    } else if (ra == 1 && rb == 0) {
+        decoded->relation = IA64_FLOAT_CMP_LT;
+    } else if (ra == 0 && rb == 1) {
+        decoded->relation = IA64_FLOAT_CMP_LE;
+    } else {
+        decoded->relation = IA64_FLOAT_CMP_UNORD;
+    }
+
+    decoded->write_kind = ((raw >> 12) & 0x1) == 0
+        ? IA64_PRED_WRITE_NORMAL
+        : IA64_PRED_WRITE_UNCONDITIONAL;
+    decoded->status_field = (raw >> 34) & 0x3;
+    decoded->p1 = (raw >> 6) & 0x3f;
+    decoded->p2 = (raw >> 27) & 0x3f;
+    decoded->source2 = (raw >> 13) & 0x7f;
+    decoded->source3 = (raw >> 20) & 0x7f;
+    return true;
+}
+
 static uint64_t ia64_compare_left_operand(CPUIA64State *env,
                                           const IA64CompareInstruction *decoded)
 {
@@ -4807,6 +4843,79 @@ static void ia64_apply_predicate_pair_write(CPUIA64State *env,
     default:
         g_assert_not_reached();
     }
+}
+
+static bool ia64_floating_compare_matches(const IA64FloatReg *left_reg,
+                                          const IA64FloatReg *right_reg,
+                                          IA64FloatingCompareRelation relation,
+                                          bool *source_unavailable)
+{
+    bool unordered;
+    double left;
+    double right;
+
+    if (ia64_fr_is_natval(left_reg) || ia64_fr_is_natval(right_reg)) {
+        *source_unavailable = true;
+        return false;
+    }
+
+    unordered = ia64_fr_is_nan(left_reg) || ia64_fr_is_nan(right_reg);
+    left = ia64_fr_to_double(left_reg);
+    right = ia64_fr_to_double(right_reg);
+
+    switch (relation) {
+    case IA64_FLOAT_CMP_EQ:
+        return !unordered && left == right;
+    case IA64_FLOAT_CMP_LT:
+        return !unordered && left < right;
+    case IA64_FLOAT_CMP_LE:
+        return !unordered && left <= right;
+    case IA64_FLOAT_CMP_UNORD:
+        return unordered;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+bool ia64_exec_floating_compare_qualified(
+    CPUIA64State *env,
+    const IA64FloatingCompareInstruction *decoded,
+    bool qualifying_predicate)
+{
+    const IA64FloatReg *left_reg;
+    const IA64FloatReg *right_reg;
+    bool source_unavailable = false;
+    bool result;
+
+    if (!env || !decoded || decoded->p1 == decoded->p2) {
+        return false;
+    }
+
+    if (!qualifying_predicate) {
+        if (decoded->write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+            ia64_write_pr(env, decoded->p1, false);
+            ia64_write_pr(env, decoded->p2, false);
+        }
+        return true;
+    }
+
+    left_reg = &env->fr[ia64_map_fr(env, decoded->source2)];
+    right_reg = &env->fr[ia64_map_fr(env, decoded->source3)];
+    result = ia64_floating_compare_matches(left_reg, right_reg,
+                                           decoded->relation,
+                                           &source_unavailable);
+
+    ia64_apply_predicate_pair_write(env, decoded->write_kind,
+                                    decoded->p1, decoded->p2,
+                                    result, source_unavailable);
+    return true;
+}
+
+bool ia64_exec_floating_compare(
+    CPUIA64State *env,
+    const IA64FloatingCompareInstruction *decoded)
+{
+    return ia64_exec_floating_compare_qualified(env, decoded, true);
 }
 
 bool ia64_exec_predicate_test_qualified(
