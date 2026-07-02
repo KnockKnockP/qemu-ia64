@@ -33,6 +33,7 @@ typedef bool (*IA64FirmwareDispatchFn)(CPUIA64State *env, uint64_t gate_ip);
 typedef bool (*IA64FirmwareCmdlinePendingFn)(void);
 typedef void (*IA64FirmwareCmdlineApplyFn)(CPUIA64State *env);
 typedef void (*IA64FirmwareRecoverPostLoadFn)(uint64_t ip);
+typedef struct PCIBus PCIBus;
 
 void ia64_firmware_set_dispatch(IA64FirmwareDispatchFn dispatch);
 bool ia64_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
@@ -46,5 +47,7 @@ void ia64_firmware_maybe_apply_linux_cmdline_append(CPUIA64State *env);
 void ia64_firmware_set_recover_post_load(
     IA64FirmwareRecoverPostLoadFn recover);
 void ia64_firmware_recover_post_load(uint64_t ip);
+
+void ia64_firmware_set_pci_bus(PCIBus *bus);
 
 #endif

@@ -4,5 +4,7 @@ config VIBTANIUM
     depends on IA64
     select ACPI
     select ISA_BUS
+    select PCI
+    select IDE_PIIX
     select PCKBD
     select SERIAL_MM

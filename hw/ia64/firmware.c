@@ -4,6 +4,8 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/getpc.h"
 #include "hw/ia64/efi.h"
+#include "hw/pci/pci.h"
+#include "hw/pci/pci_host.h"
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
 #include "target/ia64/perf.h"
@@ -24,6 +26,13 @@
 #define IA64_MAXIMUM_PERF_MON_REGISTER_COUNT UINT64_C(256)
 #define IA64_MINIMUM_PHYSICAL_STACKED_REGISTERS UINT64_C(96)
 #define IA64_MINIMUM_TRANSLATION_REGISTER_COUNT UINT64_C(8)
+
+static PCIBus *firmware_pci_bus;
+
+void ia64_firmware_set_pci_bus(PCIBus *bus)
+{
+    firmware_pci_bus = bus;
+}
 
 typedef enum IA64PalProcedureId {
     IA64_PAL_CACHE_FLUSH = 1,
@@ -477,38 +486,107 @@ static bool pal_uses_static_calling_convention(uint64_t function_id)
     return !ia64_pal_uses_stacked_calling_convention(function_id);
 }
 
-static IA64FirmwareResult sal_pci_config_read(uint64_t size)
+static bool sal_pci_config_address(uint64_t sal_addr, uint64_t mode,
+                                   uint32_t *pci_addr)
+{
+    uint64_t segment;
+    uint64_t bus;
+    uint64_t devfn;
+    uint64_t reg;
+
+    if (!firmware_pci_bus) {
+        return false;
+    }
+
+    switch (mode) {
+    case 0:
+        segment = (sal_addr >> 24) & 0xffff;
+        bus = (sal_addr >> 16) & 0xff;
+        devfn = (sal_addr >> 8) & 0xff;
+        reg = sal_addr & 0xff;
+        break;
+    case 1:
+        segment = (sal_addr >> 28) & 0xffff;
+        bus = (sal_addr >> 20) & 0xff;
+        devfn = (sal_addr >> 12) & 0xff;
+        reg = sal_addr & 0xfff;
+        break;
+    default:
+        return false;
+    }
+
+    if (segment != 0 || reg >= PCI_CONFIG_SPACE_SIZE) {
+        return false;
+    }
+
+    *pci_addr = (bus << 16) | (devfn << 8) | reg;
+    return true;
+}
+
+static uint64_t sal_pci_config_default_read(uint64_t size)
 {
     switch (size) {
     case 1:
-        return firmware_success(0xff, 0, 0);
+        return 0xff;
     case 2:
-        return firmware_success(0xffff, 0, 0);
+        return 0xffff;
     case 4:
-        return firmware_success(0xffffffff, 0, 0);
+        return 0xffffffff;
     default:
-        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+        return UINT64_MAX;
     }
 }
 
-static IA64FirmwareResult sal_pci_config_write(uint64_t size)
+static IA64FirmwareResult sal_pci_config_read(uint64_t sal_addr,
+                                              uint64_t size,
+                                              uint64_t mode)
 {
+    uint32_t pci_addr;
+
     switch (size) {
     case 1:
     case 2:
     case 4:
-        return firmware_success(0, 0, 0);
+        break;
     default:
         return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
     }
+
+    if (!sal_pci_config_address(sal_addr, mode, &pci_addr)) {
+        return firmware_success(sal_pci_config_default_read(size), 0, 0);
+    }
+
+    return firmware_success(pci_data_read(firmware_pci_bus, pci_addr, size),
+                            0, 0);
+}
+
+static IA64FirmwareResult sal_pci_config_write(uint64_t sal_addr,
+                                                uint64_t size,
+                                                uint64_t value,
+                                                uint64_t mode)
+{
+    uint32_t pci_addr;
+
+    switch (size) {
+    case 1:
+    case 2:
+    case 4:
+        break;
+    default:
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+
+    if (sal_pci_config_address(sal_addr, mode, &pci_addr)) {
+        pci_data_write(firmware_pci_bus, pci_addr, value, size);
+    }
+
+    return firmware_success(0, 0, 0);
 }
 
 static IA64FirmwareResult dispatch_sal(uint64_t function_id, uint64_t arg0,
-                                       uint64_t arg1, uint64_t arg2)
+                                       uint64_t arg1, uint64_t arg2,
+                                       uint64_t arg3)
 {
-    (void)arg0;
-    (void)arg2;
-
     switch (function_id) {
     case IA64_SAL_GET_STATE_INFO:
     case IA64_SAL_CLEAR_STATE_INFO:
@@ -526,9 +604,9 @@ static IA64FirmwareResult dispatch_sal(uint64_t function_id, uint64_t arg0,
     case IA64_SAL_FREQUENCY_BASE:
         return firmware_success(IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY, 0, 0);
     case IA64_SAL_PCI_CONFIG_READ:
-        return sal_pci_config_read(arg1);
+        return sal_pci_config_read(arg0, arg1, arg2);
     case IA64_SAL_PCI_CONFIG_WRITE:
-        return sal_pci_config_write(arg1);
+        return sal_pci_config_write(arg0, arg1, arg2, arg3);
     default:
         return firmware_status(IA64_FIRMWARE_STATUS_UNIMPLEMENTED);
     }
@@ -723,6 +801,7 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
     uint64_t arg0;
     uint64_t arg1;
     uint64_t arg2;
+    uint64_t arg3;
 
     if (!efi_gate_address_is_valid_alias(gate_ip)) {
         return false;
@@ -763,7 +842,8 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         arg0 = ia64_read_gr(env, 33);
         arg1 = ia64_read_gr(env, 34);
         arg2 = ia64_read_gr(env, 35);
-        result = dispatch_sal(function_id, arg0, arg1, arg2);
+        arg3 = ia64_read_gr(env, 36);
+        result = dispatch_sal(function_id, arg0, arg1, arg2, arg3);
         firmware_trace_call(env, "sal", sal_procedure_name(function_id),
                             function_id, arg0, arg1, arg2, result);
         firmware_write_result(env, result, true);

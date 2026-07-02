@@ -5,6 +5,7 @@ acpi_ss.add(files(
   'core.c',
   'utils.c',
 ))
+acpi_ss.add(when: 'CONFIG_PCI', if_true: files('pci-crs.c'))
 acpi_ss.add(when: 'CONFIG_ACPI_CPU_HOTPLUG', if_true: files('cpu.c'))
 stub_ss.add(files('acpi-cpu-hotplug-stub.c'))
 acpi_ss.add(when: 'CONFIG_ACPI_MEMORY_HOTPLUG', if_true: files('memory_hotplug.c'))

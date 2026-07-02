@@ -973,6 +973,7 @@ static Aml *build_acpi_pci0_device(void)
 {
     Aml *dev = aml_device("PCI0");
     Aml *crs = aml_resource_template();
+    Aml *prt = aml_package(128);
 
     aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A03")));
     aml_append(dev, aml_name_decl("_ADR", aml_int(0)));
@@ -984,14 +985,27 @@ static Aml *build_acpi_pci0_device(void)
     aml_append(crs,
                aml_word_io(AML_MIN_FIXED, AML_MAX_FIXED, AML_POS_DECODE,
                            AML_ENTIRE_RANGE, 0x0000, 0x0000, 0xffff,
-                           0x0000, 0x0000));
+                           0x0000, 0xffff));
     aml_append(crs,
                aml_dword_memory(AML_POS_DECODE, AML_MIN_FIXED,
                                 AML_MAX_FIXED, AML_NON_CACHEABLE,
                                 AML_READ_WRITE, 0x00000000, 0x80000000,
                                 0xefffffff, 0x00000000, 0x70000000));
     aml_append(dev, aml_name_decl("_CRS", crs));
-    aml_append(dev, aml_name_decl("_PRT", aml_package(0)));
+
+    for (int slot = 0; slot < 32; slot++) {
+        for (int pin = 0; pin < 4; pin++) {
+            Aml *pkg = aml_package(4);
+            int irq = VIBTANIUM_PCI_INTX_IRQ_BASE + ((slot + pin) & 3);
+
+            aml_append(pkg, aml_int((slot << 16) | 0xffff));
+            aml_append(pkg, aml_int(pin));
+            aml_append(pkg, aml_int(0));
+            aml_append(pkg, aml_int(irq));
+            aml_append(prt, pkg);
+        }
+    }
+    aml_append(dev, aml_name_decl("_PRT", prt));
     return dev;
 }
 

@@ -7,12 +7,19 @@
 #include "hw/char/serial-mm.h"
 #include "hw/core/cpu.h"
 #include "hw/core/sysbus.h"
+#include "hw/ide/ide-dev.h"
+#include "hw/ide/pci.h"
+#include "hw/ide/piix.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/efi-vars.h"
 #include "hw/ia64/vibtanium.h"
 #include "hw/intc/ia64-iosapic.h"
 #include "hw/input/i8042.h"
+#include "hw/isa/isa.h"
+#include "hw/pci/pci.h"
+#include "hw/pci/pci_device.h"
+#include "hw/pci/pci_host.h"
 #include "hw/core/qdev-properties.h"
 #include "system/block-backend.h"
 #include "system/block-backend-io.h"
@@ -25,6 +32,58 @@
 #include "vibtanium-internal.h"
 
 #define VIBTANIUM_DEFAULT_LINUX_APPEND ""
+#define TYPE_VIBTANIUM_PCI_HOST "vibtanium-pci-host"
+
+typedef struct VibtaniumPciHostState {
+    PCIHostState parent_obj;
+} VibtaniumPciHostState;
+
+OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumPciHostState, VIBTANIUM_PCI_HOST)
+
+static void vibtanium_isa_init(VibtaniumMachineState *vms)
+{
+    vms->isa_bus = isa_bus_new(NULL, get_system_memory(), get_system_io(),
+                               &error_fatal);
+    for (int i = 0; i < VIBTANIUM_LEGACY_ISA_IRQS; i++) {
+        vms->isa_irqs[i] = qdev_get_gpio_in(vms->iosapic, i);
+    }
+    isa_bus_register_input_irqs(vms->isa_bus, vms->isa_irqs);
+}
+
+static void vibtanium_pci_set_irq(void *opaque, int irq_num, int level)
+{
+    VibtaniumMachineState *vms = opaque;
+
+    if (irq_num < 0 || irq_num >= VIBTANIUM_PCI_INTX_IRQS) {
+        return;
+    }
+
+    qemu_set_irq(vms->pci_irqs[irq_num], level);
+}
+
+static void vibtanium_pci_init(VibtaniumMachineState *vms)
+{
+    PCIHostState *host;
+    PCIDevice *ide;
+
+    vms->pci_host = qdev_new(TYPE_VIBTANIUM_PCI_HOST);
+    host = PCI_HOST_BRIDGE(vms->pci_host);
+
+    for (int i = 0; i < VIBTANIUM_PCI_INTX_IRQS; i++) {
+        vms->pci_irqs[i] = qdev_get_gpio_in(vms->iosapic,
+                                            VIBTANIUM_PCI_INTX_IRQ_BASE + i);
+    }
+    vms->pci_bus = pci_register_root_bus(
+        vms->pci_host, "pci", vibtanium_pci_set_irq, pci_swizzle_map_irq_fn,
+        vms, get_system_memory(), get_system_io(), 0, VIBTANIUM_PCI_INTX_IRQS,
+        TYPE_PCI_BUS);
+    host->bus = vms->pci_bus;
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(vms->pci_host), &error_fatal);
+    ia64_firmware_set_pci_bus(vms->pci_bus);
+
+    ide = pci_create_simple(vms->pci_bus, PCI_DEVFN(1, 0), TYPE_PIIX3_IDE);
+    pci_ide_create_devs(ide);
+}
 
 static void vibtanium_i8042_init(VibtaniumMachineState *vms)
 {
@@ -198,6 +257,9 @@ bool vibtanium_blk_media_device(BlockBackend *blk,
     }
 
     dinfo = blk_legacy_dinfo(blk);
+    if (!dinfo || dinfo->type == IF_NONE) {
+        return false;
+    }
     cdrom = dinfo && dinfo->media_cd;
 
     length = blk_getlength(blk);
@@ -532,37 +594,17 @@ bool vibtanium_try_boot_entry_on_media(VibtaniumMachineState *vms,
     BlockBackend *blk = NULL;
 
     while ((blk = blk_next(blk)) != NULL) {
-        DriveInfo *dinfo = blk_legacy_dinfo(blk);
-        const char *name = blk_name(blk);
-        bool available = blk_is_available(blk);
-        bool cdrom = dinfo && dinfo->media_cd;
-        int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
-        VibtaniumBlockReadOpaque *read_opaque;
         VibtaniumEfiBlockDevice dev;
 
-        if (!available || length <= 0) {
+        if (!vibtanium_blk_media_device(blk, &dev)) {
             continue;
         }
-
-        read_opaque = g_new0(VibtaniumBlockReadOpaque, 1);
-        read_opaque->blk = blk;
-        dev = (VibtaniumEfiBlockDevice) {
-            .name = name && *name ? name : "<unnamed>",
-            .size = length,
-            .block_size = cdrom ? 2048 : 512,
-            .read_only = !blk_is_writable(blk),
-            .removable = cdrom,
-            .cdrom = cdrom,
-            .read = vibtanium_block_pread,
-            .opaque = read_opaque,
-        };
-
         if (vibtanium_try_media_efi_app(vms, machine, &dev,
                                         entry->loader_path, entry)) {
-            g_free(read_opaque);
+            vibtanium_blk_media_device_cleanup(&dev);
             return true;
         }
-        g_free(read_opaque);
+        vibtanium_blk_media_device_cleanup(&dev);
     }
 
     return false;
@@ -611,47 +653,36 @@ static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
         DriveInfo *dinfo = blk_legacy_dinfo(blk);
         const char *name = blk_name(blk);
         bool available = blk_is_available(blk);
-        bool cdrom = dinfo && dinfo->media_cd;
+        bool attached = dinfo && dinfo->type != IF_NONE;
+        bool cdrom = attached && dinfo->media_cd;
         int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
-        VibtaniumBlockReadOpaque *read_opaque = g_new0(VibtaniumBlockReadOpaque, 1);
-        VibtaniumEfiBlockDevice dev = {
-            .name = name && *name ? name : "<unnamed>",
-            .size = length > 0 ? length : 0,
-            .block_size = cdrom ? 2048 : 512,
-            .read_only = !blk_is_writable(blk),
-            .removable = cdrom,
-            .cdrom = cdrom,
-            .read = vibtanium_block_pread,
-            .opaque = read_opaque,
-        };
+        VibtaniumEfiBlockDevice dev;
 
-        read_opaque->blk = blk;
-
-        warn_report("vibtanium EFI media[%u] name=%s available=%s cdrom=%s "
-                    "writable=%s bytes=%" PRId64,
-                    media_index++, dev.name, available ? "yes" : "no",
+        warn_report("vibtanium EFI media[%u] name=%s attached=%s "
+                    "available=%s cdrom=%s writable=%s bytes=%" PRId64,
+                    media_index++, name && *name ? name : "<unnamed>",
+                    attached ? "yes" : "no", available ? "yes" : "no",
                     cdrom ? "yes" : "no",
-                    dev.read_only ? "no" : "yes", length);
+                    blk_is_writable(blk) ? "yes" : "no", length);
 
-        if (!available) {
-            g_free(read_opaque);
+        if (!attached) {
+            warn_report("vibtanium EFI media %s skipped: unattached block "
+                        "backend is not guest-visible",
+                        name && *name ? name : "<unnamed>");
             continue;
         }
-        if (length <= 0) {
-            warn_report("vibtanium EFI media %s skipped: unavailable length "
-                        "%" PRId64,
-                        dev.name, length);
-            g_free(read_opaque);
+
+        if (!vibtanium_blk_media_device(blk, &dev)) {
             continue;
         }
 
         media_candidates++;
         if (vibtanium_try_media_efi_app(vms, machine, &dev,
                                         VIBTANIUM_EFI_FALLBACK_PATH, NULL)) {
-            g_free(read_opaque);
+            vibtanium_blk_media_device_cleanup(&dev);
             return true;
         }
-        g_free(read_opaque);
+        vibtanium_blk_media_device_cleanup(&dev);
     }
 
     warn_report("vibtanium EFI discovery found no boot app path=%s "
@@ -740,6 +771,8 @@ static void vibtanium_init(MachineState *machine)
     vibtanium_i8042_init(vms);
 
     vibtanium_sparse_io_init(vms, sysmem);
+    vibtanium_isa_init(vms);
+    vibtanium_pci_init(vms);
 
     memory_region_init_ram(&vms->framebuffer, NULL,
                            "vibtanium.efi-framebuffer",
@@ -858,7 +891,9 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_cpu_type = TYPE_ITANIUM2_CPU;
     mc->default_ram_size = 512 * MiB;
     mc->default_ram_id = "vibtanium.ram";
-    mc->no_cdrom = 1;
+    mc->block_default_type = IF_IDE;
+    mc->units_per_default_bus = MAX_IDE_DEVS;
+    mc->no_cdrom = 0;
     mc->no_floppy = 1;
     mc->no_parallel = 1;
 
@@ -895,8 +930,15 @@ static const TypeInfo vibtanium_machine_typeinfo = {
     .instance_finalize = vibtanium_machine_finalize,
 };
 
+static const TypeInfo vibtanium_pci_host_typeinfo = {
+    .name = TYPE_VIBTANIUM_PCI_HOST,
+    .parent = TYPE_PCI_HOST_BRIDGE,
+    .instance_size = sizeof(VibtaniumPciHostState),
+};
+
 static void vibtanium_machine_register_types(void)
 {
+    type_register_static(&vibtanium_pci_host_typeinfo);
     type_register_static(&vibtanium_machine_typeinfo);
 }
 

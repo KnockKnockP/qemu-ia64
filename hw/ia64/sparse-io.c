@@ -5,6 +5,7 @@
 #include "hw/char/serial-mm.h"
 #include "hw/ia64/vibtanium.h"
 #include "vibtanium-internal.h"
+#include "system/address-spaces.h"
 #include "system/memory.h"
 
 static unsigned vibtanium_sparse_io_port(hwaddr offset)
@@ -46,6 +47,34 @@ static bool vibtanium_sparse_io_offset_valid(hwaddr offset, unsigned size)
     }
 
     return true;
+}
+
+static uint64_t vibtanium_io_port_space_read(unsigned port, unsigned size)
+{
+    uint8_t data[4] = { UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX };
+    uint64_t value = 0;
+
+    if (address_space_read(&address_space_io, port, MEMTXATTRS_UNSPECIFIED,
+                           data, size) != MEMTX_OK) {
+        return vibtanium_io_port_default_read(size);
+    }
+
+    for (unsigned i = 0; i < size; i++) {
+        value |= (uint64_t)data[i] << (i * 8);
+    }
+    return value;
+}
+
+static void vibtanium_io_port_space_write(unsigned port, uint64_t value,
+                                          unsigned size)
+{
+    uint8_t data[4];
+
+    for (unsigned i = 0; i < size; i++) {
+        data[i] = value >> (i * 8);
+    }
+    address_space_write(&address_space_io, port, MEMTXATTRS_UNSPECIFIED,
+                        data, size);
 }
 
 static bool vibtanium_vga_crtc_index_port(unsigned port)
@@ -164,7 +193,7 @@ static uint64_t vibtanium_io_port_read(void *opaque, hwaddr offset,
                                   port - VIBTANIUM_LEGACY_COM1_BASE, size);
     }
 
-    return vibtanium_io_port_default_read(size);
+    return vibtanium_io_port_space_read(port, size);
 }
 
 static void vibtanium_io_port_write(void *opaque, hwaddr offset,
@@ -194,7 +223,10 @@ static void vibtanium_io_port_write(void *opaque, hwaddr offset,
         port < VIBTANIUM_LEGACY_COM1_BASE + VIBTANIUM_LEGACY_COM1_SIZE) {
         serial_io_ops.write(&vms->uart->serial,
                             port - VIBTANIUM_LEGACY_COM1_BASE, value, size);
+        return;
     }
+
+    vibtanium_io_port_space_write(port, value, size);
 }
 
 static const MemoryRegionOps vibtanium_io_port_ops = {
