@@ -58,6 +58,7 @@ typedef enum IA64TcgFallbackReason {
     IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS,
     IA64_TCG_FALLBACK_FAST_LDST_DEPENDENCY,
     IA64_TCG_FALLBACK_FAST_LDST_TARGET,
+    IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE,
     IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT,
     IA64_TCG_FALLBACK_RUNTIME_GUARD,
     IA64_TCG_FALLBACK_COUNT,
@@ -141,6 +142,7 @@ typedef struct IA64TcgFastBundle {
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast);
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle);
+bool ia64_tcg_fast_ldst_memory_inline_enabled(void);
 
 typedef enum IA64TcgFallbackPlanOp {
     IA64_TCG_FALLBACK_PLAN_GENERIC,

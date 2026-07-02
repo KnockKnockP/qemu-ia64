@@ -960,6 +960,14 @@ static void test_fallback_reason_classifies_helper_sources(void)
     g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
                     ==, IA64_TCG_FALLBACK_FAST_STATIC_GR);
 
+    bundle = make_bundle(0x00, ld8_r2_r3_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE);
+    g_assert_cmpstr(ia64_tcg_fallback_reason_name(
+                        IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE),
+                    ==, "fast.ldst-host-code-size");
+
     bundle = make_bundle(0x08, add_r3_r3_r4_raw,
                          ld8_r2_r3_raw, IA64_INSN_NOP_RAW);
     g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),

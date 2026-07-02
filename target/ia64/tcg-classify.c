@@ -143,6 +143,8 @@ const char *ia64_tcg_fallback_reason_name(IA64TcgFallbackReason reason)
         return "fast.ldst-dependency";
     case IA64_TCG_FALLBACK_FAST_LDST_TARGET:
         return "fast.ldst-target";
+    case IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE:
+        return "fast.ldst-host-code-size";
     case IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT:
         return "fast.unsupported-slot";
     case IA64_TCG_FALLBACK_RUNTIME_GUARD:
@@ -241,6 +243,24 @@ static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
          */
         return false;
     }
+}
+
+static bool ia64_tcg_ldst_is_memory_access(const IA64LdstImmediate *ldst)
+{
+    return ldst->kind == IA64_LDST_IMM_LOAD ||
+           ldst->kind == IA64_LDST_IMM_STORE;
+}
+
+bool ia64_tcg_fast_ldst_memory_inline_enabled(void)
+{
+    /*
+     * IA-64 memory fast slots lower to SoftMMU qemu_ld/st ops plus guards and
+     * helper exits.  On MinGW hosts that expansion can exceed TCG's generated
+     * code limit for a single bundle, which makes translate-all try to split a
+     * one-instruction TB.  Keep memory slots on the compact helper path until
+     * this lowering has a real code-size budget or call-based memory path.
+     */
+    return false;
 }
 
 static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
@@ -932,11 +952,21 @@ static bool ia64_tcg_bundle_has_ldst_base_dependency(
     return false;
 }
 
+static bool ia64_tcg_slot_has_ldst_memory_access(IA64SlotType type,
+                                                 uint64_t raw)
+{
+    IA64LdstImmediate ldst;
+
+    return ia64_decode_ldst_immediate(type, raw, &ldst) &&
+           ia64_tcg_ldst_is_memory_access(&ldst);
+}
+
 IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
     const IA64DecodedBundle *bundle, uint64_t pc)
 {
     IA64TcgTbBoundary boundary;
     IA64TcgFallbackReason reason;
+    bool has_ldst_memory_access = false;
 
     if (!bundle || !bundle->valid) {
         return IA64_TCG_FALLBACK_INVALID_TEMPLATE;
@@ -958,10 +988,18 @@ IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
         if (reason != IA64_TCG_FALLBACK_NONE) {
             return reason;
         }
+        if (ia64_tcg_slot_has_ldst_memory_access(
+                bundle->info->slot_type[slot], bundle->slot[slot])) {
+            has_ldst_memory_access = true;
+        }
     }
 
     if (ia64_tcg_bundle_has_ldst_base_dependency(bundle)) {
         return IA64_TCG_FALLBACK_FAST_LDST_DEPENDENCY;
+    }
+    if (has_ldst_memory_access &&
+        !ia64_tcg_fast_ldst_memory_inline_enabled()) {
+        return IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE;
     }
 
     return IA64_TCG_FALLBACK_RUNTIME_GUARD;

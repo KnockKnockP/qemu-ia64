@@ -817,6 +817,9 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     }
 
     has_ldst = ia64_tr_fast_bundle_has_ldst(&fast);
+    if (has_ldst && !ia64_tcg_fast_ldst_memory_inline_enabled()) {
+        return false;
+    }
     fallback = gen_new_label();
     done = gen_new_label();
     tmp = tcg_temp_new_i64();
@@ -950,9 +953,12 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         return false;
     }
 
+    has_ldst = ia64_tr_fast_bundle_has_ldst(&branch.prefix);
+    if (has_ldst && !ia64_tcg_fast_ldst_memory_inline_enabled()) {
+        return false;
+    }
     fallback = gen_new_label();
     tmp = tcg_temp_new_i64();
-    has_ldst = ia64_tr_fast_bundle_has_ldst(&branch.prefix);
 
     ia64_tr_emit_fast_bundle_guards(ctx, &branch.prefix, fallback, tmp,
                                     ldst_address);

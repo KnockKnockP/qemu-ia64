@@ -89,6 +89,8 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
         "tcg.fallback.fast.ldst_dependency",
     [IA64_PERF_TCG_FALLBACK_FAST_LDST_TARGET] =
         "tcg.fallback.fast.ldst_target",
+    [IA64_PERF_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE] =
+        "tcg.fallback.fast.ldst_host_code_size",
     [IA64_PERF_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT] =
         "tcg.fallback.fast.unsupported_slot",
     [IA64_PERF_TCG_FALLBACK_RUNTIME_GUARD] =
@@ -448,6 +450,8 @@ void ia64_perf_count_tcg_fallback_reason(unsigned reason)
             IA64_PERF_TCG_FALLBACK_FAST_LDST_DEPENDENCY,
         [IA64_TCG_FALLBACK_FAST_LDST_TARGET] =
             IA64_PERF_TCG_FALLBACK_FAST_LDST_TARGET,
+        [IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE] =
+            IA64_PERF_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE,
         [IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT] =
             IA64_PERF_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT,
         [IA64_TCG_FALLBACK_RUNTIME_GUARD] =
