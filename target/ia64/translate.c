@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "bundle.h"
+#include "debug-trace.h"
 #include "exec-smoke.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -10,6 +11,8 @@
 #include "exec/target_page.h"
 #include "exec/translation-block.h"
 #include "exec/translator.h"
+#include "hw/core/cpu.h"
+#include "hw/ia64/efi.h"
 #include "perf.h"
 #include "tcg-skeleton.h"
 #include "tcg/tcg-op.h"
@@ -61,6 +64,12 @@ static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exec();
     }
+}
+
+static void ia64_tr_emit_can_do_io(void)
+{
+    tcg_gen_st8_i32(tcg_constant_i32(true), tcg_env,
+                    offsetof(CPUState, neg.can_do_io) - sizeof(CPUState));
 }
 
 static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
@@ -811,9 +820,14 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
 
     tcg_gen_movi_i64(cpu_ip, pc);
     tcg_gen_movi_i64(runtime_dest_mask, 0);
-    gen_helper_start_fast_bundle(tcg_env,
-                                 tcg_constant_i32(fast.slot_count),
-                                 tcg_constant_i32(fast.op_counts));
+    if (ia64_perf_enabled() || ia64_debug_hooks_active() ||
+        vibtanium_efi_linux_cmdline_append_pending()) {
+        gen_helper_start_fast_bundle(tcg_env,
+                                     tcg_constant_i32(fast.slot_count),
+                                     tcg_constant_i32(fast.op_counts));
+    } else if (has_ldst) {
+        ia64_tr_emit_can_do_io();
+    }
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
         ia64_tr_emit_fast_slot(ctx, &fast.slot[slot], ldst_address[slot],
                                runtime_dest_mask);
