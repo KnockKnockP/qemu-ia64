@@ -5,7 +5,7 @@
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/vibtanium.h"
 #include "target/ia64/bundle.h"
-#include "target/ia64/exec-smoke.h"
+#include "target/ia64/insn.h"
 
 #define PE32_MAGIC  0x10b
 #define PE32P_MAGIC 0x20b

@@ -4,12 +4,13 @@ ia64_ss.add(files(
   'cpu.c',
   'debug-trace.c',
   'exception.c',
-  'exec-smoke.c',
-  'helper.c',
+  'firmware-hook.c',
+  'insn.c',
+  'interp.c',
   'machine.c',
   'mem.c',
   'perf.c',
-  'tcg-skeleton.c',
+  'tcg-classify.c',
   'translate.c',
 ))
 

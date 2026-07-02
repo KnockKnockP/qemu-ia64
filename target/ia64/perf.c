@@ -4,7 +4,7 @@
 #include "cpu.h"
 #include "mem.h"
 #include "perf.h"
-#include "tcg-skeleton.h"
+#include "tcg-classify.h"
 
 int ia64_perf_enabled_cached = -1;
 
@@ -111,7 +111,7 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_SLOT_TYPE_L] = "slot.type.l",
     [IA64_PERF_SLOT_TYPE_X] = "slot.type.x",
     [IA64_PERF_SLOT_TYPE_INVALID] = "slot.type.invalid",
-    [IA64_PERF_OP_SMOKE] = "op.smoke_supported",
+    [IA64_PERF_OP_INSN] = "op.insn_supported",
     [IA64_PERF_OP_NOP] = "op.nop",
     [IA64_PERF_OP_BREAK] = "op.break",
     [IA64_PERF_OP_ALLOC] = "op.alloc",

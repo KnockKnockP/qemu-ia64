@@ -3,8 +3,8 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/cputlb.h"
-#include "exec-smoke.h"
-#include "hw/ia64/efi.h"
+#include "firmware.h"
+#include "insn.h"
 #include "mem.h"
 #include "migration/vmstate.h"
 
@@ -193,7 +193,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     env->gr[0] = 0;
     env->pr |= 1;
     env->fault_exit_pending_tb_translate = false;
-    vibtanium_efi_console_recover_post_load(env->ip);
+    ia64_firmware_recover_post_load(env->ip);
     return 0;
 }
 

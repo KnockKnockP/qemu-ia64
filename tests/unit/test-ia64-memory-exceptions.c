@@ -7,7 +7,7 @@
 #include "qemu/osdep.h"
 #include "exec/page-protection.h"
 #include "target/ia64/exception.h"
-#include "target/ia64/exec-smoke.h"
+#include "target/ia64/insn.h"
 #include "target/ia64/mem.h"
 
 #define IA64_PSR_IC_BIT   UINT64_C(0x0000000000002000)

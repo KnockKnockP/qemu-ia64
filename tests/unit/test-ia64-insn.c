@@ -1,12 +1,12 @@
 /*
- * IA-64 minimal execution smoke tests.
+ * IA-64 instruction execution tests.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
 #include "target/ia64/exception.h"
-#include "target/ia64/exec-smoke.h"
+#include "target/ia64/insn.h"
 #include "target/ia64/mem.h"
 #include "exec/page-protection.h"
 
@@ -84,9 +84,9 @@ static void make_bundle(uint8_t *bundle, uint8_t tmpl,
 static void make_nop_mii_bundle(uint8_t *bundle)
 {
     make_bundle(bundle, 0x00,
-                IA64_SMOKE_NOP_RAW,
-                IA64_SMOKE_NOP_RAW,
-                IA64_SMOKE_NOP_RAW);
+                IA64_INSN_NOP_RAW,
+                IA64_INSN_NOP_RAW,
+                IA64_INSN_NOP_RAW);
 }
 
 static uint64_t make_i2_packed_raw(uint8_t za, uint8_t zb,
@@ -334,28 +334,28 @@ static void test_bundle_fetch_decode(void)
     g_assert_true(ia64_decode_bundle(bundle, &decoded));
     g_assert_cmphex(decoded.tmpl, ==, 0x00);
     g_assert_cmpstr(decoded.info->name, ==, "MII");
-    g_assert_cmphex(decoded.slot[0], ==, IA64_SMOKE_NOP_RAW);
-    g_assert_cmphex(decoded.slot[1], ==, IA64_SMOKE_NOP_RAW);
-    g_assert_cmphex(decoded.slot[2], ==, IA64_SMOKE_NOP_RAW);
+    g_assert_cmphex(decoded.slot[0], ==, IA64_INSN_NOP_RAW);
+    g_assert_cmphex(decoded.slot[1], ==, IA64_INSN_NOP_RAW);
+    g_assert_cmphex(decoded.slot[2], ==, IA64_INSN_NOP_RAW);
 }
 
 static void test_ip_advances_for_nop_bundle(void)
 {
     CPUIA64State env;
     uint8_t bundle[IA64_BUNDLE_SIZE];
-    IA64ExecSmokeReport report;
+    IA64InsnReport report;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.ip = 0x1000;
     make_nop_mii_bundle(bundle);
 
-    g_assert_cmpint(ia64_exec_smoke_bundle(&env, bundle, &report), ==,
-                    IA64_EXEC_SMOKE_OK);
+    g_assert_cmpint(ia64_insn_exec_bundle(&env, bundle, &report), ==,
+                    IA64_INSN_OK);
     g_assert_cmphex(env.ip, ==, 0x1010);
     g_assert_cmphex(report.ip_before, ==, 0x1000);
     g_assert_cmphex(report.ip_after, ==, 0x1010);
     g_assert_cmpint(report.failed_slot, ==, -1);
-    g_assert_nonnull(strstr(report.message, "executed IA-64 smoke NOP"));
+    g_assert_nonnull(strstr(report.message, "executed IA-64 NOP"));
 }
 
 static void test_unsupported_instruction_message(void)
@@ -363,19 +363,19 @@ static void test_unsupported_instruction_message(void)
     const uint64_t mov_r3_ip_raw = 0x1800000c0ULL;
     CPUIA64State env;
     uint8_t bundle[IA64_BUNDLE_SIZE];
-    IA64ExecSmokeReport report;
+    IA64InsnReport report;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.ip = 0x2000;
     make_bundle(bundle, 0x00,
-                IA64_SMOKE_NOP_RAW, mov_r3_ip_raw, IA64_SMOKE_NOP_RAW);
+                IA64_INSN_NOP_RAW, mov_r3_ip_raw, IA64_INSN_NOP_RAW);
 
-    g_assert_cmpint(ia64_exec_smoke_bundle(&env, bundle, &report), ==,
-                    IA64_EXEC_SMOKE_UNSUPPORTED_SLOT);
+    g_assert_cmpint(ia64_insn_exec_bundle(&env, bundle, &report), ==,
+                    IA64_INSN_UNSUPPORTED_SLOT);
     g_assert_cmphex(env.ip, ==, 0x2000);
     g_assert_cmpint(report.failed_slot, ==, 1);
     g_assert_nonnull(strstr(report.message,
-                           "unsupported IA-64 smoke instruction"));
+                           "unsupported IA-64 instruction"));
     g_assert_nonnull(strstr(report.message, "slot=1"));
     g_assert_nonnull(strstr(report.message, "type=I"));
     g_assert_nonnull(strstr(report.message, "raw=0x001800000c0"));
@@ -2768,7 +2768,7 @@ static void test_counted_store_loop_decode_from_decompressor(void)
     IA64CountedStoreLoop decoded;
 
     make_bundle(bundle_bytes, 0x10, st1_r0_r32_imm1_raw,
-                IA64_SMOKE_NOP_RAW, br_cloop_self_raw);
+                IA64_INSN_NOP_RAW, br_cloop_self_raw);
 
     g_assert_true(ia64_decode_bundle(bundle_bytes, &bundle));
     g_assert_true(ia64_decode_counted_store_loop(&bundle, 0x1034880,
@@ -2783,7 +2783,7 @@ static void test_counted_store_loop_decode_from_decompressor(void)
     g_assert_cmphex(decoded.fallthrough_ip, ==, 0x1034890);
 
     make_bundle(bundle_bytes, 0x10, st1_r0_r32_imm1_raw | 1,
-                IA64_SMOKE_NOP_RAW, br_cloop_self_raw);
+                IA64_INSN_NOP_RAW, br_cloop_self_raw);
     g_assert_true(ia64_decode_bundle(bundle_bytes, &bundle));
     g_assert_false(ia64_decode_counted_store_loop(&bundle, 0x1034880,
                                                   &decoded));
@@ -3212,17 +3212,17 @@ static void test_reserved_template_message(void)
 {
     CPUIA64State env;
     uint8_t bundle[IA64_BUNDLE_SIZE];
-    IA64ExecSmokeReport report;
+    IA64InsnReport report;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.ip = 0x3000;
     make_bundle(bundle, 0x06,
-                IA64_SMOKE_NOP_RAW,
-                IA64_SMOKE_NOP_RAW,
-                IA64_SMOKE_NOP_RAW);
+                IA64_INSN_NOP_RAW,
+                IA64_INSN_NOP_RAW,
+                IA64_INSN_NOP_RAW);
 
-    g_assert_cmpint(ia64_exec_smoke_bundle(&env, bundle, &report), ==,
-                    IA64_EXEC_SMOKE_RESERVED_TEMPLATE);
+    g_assert_cmpint(ia64_insn_exec_bundle(&env, bundle, &report), ==,
+                    IA64_INSN_RESERVED_TEMPLATE);
     g_assert_cmphex(env.ip, ==, 0x3000);
     g_assert_cmpint(report.failed_slot, ==, -1);
     g_assert_nonnull(strstr(report.message,
@@ -3247,192 +3247,192 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
-    g_test_add_func("/ia64-exec-smoke/reset", test_reset);
-    g_test_add_func("/ia64-exec-smoke/banked-static-gr",
+    g_test_add_func("/ia64-insn/reset", test_reset);
+    g_test_add_func("/ia64-insn/banked-static-gr",
                     test_banked_static_general_registers);
-    g_test_add_func("/ia64-exec-smoke/pal-calling-convention-table",
+    g_test_add_func("/ia64-insn/pal-calling-convention-table",
                     test_pal_calling_convention_table);
-    g_test_add_func("/ia64-exec-smoke/banked-bsw-visibility",
+    g_test_add_func("/ia64-insn/banked-bsw-visibility",
                     test_banked_register_switch_via_bsw);
-    g_test_add_func("/ia64-exec-smoke/syscall-break-user-to-kernel",
+    g_test_add_func("/ia64-insn/syscall-break-user-to-kernel",
                     test_syscall_break_user_to_kernel_transition);
-    g_test_add_func("/ia64-exec-smoke/syscall-rfi-kernel-to-user",
+    g_test_add_func("/ia64-insn/syscall-rfi-kernel-to-user",
                     test_syscall_return_rfi_kernel_to_user_transition);
-    g_test_add_func("/ia64-exec-smoke/epc-user-to-kernel",
+    g_test_add_func("/ia64-insn/epc-user-to-kernel",
                     test_epc_clears_user_cpl_for_kernel_entry);
-    g_test_add_func("/ia64-exec-smoke/epc-gate-return-restores-pfs-privilege",
+    g_test_add_func("/ia64-insn/epc-gate-return-restores-pfs-privilege",
                     test_epc_gate_return_restores_pfs_privilege);
-    g_test_add_func("/ia64-exec-smoke/bundle-fetch-decode",
+    g_test_add_func("/ia64-insn/bundle-fetch-decode",
                     test_bundle_fetch_decode);
-    g_test_add_func("/ia64-exec-smoke/ip-advances-for-nop-bundle",
+    g_test_add_func("/ia64-insn/ip-advances-for-nop-bundle",
                     test_ip_advances_for_nop_bundle);
-    g_test_add_func("/ia64-exec-smoke/unsupported-instruction-message",
+    g_test_add_func("/ia64-insn/unsupported-instruction-message",
                     test_unsupported_instruction_message);
-    g_test_add_func("/ia64-exec-smoke/m34-alloc-updates-frame-state",
+    g_test_add_func("/ia64-insn/m34-alloc-updates-frame-state",
                     test_m34_alloc_updates_frame_state);
-    g_test_add_func("/ia64-exec-smoke/frame-state-preserves-ifs",
+    g_test_add_func("/ia64-insn/frame-state-preserves-ifs",
                     test_frame_state_updates_preserve_interruption_frame_state);
-    g_test_add_func("/ia64-exec-smoke/rse-backing-store-address-helpers",
+    g_test_add_func("/ia64-insn/rse-backing-store-address-helpers",
                     test_rse_backing_store_address_helpers);
-    g_test_add_func("/ia64-exec-smoke/rse-stacked-write-marks-clean-register-dirty",
+    g_test_add_func("/ia64-insn/rse-stacked-write-marks-clean-register-dirty",
                     test_rse_stacked_write_marks_clean_register_dirty);
-    g_test_add_func("/ia64-exec-smoke/rse-bspstore-write-preserves-dirty-boundary",
+    g_test_add_func("/ia64-insn/rse-bspstore-write-preserves-dirty-boundary",
                     test_rse_bspstore_write_preserves_dirty_boundary);
-    g_test_add_func("/ia64-exec-smoke/rse-loadrs-dirty-partition-bspstore-switch",
+    g_test_add_func("/ia64-insn/rse-loadrs-dirty-partition-bspstore-switch",
                     test_rse_loadrs_dirty_partition_survives_bspstore_switch);
-    g_test_add_func("/ia64-exec-smoke/rse-loadrs-preserves-rfi-frame",
+    g_test_add_func("/ia64-insn/rse-loadrs-preserves-rfi-frame",
                     test_rse_loadrs_preserves_dirty_frame_uncovered_by_rfi);
-    g_test_add_func("/ia64-exec-smoke/rse-loadrs-reads-clean-prefix-only",
+    g_test_add_func("/ia64-insn/rse-loadrs-reads-clean-prefix-only",
                     test_rse_loadrs_reads_clean_prefix_only);
-    g_test_add_func("/ia64-exec-smoke/rse-restored-frame-uses-bsp-load",
+    g_test_add_func("/ia64-insn/rse-restored-frame-uses-bsp-load",
                     test_rse_restored_frame_uses_bsp_load);
-    g_test_add_func("/ia64-exec-smoke/rse-reconstructs-clean-partition-after-load",
+    g_test_add_func("/ia64-insn/rse-reconstructs-clean-partition-after-load",
                     test_rse_reconstructs_clean_partition_after_load);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mov-ip-and-nop",
+    g_test_add_func("/ia64-insn/i-unit-mov-ip-and-nop",
                     test_i_unit_mov_ip_and_nop);
-    g_test_add_func("/ia64-exec-smoke/i-unit-break-delivers-interruption-state",
+    g_test_add_func("/ia64-insn/i-unit-break-delivers-interruption-state",
                     test_i_unit_break_delivers_interruption_state);
-    g_test_add_func("/ia64-exec-smoke/interruption-delivery-preserves-translation-state",
+    g_test_add_func("/ia64-insn/interruption-delivery-preserves-translation-state",
                     test_interruption_delivery_preserves_translation_state);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mov-from-predicate",
+    g_test_add_func("/ia64-insn/i-unit-mov-from-predicate",
                     test_i_unit_mov_from_predicate);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask",
+    g_test_add_func("/ia64-insn/i-unit-mov-to-predicate-mask",
                     test_i_unit_mov_to_predicate_mask);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask-fsys-clock",
+    g_test_add_func("/ia64-insn/i-unit-mov-to-predicate-mask-fsys-clock",
                     test_i_unit_mov_to_predicate_mask_fsys_clock);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-predicate-mask-high-restore",
+    g_test_add_func("/ia64-insn/i-unit-mov-to-predicate-mask-high-restore",
                     test_i_unit_mov_to_predicate_mask_high_restore);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mov-to-branch",
+    g_test_add_func("/ia64-insn/i-unit-mov-to-branch",
                     test_i_unit_mov_to_branch);
-    g_test_add_func("/ia64-exec-smoke/application-register-moves",
+    g_test_add_func("/ia64-insn/application-register-moves",
                     test_application_register_moves);
-    g_test_add_func("/ia64-exec-smoke/m-unit-system-memory-management",
+    g_test_add_func("/ia64-insn/m-unit-system-memory-management",
                     test_m_unit_system_memory_management);
-    g_test_add_func("/ia64-exec-smoke/translation-access-dirty-bits",
+    g_test_add_func("/ia64-insn/translation-access-dirty-bits",
                     test_translation_access_dirty_bits);
-    g_test_add_func("/ia64-exec-smoke/interrupt-control-registers",
+    g_test_add_func("/ia64-insn/interrupt-control-registers",
                     test_interrupt_control_registers);
-    g_test_add_func("/ia64-exec-smoke/timer-compare-rearms-on-itm",
+    g_test_add_func("/ia64-insn/timer-compare-rearms-on-itm",
                     test_timer_compare_rearms_only_on_itm_programming);
-    g_test_add_func("/ia64-exec-smoke/interrupt-unmask-pending",
+    g_test_add_func("/ia64-insn/interrupt-unmask-pending",
                     test_interrupt_unmask_exposes_pending_external_interrupt);
-    g_test_add_func("/ia64-exec-smoke/external-interrupt-delivery-masks",
+    g_test_add_func("/ia64-insn/external-interrupt-delivery-masks",
                     test_external_interrupt_delivery_masks);
-    g_test_add_func("/ia64-exec-smoke/interrupt-reconcile-invalid-active",
+    g_test_add_func("/ia64-insn/interrupt-reconcile-invalid-active",
                     test_interrupt_reconcile_drops_invalid_active_vector);
-    g_test_add_func("/ia64-exec-smoke/lx-movl-reconstructs-immediate",
+    g_test_add_func("/ia64-insn/lx-movl-reconstructs-immediate",
                     test_lx_movl_reconstructs_immediate);
-    g_test_add_func("/ia64-exec-smoke/lx-nop-hint-pair",
+    g_test_add_func("/ia64-insn/lx-nop-hint-pair",
                     test_lx_nop_hint_pair);
-    g_test_add_func("/ia64-exec-smoke/alu-add-register-form",
+    g_test_add_func("/ia64-insn/alu-add-register-form",
                     test_alu_add_register_form);
-    g_test_add_func("/ia64-exec-smoke/alu-sub-register-form",
+    g_test_add_func("/ia64-insn/alu-sub-register-form",
                     test_alu_sub_register_form);
-    g_test_add_func("/ia64-exec-smoke/alu-logic-addp4-and-shladd",
+    g_test_add_func("/ia64-insn/alu-logic-addp4-and-shladd",
                     test_alu_logic_addp4_and_shladd);
-    g_test_add_func("/ia64-exec-smoke/i-unit-mux-permutations",
+    g_test_add_func("/ia64-insn/i-unit-mux-permutations",
                     test_i_unit_mux_permutations);
-    g_test_add_func("/ia64-exec-smoke/i-unit-packed-i2-frontier-mix4r",
+    g_test_add_func("/ia64-insn/i-unit-packed-i2-frontier-mix4r",
                     test_i_unit_packed_i2_frontier_mix4r);
-    g_test_add_func("/ia64-exec-smoke/i-unit-packed-i2-operations",
+    g_test_add_func("/ia64-insn/i-unit-packed-i2-operations",
                     test_i_unit_packed_i2_operations);
-    g_test_add_func("/ia64-exec-smoke/i-unit-variable-shifts",
+    g_test_add_func("/ia64-insn/i-unit-variable-shifts",
                     test_i_unit_variable_shifts);
-    g_test_add_func("/ia64-exec-smoke/i-unit-bit-count",
+    g_test_add_func("/ia64-insn/i-unit-bit-count",
                     test_i_unit_bit_count);
-    g_test_add_func("/ia64-exec-smoke/addl-immediate-form",
+    g_test_add_func("/ia64-insn/addl-immediate-form",
                     test_addl_immediate_form);
-    g_test_add_func("/ia64-exec-smoke/m-unit-setf-significand",
+    g_test_add_func("/ia64-insn/m-unit-setf-significand",
                     test_m_unit_setf_significand);
-    g_test_add_func("/ia64-exec-smoke/m-unit-setf-exp-frontier",
+    g_test_add_func("/ia64-insn/m-unit-setf-exp-frontier",
                     test_m_unit_setf_exp_frontier);
-    g_test_add_func("/ia64-exec-smoke/m-unit-setf-single-double",
+    g_test_add_func("/ia64-insn/m-unit-setf-single-double",
                     test_m_unit_setf_single_and_double);
-    g_test_add_func("/ia64-exec-smoke/m-unit-setf-nat-source",
+    g_test_add_func("/ia64-insn/m-unit-setf-nat-source",
                     test_m_unit_setf_nat_source);
-    g_test_add_func("/ia64-exec-smoke/m-unit-getf-significand",
+    g_test_add_func("/ia64-insn/m-unit-getf-significand",
                     test_m_unit_getf_significand);
-    g_test_add_func("/ia64-exec-smoke/floating-spill-format-constants",
+    g_test_add_func("/ia64-insn/floating-spill-format-constants",
                     test_floating_spill_format_constants);
-    g_test_add_func("/ia64-exec-smoke/extract-zero-extends-bitfield",
+    g_test_add_func("/ia64-insn/extract-zero-extends-bitfield",
                     test_extract_zero_extends_bitfield);
-    g_test_add_func("/ia64-exec-smoke/deposit-zero-elilo-frontier",
+    g_test_add_func("/ia64-insn/deposit-zero-elilo-frontier",
                     test_deposit_zero_from_elilo_frontier);
-    g_test_add_func("/ia64-exec-smoke/deposit-immediate-masks-field",
+    g_test_add_func("/ia64-insn/deposit-immediate-masks-field",
                     test_deposit_immediate_masks_inserted_field);
-    g_test_add_func("/ia64-exec-smoke/shift-right-pair-elilo-frontier",
+    g_test_add_func("/ia64-insn/shift-right-pair-elilo-frontier",
                     test_shift_right_pair_from_elilo_frontier);
-    g_test_add_func("/ia64-exec-smoke/integer-extend-zero-extends-byte",
+    g_test_add_func("/ia64-insn/integer-extend-zero-extends-byte",
                     test_integer_extend_zero_extends_byte);
-    g_test_add_func("/ia64-exec-smoke/f-unit-xma-low",
+    g_test_add_func("/ia64-insn/f-unit-xma-low",
                     test_f_unit_xma_low);
-    g_test_add_func("/ia64-exec-smoke/f-unit-multiply-add-operand-order",
+    g_test_add_func("/ia64-insn/f-unit-multiply-add-operand-order",
                     test_f_unit_multiply_add_uses_ia64_operand_order);
-    g_test_add_func("/ia64-exec-smoke/f-unit-reciprocal-approx",
+    g_test_add_func("/ia64-insn/f-unit-reciprocal-approx",
                     test_f_unit_reciprocal_approx_sets_predicate);
-    g_test_add_func("/ia64-exec-smoke/f-unit-misc-unsigned-trunc-conversion",
+    g_test_add_func("/ia64-insn/f-unit-misc-unsigned-trunc-conversion",
                     test_f_unit_misc_unsigned_trunc_conversion);
-    g_test_add_func("/ia64-exec-smoke/f-unit-misc-noop",
+    g_test_add_func("/ia64-insn/f-unit-misc-noop",
                     test_f_unit_misc_noop);
-    g_test_add_func("/ia64-exec-smoke/ldst-immediate-decode",
+    g_test_add_func("/ia64-insn/ldst-immediate-decode",
                     test_ldst_immediate_decode);
-    g_test_add_func("/ia64-exec-smoke/m-unit-atomic-decode",
+    g_test_add_func("/ia64-insn/m-unit-atomic-decode",
                     test_m_unit_atomic_decode);
-    g_test_add_func("/ia64-exec-smoke/floating-memory-decode",
+    g_test_add_func("/ia64-insn/floating-memory-decode",
                     test_floating_memory_decode);
-    g_test_add_func("/ia64-exec-smoke/compare-immediate-predicate-write",
+    g_test_add_func("/ia64-insn/compare-immediate-predicate-write",
                     test_compare_immediate_updates_predicates);
-    g_test_add_func("/ia64-exec-smoke/compare-parallel-predicate-write",
+    g_test_add_func("/ia64-insn/compare-parallel-predicate-write",
                     test_compare_parallel_predicate_completers);
-    g_test_add_func("/ia64-exec-smoke/unc-compare-false-predicate-clear",
+    g_test_add_func("/ia64-insn/unc-compare-false-predicate-clear",
                     test_unc_compare_clears_targets_when_false_predicated);
-    g_test_add_func("/ia64-exec-smoke/unc-predicate-test-false-predicate-clear",
+    g_test_add_func("/ia64-insn/unc-predicate-test-false-predicate-clear",
                     test_unc_predicate_test_clears_targets_when_false_predicated);
-    g_test_add_func("/ia64-exec-smoke/predicate-test-bit",
+    g_test_add_func("/ia64-insn/predicate-test-bit",
                     test_predicate_test_bit_updates_predicates);
-    g_test_add_func("/ia64-exec-smoke/rotating-predicate-access",
+    g_test_add_func("/ia64-insn/rotating-predicate-access",
                     test_rotating_predicate_access_maps_through_rrb);
-    g_test_add_func("/ia64-exec-smoke/b-unit-relative-call",
+    g_test_add_func("/ia64-insn/b-unit-relative-call",
                     test_b_unit_relative_call_updates_link_and_frame);
-    g_test_add_func("/ia64-exec-smoke/b-unit-relative-branch",
+    g_test_add_func("/ia64-insn/b-unit-relative-branch",
                     test_b_unit_relative_branch);
-    g_test_add_func("/ia64-exec-smoke/counted-store-loop-decode",
+    g_test_add_func("/ia64-insn/counted-store-loop-decode",
                     test_counted_store_loop_decode_from_decompressor);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return",
+    g_test_add_func("/ia64-insn/b-unit-indirect-return",
                     test_b_unit_indirect_return);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-wrap",
+    g_test_add_func("/ia64-insn/b-unit-indirect-return-wrap",
                     test_b_unit_indirect_return_wraps_frame_base);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-contiguous-invalidate",
+    g_test_add_func("/ia64-insn/b-unit-indirect-return-contiguous-invalidate",
                     test_b_unit_indirect_return_invalidates_contiguous_window);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-wrapped-invalidate",
+    g_test_add_func("/ia64-insn/b-unit-indirect-return-wrapped-invalidate",
                     test_b_unit_indirect_return_invalidates_wrapped_window);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-clean-bsp",
+    g_test_add_func("/ia64-insn/b-unit-indirect-return-clean-bsp",
                     test_b_unit_indirect_return_retreats_clean_bsp);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-return-clean-boundary",
+    g_test_add_func("/ia64-insn/b-unit-indirect-return-clean-boundary",
                     test_b_unit_indirect_return_clamps_clean_boundary);
-    g_test_add_func("/ia64-exec-smoke/b-unit-rfi",
+    g_test_add_func("/ia64-insn/b-unit-rfi",
                     test_b_unit_return_from_interruption);
-    g_test_add_func("/ia64-exec-smoke/rfi-staged-control-registers",
+    g_test_add_func("/ia64-insn/rfi-staged-control-registers",
                     test_rfi_staged_control_registers);
-    g_test_add_func("/ia64-exec-smoke/rfi-valid-ifs-uncovers-frame",
+    g_test_add_func("/ia64-insn/rfi-valid-ifs-uncovers-frame",
                     test_rfi_uncovers_valid_interruption_frame);
-    g_test_add_func("/ia64-exec-smoke/rfi-valid-ifs-clamps-clean-boundary",
+    g_test_add_func("/ia64-insn/rfi-valid-ifs-clamps-clean-boundary",
                     test_rfi_uncovers_valid_frame_clamps_clean_boundary);
-    g_test_add_func("/ia64-exec-smoke/rfi-invalid-ifs",
+    g_test_add_func("/ia64-insn/rfi-invalid-ifs",
                     test_rfi_ignores_invalid_ifs);
-    g_test_add_func("/ia64-exec-smoke/b-unit-system-branch-extensions",
+    g_test_add_func("/ia64-insn/b-unit-system-branch-extensions",
                     test_b_unit_system_branch_extensions);
-    g_test_add_func("/ia64-exec-smoke/cover-ifs-psr-ic",
+    g_test_add_func("/ia64-insn/cover-ifs-psr-ic",
                     test_cover_sets_ifs_only_when_interruption_collection_off);
-    g_test_add_func("/ia64-exec-smoke/b-unit-indirect-call",
+    g_test_add_func("/ia64-insn/b-unit-indirect-call",
                     test_b_unit_indirect_call_updates_link_and_frame);
-    g_test_add_func("/ia64-exec-smoke/b-unit-predict-or-nop",
+    g_test_add_func("/ia64-insn/b-unit-predict-or-nop",
                     test_b_unit_predict_or_nop);
-    g_test_add_func("/ia64-exec-smoke/b-unit-break-decode",
+    g_test_add_func("/ia64-insn/b-unit-break-decode",
                     test_b_unit_break_decode);
-    g_test_add_func("/ia64-exec-smoke/reserved-template-message",
+    g_test_add_func("/ia64-insn/reserved-template-message",
                     test_reserved_template_message);
-    g_test_add_func("/ia64-exec-smoke/physical-region-alias-translation",
+    g_test_add_func("/ia64-insn/physical-region-alias-translation",
                     test_physical_region_alias_translation);
 
     return g_test_run();

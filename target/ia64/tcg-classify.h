@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef IA64_TCG_SKELETON_H
-#define IA64_TCG_SKELETON_H
+#ifndef IA64_TCG_CLASSIFY_H
+#define IA64_TCG_CLASSIFY_H
 
 #include "bundle.h"
 

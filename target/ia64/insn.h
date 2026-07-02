@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef IA64_EXEC_SMOKE_H
-#define IA64_EXEC_SMOKE_H
+#ifndef IA64_INSN_H
+#define IA64_INSN_H
 
 #include "cpu.h"
 #include "bundle.h"
 #include "mem.h"
 
-#define IA64_SMOKE_NOP_RAW 0x08000000ULL
+#define IA64_INSN_NOP_RAW 0x08000000ULL
 #define IA64_STACKED_GR_MASK (IA64_STACKED_GR_COUNT - 1)
 
 #if (IA64_STACKED_GR_COUNT & IA64_STACKED_GR_MASK) != 0
@@ -18,11 +18,11 @@ static inline uint32_t ia64_rse_wrap_slot(uint32_t slot)
     return slot & IA64_STACKED_GR_MASK;
 }
 
-typedef enum IA64ExecSmokeStatus {
-    IA64_EXEC_SMOKE_OK,
-    IA64_EXEC_SMOKE_RESERVED_TEMPLATE,
-    IA64_EXEC_SMOKE_UNSUPPORTED_SLOT,
-} IA64ExecSmokeStatus;
+typedef enum IA64InsnStatus {
+    IA64_INSN_OK,
+    IA64_INSN_RESERVED_TEMPLATE,
+    IA64_INSN_UNSUPPORTED_SLOT,
+} IA64InsnStatus;
 
 typedef enum IA64VirtualTranslationStatus {
     IA64_VIRTUAL_TRANSLATION_UNSUPPORTED,
@@ -36,14 +36,14 @@ typedef enum IA64ProbeStatus {
     IA64_PROBE_FAULT,
 } IA64ProbeStatus;
 
-typedef struct IA64ExecSmokeReport {
-    IA64ExecSmokeStatus status;
+typedef struct IA64InsnReport {
+    IA64InsnStatus status;
     IA64DecodedBundle bundle;
     uint64_t ip_before;
     uint64_t ip_after;
     int failed_slot;
     char message[160];
-} IA64ExecSmokeReport;
+} IA64InsnReport;
 
 typedef enum IA64LdstImmediateKind {
     IA64_LDST_IMM_LOAD,
@@ -207,8 +207,8 @@ void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
                                      uint64_t *next_ip, const char *detail);
 bool ia64_pal_uses_stacked_calling_convention(uint64_t function_id);
 
-const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status);
-bool ia64_exec_smoke_slot_supported(IA64SlotType type, uint64_t raw);
+const char *ia64_insn_status_name(IA64InsnStatus status);
+bool ia64_insn_slot_supported(IA64SlotType type, uint64_t raw);
 uint64_t ia64_make_cfm(uint32_t sof, uint32_t sol, uint32_t sor);
 void ia64_set_cfm(CPUIA64State *env, uint64_t cfm);
 uint32_t ia64_rse_num_regs(uint64_t bspstore, uint64_t bsp);
@@ -442,9 +442,9 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
                                  uint64_t raw,
                                  uint64_t bundle_ip,
                                  uint64_t *target_ip);
-IA64ExecSmokeStatus
-ia64_exec_smoke_bundle(CPUIA64State *env,
+IA64InsnStatus
+ia64_insn_exec_bundle(CPUIA64State *env,
                        const uint8_t bundle[IA64_BUNDLE_SIZE],
-                       IA64ExecSmokeReport *report);
+                       IA64InsnReport *report);
 
 #endif

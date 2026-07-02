@@ -5,11 +5,11 @@
 #include "bundle.h"
 #include "cpu.h"
 #include "debug-trace.h"
-#include "exec-smoke.h"
+#include "insn.h"
 #include "hw/core/cpu.h"
 #include "mem.h"
 #include "system/memory.h"
-#include "tcg-skeleton.h"
+#include "tcg-classify.h"
 #include "trace-target_ia64.h"
 
 #define IA64_LINUX_BREAK_SYSCALL UINT64_C(0x100000)

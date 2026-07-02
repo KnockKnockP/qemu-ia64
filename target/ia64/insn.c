@@ -3,7 +3,7 @@
 #include "qemu/osdep.h"
 #include <math.h>
 #include "exception.h"
-#include "exec-smoke.h"
+#include "insn.h"
 #include "mem.h"
 #include "perf.h"
 #include "qemu/host-utils.h"
@@ -116,26 +116,26 @@ bool ia64_pal_uses_stacked_calling_convention(uint64_t function_id)
     }
 }
 
-const char *ia64_exec_smoke_status_name(IA64ExecSmokeStatus status)
+const char *ia64_insn_status_name(IA64InsnStatus status)
 {
     switch (status) {
-    case IA64_EXEC_SMOKE_OK:
+    case IA64_INSN_OK:
         return "ok";
-    case IA64_EXEC_SMOKE_RESERVED_TEMPLATE:
+    case IA64_INSN_RESERVED_TEMPLATE:
         return "reserved-template";
-    case IA64_EXEC_SMOKE_UNSUPPORTED_SLOT:
+    case IA64_INSN_UNSUPPORTED_SLOT:
         return "unsupported-slot";
     default:
         return "unknown";
     }
 }
 
-bool ia64_exec_smoke_slot_supported(IA64SlotType type, uint64_t raw)
+bool ia64_insn_slot_supported(IA64SlotType type, uint64_t raw)
 {
     switch (type) {
     case IA64_SLOT_TYPE_M:
     case IA64_SLOT_TYPE_I:
-        return raw == IA64_SMOKE_NOP_RAW;
+        return raw == IA64_INSN_NOP_RAW;
     default:
         return false;
     }
@@ -4495,7 +4495,7 @@ bool ia64_decode_counted_store_loop(const IA64DecodedBundle *bundle,
     if (ia64_slot_predicate(bundle->slot[0]) != 0 ||
         ia64_slot_predicate(bundle->slot[1]) != 0 ||
         ia64_slot_predicate(bundle->slot[2]) != 0 ||
-        bundle->slot[1] != IA64_SMOKE_NOP_RAW) {
+        bundle->slot[1] != IA64_INSN_NOP_RAW) {
         return false;
     }
 
@@ -5377,11 +5377,11 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
     return true;
 }
 
-static void ia64_exec_smoke_set_message(IA64ExecSmokeReport *report,
+static void ia64_insn_set_message(IA64InsnReport *report,
                                         const char *fmt, ...)
     G_GNUC_PRINTF(2, 3);
 
-static void ia64_exec_smoke_set_message(IA64ExecSmokeReport *report,
+static void ia64_insn_set_message(IA64InsnReport *report,
                                         const char *fmt, ...)
 {
     va_list ap;
@@ -5391,10 +5391,10 @@ static void ia64_exec_smoke_set_message(IA64ExecSmokeReport *report,
     va_end(ap);
 }
 
-IA64ExecSmokeStatus
-ia64_exec_smoke_bundle(CPUIA64State *env,
+IA64InsnStatus
+ia64_insn_exec_bundle(CPUIA64State *env,
                        const uint8_t bundle[IA64_BUNDLE_SIZE],
-                       IA64ExecSmokeReport *report)
+                       IA64InsnReport *report)
 {
     memset(report, 0, sizeof(*report));
     report->failed_slot = -1;
@@ -5404,8 +5404,8 @@ ia64_exec_smoke_bundle(CPUIA64State *env,
     ia64_decode_bundle(bundle, &report->bundle);
 
     if (!report->bundle.valid) {
-        report->status = IA64_EXEC_SMOKE_RESERVED_TEMPLATE;
-        ia64_exec_smoke_set_message(
+        report->status = IA64_INSN_RESERVED_TEMPLATE;
+        ia64_insn_set_message(
             report,
             "reserved IA-64 template 0x%02x at ip=0x%016" PRIx64,
             report->bundle.tmpl, report->ip_before);
@@ -5416,12 +5416,12 @@ ia64_exec_smoke_bundle(CPUIA64State *env,
         IA64SlotType type = report->bundle.info->slot_type[slot];
         uint64_t raw = report->bundle.slot[slot];
 
-        if (!ia64_exec_smoke_slot_supported(type, raw)) {
-            report->status = IA64_EXEC_SMOKE_UNSUPPORTED_SLOT;
+        if (!ia64_insn_slot_supported(type, raw)) {
+            report->status = IA64_INSN_UNSUPPORTED_SLOT;
             report->failed_slot = slot;
-            ia64_exec_smoke_set_message(
+            ia64_insn_set_message(
                 report,
-                "unsupported IA-64 smoke instruction at ip=0x%016" PRIx64
+                "unsupported IA-64 instruction at ip=0x%016" PRIx64
                 " slot=%d type=%s raw=0x%011" PRIx64
                 " template=0x%02x %s",
                 report->ip_before, slot, ia64_slot_type_name(type), raw,
@@ -5431,11 +5431,11 @@ ia64_exec_smoke_bundle(CPUIA64State *env,
     }
 
     env->ip += IA64_BUNDLE_SIZE;
-    report->status = IA64_EXEC_SMOKE_OK;
+    report->status = IA64_INSN_OK;
     report->ip_after = env->ip;
-    ia64_exec_smoke_set_message(
+    ia64_insn_set_message(
         report,
-        "executed IA-64 smoke NOP bundle at ip=0x%016" PRIx64
+        "executed IA-64 NOP bundle at ip=0x%016" PRIx64
         " next=0x%016" PRIx64,
         report->ip_before, report->ip_after);
 

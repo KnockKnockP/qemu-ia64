@@ -23,7 +23,8 @@
 #include "system/memory.h"
 #include "system/reset.h"
 #include "system/system.h"
-#include "target/ia64/exec-smoke.h"
+#include "target/ia64/firmware.h"
+#include "target/ia64/insn.h"
 
 #define VIBTANIUM_DEFAULT_LINUX_APPEND ""
 #define VIBTANIUM_IOSAPIC_REG_SELECT 0x00
@@ -2163,6 +2164,12 @@ static void vibtanium_init(MachineState *machine)
     vmstate_register(NULL, 0, &vmstate_vibtanium_iosapic, vms);
 
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
+    ia64_firmware_set_dispatch(vibtanium_efi_dispatch_gate);
+    ia64_firmware_set_cmdline_append_hooks(
+        vibtanium_efi_linux_cmdline_append_pending,
+        vibtanium_efi_maybe_apply_linux_cmdline_append);
+    ia64_firmware_set_recover_post_load(
+        vibtanium_efi_console_recover_post_load);
 
     memory_region_add_subregion(sysmem, VIBTANIUM_RAM_BASE, machine->ram);
     memory_region_init_ram(&vms->vga_legacy, NULL, "vibtanium.vga-legacy",

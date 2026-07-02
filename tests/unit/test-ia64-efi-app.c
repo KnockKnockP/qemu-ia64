@@ -8,7 +8,7 @@
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/vibtanium.h"
-#include "target/ia64/exec-smoke.h"
+#include "target/ia64/insn.h"
 
 #define SYNTHETIC_PE_SIZE 0x400
 #define SYNTHETIC_PE_OFFSET 0x80

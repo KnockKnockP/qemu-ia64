@@ -4,17 +4,17 @@
 #include "cpu.h"
 #include "bundle.h"
 #include "debug-trace.h"
-#include "exec-smoke.h"
+#include "insn.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "exec/memop.h"
 #include "exec/target_page.h"
 #include "exec/translation-block.h"
 #include "exec/translator.h"
+#include "firmware.h"
 #include "hw/core/cpu.h"
-#include "hw/ia64/efi.h"
 #include "perf.h"
-#include "tcg-skeleton.h"
+#include "tcg-classify.h"
 #include "tcg/tcg-op.h"
 #include "trace-target_ia64.h"
 
@@ -821,7 +821,7 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     tcg_gen_movi_i64(cpu_ip, pc);
     tcg_gen_movi_i64(runtime_dest_mask, 0);
     if (ia64_perf_enabled() || ia64_debug_hooks_active() ||
-        vibtanium_efi_linux_cmdline_append_pending()) {
+        ia64_firmware_linux_cmdline_append_pending()) {
         gen_helper_start_fast_bundle(tcg_env,
                                      tcg_constant_i32(fast.slot_count),
                                      tcg_constant_i32(fast.op_counts));

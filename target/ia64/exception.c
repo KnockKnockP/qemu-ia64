@@ -2,7 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "exception.h"
-#include "exec-smoke.h"
+#include "insn.h"
 #include "mem.h"
 #include "perf.h"
 #include "trace-target_ia64.h"

@@ -2,26 +2,15 @@
 
 #include "qemu/osdep.h"
 #include "cpu-param.h"
-#include "exec-smoke.h"
-#include "hw/ia64/efi.h"
+#include "firmware.h"
+#include "insn.h"
 #include "perf.h"
-#include "tcg-skeleton.h"
+#include "tcg-classify.h"
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
 #define IA64_TCG_FAST_GR_LIMIT 64
 #define IA64_TCG_TARGET_PAGE_MASK (~((UINT64_C(1) << TARGET_PAGE_BITS) - 1))
-
-enum {
-    IA64_EFI_SERVICE_DESCRIPTOR_COUNT =
-        VIBTANIUM_EFI_BOOT_SERVICE_COUNT +
-        VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT +
-        VIBTANIUM_EFI_CON_OUT_SERVICE_COUNT +
-        VIBTANIUM_EFI_CON_IN_SERVICE_COUNT +
-        VIBTANIUM_EFI_BLOCK_IO_SERVICE_COUNT +
-        VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT +
-        VIBTANIUM_EFI_FILE_SERVICE_COUNT,
-};
 
 bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
 {
@@ -33,20 +22,22 @@ bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
         return false;
     }
     pc &= IA64_REGION_OFFSET_MASK;
-    if (pc == VIBTANIUM_EFI_PAL_PROC || pc == VIBTANIUM_EFI_SAL_PROC) {
+    if (pc == IA64_FIRMWARE_EFI_PAL_PROC ||
+        pc == IA64_FIRMWARE_EFI_SAL_PROC) {
         return true;
     }
 
-    if (pc < VIBTANIUM_EFI_CALL_GATE_BASE) {
+    if (pc < IA64_FIRMWARE_EFI_CALL_GATE_BASE) {
         return false;
     }
 
-    offset = pc - VIBTANIUM_EFI_CALL_GATE_BASE;
+    offset = pc - IA64_FIRMWARE_EFI_CALL_GATE_BASE;
     if ((offset & (IA64_BUNDLE_SIZE - 1)) != 0) {
         return false;
     }
 
-    return offset / IA64_BUNDLE_SIZE < IA64_EFI_SERVICE_DESCRIPTOR_COUNT;
+    return offset / IA64_BUNDLE_SIZE <
+           IA64_FIRMWARE_EFI_CLASSIFY_SERVICE_COUNT;
 }
 
 const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary)
@@ -386,7 +377,7 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     }
     slot->qualifying_predicate = qp;
 
-    if (ia64_exec_smoke_slot_supported(type, raw) ||
+    if (ia64_insn_slot_supported(type, raw) ||
         ia64_slot_is_i_nop(type, raw)) {
         slot->op = IA64_TCG_FAST_OP_NOP;
         ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_NOP_SHIFT);
@@ -725,7 +716,7 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
     }
 
-    if (ia64_exec_smoke_slot_supported(type, raw) ||
+    if (ia64_insn_slot_supported(type, raw) ||
         ia64_slot_is_i_nop(type, raw)) {
         return IA64_TCG_FALLBACK_NONE;
     }
