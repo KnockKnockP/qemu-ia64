@@ -27,6 +27,8 @@
 typedef struct DisasContext {
     DisasContextBase base;
     CPUIA64State *env;
+    TCGv_i32 fast_bundle_ticks;
+    bool fast_bundle_ticks_used;
 } DisasContext;
 
 #define DISAS_EXIT DISAS_TARGET_0
@@ -48,6 +50,8 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
 
     ctx->base.is_jmp = DISAS_NEXT;
     ctx->env = cpu_env(cs);
+    ctx->fast_bundle_ticks = NULL;
+    ctx->fast_bundle_ticks_used = false;
 
     /*
      * Instruction fetch exceptions raised while translating a later bundle in
@@ -61,9 +65,29 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
 
 static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
 {
+    DisasContext *ctx = container_of(dcbase, DisasContext, base);
+
+    ctx->fast_bundle_ticks = tcg_temp_new_i32();
+    tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0);
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exec();
     }
+}
+
+static void ia64_tr_note_fast_bundle(DisasContext *ctx)
+{
+    ctx->fast_bundle_ticks_used = true;
+    tcg_gen_addi_i32(ctx->fast_bundle_ticks, ctx->fast_bundle_ticks, 1);
+}
+
+static void ia64_tr_flush_fast_bundle_ticks(DisasContext *ctx)
+{
+    if (!ctx->fast_bundle_ticks_used) {
+        return;
+    }
+
+    gen_helper_finish_fast_tb(tcg_env, ctx->fast_bundle_ticks);
+    tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0);
 }
 
 static void ia64_tr_emit_can_do_io(void)
@@ -77,11 +101,13 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
     tcg_gen_insn_start(dcbase->pc_next, 0, 0);
 }
 
-static void ia64_tr_emit_exec_bundle(const IA64DecodedBundle *bundle,
+static void ia64_tr_emit_exec_bundle(DisasContext *ctx,
+                                     const IA64DecodedBundle *bundle,
                                      uint64_t pc)
 {
     uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
 
+    ia64_tr_flush_fast_bundle_ticks(ctx);
     tcg_gen_movi_i64(cpu_ip, pc);
     gen_helper_exec_bundle(tcg_env,
                            tcg_constant_i32(bundle->tmpl),
@@ -91,13 +117,15 @@ static void ia64_tr_emit_exec_bundle(const IA64DecodedBundle *bundle,
                            tcg_constant_i32(fallback_plan));
 }
 
-static void ia64_tr_emit_exec_bundle_lookup_ptr(const IA64DecodedBundle *bundle,
+static void ia64_tr_emit_exec_bundle_lookup_ptr(DisasContext *ctx,
+                                                const IA64DecodedBundle *bundle,
                                                 uint64_t pc)
 {
     uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
     TCGLabel *main_loop_exit = gen_new_label();
     TCGv_i32 chain_ok = tcg_temp_new_i32();
 
+    ia64_tr_flush_fast_bundle_ticks(ctx);
     tcg_gen_movi_i64(cpu_ip, pc);
     gen_helper_exec_bundle_lookup_ptr(chain_ok, tcg_env,
                                       tcg_constant_i32(bundle->tmpl),
@@ -112,8 +140,9 @@ static void ia64_tr_emit_exec_bundle_lookup_ptr(const IA64DecodedBundle *bundle,
     tcg_gen_exit_tb(NULL, 0);
 }
 
-static void ia64_tr_emit_firmware_call_gate(uint64_t pc)
+static void ia64_tr_emit_firmware_call_gate(DisasContext *ctx, uint64_t pc)
 {
+    ia64_tr_flush_fast_bundle_ticks(ctx);
     tcg_gen_movi_i64(cpu_ip, pc);
     gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc));
 }
@@ -835,19 +864,21 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     gen_helper_finish_fast_bundle(tcg_env,
                                   tcg_constant_i64(pc + IA64_BUNDLE_SIZE),
                                   runtime_dest_mask);
+    ia64_tr_note_fast_bundle(ctx);
     tcg_gen_br(done);
 
     gen_set_label(fallback);
     if (has_ldst && ia64_perf_enabled()) {
         gen_helper_perf_tcg_ldst_fallback();
     }
-    ia64_tr_emit_exec_bundle(bundle, pc);
+    ia64_tr_emit_exec_bundle(ctx, bundle, pc);
     gen_set_label(done);
     return true;
 }
 
-static void ia64_tr_emit_main_loop_exit(void)
+static void ia64_tr_emit_main_loop_exit(DisasContext *ctx)
 {
+    ia64_tr_flush_fast_bundle_ticks(ctx);
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exit_main_loop();
     }
@@ -866,11 +897,12 @@ static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
     if (translator_use_goto_tb(&ctx->base, target)) {
         tcg_gen_goto_tb(0);
         tcg_gen_movi_i64(cpu_ip, target);
+        ia64_tr_flush_fast_bundle_ticks(ctx);
         ia64_tr_count_chained_exit();
         tcg_gen_exit_tb(ctx->base.tb, 0);
     } else {
         tcg_gen_movi_i64(cpu_ip, target);
-        ia64_tr_emit_main_loop_exit();
+        ia64_tr_emit_main_loop_exit(ctx);
     }
 }
 
@@ -882,10 +914,17 @@ static void ia64_tr_emit_direct_branch_exit(DisasContext *ctx,
 {
     TCGLabel *main_loop_exit = gen_new_label();
     TCGv_i32 chain_ok = tcg_temp_new_i32();
+    TCGv_i32 branch_flags = tcg_temp_new_i32();
+
+    /* bit 0 is branch-taken, upper bits are pending fast-path bundle ticks. */
+    tcg_gen_shli_i32(branch_flags, ctx->fast_bundle_ticks, 1);
+    if (taken) {
+        tcg_gen_ori_i32(branch_flags, branch_flags, 1);
+    }
 
     gen_helper_finish_direct_branch_bundle(chain_ok, tcg_env,
                                            tcg_constant_i64(target),
-                                           tcg_constant_i32(taken ? 1 : 0),
+                                           branch_flags,
                                            tcg_constant_i32(
                                                branch->prefix.slot_count),
                                            tcg_constant_i32(
@@ -963,7 +1002,7 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     if (has_ldst && ia64_perf_enabled()) {
         gen_helper_perf_tcg_ldst_fallback();
     }
-    ia64_tr_emit_exec_bundle_lookup_ptr(bundle, pc);
+    ia64_tr_emit_exec_bundle_lookup_ptr(ctx, bundle, pc);
     return true;
 }
 
@@ -990,7 +1029,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
     boundary = ia64_tcg_tb_boundary_for_bundle(&bundle, pc);
     if (boundary == IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE) {
-        ia64_tr_emit_firmware_call_gate(pc);
+        ia64_tr_emit_firmware_call_gate(ctx, pc);
         trace_ia64_tcg_tb_boundary(pc, ia64_tcg_tb_boundary_name(boundary));
         IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
         ctx->base.is_jmp = DISAS_EXIT;
@@ -1006,7 +1045,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         trace_ia64_tcg_tb_boundary(pc,
                                    ia64_tcg_tb_boundary_name(boundary));
         IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
-        ia64_tr_emit_exec_bundle_lookup_ptr(&bundle, pc);
+        ia64_tr_emit_exec_bundle_lookup_ptr(ctx, &bundle, pc);
         ctx->base.is_jmp = DISAS_NORETURN;
         return;
     }
@@ -1016,7 +1055,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
             ia64_tcg_bundle_has_ldst_immediate(&bundle)) {
             IA64_PERF_INC(IA64_PERF_TCG_LDST_FALLBACK);
         }
-        ia64_tr_emit_exec_bundle(&bundle, pc);
+        ia64_tr_emit_exec_bundle(ctx, &bundle, pc);
     }
     if (ia64_tcg_tb_boundary_ends_tb(boundary)) {
         trace_ia64_tcg_tb_boundary(pc,
@@ -1035,7 +1074,7 @@ static void ia64_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
         ia64_tr_emit_fallthrough_exit(ctx, ctx->base.pc_next);
         break;
     case DISAS_EXIT:
-        ia64_tr_emit_main_loop_exit();
+        ia64_tr_emit_main_loop_exit(ctx);
         break;
     case DISAS_NORETURN:
         break;

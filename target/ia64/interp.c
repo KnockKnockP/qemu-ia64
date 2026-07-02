@@ -215,11 +215,20 @@ static G_NORETURN void ia64_exit_after_translation_fault(
 static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
                                unsigned next_ri)
 {
-    CPUState *cpu = env_cpu(env);
-
     env->psr = ia64_psr_with_ri(env->psr, next_ri);
     env->ip = next_ip;
-    if (ia64_advance_itc_and_check_timer(env, 1)) {
+}
+
+static void ia64_finish_tcg_ticks(CPUIA64State *env, uint32_t bundle_count)
+{
+    CPUState *cpu;
+
+    if (bundle_count == 0) {
+        return;
+    }
+
+    cpu = env_cpu(env);
+    if (ia64_advance_itc_and_check_timer(env, bundle_count)) {
         ia64_latch_timer_interrupt(env);
         cpu_set_interrupt(cpu, CPU_INTERRUPT_HARD);
     }
@@ -234,6 +243,13 @@ static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
         IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
         cpu_loop_exit(cpu);
     }
+}
+
+static void ia64_finish_interpreted_bundle(CPUIA64State *env, uint64_t next_ip,
+                                           unsigned next_ri)
+{
+    ia64_finish_bundle(env, next_ip, next_ri);
+    ia64_finish_tcg_ticks(env, 1);
 }
 
 static bool ia64_tcg_can_chain(CPUIA64State *env)
@@ -251,6 +267,21 @@ static uint32_t ia64_lookup_ptr_chain_ok(CPUIA64State *env)
     IA64_PERF_INC(chain_ok ? IA64_PERF_TB_EXIT_LOOKUP_PTR :
                              IA64_PERF_TB_EXIT_MAIN_LOOP);
     return chain_ok ? 1 : 0;
+}
+
+static void ia64_alat_invalidate_gr_mask(CPUIA64State *env, uint64_t dest_mask)
+{
+    dest_mask &= ~1ULL;
+    if (dest_mask == 0 || env->alat.valid_mask == 0) {
+        return;
+    }
+
+    while (dest_mask && env->alat.valid_mask != 0) {
+        unsigned reg = ctz64(dest_mask);
+
+        ia64_alat_invalidate_gr(env, reg);
+        dest_mask &= dest_mask - 1;
+    }
 }
 
 #include "interp-ldst.c"
@@ -378,13 +409,14 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
 void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
                                 uint64_t dest_mask)
 {
-    for (unsigned reg = 1; reg < 64; reg++) {
-        if (dest_mask & (1ULL << reg)) {
-            ia64_alat_invalidate_gr(env, reg);
-        }
-    }
+    ia64_alat_invalidate_gr_mask(env, dest_mask);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
+}
+
+void HELPER(finish_fast_tb)(CPUIA64State *env, uint32_t bundle_count)
+{
+    ia64_finish_tcg_ticks(env, bundle_count);
 }
 
 void HELPER(finish_fast_store)(CPUIA64State *env, uint64_t address,
@@ -417,12 +449,15 @@ static void ia64_flush_qemu_tlb_for_page(CPUState *cpu, vaddr address,
 
 uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
                                              uint64_t next_ip,
-                                             uint32_t taken,
+                                             uint32_t branch_flags,
                                              uint32_t prefix_slot_count,
                                              uint32_t prefix_op_counts,
                                              uint64_t prefix_dest_mask)
 {
     CPUState *cpu = env_cpu(env);
+    /* bit 0 is branch-taken, upper bits are pending fast-path bundle ticks. */
+    bool taken = branch_flags & 1;
+    uint32_t pending_bundle_count = branch_flags >> 1;
     bool chain_ok;
     bool debug_hooks = ia64_debug_hooks_active();
 
@@ -445,13 +480,10 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
-    for (unsigned reg = 1; reg < 64; reg++) {
-        if (prefix_dest_mask & (1ULL << reg)) {
-            ia64_alat_invalidate_gr(env, reg);
-        }
-    }
+    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
+    ia64_finish_tcg_ticks(env, pending_bundle_count + 1);
 
     chain_ok = ia64_tcg_can_chain(env);
     IA64_PERF_INC(chain_ok ? IA64_PERF_TB_EXIT_CHAINED :
@@ -766,7 +798,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
             IA64_PERF_INC(IA64_PERF_OP_STORE);
-            ia64_finish_bundle(env, next_ip, 0);
+            ia64_finish_interpreted_bundle(env, next_ip, 0);
             return;
         }
     }
@@ -1308,7 +1340,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
 
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_SLOT, planned_slot_count);
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT, planned_bailout_count);
-    ia64_finish_bundle(env, next_ip, next_ri);
+    ia64_finish_interpreted_bundle(env, next_ip, next_ri);
 }
 
 void HELPER(exec_bundle)(CPUIA64State *env,
