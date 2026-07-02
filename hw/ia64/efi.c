@@ -783,7 +783,8 @@ static void write_loaded_image(uint8_t *blob, size_t size,
     blob_wr32(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 84, 2);
 }
 
-static void write_configuration_table(uint8_t *blob, size_t size)
+static void write_configuration_table(uint8_t *blob, size_t size,
+                                      bool hcdp_serial_console)
 {
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE,
                efi_acpi20_table_guid);
@@ -793,10 +794,12 @@ static void write_configuration_table(uint8_t *blob, size_t size)
                efi_sal_system_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 40,
               VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
-    write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 48,
-               efi_hcdp_table_guid);
-    blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 64,
-              VIBTANIUM_EFI_HCDP_TABLE);
+    if (hcdp_serial_console) {
+        write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 48,
+                   efi_hcdp_table_guid);
+        blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 64,
+                  VIBTANIUM_EFI_HCDP_TABLE);
+    }
 }
 
 static void write_sal_system_table(uint8_t *blob, size_t size)
@@ -976,7 +979,8 @@ static void write_acpi_tables(uint8_t *blob, size_t size)
     write_acpi_facs(blob, size);
 }
 
-static void write_system_table(uint8_t *blob, size_t size)
+static void write_system_table(uint8_t *blob, size_t size,
+                               unsigned configuration_table_count)
 {
     uint8_t *table = blob_ptr(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE, 120);
 
@@ -999,7 +1003,8 @@ static void write_system_table(uint8_t *blob, size_t size)
               VIBTANIUM_EFI_RUNTIME_SERVICES);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 96,
               VIBTANIUM_EFI_BOOT_SERVICES);
-    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104, 3);
+    blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 104,
+              configuration_table_count);
     blob_wr64(blob, size, VIBTANIUM_EFI_SYSTEM_TABLE + 112,
               VIBTANIUM_EFI_CONFIGURATION_TABLE);
     write_table_header(table, 120, 0x5453595320494249ULL);
@@ -1126,9 +1131,11 @@ static void write_media_protocols(uint8_t *blob, size_t size,
 
 uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiImage *image,
-                                           const VibtaniumEfiBlockDevice *boot_media)
+                                           const VibtaniumEfiBlockDevice *boot_media,
+                                           const VibtaniumEfiFirmwareOptions *options)
 {
     uint8_t *blob;
+    bool hcdp_serial_console = options && options->hcdp_serial_console;
 
     if (size) {
         *size = VIBTANIUM_EFI_BLOB_SIZE;
@@ -1155,11 +1162,15 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                         0x56524553544e5552ULL,
                         EFI_RUNTIME_SERVICE_BASE,
                         VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT, -1);
-    write_configuration_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    write_configuration_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
+                              hcdp_serial_console);
     write_acpi_tables(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_sal_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
-    write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
-    write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    if (hcdp_serial_console) {
+        write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE);
+    }
+    write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
+                       hcdp_serial_console ? 3 : 2);
 
     return blob;
 }

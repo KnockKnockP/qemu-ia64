@@ -76,6 +76,7 @@ struct VibtaniumMachineState {
     char *efi_boot_manager;
     VibtaniumEfiBootManagerState *boot_manager;
     bool efi_auto_enter;
+    bool hcdp_serial_console;
     uint32_t iosapic_select;
     uint32_t iosapic_rte_low[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];
     uint32_t iosapic_rte_high[VIBTANIUM_IOSAPIC_REDIRECTION_COUNT];

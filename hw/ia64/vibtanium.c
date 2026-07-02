@@ -689,6 +689,9 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     size_t firmware_blob_size = 0;
     const char *linux_append = machine->kernel_cmdline;
     const char *overlap;
+    VibtaniumEfiFirmwareOptions firmware_options = {
+        .hcdp_serial_console = vms->hcdp_serial_console,
+    };
 
     if (!linux_append || !linux_append[0]) {
         linux_append = VIBTANIUM_DEFAULT_LINUX_APPEND;
@@ -712,7 +715,8 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     }
 
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
-                                                      image, boot_media);
+                                                      image, boot_media,
+                                                      &firmware_options);
     vibtanium_efi_input_set_auto_enter(vms->efi_auto_enter);
     vibtanium_efi_register_boot_media(boot_media);
     vibtanium_efi_register_loaded_image(image->load_base, image->size);
@@ -2243,6 +2247,21 @@ static void vibtanium_set_efi_auto_enter(Object *obj, bool value, Error **errp)
     vms->efi_auto_enter = value;
 }
 
+static bool vibtanium_get_hcdp_serial_console(Object *obj, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    return vms->hcdp_serial_console;
+}
+
+static void vibtanium_set_hcdp_serial_console(Object *obj, bool value,
+                                              Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    vms->hcdp_serial_console = value;
+}
+
 static char *vibtanium_get_nvram(Object *obj, Error **errp)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
@@ -2325,6 +2344,12 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
                                    vibtanium_set_efi_auto_enter);
     object_class_property_set_description(oc, "efi-auto-enter",
         "Queue one EFI Simple Text Input Enter key at firmware reset");
+
+    object_class_property_add_bool(oc, "hcdp-serial-console",
+                                   vibtanium_get_hcdp_serial_console,
+                                   vibtanium_set_hcdp_serial_console);
+    object_class_property_set_description(oc, "hcdp-serial-console",
+        "Expose the IA-64 HCDP UART as the firmware-selected primary console");
 
     object_class_property_add_str(oc, "nvram",
                                   vibtanium_get_nvram,

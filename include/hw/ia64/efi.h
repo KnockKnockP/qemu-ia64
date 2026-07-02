@@ -123,6 +123,10 @@ typedef struct VibtaniumEfiInputKey {
     uint16_t unicode_char;
 } VibtaniumEfiInputKey;
 
+typedef struct VibtaniumEfiFirmwareOptions {
+    bool hcdp_serial_console;
+} VibtaniumEfiFirmwareOptions;
+
 typedef enum VibtaniumEfiService {
     VIBTANIUM_EFI_SERVICE_UNKNOWN,
     VIBTANIUM_EFI_SERVICE_LOADED_IMAGE_PROTOCOL,
@@ -192,7 +196,8 @@ void vibtanium_efi_prepare_cpu(CPUIA64State *env,
                                const VibtaniumEfiImage *image);
 uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiImage *image,
-                                           const struct VibtaniumEfiBlockDevice *boot_media);
+                                           const struct VibtaniumEfiBlockDevice *boot_media,
+                                           const VibtaniumEfiFirmwareOptions *options);
 bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
 void vibtanium_efi_register_loaded_image(uint64_t image_base,
                                          uint64_t image_size);

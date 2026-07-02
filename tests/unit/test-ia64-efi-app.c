@@ -286,7 +286,7 @@ static void test_builds_guest_firmware_tables(void)
     };
     size_t blob_size = 0;
     uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
-                                                      &boot_media);
+                                                      &boot_media, NULL);
     uint64_t boot_services;
     uint64_t runtime_services;
     uint64_t get_time_descriptor;
@@ -298,9 +298,6 @@ static void test_builds_guest_firmware_tables(void)
     const uint8_t *sal_config_entry;
     const uint8_t *sal_table;
     const uint8_t *sal_entry;
-    const uint8_t *hcdp_config_entry;
-    const uint8_t *hcdp_table;
-    const uint8_t *hcdp_uart;
     const uint8_t *rsdp;
     const uint8_t *rsdt;
     const uint8_t *xsdt;
@@ -321,7 +318,7 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(runtime_services, ==, VIBTANIUM_EFI_RUNTIME_SERVICES);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SYSTEM_TABLE + 104)),
-                    ==, 3);
+                    ==, 2);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SYSTEM_TABLE + 112)),
                     ==, VIBTANIUM_EFI_CONFIGURATION_TABLE);
@@ -400,10 +397,9 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmpmem(sal_config_entry, 16, efi_sal_system_table_guid, 16);
     g_assert_cmphex(load_le64(sal_config_entry + 16),
                     ==, VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
-    hcdp_config_entry = config_entry + 48;
-    g_assert_cmpmem(hcdp_config_entry, 16, efi_hcdp_table_guid, 16);
-    g_assert_cmphex(load_le64(hcdp_config_entry + 16),
-                    ==, VIBTANIUM_EFI_HCDP_TABLE);
+    g_assert_false(bytes_contain(config_entry, 72,
+                                 efi_hcdp_table_guid,
+                                 sizeof(efi_hcdp_table_guid)));
 
     rsdp = firmware_ptr(blob, VIBTANIUM_EFI_ACPI_RSDP);
     g_assert_cmpmem(rsdp, 8, "RSD PTR ", 8);
@@ -501,19 +497,8 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_SAL_GP)),
                     ==, 0);
 
-    hcdp_table = firmware_ptr(blob, VIBTANIUM_EFI_HCDP_TABLE);
-    g_assert_cmpmem(hcdp_table, 4, "HCDP", 4);
-    g_assert_cmphex(load_le32(hcdp_table + 4), ==, 88);
-    g_assert_cmpuint(hcdp_table[8], ==, 3);
-    g_assert_cmphex(byte_sum(hcdp_table, 88), ==, 0);
-    g_assert_cmphex(load_le32(hcdp_table + 36), ==, 1);
-    hcdp_uart = hcdp_table + 40;
-    g_assert_cmpuint(hcdp_uart[0], ==, 0);
-    g_assert_cmpuint(hcdp_uart[1], ==, 8);
-    g_assert_cmphex(load_le64(hcdp_uart + 8), ==, 115200);
-    g_assert_cmpuint(hcdp_uart[16], ==, 1);
-    g_assert_cmphex(load_le64(hcdp_uart + 20), ==, 0x3f8);
-    g_assert_cmphex(hcdp_uart[41], ==, 1 << 2);
+    g_assert_cmphex(load_le32(firmware_ptr(blob, VIBTANIUM_EFI_HCDP_TABLE)),
+                    ==, 0);
 
     block_io_base = VIBTANIUM_EFI_BOOT_SERVICE_COUNT +
                     VIBTANIUM_EFI_RUNTIME_SERVICE_COUNT +
@@ -541,6 +526,51 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM + 8)),
                     ==, VIBTANIUM_EFI_DESCRIPTOR_BASE + simplefs_base * 16);
+
+    g_free(blob);
+}
+
+static void test_builds_hcdp_serial_console_table(void)
+{
+    VibtaniumEfiImage image = {
+        .load_base = VIBTANIUM_EFI_APP_BASE,
+        .size = 0x123450,
+    };
+    VibtaniumEfiFirmwareOptions options = {
+        .hcdp_serial_console = true,
+    };
+    size_t blob_size = 0;
+    uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
+                                                      NULL, &options);
+    const uint8_t *config_entry;
+    const uint8_t *hcdp_config_entry;
+    const uint8_t *hcdp_table;
+    const uint8_t *hcdp_uart;
+
+    g_assert_cmpuint(blob_size, ==, VIBTANIUM_EFI_BLOB_SIZE);
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob, VIBTANIUM_EFI_SYSTEM_TABLE + 104)),
+                    ==, 3);
+
+    config_entry = firmware_ptr(blob, VIBTANIUM_EFI_CONFIGURATION_TABLE);
+    hcdp_config_entry = config_entry + 48;
+    g_assert_cmpmem(hcdp_config_entry, 16, efi_hcdp_table_guid, 16);
+    g_assert_cmphex(load_le64(hcdp_config_entry + 16),
+                    ==, VIBTANIUM_EFI_HCDP_TABLE);
+
+    hcdp_table = firmware_ptr(blob, VIBTANIUM_EFI_HCDP_TABLE);
+    g_assert_cmpmem(hcdp_table, 4, "HCDP", 4);
+    g_assert_cmphex(load_le32(hcdp_table + 4), ==, 88);
+    g_assert_cmpuint(hcdp_table[8], ==, 3);
+    g_assert_cmphex(byte_sum(hcdp_table, 88), ==, 0);
+    g_assert_cmphex(load_le32(hcdp_table + 36), ==, 1);
+    hcdp_uart = hcdp_table + 40;
+    g_assert_cmpuint(hcdp_uart[0], ==, 0);
+    g_assert_cmpuint(hcdp_uart[1], ==, 8);
+    g_assert_cmphex(load_le64(hcdp_uart + 8), ==, 115200);
+    g_assert_cmpuint(hcdp_uart[16], ==, 1);
+    g_assert_cmphex(load_le64(hcdp_uart + 20), ==, 0x3f8);
+    g_assert_cmphex(hcdp_uart[41], ==, 1 << 2);
 
     g_free(blob);
 }
@@ -683,6 +713,8 @@ int main(int argc, char **argv)
                     test_prepare_cpu_entry_abi);
     g_test_add_func("/ia64-efi-app/build-guest-firmware-tables",
                     test_builds_guest_firmware_tables);
+    g_test_add_func("/ia64-efi-app/build-hcdp-serial-console-table",
+                    test_builds_hcdp_serial_console_table);
     g_test_add_func("/ia64-efi-app/relocate-entry-descriptor",
                     test_relocates_ia64_entry_descriptor);
     g_test_add_func("/ia64-efi-app/load-fixed-at-preferred-base",
