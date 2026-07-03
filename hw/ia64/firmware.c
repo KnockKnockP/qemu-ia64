@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/getpc.h"
 #include "hw/ia64/efi.h"
 #include "hw/pci/pci.h"
@@ -17,7 +18,13 @@
 #define IA64_FIRMWARE_STATUS_UNIMPLEMENTED UINT64_C(0xffffffffffffffff)
 #define IA64_FIRMWARE_STATUS_INVALID_ARGUMENT UINT64_C(0xfffffffffffffffe)
 #define IA64_FIRMWARE_STATUS_REQUIRES_MEMORY UINT64_C(0xfffffffffffffff7)
-#define IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY UINT64_C(100000000)
+/*
+ * Platform base frequency reported by SAL_FREQ_BASE and PAL_FREQ_BASE.  With
+ * the 1/1 PAL ITC ratio below this is also the ITC frequency, which the
+ * target really implements: AR.ITC follows the QEMU virtual clock at
+ * IA64_ITC_FREQUENCY_HZ.
+ */
+#define IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY ((uint64_t)IA64_ITC_FREQUENCY_HZ)
 #define IA64_PAL_FREQ_RATIO(den, num) \
     ((((uint64_t)(num)) << 32) | (uint32_t)(den))
 #define IA64_PAL_VERSION UINT64_C(0x0000002300000000)
@@ -462,9 +469,9 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
         /*
          * PAL encodes frequency ratios as { uint32_t den, num }.  Linux uses
          * ITC frequency = SAL_FREQ_BASE_PLATFORM * num / den for scheduling
-         * and watchdog time, while this target advances ITC by retired guest
-         * bundles.  Keep the advertised ITC frequency consistent with that
-         * model instead of accidentally reporting a 1 MHz interval timer.
+         * and delay loops.  The target backs AR.ITC with the QEMU virtual
+         * clock at exactly IA64_ITC_FREQUENCY_HZ, so a 1/1 ratio on the
+         * 100 MHz base makes the advertised and implemented rates identical.
          */
         return firmware_success(IA64_PAL_FREQ_RATIO(1, 1),
                                 IA64_PAL_FREQ_RATIO(1, 1),
@@ -874,6 +881,23 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         firmware_trace_call(env, "pal", pal_procedure_name(function_id),
                             function_id, arg0, arg1, arg2, result);
         firmware_write_result(env, result, !static_call);
+        if ((function_id == IA64_PAL_HALT ||
+             function_id == IA64_PAL_HALT_LIGHT) &&
+            result.status == IA64_FIRMWARE_STATUS_SUCCESS) {
+            CPUState *cs = env_cpu(env);
+
+            /*
+             * PAL halt completes when an external interrupt arrives.  The
+             * return values and IP are committed above, so the vCPU can
+             * sleep until has_work() sees CPU_INTERRUPT_HARD or a
+             * deliverable interrupt (ITM deadline timer, device, IPI).
+             * AR.ITC keeps running while halted because it follows the QEMU
+             * virtual clock.
+             */
+            cs->halted = 1;
+            cs->exception_index = EXCP_HLT;
+            cpu_loop_exit(cs);
+        }
         return true;
     }
 

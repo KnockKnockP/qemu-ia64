@@ -7,6 +7,7 @@
 #include "mem.h"
 #include "perf.h"
 #include "qemu/host-utils.h"
+#include "qemu/timer.h"
 #include "trace-target_ia64.h"
 
 #define IA64_FR_EXPONENT_BIAS 0xffff
@@ -939,6 +940,9 @@ static uint64_t ia64_read_ar(CPUIA64State *env, uint32_t reg)
         return env->rse.rnat;
     case IA64_AR_UNAT:
         return env->nat.unat;
+    case IA64_AR_ITC:
+        ia64_itc_sync(env);
+        return env->ar[IA64_AR_ITC];
     default:
         return env->ar[reg];
     }
@@ -1079,8 +1083,9 @@ static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)
 
     switch (reg) {
     case IA64_AR_ITC:
-        env->ar[reg] = value;
+        ia64_itc_set(env, value);
         env->interrupt.timer_compare_latched = 0;
+        ia64_itc_timer_update(env);
         break;
     case IA64_AR_RSC:
         env->ar[reg] = value;
@@ -1824,13 +1829,100 @@ static bool ia64_timer_compare_due(CPUIA64State *env)
     return true;
 }
 
-void ia64_advance_itc(CPUIA64State *env, uint64_t ticks)
+/*
+ * AR.ITC is backed by the QEMU virtual clock at IA64_ITC_FREQUENCY_HZ so
+ * guest time tracks real time regardless of emulation speed.  While
+ * itc_clock_backed is false (bare resets in unit tests), the register stays
+ * fully manual and every helper below degrades to plain
+ * env->ar[IA64_AR_ITC] accesses.
+ */
+static int64_t ia64_itc_clock_ticks(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / IA64_ITC_NS_PER_TICK;
+}
+
+void ia64_itc_sync(CPUIA64State *env)
+{
+    if (!env || !env->itc_clock_backed) {
+        return;
+    }
+
+    env->ar[IA64_AR_ITC] = (uint64_t)(ia64_itc_clock_ticks() +
+                                      env->itc_offset);
+}
+
+void ia64_itc_set(CPUIA64State *env, uint64_t value)
 {
     if (!env) {
         return;
     }
 
-    env->ar[IA64_AR_ITC] += ticks;
+    env->ar[IA64_AR_ITC] = value;
+    if (env->itc_clock_backed) {
+        env->itc_offset = (int64_t)value - ia64_itc_clock_ticks();
+    }
+}
+
+void ia64_itc_warp_to(CPUIA64State *env, uint64_t target)
+{
+    if (!env) {
+        return;
+    }
+
+    ia64_itc_sync(env);
+    if (!ia64_time_after_eq(env->ar[IA64_AR_ITC], target)) {
+        ia64_itc_set(env, target);
+        ia64_itc_timer_update(env);
+    }
+}
+
+static bool ia64_itm_timer_can_fire(CPUIA64State *env)
+{
+    uint64_t vector = ia64_timer_vector(env);
+
+    return !env->interrupt.timer_compare_latched &&
+           !ia64_timer_vector_masked(env) &&
+           vector > IA64_INTERRUPT_SPURIOUS_VECTOR &&
+           ia64_valid_external_interrupt_vector(vector);
+}
+
+void ia64_itc_timer_update(CPUIA64State *env)
+{
+    int64_t now_ns;
+    int64_t delta_ticks;
+
+    if (!env || !env->itc_clock_backed || !env->itm_timer) {
+        return;
+    }
+    if (!ia64_itm_timer_can_fire(env)) {
+        timer_del(env->itm_timer);
+        return;
+    }
+
+    now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    delta_ticks = (int64_t)(env->cr[IA64_CR_ITM] -
+                            (uint64_t)(now_ns / IA64_ITC_NS_PER_TICK +
+                                       env->itc_offset));
+    if (delta_ticks <= 0) {
+        timer_mod(env->itm_timer, now_ns);
+        return;
+    }
+    if (delta_ticks >= (INT64_MAX - now_ns) / IA64_ITC_NS_PER_TICK) {
+        /*
+         * The compare point lies beyond the virtual clock's range.  Every
+         * ITM/ITV/ITC write re-evaluates the deadline, so treat it as
+         * unreachable rather than arming an overflowed expiry.
+         */
+        timer_del(env->itm_timer);
+        return;
+    }
+    timer_mod(env->itm_timer, now_ns + delta_ticks * IA64_ITC_NS_PER_TICK);
+}
+
+bool ia64_itc_timer_poll(CPUIA64State *env)
+{
+    ia64_itc_sync(env);
+    return ia64_timer_interrupt_due(env);
 }
 
 bool ia64_timer_interrupt_due(CPUIA64State *env)
@@ -1856,41 +1948,12 @@ bool ia64_timer_interrupt_due(CPUIA64State *env)
     return true;
 }
 
-bool ia64_advance_itc_and_check_timer(CPUIA64State *env, uint64_t ticks)
-{
-    uint64_t vector;
-
-    if (!env) {
-        return false;
-    }
-
-    env->ar[IA64_AR_ITC] += ticks;
-    IA64_PERF_INC(IA64_PERF_INTERRUPT_CHECK);
-    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_CHECK);
-
-    if (!ia64_timer_compare_due(env)) {
-        IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_FAST_NOT_DUE);
-        return false;
-    }
-
-    vector = ia64_timer_vector(env);
-    if (env->interrupt.timer_compare_latched) {
-        return false;
-    }
-    if (ia64_interrupt_vector_active(env, vector) ||
-        ia64_interrupt_vector_pending(env, vector)) {
-        return false;
-    }
-
-    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_DUE);
-    return true;
-}
-
 void ia64_latch_timer_interrupt(CPUIA64State *env)
 {
     IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_LATCHED);
     if (ia64_queue_external_interrupt(env, ia64_timer_vector(env))) {
         env->interrupt.timer_compare_latched = 1;
+        ia64_itc_timer_update(env);
     }
 }
 
@@ -1987,6 +2050,7 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
         break;
     case IA64_CR_ITM:
         env->interrupt.timer_compare_latched = 0;
+        ia64_itc_sync(env);
         if (!ia64_timer_compare_due(env)) {
             uint64_t vector = ia64_timer_vector(env);
 
@@ -1994,6 +2058,7 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
                 ia64_clear_pending_external_interrupt(env, vector);
             }
         }
+        ia64_itc_timer_update(env);
         break;
     case IA64_CR_IRR0:
     case IA64_CR_IRR1:
@@ -2008,6 +2073,7 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
                                                   value &
                                                   IA64_INTERRUPT_VECTOR_MASK);
         }
+        ia64_itc_timer_update(env);
         break;
     default:
         break;

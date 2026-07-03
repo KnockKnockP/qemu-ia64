@@ -49,6 +49,17 @@
 #define IA64_ISR_EI_SHIFT 41
 #define IA64_ISR_EI_MASK UINT64_C(0x0000060000000000)
 
+/*
+ * AR.ITC advances at a fixed declared rate backed by the QEMU virtual clock,
+ * so guest time tracks real time regardless of emulation speed.  100 MHz
+ * divides nanoseconds exactly (10 ns per tick) and matches the frequency the
+ * firmware advertises (SAL_FREQ_BASE 100 MHz with a 1/1 PAL ITC ratio).
+ */
+#define IA64_ITC_FREQUENCY_HZ 100000000
+#define IA64_ITC_NS_PER_TICK 10
+/* UEFI event trigger times are expressed in 100 ns units. */
+#define IA64_ITC_TICKS_PER_100NS 10
+
 typedef enum IA64MmuIndex {
     IA64_MMU_PHYSICAL = 0,
     IA64_MMU_DATA_CPL0 = 1,
@@ -370,12 +381,32 @@ typedef struct CPUArchState {
     IA64AlatState alat;
 
     /*
+     * ar[IA64_AR_ITC] caches the clock-backed ITC value and is refreshed by
+     * ia64_itc_sync().  itc_offset holds "ITC minus virtual-clock ticks" so
+     * guest writes to AR.ITC persist on top of the backing clock.  Both are
+     * transient: vmstate serializes the synced ar[] value and re-derives the
+     * offset on load.  itc_clock_backed sits inside the reset region so a
+     * bare reset (unit tests on stack-allocated envs) deterministically
+     * falls back to a fully manual AR.ITC; the system CPU reset hook turns
+     * it back on after creating the ITM deadline timer.
+     */
+    int64_t itc_offset;
+    bool itc_clock_backed;
+
+    /*
      * Perf-only transient set by a fault-induced cpu_loop_exit and consumed
      * by the next TB translation. It is not serialized.
      */
     bool fault_exit_pending_tb_translate;
 
     struct {} end_reset_fields;
+
+    /*
+     * QEMU virtual-clock deadline timer for CR.ITM, owned by the CPU.  NULL
+     * outside system emulation (unit tests); while NULL, AR.ITC stays fully
+     * manual and no deadline is armed.
+     */
+    QEMUTimer *itm_timer;
 } CPUIA64State;
 
 struct ArchCPU {

@@ -168,6 +168,15 @@ static const VMStateDescription vmstate_exception = {
     }
 };
 
+static int ia64_env_pre_save(void *opaque)
+{
+    CPUIA64State *env = opaque;
+
+    /* Serialize the current clock-backed ITC value in ar[IA64_AR_ITC]. */
+    ia64_itc_sync(env);
+    return 0;
+}
+
 static int ia64_env_post_load(void *opaque, int version_id)
 {
     CPUIA64State *env = opaque;
@@ -189,6 +198,12 @@ static int ia64_env_post_load(void *opaque, int version_id)
     ia64_translation_lookup_cache_flush(env);
     ia64_alat_reconstruct_transients(env);
     env->interrupt.timer_compare_latched = 0;
+    /*
+     * Guest time continues from the serialized ITC value; re-derive the
+     * clock offset and re-arm the CR.ITM deadline for the new clock.
+     */
+    ia64_itc_set(env, env->ar[IA64_AR_ITC]);
+    ia64_itc_timer_update(env);
     ia64_reconcile_interrupt_state(env);
     env->gr[0] = 0;
     env->pr |= 1;
@@ -203,6 +218,7 @@ static const VMStateDescription vmstate_env = {
     .name = "env",
     .version_id = 3,
     .minimum_version_id = 1,
+    .pre_save = ia64_env_pre_save,
     .post_load = ia64_env_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT64_ARRAY(gr, CPUIA64State, IA64_GR_COUNT),

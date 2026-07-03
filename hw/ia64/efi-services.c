@@ -2355,6 +2355,12 @@ static uint64_t efi_create_event(CPUIA64State *env)
     return VIBTANIUM_EFI_OUT_OF_RESOURCES;
 }
 
+static uint64_t efi_itc_now(CPUIA64State *env)
+{
+    ia64_itc_sync(env);
+    return env->ar[IA64_AR_ITC];
+}
+
 static uint64_t efi_set_timer(CPUIA64State *env)
 {
     uint64_t handle = ia64_read_gr(env, 32);
@@ -2376,10 +2382,12 @@ static uint64_t efi_set_timer(CPUIA64State *env)
         return VIBTANIUM_EFI_SUCCESS;
     case EFI_TIMER_PERIODIC:
     case EFI_TIMER_RELATIVE:
+        /* UEFI trigger times are in 100 ns units; event state is ITC ticks. */
         event->timer_active = true;
         event->timer_periodic = timer_type == EFI_TIMER_PERIODIC;
-        event->timer_period = trigger_time;
-        event->timer_due = env->ar[IA64_AR_ITC] + trigger_time;
+        event->timer_period = trigger_time * IA64_ITC_TICKS_PER_100NS;
+        event->timer_due = efi_itc_now(env) +
+                           trigger_time * IA64_ITC_TICKS_PER_100NS;
         event->signaled = trigger_time == 0;
         return VIBTANIUM_EFI_SUCCESS;
     default:
@@ -2390,7 +2398,7 @@ static uint64_t efi_set_timer(CPUIA64State *env)
 static bool efi_event_timer_due(CPUIA64State *env, EfiGuestEvent *event)
 {
     return event->timer_active &&
-           vibtanium_efi_timer_due(env->ar[IA64_AR_ITC], event->timer_due);
+           vibtanium_efi_timer_due(efi_itc_now(env), event->timer_due);
 }
 
 static void efi_event_consume(CPUIA64State *env, EfiGuestEvent *event)
@@ -2403,7 +2411,7 @@ static void efi_event_consume(CPUIA64State *env, EfiGuestEvent *event)
         if (event->timer_periodic && event->timer_period != 0) {
             do {
                 event->timer_due += event->timer_period;
-            } while (vibtanium_efi_timer_due(env->ar[IA64_AR_ITC],
+            } while (vibtanium_efi_timer_due(efi_itc_now(env),
                                              event->timer_due));
         } else {
             event->timer_active = false;
@@ -2443,7 +2451,7 @@ static bool efi_event_next_timer(CPUIA64State *env, EfiGuestEvent *event,
     }
 
     if (efi_event_timer_due(env, event)) {
-        *due = env->ar[IA64_AR_ITC];
+        *due = efi_itc_now(env);
     } else {
         *due = event->timer_due;
     }
@@ -2467,7 +2475,7 @@ static bool efi_wait_timer_candidate(CPUIA64State *env, EfiGuestEvent *event,
     }
 
     if (*timer_index == UINT64_MAX ||
-        efi_timer_before(env->ar[IA64_AR_ITC], due, *timer_due)) {
+        efi_timer_before(efi_itc_now(env), due, *timer_due)) {
         *timer_index = index;
         *timer_due = due;
     }
@@ -2476,9 +2484,11 @@ static bool efi_wait_timer_candidate(CPUIA64State *env, EfiGuestEvent *event,
 
 static void efi_block_until_timer(CPUIA64State *env, uint64_t timer_due)
 {
-    if (!vibtanium_efi_timer_due(env->ar[IA64_AR_ITC], timer_due)) {
-        env->ar[IA64_AR_ITC] = timer_due;
-    }
+    /*
+     * Warp guest time forward to the deadline instead of making the caller
+     * spin; boot loaders wait out multi-second delays this way.
+     */
+    ia64_itc_warp_to(env, timer_due);
 }
 
 static uint64_t efi_wait_ready_event(CPUIA64State *env, uint64_t count,

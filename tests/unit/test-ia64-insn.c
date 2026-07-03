@@ -1485,7 +1485,8 @@ static void test_interrupt_control_registers(void)
     env.ar[IA64_AR_ITC] = 9;
     g_assert_false(ia64_timer_interrupt_due(&env));
 
-    ia64_advance_itc(&env, 1);
+    /* Without an ITM deadline timer, ia64_itc_set stays fully manual. */
+    ia64_itc_set(&env, 10);
     g_assert_true(ia64_timer_interrupt_due(&env));
     ia64_latch_timer_interrupt(&env);
     g_assert_true(ia64_external_interrupt_pending(&env));
@@ -1530,8 +1531,9 @@ static void test_interrupt_control_registers(void)
     env.cr[IA64_CR_ITV] = 0xef;
     env.cr[IA64_CR_ITM] = 10;
     env.ar[IA64_AR_ITC] = 9;
-    g_assert_true(ia64_advance_itc_and_check_timer(&env, 1));
-    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 10);
+    g_assert_false(ia64_itc_timer_poll(&env));
+    ia64_itc_set(&env, 10);
+    g_assert_true(ia64_itc_timer_poll(&env));
     ia64_latch_timer_interrupt(&env);
     g_assert_true(ia64_external_interrupt_pending(&env));
 
@@ -1539,9 +1541,22 @@ static void test_interrupt_control_registers(void)
     env.cr[IA64_CR_ITV] = (1ULL << 16) | 0xef;
     env.cr[IA64_CR_ITM] = 0;
     env.ar[IA64_AR_ITC] = 1000;
-    g_assert_false(ia64_advance_itc_and_check_timer(&env, 1));
-    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 1001);
+    g_assert_false(ia64_itc_timer_poll(&env));
     g_assert_false(ia64_external_interrupt_pending(&env));
+}
+
+static void test_itc_warp_moves_forward_only(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_itc_set(&env, 100);
+    ia64_itc_warp_to(&env, 90);
+    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 100);
+    ia64_itc_warp_to(&env, 250);
+    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 250);
+    ia64_itc_warp_to(&env, 250);
+    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 250);
 }
 
 static void test_timer_compare_rearms_only_on_itm_programming(void)
@@ -1560,15 +1575,15 @@ static void test_timer_compare_rearms_only_on_itm_programming(void)
     ia64_write_control_register(&env, IA64_CR_EOI, 0);
 
     g_assert_false(ia64_timer_interrupt_due(&env));
-    g_assert_false(ia64_advance_itc_and_check_timer(&env, 1));
-    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 11);
+    ia64_itc_set(&env, 11);
+    g_assert_false(ia64_itc_timer_poll(&env));
     g_assert_false(ia64_external_interrupt_pending(&env));
 
     ia64_write_control_register(&env, IA64_CR_ITM, 13);
-    g_assert_false(ia64_advance_itc_and_check_timer(&env, 1));
-    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 12);
-    g_assert_true(ia64_advance_itc_and_check_timer(&env, 1));
-    g_assert_cmphex(env.ar[IA64_AR_ITC], ==, 13);
+    ia64_itc_set(&env, 12);
+    g_assert_false(ia64_itc_timer_poll(&env));
+    ia64_itc_set(&env, 13);
+    g_assert_true(ia64_itc_timer_poll(&env));
     ia64_latch_timer_interrupt(&env);
     g_assert_true(ia64_external_interrupt_pending(&env));
     g_assert_cmphex(ia64_read_control_register(&env, IA64_CR_IVR), ==, 0xef);
@@ -3314,6 +3329,8 @@ int main(int argc, char **argv)
                     test_interrupt_control_registers);
     g_test_add_func("/ia64-insn/timer-compare-rearms-on-itm",
                     test_timer_compare_rearms_only_on_itm_programming);
+    g_test_add_func("/ia64-insn/itc-warp-forward-only",
+                    test_itc_warp_moves_forward_only);
     g_test_add_func("/ia64-insn/interrupt-unmask-pending",
                     test_interrupt_unmask_exposes_pending_external_interrupt);
     g_test_add_func("/ia64-insn/external-interrupt-delivery-masks",

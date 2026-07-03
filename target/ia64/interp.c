@@ -221,27 +221,21 @@ static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
 
 static void ia64_finish_tcg_ticks(CPUIA64State *env, uint32_t bundle_count)
 {
-    CPUState *cpu;
-
     if (bundle_count == 0) {
         return;
     }
 
-    cpu = env_cpu(env);
-    if (ia64_advance_itc_and_check_timer(env, bundle_count)) {
-        ia64_latch_timer_interrupt(env);
-        cpu_set_interrupt(cpu, CPU_INTERRUPT_HARD);
-    }
-
     /*
-     * The target timer is advanced by retired bundles, so a helper can make an
-     * external interrupt deliverable while generated code still has later
-     * bundle constants queued in the same TB.  Leave the TB at the precise
-     * post-bundle IP and let the cpu_exec_interrupt hook enter the IVT.
+     * AR.ITC follows the QEMU virtual clock and the CR.ITM deadline timer
+     * raises CPU_INTERRUPT_HARD from the main loop, so retired bundles no
+     * longer advance guest time here.  Helpers can still make an external
+     * interrupt deliverable while generated code has later bundle constants
+     * queued in the same TB.  Leave the TB at the precise post-bundle IP and
+     * let the cpu_exec_interrupt hook enter the IVT.
      */
     if (ia64_external_interrupt_enabled(env)) {
         IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
-        cpu_loop_exit(cpu);
+        cpu_loop_exit(env_cpu(env));
     }
 }
 

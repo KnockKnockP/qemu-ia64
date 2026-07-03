@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/qemu-print.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "cpu.h"
 #include "exception.h"
@@ -130,6 +131,16 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     CPUIA64State *env = &cpu->env;
 
     IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_CHECK);
+    /*
+     * The CR.ITM deadline timer only raises CPU_INTERRUPT_HARD; the IRR
+     * latch must happen here, on the vCPU thread, where guest interrupt
+     * state can be touched safely.
+     */
+    if ((interrupt_request & CPU_INTERRUPT_HARD) != 0 &&
+        ia64_itc_timer_poll(env)) {
+        ia64_latch_timer_interrupt(env);
+    }
+
     if ((interrupt_request & CPU_INTERRUPT_HARD) == 0 &&
         !ia64_external_interrupt_pending(env)) {
         return false;
@@ -337,6 +348,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     default:
         g_assert_not_reached();
     }
+
+    /*
+     * The synthetic reset clears itc_clock_backed; re-attach AR.ITC to the
+     * virtual clock and restart guest time from zero.
+     */
+    cpu->env.itc_clock_backed = cpu->env.itm_timer != NULL;
+    ia64_itc_set(&cpu->env, 0);
+    ia64_itc_timer_update(&cpu->env);
 }
 
 static ObjectClass *ia64_cpu_class_by_name(const char *cpu_model)
@@ -360,9 +379,22 @@ static ObjectClass *ia64_cpu_class_by_name(const char *cpu_model)
     return NULL;
 }
 
+static void ia64_itm_timer_cb(void *opaque)
+{
+    IA64CPU *cpu = opaque;
+
+    /*
+     * Runs on the main loop thread; only kick the vCPU.  The
+     * cpu_exec_interrupt hook polls the ITC/ITM compare and latches the
+     * timer interrupt on the vCPU thread.
+     */
+    cpu_interrupt(CPU(cpu), CPU_INTERRUPT_HARD);
+}
+
 static void ia64_cpu_realizefn(DeviceState *dev, Error **errp)
 {
     CPUState *cs = CPU(dev);
+    IA64CPU *cpu = IA64_CPU(dev);
     IA64CPUClass *mcc = IA64_CPU_GET_CLASS(dev);
     Error *local_err = NULL;
 
@@ -371,6 +403,9 @@ static void ia64_cpu_realizefn(DeviceState *dev, Error **errp)
         error_propagate(errp, local_err);
         return;
     }
+
+    cpu->env.itm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ia64_itm_timer_cb,
+                                      cpu);
 
     qemu_init_vcpu(cs);
     cpu_reset(cs);
