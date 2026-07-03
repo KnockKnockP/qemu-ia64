@@ -422,10 +422,16 @@ void HELPER(finish_fast_tb)(CPUIA64State *env, uint32_t bundle_count)
     ia64_finish_tcg_ticks(env, bundle_count);
 }
 
-void HELPER(finish_fast_store)(CPUIA64State *env, uint64_t address,
-                               uint32_t width)
+uint64_t HELPER(fast_ldst_load)(CPUIA64State *env, uint64_t address,
+                                uint32_t width)
 {
-    ia64_alat_invalidate_store(env, address, width);
+    return ia64_ldst_read(env, address, width);
+}
+
+void HELPER(fast_ldst_store)(CPUIA64State *env, uint64_t address,
+                             uint64_t value, uint32_t width)
+{
+    ia64_ldst_write(env, address, width, value);
 }
 
 static void ia64_flush_qemu_tlb_for_page(CPUState *cpu, vaddr address,

@@ -111,7 +111,8 @@ static void test_helper_flags_are_conservative(void)
     g_assert_cmphex(helper_flags_for("firmware_call_gate"), ==, 0);
     g_assert_cmphex(helper_flags_for("start_fast_bundle"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_fast_bundle"), ==, 0);
-    g_assert_cmphex(helper_flags_for("finish_fast_store"), ==, 0);
+    g_assert_cmphex(helper_flags_for("fast_ldst_load"), ==, 0);
+    g_assert_cmphex(helper_flags_for("fast_ldst_store"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_direct_branch_bundle"), ==, 0);
 
     g_assert_cmphex(helper_flags_for("perf_direct_branch_fallback"),
@@ -980,7 +981,9 @@ static void test_fallback_reason_classifies_helper_sources(void)
     bundle = make_bundle(0x00, ld8_r2_r3_raw,
                          IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
     g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
-                    ==, IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE);
+                    ==, ia64_tcg_fast_ldst_memory_inline_enabled()
+                        ? IA64_TCG_FALLBACK_RUNTIME_GUARD
+                        : IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE);
     g_assert_cmpstr(ia64_tcg_fallback_reason_name(
                         IA64_TCG_FALLBACK_FAST_LDST_HOST_CODE_SIZE),
                     ==, "fast.ldst-host-code-size");
