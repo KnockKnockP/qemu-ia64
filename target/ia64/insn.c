@@ -94,9 +94,14 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)
 void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
                                      uint64_t *next_ip, const char *detail)
 {
+    /* PSR.ic=0 suppresses interruption collection, including CR.IIM. */
+    bool collect = (ia64_env_psr(env) & IA64_PSR_IC_BIT) != 0;
+
     ia64_deliver_exception(env, IA64_EXCEPTION_BREAK, env->ip,
                            MMU_INST_FETCH, detail);
-    env->cr[IA64_CR_IIM] = iim;
+    if (collect) {
+        env->cr[IA64_CR_IIM] = iim;
+    }
     *next_ip = env->ip;
 }
 

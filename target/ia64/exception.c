@@ -89,6 +89,9 @@ static uint64_t ia64_interruption_isr(uint64_t psr,
         isr |= UINT64_C(1) << IA64_ISR_R_BIT;
         break;
     }
+    if ((psr & IA64_PSR_IC_BIT) == 0) {
+        isr |= UINT64_C(1) << IA64_ISR_NI_BIT;
+    }
 
     return isr;
 }
@@ -283,7 +286,8 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     uint64_t saved_itir;
     uint64_t saved_iha;
     uint64_t rr;
-    bool nested_data_tlb;
+    bool collection_disabled;
+    bool data_nested_tlb;
     bool trace_enabled;
     bool user_trace_enabled;
 
@@ -300,13 +304,20 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     saved_itir = env->cr[IA64_CR_ITIR];
     saved_iha = env->cr[IA64_CR_IHA];
     rr = env->rr[ia64_va_region(address)];
-    nested_data_tlb = (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
-                       kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS) &&
-                      (old_psr & IA64_PSR_IC_BIT) == 0;
+    /*
+     * PSR.ic=0 suppresses interruption-resource collection.  Keep the
+     * original collected state for resources that are only updated with
+     * collection enabled; ISR is still written for non-Data-Nested
+     * interruptions and records ISR.ni for the nested-delivery condition.
+     */
+    collection_disabled = (old_psr & IA64_PSR_IC_BIT) == 0;
+    data_nested_tlb = collection_disabled &&
+                      (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
+                       kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS);
     trace_enabled = ia64_exception_trace_enabled();
     user_trace_enabled = ia64_user_exception_trace_enabled();
 
-    if (nested_data_tlb) {
+    if (data_nested_tlb) {
         kind = IA64_EXCEPTION_DATA_NESTED_TLB;
     }
 
@@ -319,15 +330,17 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
                                  format_detail || trace_enabled ||
                                  user_trace_enabled);
 
-    if (nested_data_tlb) {
+    if (collection_disabled) {
         env->cr[IA64_CR_IPSR] = saved_ipsr;
         env->cr[IA64_CR_IIP] = saved_iip;
         env->cr[IA64_CR_IIPA] = saved_iipa;
         env->cr[IA64_CR_IFS] = saved_ifs;
-        env->cr[IA64_CR_ISR] = saved_isr;
         env->cr[IA64_CR_IFA] = saved_ifa;
         env->cr[IA64_CR_ITIR] = saved_itir;
         env->cr[IA64_CR_IHA] = saved_iha;
+        if (data_nested_tlb) {
+            env->cr[IA64_CR_ISR] = saved_isr;
+        }
         ia64_env_set_psr(env, ia64_psr_for_interruption_delivery(env));
         env->ip = (env->cr[IA64_CR_IVA] & ~0x7fffULL) +
                   env->exception.vector;

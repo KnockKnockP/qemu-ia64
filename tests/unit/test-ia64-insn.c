@@ -820,6 +820,59 @@ static void test_i_unit_break_delivers_interruption_state(void)
                                IA64_PSR_RI_MASK), ==, 0);
 }
 
+static void test_i_unit_break_with_ic_clear_preserves_collection_state(void)
+{
+    const uint64_t bundle_ip = 0x200000;
+    const uint64_t iva = 0x100000;
+    const uint64_t saved_ipsr = 0x1111;
+    const uint64_t saved_iip = 0xcafe0;
+    const uint64_t saved_iipa = 0x2222;
+    const uint64_t saved_ifs = 0x3333;
+    const uint64_t saved_ifa = 0x5555;
+    const uint64_t saved_itir = 0x6666;
+    const uint64_t saved_iha = 0x7777;
+    const uint64_t saved_iim = 0x8888;
+    const uint64_t expected_isr = (UINT64_C(2) << IA64_ISR_EI_SHIFT) |
+                                  (UINT64_C(1) << IA64_ISR_X_BIT) |
+                                  (UINT64_C(1) << IA64_ISR_NI_BIT);
+    CPUIA64State env;
+    uint64_t next_ip = 0;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = bundle_ip;
+    env.psr = ia64_psr_with_ri(IA64_PSR_I_BIT | IA64_PSR_BN_BIT |
+                               IA64_PSR_CPL_MASK, 2);
+    env.cr[IA64_CR_IVA] = iva;
+    env.cr[IA64_CR_IPSR] = saved_ipsr;
+    env.cr[IA64_CR_IIP] = saved_iip;
+    env.cr[IA64_CR_IIPA] = saved_iipa;
+    env.cr[IA64_CR_IFS] = saved_ifs;
+    env.cr[IA64_CR_IFA] = saved_ifa;
+    env.cr[IA64_CR_ITIR] = saved_itir;
+    env.cr[IA64_CR_IHA] = saved_iha;
+    env.cr[IA64_CR_IIM] = saved_iim;
+
+    ia64_deliver_break_interruption(&env, 0x100000, &next_ip,
+                                    "break.i iim=0x100000");
+
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_BREAK);
+    g_assert_cmphex(env.exception.vector, ==, 0x2c00);
+    g_assert_cmphex(env.ip, ==, iva + 0x2c00);
+    g_assert_cmphex(next_ip, ==, env.ip);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, saved_ipsr);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, saved_iip);
+    g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, saved_iipa);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, saved_ifa);
+    g_assert_cmphex(env.cr[IA64_CR_ITIR], ==, saved_itir);
+    g_assert_cmphex(env.cr[IA64_CR_IHA], ==, saved_iha);
+    g_assert_cmphex(env.cr[IA64_CR_IIM], ==, saved_iim);
+    g_assert_cmphex(env.cr[IA64_CR_ISR], ==, expected_isr);
+    g_assert_cmphex(env.psr & (IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
+                               IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK |
+                               IA64_PSR_RI_MASK), ==, 0);
+}
+
 static void test_interruption_delivery_preserves_translation_state(void)
 {
     const uint64_t bundle_ip = 0x200000;
@@ -3307,6 +3360,8 @@ int main(int argc, char **argv)
                     test_i_unit_mov_ip_and_nop);
     g_test_add_func("/ia64-insn/i-unit-break-delivers-interruption-state",
                     test_i_unit_break_delivers_interruption_state);
+    g_test_add_func("/ia64-insn/i-unit-break-ic-clear-preserves-state",
+                    test_i_unit_break_with_ic_clear_preserves_collection_state);
     g_test_add_func("/ia64-insn/interruption-delivery-preserves-translation-state",
                     test_interruption_delivery_preserves_translation_state);
     g_test_add_func("/ia64-insn/i-unit-mov-from-predicate",

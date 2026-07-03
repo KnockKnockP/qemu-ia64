@@ -784,6 +784,56 @@ static void test_data_tlb_miss_records_slot_and_access(void)
     assert_delivery_psr(&env, 0);
 }
 
+static void test_non_nested_exception_with_ic_clear_preserves_collection_state(void)
+{
+    CPUIA64State env;
+    uint64_t saved_ipsr = 0x1111;
+    uint64_t saved_iip = 0xcafe0;
+    uint64_t saved_iipa = 0x2222;
+    uint64_t saved_ifs = 0x3333;
+    uint64_t saved_ifa = 0x5555;
+    uint64_t saved_itir = 0x6666;
+    uint64_t saved_iha = 0x7777;
+    uint64_t saved_iim = 0x8888;
+    uint64_t expected_isr = (UINT64_C(2) << IA64_ISR_EI_SHIFT) |
+                            (UINT64_C(1) << IA64_ISR_W_BIT) |
+                            (UINT64_C(1) << IA64_ISR_NI_BIT);
+    vaddr fault_ip = 0xa00000010015fcf0ULL;
+    vaddr fault_addr = 0xa0007fffffc88c98ULL;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = fault_ip;
+    env.psr = ia64_psr_with_ri(IA64_PSR_I_BIT | IA64_PSR_BN_BIT |
+                               IA64_PSR_CPL_MASK, 2);
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.cr[IA64_CR_IPSR] = saved_ipsr;
+    env.cr[IA64_CR_IIP] = saved_iip;
+    env.cr[IA64_CR_IIPA] = saved_iipa;
+    env.cr[IA64_CR_IFS] = saved_ifs;
+    env.cr[IA64_CR_IFA] = saved_ifa;
+    env.cr[IA64_CR_ITIR] = saved_itir;
+    env.cr[IA64_CR_IHA] = saved_iha;
+    env.cr[IA64_CR_IIM] = saved_iim;
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_PAGE_FAULT, fault_addr,
+                           MMU_DATA_STORE, "page fault with ic clear");
+
+    g_assert_true(env.exception.pending);
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_PAGE_FAULT);
+    g_assert_cmphex(env.exception.vector, ==, 0x5000);
+    g_assert_cmphex(env.ip, ==, 0x105000);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, saved_ipsr);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, saved_iip);
+    g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, saved_iipa);
+    g_assert_cmphex(env.cr[IA64_CR_IFS], ==, saved_ifs);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, saved_ifa);
+    g_assert_cmphex(env.cr[IA64_CR_ITIR], ==, saved_itir);
+    g_assert_cmphex(env.cr[IA64_CR_IHA], ==, saved_iha);
+    g_assert_cmphex(env.cr[IA64_CR_IIM], ==, saved_iim);
+    g_assert_cmphex(env.cr[IA64_CR_ISR], ==, expected_isr);
+    assert_delivery_psr(&env, 0);
+}
+
 static void test_data_tlb_miss_with_ic_clear_vectors_to_nested(void)
 {
     CPUIA64State env;
@@ -902,6 +952,8 @@ int main(int argc, char **argv)
                     test_alternate_tlb_miss_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/data-tlb-miss-slot-and-access",
                     test_data_tlb_miss_records_slot_and_access);
+    g_test_add_func("/ia64-exception/ic-clear-preserves-collection-state",
+                    test_non_nested_exception_with_ic_clear_preserves_collection_state);
     g_test_add_func("/ia64-exception/data-nested-tlb-delivery",
                     test_data_tlb_miss_with_ic_clear_vectors_to_nested);
     g_test_add_func("/ia64-exception/alternate-data-nested-tlb-delivery",
