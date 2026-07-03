@@ -8,6 +8,7 @@
 #include "cpu.h"
 #include "debug-trace.h"
 #include "exception.h"
+#include "exec/cpu-interrupt.h"
 #include "firmware.h"
 #include "insn.h"
 #include "exec/helper-proto.h"
@@ -249,9 +250,39 @@ static void ia64_finish_interpreted_bundle(CPUIA64State *env, uint64_t next_ip,
 static bool ia64_tcg_can_chain(CPUIA64State *env)
 {
     CPUState *cpu = env_cpu(env);
+    uint32_t interrupt_request = qatomic_read(&cpu->interrupt_request);
 
-    return cpu->interrupt_request == 0 &&
-           !qatomic_read(&cpu->exit_request);
+    if (qatomic_read(&cpu->exit_request)) {
+        return false;
+    }
+
+    /*
+     * HARD is also used as the timer kick.  Poll and latch the ITM compare
+     * here on the vCPU thread, but do not let a masked IA-64 interrupt break
+     * TB chaining until it can actually be delivered.
+     */
+    if ((interrupt_request & CPU_INTERRUPT_HARD) != 0 &&
+        ia64_itc_timer_poll(env)) {
+        ia64_latch_timer_interrupt(env);
+    }
+
+    if ((interrupt_request & ~CPU_INTERRUPT_HARD) != 0) {
+        return false;
+    }
+
+    if (!ia64_external_interrupt_pending(env)) {
+        if ((interrupt_request & CPU_INTERRUPT_HARD) != 0) {
+            cpu_reset_interrupt(cpu, CPU_INTERRUPT_HARD);
+        }
+        return true;
+    }
+
+    if (!ia64_external_interrupt_enabled(env)) {
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
+        return true;
+    }
+
+    return false;
 }
 
 static uint32_t ia64_lookup_ptr_chain_ok(CPUIA64State *env)
