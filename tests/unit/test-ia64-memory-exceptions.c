@@ -15,10 +15,18 @@
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
 #define IA64_PSR_RT_BIT   UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
-#define IA64_PSR_DELIVERY_MASK \
+#define IA64_PSR_DELIVERY_CLEARED_MASK \
     (IA64_PSR_I_BIT | IA64_PSR_IC_BIT | IA64_PSR_RI_MASK | \
-     IA64_TB_PSR_DT_BIT | IA64_PSR_RT_BIT | IA64_TB_PSR_IT_BIT | \
      IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK)
+#define IA64_PSR_DELIVERY_PRESERVED_MASK \
+    (IA64_TB_PSR_DT_BIT | IA64_PSR_RT_BIT | IA64_TB_PSR_IT_BIT)
+
+static void assert_delivery_psr(CPUIA64State *env, uint64_t preserved)
+{
+    g_assert_cmphex((env->psr & IA64_PSR_DELIVERY_CLEARED_MASK), ==, 0);
+    g_assert_cmphex((env->psr & IA64_PSR_DELIVERY_PRESERVED_MASK),
+                    ==, preserved);
+}
 
 static uint64_t test_rr(uint32_t rid, uint8_t page_size, bool vhpt)
 {
@@ -424,7 +432,7 @@ static void test_user_store_protection_page_fault_preserves_slot(void)
     g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
                     ==, 0);
     g_assert_nonnull(strstr((const char *)env.exception.message, "cpl=3"));
-    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    assert_delivery_psr(&env, IA64_TB_PSR_DT_BIT);
 }
 
 static void test_instruction_fetch_page_fault_sets_fault_ip(void)
@@ -653,14 +661,14 @@ static void test_exception_reporting(void)
     g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_NONE);
 }
 
-static void test_interruption_delivery_clears_translation_bits(void)
+static void test_interruption_delivery_preserves_translation_bits(void)
 {
     CPUIA64State env;
+    uint64_t preserved = IA64_TB_PSR_DT_BIT | IA64_TB_PSR_IT_BIT |
+                         IA64_PSR_RT_BIT;
     uint64_t psr = ia64_psr_with_ri(IA64_PSR_IC_BIT | IA64_PSR_I_BIT |
                                     IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK |
-                                    IA64_TB_PSR_DT_BIT |
-                                    IA64_TB_PSR_IT_BIT |
-                                    IA64_PSR_RT_BIT, 2);
+                                    preserved, 2);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.ip = 0xe0000000049acc10ULL;
@@ -674,11 +682,11 @@ static void test_interruption_delivery_clears_translation_bits(void)
     g_assert_cmphex(env.exception.vector, ==, 0x3000);
     g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, psr);
     g_assert_cmphex(env.ip, ==, 0xe000000004403000ULL);
-    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    assert_delivery_psr(&env, preserved);
     g_assert_cmpint(ia64_tcg_mmu_index_for_psr(env.psr, true), ==,
-                    IA64_MMU_PHYSICAL);
+                    IA64_MMU_INST_CPL0);
     g_assert_cmpint(ia64_tcg_mmu_index_for_psr(env.psr, false), ==,
-                    IA64_MMU_PHYSICAL);
+                    IA64_MMU_DATA_CPL0);
 }
 
 static void test_tlb_miss_delivery_vectors_to_iva(void)
@@ -710,7 +718,7 @@ static void test_tlb_miss_delivery_vectors_to_iva(void)
     g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_X_BIT),
                     ==, UINT64_C(1) << IA64_ISR_X_BIT);
     g_assert_cmphex(env.ip, ==, 0x100400);
-    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    assert_delivery_psr(&env, 0);
 }
 
 static void test_alternate_tlb_miss_delivery_vectors_to_iva(void)
@@ -773,7 +781,7 @@ static void test_data_tlb_miss_records_slot_and_access(void)
     g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_X_BIT),
                     ==, 0);
     g_assert_cmphex(env.ip, ==, 0x100800);
-    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    assert_delivery_psr(&env, 0);
 }
 
 static void test_data_tlb_miss_with_ic_clear_vectors_to_nested(void)
@@ -817,7 +825,7 @@ static void test_data_tlb_miss_with_ic_clear_vectors_to_nested(void)
     g_assert_cmphex(env.cr[IA64_CR_IFA], ==, saved_ifa);
     g_assert_cmphex(env.cr[IA64_CR_ITIR], ==, saved_itir);
     g_assert_cmphex(env.cr[IA64_CR_IHA], ==, saved_iha);
-    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    assert_delivery_psr(&env, 0);
 }
 
 static void test_alternate_data_tlb_miss_with_ic_clear_vectors_to_nested(void)
@@ -842,7 +850,7 @@ static void test_alternate_data_tlb_miss_with_ic_clear_vectors_to_nested(void)
     g_assert_cmphex(env.ip, ==, 0x101400);
     g_assert_cmphex(env.cr[IA64_CR_IIP], ==, 0xcafe0);
     g_assert_cmphex(env.cr[IA64_CR_IHA], ==, 0x7777);
-    g_assert_cmphex(env.psr & IA64_PSR_DELIVERY_MASK, ==, 0);
+    assert_delivery_psr(&env, 0);
 }
 
 int main(int argc, char **argv)
@@ -886,8 +894,8 @@ int main(int argc, char **argv)
     g_test_add_func("/ia64-exception/translation-fault-vectors",
                     test_translation_fault_vectors);
     g_test_add_func("/ia64-exception/reporting", test_exception_reporting);
-    g_test_add_func("/ia64-exception/delivery-clears-translation-bits",
-                    test_interruption_delivery_clears_translation_bits);
+    g_test_add_func("/ia64-exception/delivery-preserves-translation-bits",
+                    test_interruption_delivery_preserves_translation_bits);
     g_test_add_func("/ia64-exception/tlb-miss-delivery",
                     test_tlb_miss_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/alternate-tlb-miss-delivery",
