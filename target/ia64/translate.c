@@ -7,6 +7,7 @@
 #include "insn.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
+#include "exec/memop.h"
 #include "exec/target_page.h"
 #include "exec/translation-block.h"
 #include "exec/translator.h"
@@ -495,6 +496,56 @@ static void ia64_tr_load_fast_source2(DisasContext *ctx, TCGv_i64 dest,
     }
 }
 
+static MemOp ia64_tr_ldst_memop(uint8_t width)
+{
+    /* IA-64 permits unaligned data access; the interpreter path assembles
+       unaligned values bytewise, which matches unaligned SoftMMU ops. */
+    switch (width) {
+    case 1:
+        return MO_UB;
+    case 2:
+        return MO_LEUW;
+    case 4:
+        return MO_LEUL;
+    case 8:
+        return MO_LEUQ;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static int ia64_tr_data_mmu_index(DisasContext *ctx)
+{
+    return ia64_tcg_data_mmu_index_for_tb_flags(ctx->base.tb->flags);
+}
+
+static void ia64_tr_publish_slot_ri(const IA64TcgFastSlot *slot)
+{
+    /*
+     * The bundle has a single insn_start, so a fault inside the memory op
+     * must find the executing slot in env->ri (see ia64_env_restore_ri).
+     * The bundle-finish helper republishes PSR.ri and clears the flag.
+     */
+    tcg_gen_st8_i32(tcg_constant_i32(slot->slot_index), tcg_env,
+                    offsetof(CPUIA64State, ri));
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                    offsetof(CPUIA64State, ri_dirty));
+}
+
+static void ia64_tr_emit_ldst_alat_invalidate(const IA64TcgFastSlot *slot,
+                                              TCGv_i64 address)
+{
+    TCGLabel *skip = gen_new_label();
+    TCGv_i32 valid = tcg_temp_new_i32();
+
+    tcg_gen_ld_i32(valid, tcg_env,
+                   offsetof(CPUIA64State, alat.valid_mask));
+    tcg_gen_brcondi_i32(TCG_COND_EQ, valid, 0, skip);
+    gen_helper_fast_ldst_alat_store(tcg_env, address,
+                                    tcg_constant_i32(slot->width));
+    gen_set_label(skip);
+}
+
 static void ia64_tr_emit_ldst_base_update(DisasContext *ctx,
                                           const IA64TcgFastSlot *slot,
                                           TCGv_i64 address)
@@ -681,9 +732,16 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         break;
     case IA64_TCG_FAST_OP_LDST_LOAD:
         g_assert(ldst_address != NULL);
-        gen_helper_fast_ldst_load(result, tcg_env, ldst_address,
-                                  tcg_constant_i32(slot->width),
-                                  tcg_constant_i32(slot->slot_index));
+        if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
+            ia64_tr_publish_slot_ri(slot);
+            tcg_gen_qemu_ld_i64(result, ldst_address,
+                                ia64_tr_data_mmu_index(ctx),
+                                ia64_tr_ldst_memop(slot->width));
+        } else {
+            gen_helper_fast_ldst_load(result, tcg_env, ldst_address,
+                                      tcg_constant_i32(slot->width),
+                                      tcg_constant_i32(slot->slot_index));
+        }
         ia64_tr_store_static_gr(ctx, slot->target, result);
         ia64_tr_emit_ldst_base_update(ctx, slot, ldst_address);
         if (runtime_dest_mask != NULL && slot->dest_mask != 0) {
@@ -695,9 +753,17 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
     case IA64_TCG_FAST_OP_LDST_STORE:
         g_assert(ldst_address != NULL);
         ia64_tr_load_static_gr(ctx, source2, slot->source2);
-        gen_helper_fast_ldst_store(tcg_env, ldst_address, source2,
-                                   tcg_constant_i32(slot->width),
-                                   tcg_constant_i32(slot->slot_index));
+        if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
+            ia64_tr_publish_slot_ri(slot);
+            tcg_gen_qemu_st_i64(source2, ldst_address,
+                                ia64_tr_data_mmu_index(ctx),
+                                ia64_tr_ldst_memop(slot->width));
+            ia64_tr_emit_ldst_alat_invalidate(slot, ldst_address);
+        } else {
+            gen_helper_fast_ldst_store(tcg_env, ldst_address, source2,
+                                       tcg_constant_i32(slot->width),
+                                       tcg_constant_i32(slot->slot_index));
+        }
         ia64_tr_emit_ldst_base_update(ctx, slot, ldst_address);
         if (runtime_dest_mask != NULL && slot->dest_mask != 0) {
             tcg_gen_ori_i64(runtime_dest_mask, runtime_dest_mask,

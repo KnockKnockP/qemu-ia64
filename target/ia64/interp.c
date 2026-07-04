@@ -472,6 +472,13 @@ void HELPER(fast_ldst_store)(CPUIA64State *env, uint64_t address,
     ia64_ldst_write(env, address, width, value);
 }
 
+void HELPER(fast_ldst_alat_store)(CPUIA64State *env, uint64_t address,
+                                  uint32_t width)
+{
+    /* Direct qemu_st lowering calls this only while ALAT entries are valid. */
+    ia64_alat_invalidate_store(env, address, width);
+}
+
 static void ia64_flush_qemu_tlb_for_page(CPUState *cpu, vaddr address,
                                          uint8_t page_size)
 {

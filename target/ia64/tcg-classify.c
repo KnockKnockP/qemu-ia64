@@ -249,29 +249,41 @@ static bool ia64_tcg_ldst_is_memory_access(const IA64LdstImmediate *ldst)
            ldst->kind == IA64_LDST_IMM_STORE;
 }
 
-bool ia64_tcg_fast_ldst_memory_inline_enabled(void)
+IA64TcgFastLdstMode ia64_tcg_fast_ldst_mode(void)
 {
     /*
-     * Fast memory slots lower to compact decoded load/store helpers.  The
-     * crashes that kept this path opt-in were not host code size: the old
-     * lowering emitted an extra insn_start per memory slot, overflowing
-     * TCG's per-instruction metadata (gen_insn_data and gen_insn_end_off
-     * are sized by tb->icount) and corrupting the TCG pool.  The fast path
-     * now keeps one insn_start per bundle and reports the executing slot
-     * through env->ri, so the helper path is on by default;
-     * VIBTANIUM_TCG_LDST_INLINE=0 (or off) keeps a kill-switch back to the
-     * full interpreter for memory bundles.
+     * Fast memory slots lower to direct SoftMMU qemu_ld/st ops.  The crashes
+     * that historically kept inline memory lowering opt-in were not host
+     * code size: the old lowering emitted an extra insn_start per memory
+     * slot, overflowing TCG's per-instruction metadata (gen_insn_data and
+     * gen_insn_end_off are sized by tb->icount) and corrupting the TCG pool.
+     * The fast path now keeps one insn_start per bundle and publishes the
+     * executing slot through env->ri before each memory access instead.
+     * VIBTANIUM_TCG_LDST_INLINE=helper keeps the compact decoded helper
+     * lowering; =0 (or off) is a kill-switch back to the full interpreter
+     * for memory bundles.
      */
-    static int enabled = -1;
+    static int mode = -1;
 
-    if (enabled < 0) {
+    if (mode < 0) {
         const char *value = g_getenv("VIBTANIUM_TCG_LDST_INLINE");
 
-        enabled = value == NULL || *value == '\0' ||
-                  (strcmp(value, "0") != 0 &&
-                   g_ascii_strcasecmp(value, "off") != 0);
+        if (value != NULL && (strcmp(value, "0") == 0 ||
+                              g_ascii_strcasecmp(value, "off") == 0)) {
+            mode = IA64_TCG_FAST_LDST_OFF;
+        } else if (value != NULL &&
+                   g_ascii_strcasecmp(value, "helper") == 0) {
+            mode = IA64_TCG_FAST_LDST_HELPER;
+        } else {
+            mode = IA64_TCG_FAST_LDST_DIRECT;
+        }
     }
-    return enabled != 0;
+    return mode;
+}
+
+bool ia64_tcg_fast_ldst_memory_inline_enabled(void)
+{
+    return ia64_tcg_fast_ldst_mode() != IA64_TCG_FAST_LDST_OFF;
 }
 
 static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(

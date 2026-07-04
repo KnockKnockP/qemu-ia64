@@ -142,6 +142,14 @@ typedef struct IA64TcgFastBundle {
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast);
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle);
+
+typedef enum IA64TcgFastLdstMode {
+    IA64_TCG_FAST_LDST_OFF,
+    IA64_TCG_FAST_LDST_HELPER,
+    IA64_TCG_FAST_LDST_DIRECT,
+} IA64TcgFastLdstMode;
+
+IA64TcgFastLdstMode ia64_tcg_fast_ldst_mode(void);
 bool ia64_tcg_fast_ldst_memory_inline_enabled(void);
 
 typedef enum IA64TcgFallbackPlanOp {
