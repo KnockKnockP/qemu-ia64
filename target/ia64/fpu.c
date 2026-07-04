@@ -30,11 +30,14 @@ static void exec_floating_load(CPUIA64State *env,
 
     switch (decoded->format) {
     case IA64_FLOAT_FMT_SINGLE:
-        helper_write_fr_raw(env, decoded->freg,
-                            ia64_ldst_read(env, address, 4),
-                            0x1003e);
+        ia64_write_fr_from_single_bits(env, decoded->freg,
+                                       (uint32_t)ia64_ldst_read(env,
+                                                                address, 4));
         break;
     case IA64_FLOAT_FMT_DOUBLE:
+        ia64_write_fr_from_double_bits(env, decoded->freg,
+                                       ia64_ldst_read(env, address, 8));
+        break;
     case IA64_FLOAT_FMT_SIGNIFICAND:
         helper_write_fr_raw(env, decoded->freg,
                             ia64_ldst_read(env, address, 8),
@@ -82,9 +85,13 @@ static void exec_floating_store(CPUIA64State *env,
 
     switch (decoded->format) {
     case IA64_FLOAT_FMT_SINGLE:
-        ia64_ldst_write(env, address, 4, low);
+        ia64_ldst_write(env, address, 4,
+                        ia64_read_fr_as_single_bits(&env->fr[mapped]));
         break;
     case IA64_FLOAT_FMT_DOUBLE:
+        ia64_ldst_write(env, address, 8,
+                        ia64_read_fr_as_double_bits(&env->fr[mapped]));
+        break;
     case IA64_FLOAT_FMT_SIGNIFICAND:
         ia64_ldst_write(env, address, 8, low);
         break;

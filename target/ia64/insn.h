@@ -413,6 +413,12 @@ void ia64_float_reg_to_spill(const IA64FloatReg *reg,
                              uint64_t *mantissa);
 void ia64_float_reg_from_spill(uint64_t sign_exponent, uint64_t mantissa,
                                IA64FloatReg *reg);
+void ia64_write_fr_from_single_bits(CPUIA64State *env, uint32_t reg,
+                                    uint32_t bits);
+void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
+                                    uint64_t bits);
+uint32_t ia64_read_fr_as_single_bits(const IA64FloatReg *reg);
+uint64_t ia64_read_fr_as_double_bits(const IA64FloatReg *reg);
 bool ia64_decode_m_atomic(IA64SlotType type, uint64_t raw,
                           IA64AtomicInstruction *decoded);
 bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,

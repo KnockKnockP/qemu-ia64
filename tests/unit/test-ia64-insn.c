@@ -2199,6 +2199,30 @@ static void test_m_unit_getf_all_memory_forms(void)
     g_assert_cmphex(ia64_read_gr(&env, 40), ==, 0x4004000000000000ULL);
 }
 
+static void test_floating_ieee_memory_bit_conversions(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    ia64_write_fr_from_double_bits(&env, 8, 0x4014000000000000ULL);
+    g_assert_cmphex(env.fr[8].raw[0], ==, 0xa000000000000000ULL);
+    g_assert_cmphex(env.fr[8].raw[1], ==, 0x10001);
+    g_assert_cmphex(ia64_read_fr_as_double_bits(&env.fr[8]), ==,
+                    0x4014000000000000ULL);
+
+    ia64_write_fr_from_single_bits(&env, 9, 0x40a00000);
+    g_assert_cmphex(env.fr[9].raw[0], ==, 0xa000000000000000ULL);
+    g_assert_cmphex(env.fr[9].raw[1], ==, 0x10001);
+    g_assert_cmphex(ia64_read_fr_as_single_bits(&env.fr[9]), ==,
+                    0x40a00000);
+
+    env.fr[10].raw[0] = 0x4014000000000000ULL;
+    env.fr[10].raw[1] = 0x1003e;
+    g_assert_cmphex(ia64_read_fr_as_double_bits(&env.fr[10]), !=,
+                    0x4014000000000000ULL);
+}
+
 static void test_floating_spill_format_constants(void)
 {
     IA64FloatReg reg;
@@ -3744,6 +3768,8 @@ int main(int argc, char **argv)
                     test_m_unit_getf_significand);
     g_test_add_func("/ia64-insn/m-unit-getf-memory-forms",
                     test_m_unit_getf_all_memory_forms);
+    g_test_add_func("/ia64-insn/floating-ieee-memory-bit-conversions",
+                    test_floating_ieee_memory_bit_conversions);
     g_test_add_func("/ia64-insn/floating-spill-format-constants",
                     test_floating_spill_format_constants);
     g_test_add_func("/ia64-insn/extract-zero-extends-bitfield",

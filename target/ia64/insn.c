@@ -968,23 +968,23 @@ static void ia64_write_fr_from_ieee_bits(CPUIA64State *env, uint32_t reg,
     ia64_write_fr_parts(env, reg, sign, register_exponent, significand);
 }
 
-static void ia64_write_fr_from_single_bits(CPUIA64State *env, uint32_t reg,
-                                           uint32_t bits)
+void ia64_write_fr_from_single_bits(CPUIA64State *env, uint32_t reg,
+                                    uint32_t bits)
 {
     ia64_write_fr_from_ieee_bits(env, reg, (bits >> 31) != 0,
                                  (bits >> 23) & 0xff, 0xff, 127,
                                  bits & 0x7fffff, 23);
 }
 
-static void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
-                                           uint64_t bits)
+void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
+                                    uint64_t bits)
 {
     ia64_write_fr_from_ieee_bits(env, reg, (bits >> 63) != 0,
                                  (bits >> 52) & 0x7ff, 0x7ff, 1023,
                                  bits & 0x000fffffffffffffULL, 52);
 }
 
-static uint32_t ia64_read_fr_as_single_bits(const IA64FloatReg *reg)
+uint32_t ia64_read_fr_as_single_bits(const IA64FloatReg *reg)
 {
     float_status status;
     float32 value;
@@ -994,7 +994,7 @@ static uint32_t ia64_read_fr_as_single_bits(const IA64FloatReg *reg)
     return float32_val(value);
 }
 
-static uint64_t ia64_read_fr_as_double_bits(const IA64FloatReg *reg)
+uint64_t ia64_read_fr_as_double_bits(const IA64FloatReg *reg)
 {
     float_status status;
     float64 value;
