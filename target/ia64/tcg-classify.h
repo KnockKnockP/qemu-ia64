@@ -85,6 +85,10 @@ typedef enum IA64TcgFastOp {
     IA64_TCG_FAST_OP_VARIABLE_SHIFT,
     IA64_TCG_FAST_OP_LDST_LOAD,
     IA64_TCG_FAST_OP_LDST_STORE,
+    IA64_TCG_FAST_OP_MOV_FROM_BR,
+    IA64_TCG_FAST_OP_MOV_TO_BR,
+    IA64_TCG_FAST_OP_MOV_FROM_AR,
+    IA64_TCG_FAST_OP_MOV_TO_AR,
 } IA64TcgFastOp;
 
 typedef enum IA64TcgFastLogicOp {
@@ -120,6 +124,7 @@ typedef struct IA64TcgFastSlot {
     uint8_t shift_kind;
     uint8_t position;
     uint8_t length;
+    uint8_t system_reg;
     bool source2_immediate;
     bool base_update;
     bool sign_extend;

@@ -218,6 +218,37 @@ static bool ia64_tcg_ldst_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool ia64_tcg_system_mov_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_BRANCH_TRACE") != NULL ||
+                  g_getenv("VIBTANIUM_AR_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+static bool ia64_tcg_fast_ar_is_plain(uint32_t reg)
+{
+    /*
+     * ia64_read_ar/ia64_write_ar treat every application register as a plain
+     * env->ar[] cell except the RSE-coupled group and the clock-backed ITC;
+     * those keep interpreter semantics.
+     */
+    switch (reg) {
+    case IA64_AR_RSC:
+    case IA64_AR_BSP:
+    case IA64_AR_BSPSTORE:
+    case IA64_AR_RNAT:
+    case IA64_AR_UNAT:
+    case IA64_AR_ITC:
+        return false;
+    default:
+        return reg < IA64_AR_COUNT;
+    }
+}
+
 static bool ia64_tcg_fast_ldst_store_class(uint8_t memory_class)
 {
     return memory_class == 0x0c || memory_class == 0x0d ||
@@ -733,6 +764,84 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         return true;
     }
 
+    if (ia64_slot_is_i_mov_from_branch(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_set_target(slot, r1)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_MOV_FROM_BR;
+        slot->system_reg = (raw >> 13) & 0x7;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_i_mov_to_branch(type, raw)) {
+        r2 = (raw >> 13) & 0x7f;
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_add_source(slot, r2)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_MOV_TO_BR;
+        slot->source2 = r2;
+        slot->system_reg = (raw >> 6) & 0x7;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_mov_from_application(type, raw)) {
+        uint32_t ar3 = (raw >> 20) & 0x7f;
+
+        r1 = (raw >> 6) & 0x7f;
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_ar_is_plain(ar3) ||
+            !ia64_tcg_fast_set_target(slot, r1)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_MOV_FROM_AR;
+        slot->system_reg = ar3;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_mov_to_application(type, raw)) {
+        uint32_t ar3 = (raw >> 20) & 0x7f;
+
+        r2 = (raw >> 13) & 0x7f;
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_ar_is_plain(ar3) ||
+            !ia64_tcg_fast_add_source(slot, r2)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_MOV_TO_AR;
+        slot->source2 = r2;
+        slot->system_reg = ar3;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
+    if (ia64_slot_is_mov_to_application_immediate(type, raw)) {
+        uint32_t ar3 = (raw >> 20) & 0x7f;
+
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_ar_is_plain(ar3)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_MOV_TO_AR;
+        slot->source2_immediate = true;
+        slot->immediate =
+            ia64_tcg_sign_extend((((raw >> 36) & 0x1) << 7) |
+                                 ((raw >> 13) & 0x7f), 8);
+        slot->system_reg = ar3;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
     if (ia64_decode_ldst_immediate(type, raw, &ldst) &&
         ia64_tcg_build_fast_ldst_slot(&ldst, slot_index, slot, fast)) {
         return true;
@@ -928,6 +1037,56 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         if (pred_test.kind != IA64_PRED_TEST_FEATURE &&
             !ia64_tcg_fast_static_gr(pred_test.source3)) {
             return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_i_mov_from_branch(type, raw)) {
+        if (ia64_tcg_system_mov_trace_enabled()) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr((raw >> 6) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_i_mov_to_branch(type, raw)) {
+        if (ia64_tcg_system_mov_trace_enabled()) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr((raw >> 13) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_mov_from_application(type, raw)) {
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_ar_is_plain((raw >> 20) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr((raw >> 6) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_mov_to_application(type, raw)) {
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_ar_is_plain((raw >> 20) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr((raw >> 13) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_mov_to_application_immediate(type, raw)) {
+        if (ia64_tcg_system_mov_trace_enabled() ||
+            !ia64_tcg_fast_ar_is_plain((raw >> 20) & 0x7f)) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
         }
         return IA64_TCG_FALLBACK_NONE;
     }
@@ -1208,28 +1367,18 @@ static bool ia64_tcg_same_page(uint64_t left, uint64_t right)
     return ((left ^ right) & IA64_TCG_TARGET_PAGE_MASK) == 0;
 }
 
-static bool ia64_tcg_fast_slot_writes_predicate(const IA64TcgFastSlot *slot,
-                                                uint8_t predicate)
-{
-    if (predicate == 0) {
-        return false;
-    }
-
-    switch (slot->op) {
-    case IA64_TCG_FAST_OP_COMPARE:
-    case IA64_TCG_FAST_OP_PREDICATE_TEST:
-        return slot->predicate1 == predicate || slot->predicate2 == predicate;
-    default:
-        return false;
-    }
-}
-
 static bool ia64_tcg_build_direct_branch_prefix(
-    const IA64DecodedBundle *bundle, uint8_t predicate,
-    IA64TcgFastBundle *prefix)
+    const IA64DecodedBundle *bundle, IA64TcgFastBundle *prefix)
 {
     uint64_t prior_dest_mask = 0;
 
+    /*
+     * Prefix slots run in program order before the branch condition is
+     * evaluated, so predicated slots and slots writing the branch predicate
+     * keep interpreter semantics: legal encodings separate the producer and
+     * the branch with a stop, and the branch reads the freshly written
+     * value either way.
+     */
     memset(prefix, 0, sizeof(*prefix));
     for (int slot = 0; slot < 2; slot++) {
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
@@ -1238,15 +1387,8 @@ static bool ia64_tcg_build_direct_branch_prefix(
                                       &prefix->slot[slot], prefix)) {
             return false;
         }
-        if (prefix->slot[slot].qualifying_predicate != 0) {
-            return false;
-        }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&prefix->slot[slot],
                                                          prior_dest_mask)) {
-            return false;
-        }
-        if (ia64_tcg_fast_slot_writes_predicate(&prefix->slot[slot],
-                                                predicate)) {
             return false;
         }
         prefix->slot_count++;
@@ -1319,8 +1461,8 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
      * Keep branch lowering auditably small: only bundles with a final simple
      * relative branch or simple counted-loop branch and two safe fast-prefix
      * slots can use direct TCG control flow.  Calls, returns, modulo-scheduled
-     * loop branches, branch-register targets, rotating predicate reads, and
-     * branch-predicate producer hazards stay on the helper path.
+     * loop branches, branch-register targets, and rotating predicate reads
+     * stay on the helper path.
      */
     if (!ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
                                         bundle->slot[2])) {
@@ -1354,8 +1496,7 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     }
 
     memset(branch, 0, sizeof(*branch));
-    if (!ia64_tcg_build_direct_branch_prefix(bundle, predicate,
-                                             &branch->prefix)) {
+    if (!ia64_tcg_build_direct_branch_prefix(bundle, &branch->prefix)) {
         return false;
     }
     branch->target_ip = target;

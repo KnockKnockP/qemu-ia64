@@ -730,6 +730,30 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
     case IA64_TCG_FAST_OP_VARIABLE_SHIFT:
         ia64_tr_emit_variable_shift(ctx, slot, result, source2, source3);
         break;
+    case IA64_TCG_FAST_OP_MOV_FROM_BR:
+        tcg_gen_ld_i64(result, tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       slot->system_reg * sizeof(uint64_t));
+        break;
+    case IA64_TCG_FAST_OP_MOV_TO_BR:
+        ia64_tr_load_static_gr(ctx, source2, slot->source2);
+        tcg_gen_st_i64(source2, tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       slot->system_reg * sizeof(uint64_t));
+        ia64_tr_finish_fast_slot_predicate_guard(skip);
+        return;
+    case IA64_TCG_FAST_OP_MOV_FROM_AR:
+        tcg_gen_ld_i64(result, tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       slot->system_reg * sizeof(uint64_t));
+        break;
+    case IA64_TCG_FAST_OP_MOV_TO_AR:
+        ia64_tr_load_fast_source2(ctx, source2, slot);
+        tcg_gen_st_i64(source2, tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       slot->system_reg * sizeof(uint64_t));
+        ia64_tr_finish_fast_slot_predicate_guard(skip);
+        return;
     case IA64_TCG_FAST_OP_LDST_LOAD:
         g_assert(ldst_address != NULL);
         if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {

@@ -520,6 +520,60 @@ static void test_fast_bundle_accepts_predicate_test(void)
     g_assert_cmphex(fast.source_nat_mask, ==, 1ULL << 20);
 }
 
+static void test_fast_bundle_accepts_system_movs(void)
+{
+    const uint64_t mov_r3_from_b0_raw = (0x31ULL << 27) | (3ULL << 6);
+    const uint64_t mov_b1_from_r4_raw =
+        (7ULL << 33) | (4ULL << 13) | (1ULL << 6);
+    const uint64_t mov_r5_from_ar_pfs_raw =
+        (0x32ULL << 27) | (64ULL << 20) | (5ULL << 6);
+    const uint64_t mov_ar_ccv_from_r6_raw =
+        (0x2aULL << 27) | (32ULL << 20) | (6ULL << 13);
+    const uint64_t mov_ar_lc_from_imm5_raw =
+        (0x0aULL << 27) | (65ULL << 20) | (5ULL << 13);
+    const uint64_t mov_r5_from_ar_itc_raw =
+        (0x32ULL << 27) | (44ULL << 20) | (5ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, IA64_INSN_NOP_RAW,
+                    mov_r3_from_b0_raw, mov_b1_from_r4_raw);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_MOV_FROM_BR);
+    g_assert_cmpuint(fast.slot[1].system_reg, ==, 0);
+    g_assert_cmpuint(fast.slot[1].target, ==, 3);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_MOV_TO_BR);
+    g_assert_cmpuint(fast.slot[2].system_reg, ==, 1);
+    g_assert_cmpuint(fast.slot[2].source2, ==, 4);
+    g_assert_cmphex(fast.dest_mask, ==, 1ULL << 3);
+
+    bundle = make_bundle(0x00, IA64_INSN_NOP_RAW,
+                         mov_r5_from_ar_pfs_raw, mov_ar_ccv_from_r6_raw);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_MOV_FROM_AR);
+    g_assert_cmpuint(fast.slot[1].system_reg, ==, IA64_AR_PFS);
+    g_assert_cmpuint(fast.slot[1].target, ==, 5);
+    g_assert_cmpint(fast.slot[2].op, ==, IA64_TCG_FAST_OP_MOV_TO_AR);
+    g_assert_cmpuint(fast.slot[2].system_reg, ==, IA64_AR_CCV);
+    g_assert_cmpuint(fast.slot[2].source2, ==, 6);
+    g_assert_false(fast.slot[2].source2_immediate);
+
+    bundle = make_bundle(0x00, IA64_INSN_NOP_RAW,
+                         mov_ar_lc_from_imm5_raw, IA64_INSN_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_MOV_TO_AR);
+    g_assert_cmpuint(fast.slot[1].system_reg, ==, IA64_AR_LC);
+    g_assert_true(fast.slot[1].source2_immediate);
+    g_assert_cmpint(fast.slot[1].immediate, ==, 5);
+
+    /* RSE-coupled and clock-backed application registers stay interpreted. */
+    bundle = make_bundle(0x00, IA64_INSN_NOP_RAW,
+                         mov_r5_from_ar_itc_raw, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT);
+}
+
 static void test_fast_bundle_accepts_static_predicates(void)
 {
     const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
@@ -914,10 +968,18 @@ static void test_direct_branch_rejects_unsafe_forms(void)
     g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
     g_assert_true(ia64_tcg_bundle_has_indirect_branch(&bundle));
 
+    /*
+     * A prefix compare producing the branch predicate is legal with a stop
+     * between them; prefix slots run in program order, so the branch reads
+     * the freshly written predicate exactly like the interpreter.
+     */
     bundle = make_bundle(0x10, cmp_eq_p6_p7_r20_r21_raw,
                          IA64_INSN_NOP_RAW, 0x08600002006ULL);
-    g_assert_false(ia64_tcg_build_direct_branch(
-                       &bundle, 0xa0000001003e9700ULL, &branch));
+    g_assert_true(ia64_tcg_build_direct_branch(
+                      &bundle, 0xa0000001003e9700ULL, &branch));
+    g_assert_cmpuint(branch.predicate, ==, 6);
+    g_assert_true(branch.conditional);
+    g_assert_cmpint(branch.prefix.slot[0].op, ==, IA64_TCG_FAST_OP_COMPARE);
 
     bundle = make_bundle(0x18, add_r3_r3_r4_raw,
                          ld8_r2_r3_raw, br_cond_raw);
@@ -1033,6 +1095,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_bitfield_misc);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-predicate-test",
                     test_fast_bundle_accepts_predicate_test);
+    g_test_add_func("/ia64-tcg-classify/fast-bundle-system-movs",
+                    test_fast_bundle_accepts_system_movs);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-static-predicates",
                     test_fast_bundle_accepts_static_predicates);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-ldst-slot0",
