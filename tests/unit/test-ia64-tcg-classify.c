@@ -947,6 +947,35 @@ static void test_direct_branch_accepts_cloop_same_page(void)
     g_assert_true(branch.conditional);
 }
 
+static void test_direct_branch_accepts_relative_call(void)
+{
+    const uint64_t br_call_b0_raw = (5ULL << 37) | (2ULL << 13);
+    const uint64_t br_call_far_b1_raw = (5ULL << 37) | (0x400ULL << 13) |
+                                        (1ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x10, IA64_INSN_NOP_RAW,
+                    IA64_INSN_NOP_RAW, br_call_b0_raw);
+    IA64TcgDirectBranch branch;
+
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmpint(branch.kind, ==, IA64_TCG_DIRECT_BRANCH_CALL);
+    g_assert_cmphex(branch.target_ip, ==, 0x2020);
+    g_assert_cmphex(branch.fallthrough_ip, ==, 0x2010);
+    g_assert_cmpuint(branch.call_branch_reg, ==, 0);
+    g_assert_false(branch.conditional);
+
+    /* Calls may leave the page; the translator uses a TB lookup there. */
+    bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
+                         IA64_INSN_NOP_RAW, br_call_far_b1_raw | 6);
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmpint(branch.kind, ==, IA64_TCG_DIRECT_BRANCH_CALL);
+    g_assert_cmphex(branch.target_ip, ==, 0x6000);
+    g_assert_cmphex(branch.fallthrough_ip, ==, 0x2010);
+    g_assert_cmpuint(branch.call_branch_reg, ==, 1);
+    g_assert_cmpuint(branch.predicate, ==, 6);
+    g_assert_true(branch.conditional);
+}
+
 static void test_direct_branch_rejects_unsafe_forms(void)
 {
     const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
@@ -1115,6 +1144,8 @@ int main(int argc, char **argv)
                     test_direct_branch_accepts_predicate_to_next_bundle);
     g_test_add_func("/ia64-tcg-classify/direct-branch-cloop",
                     test_direct_branch_accepts_cloop_same_page);
+    g_test_add_func("/ia64-tcg-classify/direct-branch-relative-call",
+                    test_direct_branch_accepts_relative_call);
     g_test_add_func("/ia64-tcg-classify/direct-branch-rejects-unsafe",
                     test_direct_branch_rejects_unsafe_forms);
     g_test_add_func("/ia64-tcg-classify/direct-branch-rejects-page-crossing",

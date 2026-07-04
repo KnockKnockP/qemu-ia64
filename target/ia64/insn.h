@@ -467,6 +467,8 @@ bool ia64_exec_b_branch_relative(CPUIA64State *env,
                                  uint64_t bundle_ip,
                                  uint64_t *target_ip,
                                  bool *taken_out);
+void ia64_branch_call_effects(CPUIA64State *env, uint32_t b1,
+                              uint64_t bundle_ip);
 bool ia64_exec_b_call_relative(CPUIA64State *env,
                                uint64_t raw,
                                uint64_t bundle_ip,

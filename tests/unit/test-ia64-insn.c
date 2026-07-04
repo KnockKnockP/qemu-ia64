@@ -111,6 +111,12 @@ static uint64_t make_extract_raw(bool sign_extend, uint8_t r1, uint8_t r3,
            ((uint64_t)sign_extend << 13) | ((uint64_t)r1 << 6);
 }
 
+static uint64_t make_m_getf_raw(uint8_t x6, uint8_t r1, uint8_t f2)
+{
+    return (4ULL << 37) | (1ULL << 27) | ((uint64_t)x6 << 30) |
+           ((uint64_t)f2 << 13) | ((uint64_t)r1 << 6);
+}
+
 static void test_reset(void)
 {
     CPUIA64State env;
@@ -2143,7 +2149,7 @@ static void test_m_unit_setf_nat_source(void)
 
 static void test_m_unit_getf_significand(void)
 {
-    const uint64_t getf_sig_r21_f10_raw = 0x08708014540ULL;
+    const uint64_t getf_sig_r21_f10_raw = make_m_getf_raw(0x1c, 21, 10);
     CPUIA64State env;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
@@ -2154,6 +2160,39 @@ static void test_m_unit_getf_significand(void)
                                       getf_sig_r21_f10_raw));
     g_assert_true(ia64_exec_m_getf(&env, getf_sig_r21_f10_raw));
     g_assert_cmphex(ia64_read_gr(&env, 21), ==, 0x1234);
+}
+
+static void test_m_unit_getf_all_memory_forms(void)
+{
+    const uint64_t getf_exp_r22_f10_raw = make_m_getf_raw(0x1d, 22, 10);
+    const uint64_t getf_s_r23_f8_raw = make_m_getf_raw(0x1e, 23, 8);
+    const uint64_t getf_d_r40_f6_raw = make_m_getf_raw(0x1f, 40, 6);
+    CPUIA64State env;
+
+    g_assert_cmphex(getf_d_r40_f6_raw, ==, 0x087c800ca00ULL);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.fr[10].raw[0] = 0x0123456789abcdefULL;
+    env.fr[10].raw[1] = 0x21234;
+    env.fr[8].raw[0] = 0xc000000000000000ULL;
+    env.fr[8].raw[1] = 0x2ffff;
+    env.fr[6].raw[0] = 0xa000000000000000ULL;
+    env.fr[6].raw[1] = 0x10000;
+
+    g_assert_true(ia64_slot_is_m_getf(IA64_SLOT_TYPE_M,
+                                      getf_exp_r22_f10_raw));
+    g_assert_true(ia64_exec_m_getf(&env, getf_exp_r22_f10_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 22), ==, 0x21234);
+
+    g_assert_true(ia64_slot_is_m_getf(IA64_SLOT_TYPE_M,
+                                      getf_s_r23_f8_raw));
+    g_assert_true(ia64_exec_m_getf(&env, getf_s_r23_f8_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 23), ==, 0xbfc00000);
+
+    g_assert_true(ia64_slot_is_m_getf(IA64_SLOT_TYPE_M,
+                                      getf_d_r40_f6_raw));
+    g_assert_true(ia64_exec_m_getf(&env, getf_d_r40_f6_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 40), ==, 0x4004000000000000ULL);
 }
 
 static void test_floating_spill_format_constants(void)
@@ -3574,6 +3613,8 @@ int main(int argc, char **argv)
                     test_m_unit_setf_nat_source);
     g_test_add_func("/ia64-insn/m-unit-getf-significand",
                     test_m_unit_getf_significand);
+    g_test_add_func("/ia64-insn/m-unit-getf-memory-forms",
+                    test_m_unit_getf_all_memory_forms);
     g_test_add_func("/ia64-insn/floating-spill-format-constants",
                     test_floating_spill_format_constants);
     g_test_add_func("/ia64-insn/extract-zero-extends-bitfield",

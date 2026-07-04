@@ -509,16 +509,23 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
                                              uint64_t prefix_dest_mask)
 {
     CPUState *cpu = env_cpu(env);
-    /* bit 0 is branch-taken, upper bits are pending fast-path bundle ticks. */
+    /*
+     * bit 0 is branch-taken, bit 1 marks a taken call whose branch register
+     * sits in bits 2-4, and the remaining upper bits are pending fast-path
+     * bundle ticks.
+     */
     bool taken = branch_flags & 1;
-    uint32_t pending_bundle_count = branch_flags >> 1;
+    bool is_call = branch_flags & 2;
+    uint32_t call_branch_reg = (branch_flags >> 2) & 0x7;
+    uint32_t pending_bundle_count = branch_flags >> 5;
     bool chain_ok;
     bool debug_hooks = ia64_debug_hooks_active();
 
     IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
     IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_TRANSLATED);
     ia64_count_fast_tcg_ops(prefix_slot_count, prefix_op_counts, false);
-    IA64_PERF_INC(IA64_PERF_OP_BRANCH_DIRECT);
+    IA64_PERF_INC(is_call ? IA64_PERF_OP_BRANCH_CALL :
+                            IA64_PERF_OP_BRANCH_DIRECT);
     IA64_PERF_INC(taken ? IA64_PERF_BRANCH_TAKEN :
                            IA64_PERF_BRANCH_FALLTHROUGH);
     IA64_PERF_INC(IA64_PERF_TB_EXIT_DIRECT_BRANCH);
@@ -534,6 +541,10 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
+    if (is_call) {
+        /* env->ip still holds the call bundle; the return IP derives from it. */
+        ia64_branch_call_effects(env, call_branch_reg, env->ip);
+    }
     ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);

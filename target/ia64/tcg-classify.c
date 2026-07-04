@@ -1452,6 +1452,8 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     uint64_t fallthrough;
     uint8_t btype;
     uint8_t predicate;
+    IA64TcgDirectBranchKind kind;
+    uint8_t call_branch_reg = 0;
 
     if (!bundle || !branch || !bundle->valid || bundle->info->long_immediate) {
         return false;
@@ -1459,39 +1461,56 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
 
     /*
      * Keep branch lowering auditably small: only bundles with a final simple
-     * relative branch or simple counted-loop branch and two safe fast-prefix
-     * slots can use direct TCG control flow.  Calls, returns, modulo-scheduled
-     * loop branches, branch-register targets, and rotating predicate reads
-     * stay on the helper path.
+     * relative branch, counted-loop branch, or relative call and two safe
+     * fast-prefix slots can use direct TCG control flow.  Returns,
+     * modulo-scheduled loop branches, branch-register targets, and rotating
+     * predicate reads stay on the helper path.
      */
-    if (!ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
-                                        bundle->slot[2])) {
-        return false;
-    }
-
     raw = bundle->slot[2];
-    btype = (raw >> 6) & 0x7;
     predicate = ia64_slot_predicate(raw);
-    switch (btype) {
-    case 0:
-    case 1:
+    if (ia64_slot_is_b_branch_relative(bundle->info->slot_type[2], raw)) {
+        btype = (raw >> 6) & 0x7;
+        switch (btype) {
+        case 0:
+        case 1:
+            if (predicate >= 16) {
+                return false;
+            }
+            kind = IA64_TCG_DIRECT_BRANCH_COND;
+            break;
+        case 5:
+            if (predicate != 0) {
+                return false;
+            }
+            kind = IA64_TCG_DIRECT_BRANCH_CLOOP;
+            break;
+        default:
+            return false;
+        }
+    } else if (ia64_slot_is_b_call_relative(bundle->info->slot_type[2],
+                                            raw)) {
         if (predicate >= 16) {
             return false;
         }
-        break;
-    case 5:
-        if (predicate != 0) {
-            return false;
-        }
-        break;
-    default:
+        kind = IA64_TCG_DIRECT_BRANCH_CALL;
+        call_branch_reg = (raw >> 6) & 0x7;
+    } else {
         return false;
     }
 
     fallthrough = pc + IA64_BUNDLE_SIZE;
     target = pc + ia64_branch_displacement(raw);
-    if (target == 0 || !ia64_tcg_same_page(pc, target) ||
-        !ia64_tcg_same_page(pc, fallthrough)) {
+    /*
+     * The not-taken path must stay chainable, so the fallthrough keeps the
+     * same-page rule.  Calls routinely target other pages; the translator
+     * falls back to a TB lookup for those, so only conditional and counted
+     * branches require a same-page target.
+     */
+    if (target == 0 || !ia64_tcg_same_page(pc, fallthrough)) {
+        return false;
+    }
+    if (kind != IA64_TCG_DIRECT_BRANCH_CALL &&
+        !ia64_tcg_same_page(pc, target)) {
         return false;
     }
 
@@ -1501,12 +1520,13 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     }
     branch->target_ip = target;
     branch->fallthrough_ip = fallthrough;
-    branch->kind = btype == 5 ? IA64_TCG_DIRECT_BRANCH_CLOOP :
-                                IA64_TCG_DIRECT_BRANCH_COND;
+    branch->kind = kind;
     branch->slot = 2;
     branch->predicate = predicate;
     branch->nop_count = ia64_tcg_fast_bundle_nop_count(&branch->prefix);
-    branch->conditional = btype == 5 || predicate != 0;
+    branch->call_branch_reg = call_branch_reg;
+    branch->conditional = kind == IA64_TCG_DIRECT_BRANCH_CLOOP ||
+                          predicate != 0;
     return true;
 }
 

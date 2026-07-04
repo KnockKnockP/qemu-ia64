@@ -963,16 +963,28 @@ static void ia64_tr_emit_direct_branch_exit(DisasContext *ctx,
                                             const IA64TcgDirectBranch *branch,
                                             uint64_t target,
                                             bool taken,
-                                            int tb_slot)
+                                            int tb_slot,
+                                            bool use_goto_tb)
 {
     TCGLabel *main_loop_exit = gen_new_label();
     TCGv_i32 chain_ok = tcg_temp_new_i32();
     TCGv_i32 branch_flags = tcg_temp_new_i32();
+    uint32_t static_flags = 0;
 
-    /* bit 0 is branch-taken, upper bits are pending fast-path bundle ticks. */
-    tcg_gen_shli_i32(branch_flags, ctx->fast_bundle_ticks, 1);
+    /*
+     * bit 0 is branch-taken, bit 1 marks a taken call whose branch register
+     * sits in bits 2-4, and the remaining upper bits are pending fast-path
+     * bundle ticks.
+     */
+    tcg_gen_shli_i32(branch_flags, ctx->fast_bundle_ticks, 5);
     if (taken) {
-        tcg_gen_ori_i32(branch_flags, branch_flags, 1);
+        static_flags |= 1;
+        if (branch->kind == IA64_TCG_DIRECT_BRANCH_CALL) {
+            static_flags |= 2 | ((uint32_t)branch->call_branch_reg << 2);
+        }
+    }
+    if (static_flags != 0) {
+        tcg_gen_ori_i32(branch_flags, branch_flags, static_flags);
     }
 
     gen_helper_finish_direct_branch_bundle(chain_ok, tcg_env,
@@ -985,8 +997,12 @@ static void ia64_tr_emit_direct_branch_exit(DisasContext *ctx,
                                            tcg_constant_i64(
                                                branch->prefix.dest_mask));
     tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
-    tcg_gen_goto_tb(tb_slot);
-    tcg_gen_exit_tb(ctx->base.tb, tb_slot);
+    if (use_goto_tb) {
+        tcg_gen_goto_tb(tb_slot);
+        tcg_gen_exit_tb(ctx->base.tb, tb_slot);
+    } else {
+        tcg_gen_lookup_and_goto_ptr();
+    }
 
     gen_set_label(main_loop_exit);
     tcg_gen_exit_tb(NULL, 0);
@@ -1020,8 +1036,9 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
         return false;
     }
-    if (!translator_use_goto_tb(&ctx->base, branch.target_ip) ||
-        !translator_use_goto_tb(&ctx->base, branch.fallthrough_ip)) {
+    if (!translator_use_goto_tb(&ctx->base, branch.fallthrough_ip) ||
+        (branch.kind != IA64_TCG_DIRECT_BRANCH_CALL &&
+         !translator_use_goto_tb(&ctx->base, branch.target_ip))) {
         IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
         return false;
     }
@@ -1061,11 +1078,13 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, not_taken);
     }
 
-    ia64_tr_emit_direct_branch_exit(ctx, &branch, branch.target_ip, true, 0);
+    ia64_tr_emit_direct_branch_exit(ctx, &branch, branch.target_ip, true, 0,
+                                    translator_use_goto_tb(&ctx->base,
+                                                           branch.target_ip));
     if (branch.conditional) {
         gen_set_label(not_taken);
         ia64_tr_emit_direct_branch_exit(ctx, &branch, branch.fallthrough_ip,
-                                        false, 1);
+                                        false, 1, true);
     }
 
     gen_set_label(fallback);

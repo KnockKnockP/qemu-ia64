@@ -928,6 +928,26 @@ static void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
                                  bits & 0x000fffffffffffffULL, 52);
 }
 
+static uint32_t ia64_read_fr_as_single_bits(const IA64FloatReg *reg)
+{
+    float_status status;
+    float32 value;
+
+    ia64_float_status_init(&status);
+    value = floatx80_to_float32(ia64_fr_to_floatx80(reg), &status);
+    return float32_val(value);
+}
+
+static uint64_t ia64_read_fr_as_double_bits(const IA64FloatReg *reg)
+{
+    float_status status;
+    float64 value;
+
+    ia64_float_status_init(&status);
+    value = floatx80_to_float64(ia64_fr_to_floatx80(reg), &status);
+    return float64_val(value);
+}
+
 static uint64_t ia64_round_shift_right_u64(uint64_t value, unsigned shift,
                                            bool truncate)
 {
@@ -3864,6 +3884,7 @@ bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw)
     uint32_t f2;
     uint32_t mapped;
     uint64_t value;
+    const char *mnemonic;
 
     if (!env || !ia64_slot_is_m_getf(IA64_SLOT_TYPE_M, raw)) {
         return false;
@@ -3878,9 +3899,19 @@ bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw)
     switch (format) {
     case 0:
         value = env->fr[mapped].raw[0];
+        mnemonic = "getf.sig";
         break;
     case 1:
         value = env->fr[mapped].raw[1] & 0x3ffff;
+        mnemonic = "getf.exp";
+        break;
+    case 2:
+        value = ia64_read_fr_as_single_bits(&env->fr[mapped]);
+        mnemonic = "getf.s";
+        break;
+    case 3:
+        value = ia64_read_fr_as_double_bits(&env->fr[mapped]);
+        mnemonic = "getf.d";
         break;
     default:
         return false;
@@ -3890,10 +3921,10 @@ bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw)
     if (ia64_fpu_trace_enabled(env)) {
         ia64_fpu_trace_fr("getf.source", env, raw, f2);
         fprintf(stderr,
-                "[ia64-fpu] getf.sig ip=0x%016" PRIx64
+                "[ia64-fpu] %s ip=0x%016" PRIx64
                 " raw=0x%011" PRIx64 " r%u=f%u"
                 " value=0x%016" PRIx64 "\n",
-                env->ip, raw, r1, f2, value);
+                mnemonic, env->ip, raw, r1, f2, value);
     }
     return true;
 }
@@ -5711,6 +5742,15 @@ bool ia64_return_from_call_frame(CPUIA64State *env, uint64_t target_ip)
     return true;
 }
 
+void ia64_branch_call_effects(CPUIA64State *env, uint32_t b1,
+                              uint64_t bundle_ip)
+{
+    ia64_trace_branch_write(env, "br.call-relative", b1,
+                            bundle_ip + IA64_BUNDLE_SIZE, bundle_ip);
+    env->br[b1] = bundle_ip + IA64_BUNDLE_SIZE;
+    ia64_enter_call_frame(env);
+}
+
 bool ia64_exec_b_call_relative(CPUIA64State *env,
                                uint64_t raw,
                                uint64_t bundle_ip,
@@ -5724,10 +5764,7 @@ bool ia64_exec_b_call_relative(CPUIA64State *env,
     }
 
     b1 = (raw >> 6) & 0x7;
-    ia64_trace_branch_write(env, "br.call-relative", b1,
-                            bundle_ip + IA64_BUNDLE_SIZE, bundle_ip);
-    env->br[b1] = bundle_ip + IA64_BUNDLE_SIZE;
-    ia64_enter_call_frame(env);
+    ia64_branch_call_effects(env, b1, bundle_ip);
     *target_ip = bundle_ip + ia64_branch_displacement(raw);
     return true;
 }

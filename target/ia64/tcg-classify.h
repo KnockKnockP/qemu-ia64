@@ -205,6 +205,7 @@ uint32_t ia64_tcg_fallback_plan_for_bundle(const IA64DecodedBundle *bundle);
 typedef enum IA64TcgDirectBranchKind {
     IA64_TCG_DIRECT_BRANCH_COND,
     IA64_TCG_DIRECT_BRANCH_CLOOP,
+    IA64_TCG_DIRECT_BRANCH_CALL,
 } IA64TcgDirectBranchKind;
 
 typedef struct IA64TcgDirectBranch {
@@ -215,6 +216,7 @@ typedef struct IA64TcgDirectBranch {
     uint8_t slot;
     uint8_t predicate;
     uint8_t nop_count;
+    uint8_t call_branch_reg;
     bool conditional;
 } IA64TcgDirectBranch;
 
