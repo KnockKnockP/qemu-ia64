@@ -565,6 +565,76 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
     return chain_ok ? 1 : 0;
 }
 
+uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
+                                               uint64_t raw,
+                                               uint32_t pending_bundle_count,
+                                               uint32_t prefix_slot_count,
+                                               uint32_t prefix_op_counts,
+                                               uint64_t prefix_dest_mask)
+{
+    CPUState *cpu = env_cpu(env);
+    uint8_t x6 = (raw >> 27) & 0x3f;
+    bool br_ret = ia64_slot_major_opcode(raw) == 0x0 && x6 == 0x21;
+    bool br_call = ia64_slot_major_opcode(raw) == 0x1;
+    uint64_t old_psr = ia64_env_psr(env);
+    uint64_t next_ip = 0;
+    bool debug_hooks = ia64_debug_hooks_active();
+
+    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    ia64_count_fast_tcg_ops(prefix_slot_count, prefix_op_counts, false);
+    IA64_PERF_INC(br_call ? IA64_PERF_OP_BRANCH_CALL :
+                            IA64_PERF_OP_BRANCH_INDIRECT);
+    IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
+
+    cpu->neg.can_do_io = true;
+    if (debug_hooks) {
+        ia64_trace_execve(env);
+        ia64_trace_uevent_netlink(env);
+        ia64_progress_trace_bundle(env);
+        ia64_state_trace_bundle(env);
+    }
+    if (ia64_firmware_linux_cmdline_append_pending()) {
+        ia64_firmware_maybe_apply_linux_cmdline_append(env);
+    }
+
+    /*
+     * The return-frame fill below can touch the backing store and fault;
+     * publish the branch slot the way the interpreter loop does so delivery
+     * reports the precise PSR.ri/ISR.ei.
+     */
+    ia64_env_set_ri(env, 2);
+    if (br_ret) {
+        ia64_rse_probe_restored_frame_fill(env,
+                                           (env->ar[IA64_AR_PFS] >> 7) &
+                                           0x7f);
+    }
+    ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
+    if (br_ret) {
+        ia64_rse_maybe_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
+    }
+    ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
+    if (next_ip == 0) {
+        IA64_PERF_INC(IA64_PERF_ZERO_BRANCH_ABORT);
+        cpu_abort(cpu,
+                  "IA-64 execution frontier at IP=0x%016" PRIx64
+                  ": indirect branch target became zero"
+                  " (B slot raw 0x%011" PRIx64 ")\n",
+                  env->ip, raw);
+    }
+
+    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
+    env->gr[0] = 0;
+    ia64_finish_bundle(env, next_ip, 0);
+    ia64_finish_tcg_ticks(env, pending_bundle_count + 1);
+    return ia64_lookup_ptr_chain_ok(env);
+}
+
+void HELPER(fast_alloc)(CPUIA64State *env, uint64_t raw)
+{
+    IA64_PERF_INC(IA64_PERF_OP_ALLOC);
+    ia64_exec_m34_alloc(env, raw);
+}
+
 typedef enum IA64PlannedSlotResult {
     IA64_PLANNED_SLOT_GENERIC,
     IA64_PLANNED_SLOT_CONTINUE,

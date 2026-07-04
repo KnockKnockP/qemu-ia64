@@ -764,6 +764,25 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         return true;
     }
 
+    if (ia64_slot_is_m34_alloc(type, raw)) {
+        r1 = (raw >> 6) & 0x7f;
+        /*
+         * The helper reruns the interpreter's alloc.  Rotating frames stay on
+         * the interpreter: the whole-bundle sor==0 guard is evaluated before
+         * the alloc executes, so an alloc that enables rotation would stale
+         * the mapping used by later fast slots.
+         */
+        if (((raw >> 27) & 0x0f) != 0 ||
+            !ia64_tcg_fast_set_target(slot, r1)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_ALLOC;
+        slot->immediate = (int64_t)raw;
+        ia64_tcg_fast_count_op(fast,
+                               IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        return true;
+    }
+
     if (ia64_slot_is_i_mov_from_branch(type, raw)) {
         r1 = (raw >> 6) & 0x7f;
         if (ia64_tcg_system_mov_trace_enabled() ||
@@ -1036,6 +1055,16 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         }
         if (pred_test.kind != IA64_PRED_TEST_FEATURE &&
             !ia64_tcg_fast_static_gr(pred_test.source3)) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_m34_alloc(type, raw)) {
+        if (((raw >> 27) & 0x0f) != 0) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        if (!ia64_tcg_fast_static_gr((raw >> 6) & 0x7f)) {
             return IA64_TCG_FALLBACK_FAST_STATIC_GR;
         }
         return IA64_TCG_FALLBACK_NONE;
@@ -1465,10 +1494,10 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
 
     /*
      * Keep branch lowering auditably small: only bundles with a final simple
-     * relative branch, counted-loop branch, or relative call and two safe
-     * fast-prefix slots can use direct TCG control flow.  Returns,
-     * modulo-scheduled loop branches, branch-register targets, and rotating
-     * predicate reads stay on the helper path.
+     * relative branch, counted-loop branch, call, plain indirect branch, or
+     * return and two safe fast-prefix slots can use direct TCG control flow.
+     * rfi, cover/clrrrb/bsw/epc forms, modulo-scheduled loop branches, and
+     * rotating predicate reads stay on the helper path.
      */
     raw = bundle->slot[2];
     predicate = ia64_slot_predicate(raw);
@@ -1498,24 +1527,43 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
         }
         kind = IA64_TCG_DIRECT_BRANCH_CALL;
         call_branch_reg = (raw >> 6) & 0x7;
+    } else if (ia64_slot_is_b_indirect_branch(bundle->info->slot_type[2],
+                                              raw)) {
+        uint8_t major = ia64_slot_major_opcode(raw);
+        uint8_t x6 = (raw >> 27) & 0x3f;
+
+        if (predicate >= 16 ||
+            !(major == 0x1 ||
+              (major == 0x0 && (x6 == 0x20 || x6 == 0x21)))) {
+            return false;
+        }
+        kind = IA64_TCG_DIRECT_BRANCH_INDIRECT;
     } else {
         return false;
     }
 
     fallthrough = pc + IA64_BUNDLE_SIZE;
-    target = pc + ia64_branch_displacement(raw);
     /*
      * The not-taken path must stay chainable, so the fallthrough keeps the
-     * same-page rule.  Calls routinely target other pages; the translator
-     * falls back to a TB lookup for those, so only conditional and counted
-     * branches require a same-page target.
+     * same-page rule.  Calls routinely target other pages and indirect
+     * targets are runtime values; the translator falls back to a TB lookup
+     * for those, so only conditional and counted branches require a
+     * same-page target.
      */
-    if (target == 0 || !ia64_tcg_same_page(pc, fallthrough)) {
+    if (!ia64_tcg_same_page(pc, fallthrough)) {
         return false;
     }
-    if (kind != IA64_TCG_DIRECT_BRANCH_CALL &&
-        !ia64_tcg_same_page(pc, target)) {
-        return false;
+    if (kind == IA64_TCG_DIRECT_BRANCH_INDIRECT) {
+        target = 0;
+    } else {
+        target = pc + ia64_branch_displacement(raw);
+        if (target == 0) {
+            return false;
+        }
+        if (kind != IA64_TCG_DIRECT_BRANCH_CALL &&
+            !ia64_tcg_same_page(pc, target)) {
+            return false;
+        }
     }
 
     memset(branch, 0, sizeof(*branch));
@@ -1524,6 +1572,7 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     }
     branch->target_ip = target;
     branch->fallthrough_ip = fallthrough;
+    branch->branch_raw = raw;
     branch->kind = kind;
     branch->slot = 2;
     branch->predicate = predicate;

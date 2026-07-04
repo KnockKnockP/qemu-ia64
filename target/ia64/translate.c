@@ -754,6 +754,15 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
                        slot->system_reg * sizeof(uint64_t));
         ia64_tr_finish_fast_slot_predicate_guard(skip);
         return;
+    case IA64_TCG_FAST_OP_ALLOC:
+        gen_helper_fast_alloc(tcg_env,
+                              tcg_constant_i64((uint64_t)slot->immediate));
+        if (runtime_dest_mask != NULL && slot->dest_mask != 0) {
+            tcg_gen_ori_i64(runtime_dest_mask, runtime_dest_mask,
+                            slot->dest_mask);
+        }
+        ia64_tr_finish_fast_slot_predicate_guard(skip);
+        return;
     case IA64_TCG_FAST_OP_LDST_LOAD:
         g_assert(ldst_address != NULL);
         if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
@@ -971,6 +980,23 @@ static void ia64_tr_emit_direct_branch_exit(DisasContext *ctx,
     TCGv_i32 branch_flags = tcg_temp_new_i32();
     uint32_t static_flags = 0;
 
+    if (taken && branch->kind == IA64_TCG_DIRECT_BRANCH_INDIRECT) {
+        /* The runtime target comes from the raw B slot inside the helper. */
+        gen_helper_finish_indirect_branch_bundle(
+            chain_ok, tcg_env,
+            tcg_constant_i64(branch->branch_raw),
+            ctx->fast_bundle_ticks,
+            tcg_constant_i32(branch->prefix.slot_count),
+            tcg_constant_i32(branch->prefix.op_counts),
+            tcg_constant_i64(branch->prefix.dest_mask));
+        tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
+        tcg_gen_lookup_and_goto_ptr();
+
+        gen_set_label(main_loop_exit);
+        tcg_gen_exit_tb(NULL, 0);
+        return;
+    }
+
     /*
      * bit 0 is branch-taken, bit 1 marks a taken call whose branch register
      * sits in bits 2-4, and the remaining upper bits are pending fast-path
@@ -1037,7 +1063,8 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         return false;
     }
     if (!translator_use_goto_tb(&ctx->base, branch.fallthrough_ip) ||
-        (branch.kind != IA64_TCG_DIRECT_BRANCH_CALL &&
+        ((branch.kind == IA64_TCG_DIRECT_BRANCH_COND ||
+          branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP) &&
          !translator_use_goto_tb(&ctx->base, branch.target_ip))) {
         IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
         return false;

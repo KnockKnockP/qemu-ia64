@@ -584,6 +584,32 @@ static void test_fast_bundle_accepts_system_movs(void)
                     ==, IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT);
 }
 
+static void test_fast_bundle_accepts_alloc(void)
+{
+    /* alloc r34 = ar.pfs, 5, 3, 0 : M34, sof=5, sol=3, sor=0. */
+    const uint64_t alloc_r34_raw = (1ULL << 37) | (6ULL << 33) |
+                                   (3ULL << 20) | (5ULL << 13) |
+                                   (34ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, alloc_r34_raw,
+                    IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[0].op, ==, IA64_TCG_FAST_OP_ALLOC);
+    g_assert_cmpuint(fast.slot[0].target, ==, 34);
+    g_assert_cmphex((uint64_t)fast.slot[0].immediate, ==, alloc_r34_raw);
+    g_assert_cmphex(fast.dest_mask, ==, 1ULL << 34);
+    g_assert_true(fast.slot[0].uses_stacked_gr);
+
+    /* Rotating frames (sor != 0) stay on the interpreter. */
+    bundle = make_bundle(0x00, alloc_r34_raw | (1ULL << 27),
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT);
+}
+
 static void test_fast_bundle_accepts_static_predicates(void)
 {
     const uint64_t add_r36_r36_r1_raw = 0x10000148900ULL;
@@ -1015,10 +1041,19 @@ static void test_direct_branch_rejects_unsafe_forms(void)
                          IA64_INSN_NOP_RAW, br_cond_raw | 16);
     g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
 
+    /* Returns lower to the indirect finish helper with a TB-lookup exit. */
     bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
                          IA64_INSN_NOP_RAW, br_ret_b0_raw);
-    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmpint(branch.kind, ==, IA64_TCG_DIRECT_BRANCH_INDIRECT);
+    g_assert_cmphex(branch.branch_raw, ==, br_ret_b0_raw);
+    g_assert_false(branch.conditional);
     g_assert_true(ia64_tcg_bundle_has_indirect_branch(&bundle));
+
+    /* rfi stays on the interpreter path. */
+    bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
+                         IA64_INSN_NOP_RAW, 0x08ULL << 27);
+    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
 
     /*
      * A prefix compare producing the branch predicate is legal with a stop
@@ -1149,6 +1184,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_predicate_test);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-system-movs",
                     test_fast_bundle_accepts_system_movs);
+    g_test_add_func("/ia64-tcg-classify/fast-bundle-alloc",
+                    test_fast_bundle_accepts_alloc);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-static-predicates",
                     test_fast_bundle_accepts_static_predicates);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-ldst-slot0",

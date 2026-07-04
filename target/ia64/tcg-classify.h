@@ -89,6 +89,7 @@ typedef enum IA64TcgFastOp {
     IA64_TCG_FAST_OP_MOV_TO_BR,
     IA64_TCG_FAST_OP_MOV_FROM_AR,
     IA64_TCG_FAST_OP_MOV_TO_AR,
+    IA64_TCG_FAST_OP_ALLOC,
 } IA64TcgFastOp;
 
 typedef enum IA64TcgFastLogicOp {
@@ -207,12 +208,15 @@ typedef enum IA64TcgDirectBranchKind {
     IA64_TCG_DIRECT_BRANCH_COND,
     IA64_TCG_DIRECT_BRANCH_CLOOP,
     IA64_TCG_DIRECT_BRANCH_CALL,
+    IA64_TCG_DIRECT_BRANCH_INDIRECT,
 } IA64TcgDirectBranchKind;
 
 typedef struct IA64TcgDirectBranch {
     IA64TcgFastBundle prefix;
     uint64_t target_ip;
     uint64_t fallthrough_ip;
+    /* Raw B slot for the runtime-target kinds (indirect br/call/ret). */
+    uint64_t branch_raw;
     IA64TcgDirectBranchKind kind;
     uint8_t slot;
     uint8_t predicate;
