@@ -454,14 +454,21 @@ void HELPER(finish_fast_tb)(CPUIA64State *env, uint32_t bundle_count)
 }
 
 uint64_t HELPER(fast_ldst_load)(CPUIA64State *env, uint64_t address,
-                                uint32_t width)
+                                uint32_t width, uint32_t slot)
 {
+    /*
+     * Translated fast bundles carry one insn_start per bundle, so publish the
+     * executing slot the same way the interpreter loop does: a fault below
+     * must deliver PSR.ri/ISR.ei for this slot, not the bundle start.
+     */
+    ia64_env_set_ri(env, slot);
     return ia64_ldst_read(env, address, width);
 }
 
 void HELPER(fast_ldst_store)(CPUIA64State *env, uint64_t address,
-                             uint64_t value, uint32_t width)
+                             uint64_t value, uint32_t width, uint32_t slot)
 {
+    ia64_env_set_ri(env, slot);
     ia64_ldst_write(env, address, width, value);
 }
 

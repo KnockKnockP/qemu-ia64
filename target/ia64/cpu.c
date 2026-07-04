@@ -50,7 +50,7 @@ static void ia64_restore_state_to_opc(CPUState *cs,
                                       const uint64_t *data)
 {
     IA64CPU *cpu = IA64_CPU(cs);
-    unsigned ri = data[1] & 3;
+    unsigned ri = ia64_env_restore_ri(&cpu->env, data[1] & 3);
 
     cpu->env.ip = data[0];
     ia64_env_set_psr(&cpu->env, ia64_psr_with_ri(cpu->env.psr, ri));

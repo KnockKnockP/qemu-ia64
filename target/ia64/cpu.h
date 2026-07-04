@@ -447,6 +447,18 @@ static inline void ia64_env_sync_psr_ri(CPUIA64State *env)
     }
 }
 
+/*
+ * insn_start data is bundle-granular.  Helpers that execute individual slots
+ * (the interpreter loop and the fast load/store helpers) publish the
+ * executing slot in env->ri before any faulting access; that is more precise
+ * than the translation-time value recorded for the bundle.
+ */
+static inline unsigned ia64_env_restore_ri(const CPUIA64State *env,
+                                           unsigned data_ri)
+{
+    return (env->ri_dirty ? env->ri : data_ri) & 3;
+}
+
 #define CPU_RESOLVING_TYPE TYPE_IA64_CPU
 
 void ia64_translate_init(void);

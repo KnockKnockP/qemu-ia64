@@ -903,6 +903,25 @@ static void test_alternate_data_tlb_miss_with_ic_clear_vectors_to_nested(void)
     assert_delivery_psr(&env, 0);
 }
 
+static void test_restore_ri_prefers_dirty_slot(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    /* Without a helper-published slot, insn_start data wins. */
+    ia64_env_set_psr(&env, ia64_psr_with_ri(IA64_PSR_IC_BIT, 0));
+    g_assert_cmpuint(ia64_env_restore_ri(&env, 1), ==, 1);
+
+    /* A slot helper (interpreter loop, fast load/store) is more precise. */
+    ia64_env_set_ri(&env, 2);
+    g_assert_cmpuint(ia64_env_restore_ri(&env, 0), ==, 2);
+
+    /* Bundle retirement publishes PSR.ri and re-arms insn_start data. */
+    ia64_env_set_psr(&env, ia64_psr_with_ri(ia64_env_psr(&env), 0));
+    g_assert_cmpuint(ia64_env_restore_ri(&env, 1), ==, 1);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -958,6 +977,8 @@ int main(int argc, char **argv)
                     test_data_tlb_miss_with_ic_clear_vectors_to_nested);
     g_test_add_func("/ia64-exception/alternate-data-nested-tlb-delivery",
                     test_alternate_data_tlb_miss_with_ic_clear_vectors_to_nested);
+    g_test_add_func("/ia64-exception/restore-ri-prefers-dirty-slot",
+                    test_restore_ri_prefers_dirty_slot);
 
     return g_test_run();
 }

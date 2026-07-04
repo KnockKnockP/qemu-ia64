@@ -252,22 +252,24 @@ static bool ia64_tcg_ldst_is_memory_access(const IA64LdstImmediate *ldst)
 bool ia64_tcg_fast_ldst_memory_inline_enabled(void)
 {
     /*
-     * Fast memory slots used to lower directly to SoftMMU qemu_ld/st ops, but
-     * those ops can exceed the host generated-code limit even for a single
-     * IA-64 bundle on MinGW.  The current compact decoded load/store helpers
-     * are smaller, but still overflow this backend for mixed memory/ALU
-     * bundles seen in the Debian timer path.  Keep memory bundles on the full
-     * interpreter by default; VIBTANIUM_TCG_LDST_INLINE=1 enables the
-     * experimental helper-backed path for profiling.
+     * Fast memory slots lower to compact decoded load/store helpers.  The
+     * crashes that kept this path opt-in were not host code size: the old
+     * lowering emitted an extra insn_start per memory slot, overflowing
+     * TCG's per-instruction metadata (gen_insn_data and gen_insn_end_off
+     * are sized by tb->icount) and corrupting the TCG pool.  The fast path
+     * now keeps one insn_start per bundle and reports the executing slot
+     * through env->ri, so the helper path is on by default;
+     * VIBTANIUM_TCG_LDST_INLINE=0 (or off) keeps a kill-switch back to the
+     * full interpreter for memory bundles.
      */
     static int enabled = -1;
 
     if (enabled < 0) {
         const char *value = g_getenv("VIBTANIUM_TCG_LDST_INLINE");
 
-        enabled = value != NULL && *value != '\0' &&
-                  strcmp(value, "0") != 0 &&
-                  g_ascii_strcasecmp(value, "off") != 0;
+        enabled = value == NULL || *value == '\0' ||
+                  (strcmp(value, "0") != 0 &&
+                   g_ascii_strcasecmp(value, "off") != 0);
     }
     return enabled != 0;
 }

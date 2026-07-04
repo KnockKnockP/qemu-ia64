@@ -99,11 +99,6 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
                        ia64_tcg_tb_flags_ri(dcbase->tb->flags), 0);
 }
 
-static void ia64_tr_slot_insn_start(uint64_t pc, uint8_t slot)
-{
-    tcg_gen_insn_start(pc, slot, 0);
-}
-
 static void ia64_tr_emit_exec_bundle(DisasContext *ctx,
                                      const IA64DecodedBundle *bundle,
                                      uint64_t pc)
@@ -543,8 +538,7 @@ static void ia64_tr_finish_fast_slot_predicate_guard(TCGLabel *skip)
 static void ia64_tr_emit_fast_slot(DisasContext *ctx,
                                    const IA64TcgFastSlot *slot,
                                    TCGv_i64 ldst_address,
-                                   TCGv_i64 runtime_dest_mask,
-                                   uint64_t pc)
+                                   TCGv_i64 runtime_dest_mask)
 {
     TCGLabel *skip;
     TCGv_i64 result;
@@ -687,9 +681,9 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         break;
     case IA64_TCG_FAST_OP_LDST_LOAD:
         g_assert(ldst_address != NULL);
-        ia64_tr_slot_insn_start(pc, slot->slot_index);
         gen_helper_fast_ldst_load(result, tcg_env, ldst_address,
-                                  tcg_constant_i32(slot->width));
+                                  tcg_constant_i32(slot->width),
+                                  tcg_constant_i32(slot->slot_index));
         ia64_tr_store_static_gr(ctx, slot->target, result);
         ia64_tr_emit_ldst_base_update(ctx, slot, ldst_address);
         if (runtime_dest_mask != NULL && slot->dest_mask != 0) {
@@ -701,9 +695,9 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
     case IA64_TCG_FAST_OP_LDST_STORE:
         g_assert(ldst_address != NULL);
         ia64_tr_load_static_gr(ctx, source2, slot->source2);
-        ia64_tr_slot_insn_start(pc, slot->slot_index);
         gen_helper_fast_ldst_store(tcg_env, ldst_address, source2,
-                                   tcg_constant_i32(slot->width));
+                                   tcg_constant_i32(slot->width),
+                                   tcg_constant_i32(slot->slot_index));
         ia64_tr_emit_ldst_base_update(ctx, slot, ldst_address);
         if (runtime_dest_mask != NULL && slot->dest_mask != 0) {
             tcg_gen_ori_i64(runtime_dest_mask, runtime_dest_mask,
@@ -826,7 +820,7 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     }
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
         ia64_tr_emit_fast_slot(ctx, &fast.slot[slot], ldst_address[slot],
-                               runtime_dest_mask, pc);
+                               runtime_dest_mask);
     }
     gen_helper_finish_fast_bundle(tcg_env,
                                   tcg_constant_i64(pc + IA64_BUNDLE_SIZE),
@@ -953,9 +947,12 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
                                     ldst_address);
 
     tcg_gen_movi_i64(cpu_ip, pc);
+    if (has_ldst) {
+        ia64_tr_emit_can_do_io();
+    }
     for (int slot = 0; slot < 2; slot++) {
         ia64_tr_emit_fast_slot(ctx, &branch.prefix.slot[slot],
-                               ldst_address[slot], NULL, pc);
+                               ldst_address[slot], NULL);
     }
     if (branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP) {
         not_taken = gen_new_label();
