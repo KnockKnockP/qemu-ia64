@@ -49,6 +49,10 @@
 #define IA64_PTE_P_BIT UINT64_C(0x0000000000000001)
 #define IA64_PTE_A_BIT UINT64_C(0x0000000000000020)
 #define IA64_PTE_D_BIT UINT64_C(0x0000000000000040)
+#define IA64_TEST_FR_SPECIAL_EXPONENT 0x1ffff
+#define IA64_TEST_FR_NATVAL_EXPONENT 0x1fffe
+#define IA64_TEST_FR_INTEGER_BIT UINT64_C(0x8000000000000000)
+#define IA64_TEST_FR_QUIET_NAN_BIT UINT64_C(0x4000000000000000)
 
 static uint64_t ia64_make_pfs(uint64_t cfm, uint64_t ec, uint64_t cpl)
 {
@@ -2745,6 +2749,50 @@ static void assert_p6_p7(CPUIA64State *env, bool p6, bool p7)
     g_assert_cmphex(env->pr & (1ULL << 7), ==, p7 ? 1ULL << 7 : 0);
 }
 
+static uint64_t make_fclass_raw(uint16_t mask, uint8_t p1, uint8_t p2,
+                                uint8_t f2, bool unc, uint8_t qp)
+{
+    return (5ULL << 37) | ((uint64_t)(mask & 0x3) << 35) |
+           ((uint64_t)p2 << 27) |
+           ((uint64_t)((mask >> 2) & 0x7f) << 20) |
+           ((uint64_t)f2 << 13) | ((uint64_t)unc << 12) |
+           ((uint64_t)p1 << 6) | qp;
+}
+
+static IA64FloatReg make_test_fr(bool sign, uint32_t exponent,
+                                 uint64_t significand)
+{
+    IA64FloatReg reg = {
+        .raw = {
+            significand,
+            (exponent & 0x1ffff) | ((uint64_t)sign << 17),
+        },
+    };
+
+    return reg;
+}
+
+static void assert_fclass_p6_p7(IA64FloatReg reg, uint16_t mask,
+                                bool p6, bool p7)
+{
+    IA64FloatingClassInstruction decoded;
+    CPUIA64State env;
+
+    g_assert_true(ia64_decode_floating_class(
+                      IA64_SLOT_TYPE_F,
+                      make_fclass_raw(mask, 6, 7, 8, false, 0),
+                      &decoded));
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 6, true);
+    ia64_write_pr(&env, 7, true);
+    env.fr[8] = reg;
+
+    g_assert_true(ia64_exec_floating_class(&env, &decoded));
+    assert_p6_p7(&env, p6, p7);
+    g_assert_cmphex(env.pr & 1, ==, 1);
+}
+
 static void test_compare_parallel_predicate_completers(void)
 {
     IA64CompareInstruction decoded;
@@ -2843,6 +2891,87 @@ static void test_unc_compare_clears_targets_when_false_predicated(void)
 
     g_assert_true(ia64_exec_compare_qualified(&env, &decoded, false));
     g_assert_cmphex(env.pr & (1ULL << 8), ==, 0);
+    g_assert_cmphex(env.pr & 1, ==, 1);
+}
+
+static void test_floating_class_decode_frontier(void)
+{
+    const uint64_t fclass_p6_p7_f8_0x1c0_raw =
+        make_fclass_raw(0x1c0, 6, 7, 8, false, 0);
+    IA64FloatingClassInstruction decoded;
+
+    g_assert_cmphex(fclass_p6_p7_f8_0x1c0_raw, ==, 0x0a03f010180ULL);
+    g_assert_true(ia64_decode_floating_class(
+                      IA64_SLOT_TYPE_F,
+                      fclass_p6_p7_f8_0x1c0_raw,
+                      &decoded));
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_NORMAL);
+    g_assert_cmpuint(decoded.p1, ==, 6);
+    g_assert_cmpuint(decoded.p2, ==, 7);
+    g_assert_cmpuint(decoded.source2, ==, 8);
+    g_assert_cmpuint(decoded.mask, ==, 0x1c0);
+    g_assert_false(ia64_decode_floating_class(
+                       IA64_SLOT_TYPE_I,
+                       fclass_p6_p7_f8_0x1c0_raw,
+                       &decoded));
+}
+
+static void test_floating_class_nan_and_natval_masks(void)
+{
+    const IA64FloatReg qnan =
+        make_test_fr(false, IA64_TEST_FR_SPECIAL_EXPONENT,
+                     IA64_TEST_FR_INTEGER_BIT |
+                     IA64_TEST_FR_QUIET_NAN_BIT);
+    const IA64FloatReg snan =
+        make_test_fr(false, IA64_TEST_FR_SPECIAL_EXPONENT,
+                     IA64_TEST_FR_INTEGER_BIT | 1);
+    const IA64FloatReg natval =
+        make_test_fr(false, IA64_TEST_FR_NATVAL_EXPONENT, 0);
+
+    assert_fclass_p6_p7(qnan, 0x1c0, true, false);
+    assert_fclass_p6_p7(snan, 0x1c0, true, false);
+    assert_fclass_p6_p7(natval, 0x1c0, true, false);
+    assert_fclass_p6_p7(natval, 0x080, false, false);
+}
+
+static void test_floating_class_numeric_masks(void)
+{
+    const IA64FloatReg normal =
+        make_test_fr(false, 0xffff, IA64_TEST_FR_INTEGER_BIT);
+    const IA64FloatReg negative_zero =
+        make_test_fr(true, IA64_TEST_FR_SPECIAL_EXPONENT, 0);
+    const IA64FloatReg infinity =
+        make_test_fr(false, IA64_TEST_FR_SPECIAL_EXPONENT,
+                     IA64_TEST_FR_INTEGER_BIT);
+    const IA64FloatReg unnormal =
+        make_test_fr(false, 0xffff, IA64_TEST_FR_QUIET_NAN_BIT);
+
+    assert_fclass_p6_p7(normal, 0x011, true, false);
+    assert_fclass_p6_p7(normal, 0x012, false, true);
+    assert_fclass_p6_p7(negative_zero, 0x006, true, false);
+    assert_fclass_p6_p7(infinity, 0x021, true, false);
+    assert_fclass_p6_p7(unnormal, 0x009, true, false);
+}
+
+static void test_unc_floating_class_clears_targets_when_false_predicated(void)
+{
+    IA64FloatingClassInstruction decoded;
+    CPUIA64State env;
+
+    g_assert_true(ia64_decode_floating_class(
+                      IA64_SLOT_TYPE_F,
+                      make_fclass_raw(0x011, 6, 7, 8, true, 8),
+                      &decoded));
+    g_assert_cmpint(decoded.write_kind, ==,
+                    IA64_PRED_WRITE_UNCONDITIONAL);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_pr(&env, 6, true);
+    ia64_write_pr(&env, 7, true);
+
+    g_assert_true(ia64_exec_floating_class_qualified(
+                      &env, &decoded, false));
+    assert_p6_p7(&env, false, false);
     g_assert_cmphex(env.pr & 1, ==, 1);
 }
 
@@ -3653,6 +3782,14 @@ int main(int argc, char **argv)
                     test_compare_parallel_predicate_completers);
     g_test_add_func("/ia64-insn/unc-compare-false-predicate-clear",
                     test_unc_compare_clears_targets_when_false_predicated);
+    g_test_add_func("/ia64-insn/floating-class-decode-frontier",
+                    test_floating_class_decode_frontier);
+    g_test_add_func("/ia64-insn/floating-class-nan-natval-masks",
+                    test_floating_class_nan_and_natval_masks);
+    g_test_add_func("/ia64-insn/floating-class-numeric-masks",
+                    test_floating_class_numeric_masks);
+    g_test_add_func("/ia64-insn/unc-floating-class-false-predicate-clear",
+                    test_unc_floating_class_clears_targets_when_false_predicated);
     g_test_add_func("/ia64-insn/unc-predicate-test-false-predicate-clear",
                     test_unc_predicate_test_clears_targets_when_false_predicated);
     g_test_add_func("/ia64-insn/predicate-test-bit",

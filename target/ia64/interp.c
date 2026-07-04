@@ -355,6 +355,7 @@ static bool exec_false_predicated_side_effect(CPUIA64State *env,
     uint64_t raw = decoded->slot[slot];
     IA64CompareInstruction cmp;
     IA64FloatingCompareInstruction fcmp;
+    IA64FloatingClassInstruction fclass;
     IA64PredicateTestInstruction pred_test;
 
     if (ia64_decode_compare(type, raw, &cmp) &&
@@ -368,6 +369,14 @@ static bool exec_false_predicated_side_effect(CPUIA64State *env,
     if (ia64_decode_floating_compare(type, raw, &fcmp) &&
         fcmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
         if (!ia64_exec_floating_compare_qualified(env, &fcmp, false)) {
+            abort_unsupported_slot(env, decoded, slot);
+        }
+        return true;
+    }
+
+    if (ia64_decode_floating_class(type, raw, &fclass) &&
+        fclass.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+        if (!ia64_exec_floating_class_qualified(env, &fclass, false)) {
             abort_unsupported_slot(env, decoded, slot);
         }
         return true;
@@ -644,6 +653,16 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         IA64_PERF_INC(IA64_PERF_OP_FLOAT);
         return IA64_PLANNED_SLOT_CONTINUE;
     }
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS: {
+        IA64FloatingClassInstruction fclass;
+
+        if (!ia64_decode_floating_class(type, raw, &fclass) ||
+            !ia64_exec_floating_class(env, &fclass)) {
+            return IA64_PLANNED_SLOT_GENERIC;
+        }
+        IA64_PERF_INC(IA64_PERF_OP_FLOAT);
+        return IA64_PLANNED_SLOT_CONTINUE;
+    }
     case IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE: {
         IA64LdstImmediate ldst;
 
@@ -892,6 +911,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         IA64LdstImmediate ldst;
         IA64FloatingMemoryInstruction fldst;
         IA64FloatingCompareInstruction fcmp;
+        IA64FloatingClassInstruction fclass;
         IA64AtomicInstruction atomic;
         IA64CompareInstruction cmp;
         IA64PredicateTestInstruction pred_test;
@@ -1257,6 +1277,11 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         }
         if (ia64_decode_floating_compare(type, raw, &fcmp) &&
             ia64_exec_floating_compare(env, &fcmp)) {
+            IA64_PERF_INC(IA64_PERF_OP_FLOAT);
+            continue;
+        }
+        if (ia64_decode_floating_class(type, raw, &fclass) &&
+            ia64_exec_floating_class(env, &fclass)) {
             IA64_PERF_INC(IA64_PERF_OP_FLOAT);
             continue;
         }

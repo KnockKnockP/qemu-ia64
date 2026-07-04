@@ -185,6 +185,14 @@ typedef struct IA64FloatingCompareInstruction {
     uint8_t source3;
 } IA64FloatingCompareInstruction;
 
+typedef struct IA64FloatingClassInstruction {
+    IA64PredicateWriteKind write_kind;
+    uint8_t p1;
+    uint8_t p2;
+    uint8_t source2;
+    uint16_t mask;
+} IA64FloatingClassInstruction;
+
 typedef struct IA64ExtractInstruction {
     uint8_t target;
     uint8_t source3;
@@ -418,6 +426,15 @@ bool ia64_exec_floating_compare_qualified(
 bool ia64_exec_floating_compare(
     CPUIA64State *env,
     const IA64FloatingCompareInstruction *decoded);
+bool ia64_decode_floating_class(IA64SlotType type, uint64_t raw,
+                                IA64FloatingClassInstruction *decoded);
+bool ia64_exec_floating_class_qualified(
+    CPUIA64State *env,
+    const IA64FloatingClassInstruction *decoded,
+    bool qualifying_predicate);
+bool ia64_exec_floating_class(
+    CPUIA64State *env,
+    const IA64FloatingClassInstruction *decoded);
 bool ia64_decode_extract(IA64SlotType type, uint64_t raw,
                          IA64ExtractInstruction *decoded);
 bool ia64_exec_extract(CPUIA64State *env,

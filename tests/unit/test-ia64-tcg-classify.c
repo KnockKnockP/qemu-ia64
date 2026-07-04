@@ -351,6 +351,16 @@ static uint64_t make_cmp_eq_parallel_p6_p7_r20_r21(uint8_t major)
            (21ULL << 20) | (20ULL << 13) | (6ULL << 6);
 }
 
+static uint64_t make_fclass_raw(uint16_t mask, uint8_t p1, uint8_t p2,
+                                uint8_t f2, bool unc, uint8_t qp)
+{
+    return (5ULL << 37) | ((uint64_t)(mask & 0x3) << 35) |
+           ((uint64_t)p2 << 27) |
+           ((uint64_t)((mask >> 2) & 0x7f) << 20) |
+           ((uint64_t)f2 << 13) | ((uint64_t)unc << 12) |
+           ((uint64_t)p1 << 6) | qp;
+}
+
 static void test_fast_bundle_accepts_compare_predicate_writes(void)
 {
     const uint64_t cmp_eq_p6_p0_0_r16_raw = 0x1c801000180ULL;
@@ -823,6 +833,8 @@ static void test_fallback_plan_classifies_hot_helper_slots(void)
     const uint64_t add_r1_r2_r3_raw =
         (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
     const uint64_t br_cond_raw = 0x0800001a006ULL;
+    const uint64_t fclass_p6_p7_f8_0x1c0_raw =
+        make_fclass_raw(0x1c0, 6, 7, 8, false, 0);
     IA64DecodedBundle bundle;
     uint32_t plan;
 
@@ -845,6 +857,17 @@ static void test_fallback_plan_classifies_hot_helper_slots(void)
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
     g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
                     IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE);
+
+    bundle = make_bundle(0x0d, IA64_INSN_NOP_RAW,
+                         fclass_p6_p7_f8_0x1c0_raw,
+                         IA64_INSN_NOP_RAW);
+    plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+                    IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS);
+    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+                    IA64_TCG_FALLBACK_PLAN_GENERIC);
 }
 
 static void test_fallback_plan_keeps_long_immediate_tail_generic(void)

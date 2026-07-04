@@ -15,6 +15,16 @@
 #define IA64_FR_SPECIAL_EXPONENT 0x1ffff
 #define IA64_FR_NATVAL_EXPONENT 0x1fffe
 #define IA64_FR_INTEGER_BIT UINT64_C(0x8000000000000000)
+#define IA64_FR_QUIET_NAN_BIT UINT64_C(0x4000000000000000)
+#define IA64_FCLASS_POSITIVE 0x001
+#define IA64_FCLASS_NEGATIVE 0x002
+#define IA64_FCLASS_ZERO 0x004
+#define IA64_FCLASS_UNNORMALIZED 0x008
+#define IA64_FCLASS_NORMALIZED 0x010
+#define IA64_FCLASS_INFINITY 0x020
+#define IA64_FCLASS_SNAN 0x040
+#define IA64_FCLASS_QNAN 0x080
+#define IA64_FCLASS_NATVAL 0x100
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
@@ -739,6 +749,52 @@ static bool ia64_fr_is_nan(const IA64FloatReg *reg)
 {
     return ia64_fr_exponent(reg) == IA64_FR_SPECIAL_EXPONENT &&
            reg->raw[0] != 0 && reg->raw[0] != IA64_FR_INTEGER_BIT;
+}
+
+static bool ia64_fr_is_qnan(const IA64FloatReg *reg)
+{
+    return ia64_fr_is_nan(reg) &&
+           (reg->raw[0] & IA64_FR_INTEGER_BIT) != 0 &&
+           (reg->raw[0] & IA64_FR_QUIET_NAN_BIT) != 0;
+}
+
+static bool ia64_fr_is_snan(const IA64FloatReg *reg)
+{
+    return ia64_fr_is_nan(reg) &&
+           (reg->raw[0] & IA64_FR_INTEGER_BIT) != 0 &&
+           (reg->raw[0] & IA64_FR_QUIET_NAN_BIT) == 0;
+}
+
+static bool ia64_fr_is_unsupported_special(const IA64FloatReg *reg)
+{
+    return ia64_fr_exponent(reg) == IA64_FR_SPECIAL_EXPONENT &&
+           !ia64_fr_is_zero(reg) &&
+           !ia64_fr_is_infinity(reg) &&
+           !ia64_fr_is_qnan(reg) &&
+           !ia64_fr_is_snan(reg);
+}
+
+static bool ia64_fr_is_unnormalized(const IA64FloatReg *reg)
+{
+    return !ia64_fr_is_natval(reg) &&
+           !ia64_fr_is_zero(reg) &&
+           !ia64_fr_is_infinity(reg) &&
+           !ia64_fr_is_qnan(reg) &&
+           !ia64_fr_is_snan(reg) &&
+           !ia64_fr_is_unsupported_special(reg) &&
+           reg->raw[0] != 0 &&
+           (reg->raw[0] & IA64_FR_INTEGER_BIT) == 0;
+}
+
+static bool ia64_fr_is_normalized(const IA64FloatReg *reg)
+{
+    return !ia64_fr_is_natval(reg) &&
+           !ia64_fr_is_zero(reg) &&
+           !ia64_fr_is_infinity(reg) &&
+           !ia64_fr_is_qnan(reg) &&
+           !ia64_fr_is_snan(reg) &&
+           !ia64_fr_is_unsupported_special(reg) &&
+           (reg->raw[0] & IA64_FR_INTEGER_BIT) != 0;
 }
 
 static bool ia64_fr_is_finite_nonzero(const IA64FloatReg *reg)
@@ -5108,6 +5164,27 @@ bool ia64_decode_floating_compare(IA64SlotType type, uint64_t raw,
     return true;
 }
 
+bool ia64_decode_floating_class(IA64SlotType type, uint64_t raw,
+                                IA64FloatingClassInstruction *decoded)
+{
+    uint8_t major = ia64_slot_major_opcode(raw);
+
+    if (!decoded || type != IA64_SLOT_TYPE_F || major != 0x5) {
+        return false;
+    }
+
+    memset(decoded, 0, sizeof(*decoded));
+    decoded->write_kind = ((raw >> 12) & 0x1) == 0
+        ? IA64_PRED_WRITE_NORMAL
+        : IA64_PRED_WRITE_UNCONDITIONAL;
+    decoded->p1 = (raw >> 6) & 0x3f;
+    decoded->p2 = (raw >> 27) & 0x3f;
+    decoded->source2 = (raw >> 13) & 0x7f;
+    decoded->mask = ((((raw >> 20) & 0x7f) << 2) |
+                     ((raw >> 35) & 0x3)) & 0x1ff;
+    return true;
+}
+
 static uint64_t ia64_compare_left_operand(CPUIA64State *env,
                                           const IA64CompareInstruction *decoded)
 {
@@ -5232,6 +5309,41 @@ static bool ia64_floating_compare_matches(const IA64FloatReg *left_reg,
     }
 }
 
+static bool ia64_floating_class_matches(const IA64FloatReg *reg,
+                                        uint16_t mask)
+{
+    if (ia64_fr_is_natval(reg)) {
+        return (mask & IA64_FCLASS_NATVAL) != 0;
+    }
+    if (ia64_fr_is_qnan(reg)) {
+        return (mask & IA64_FCLASS_QNAN) != 0;
+    }
+    if (ia64_fr_is_snan(reg)) {
+        return (mask & IA64_FCLASS_SNAN) != 0;
+    }
+    if (ia64_fr_sign(reg)) {
+        if ((mask & IA64_FCLASS_NEGATIVE) == 0) {
+            return false;
+        }
+    } else if ((mask & IA64_FCLASS_POSITIVE) == 0) {
+        return false;
+    }
+
+    if (ia64_fr_is_zero(reg)) {
+        return (mask & IA64_FCLASS_ZERO) != 0;
+    }
+    if (ia64_fr_is_infinity(reg)) {
+        return (mask & IA64_FCLASS_INFINITY) != 0;
+    }
+    if (ia64_fr_is_unnormalized(reg)) {
+        return (mask & IA64_FCLASS_UNNORMALIZED) != 0;
+    }
+    if (ia64_fr_is_normalized(reg)) {
+        return (mask & IA64_FCLASS_NORMALIZED) != 0;
+    }
+    return false;
+}
+
 bool ia64_exec_floating_compare_qualified(
     CPUIA64State *env,
     const IA64FloatingCompareInstruction *decoded,
@@ -5271,6 +5383,45 @@ bool ia64_exec_floating_compare(
     const IA64FloatingCompareInstruction *decoded)
 {
     return ia64_exec_floating_compare_qualified(env, decoded, true);
+}
+
+bool ia64_exec_floating_class_qualified(
+    CPUIA64State *env,
+    const IA64FloatingClassInstruction *decoded,
+    bool qualifying_predicate)
+{
+    const IA64FloatReg *reg;
+    bool source_unavailable;
+    bool result;
+
+    if (!env || !decoded || decoded->p1 == decoded->p2) {
+        return false;
+    }
+
+    if (!qualifying_predicate) {
+        if (decoded->write_kind == IA64_PRED_WRITE_UNCONDITIONAL) {
+            ia64_write_pr(env, decoded->p1, false);
+            ia64_write_pr(env, decoded->p2, false);
+        }
+        return true;
+    }
+
+    reg = &env->fr[ia64_map_fr(env, decoded->source2)];
+    source_unavailable = ia64_fr_is_natval(reg) &&
+                         (decoded->mask & IA64_FCLASS_NATVAL) == 0;
+    result = ia64_floating_class_matches(reg, decoded->mask);
+
+    ia64_apply_predicate_pair_write(env, decoded->write_kind,
+                                    decoded->p1, decoded->p2,
+                                    result, source_unavailable);
+    return true;
+}
+
+bool ia64_exec_floating_class(
+    CPUIA64State *env,
+    const IA64FloatingClassInstruction *decoded)
+{
+    return ia64_exec_floating_class_qualified(env, decoded, true);
 }
 
 bool ia64_exec_predicate_test_qualified(
