@@ -335,44 +335,20 @@ static void ia64_alat_resolve_address(CPUIA64State *env, uint64_t address,
     }
 }
 
-static void ia64_alat_invalidate_target(CPUIA64State *env, uint8_t target)
-{
-    uint32_t valid_mask = env->alat.valid_mask;
-
-    if (valid_mask == 0) {
-        return;
-    }
-
-    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
-        if ((valid_mask & (1u << i)) != 0 &&
-            env->alat.entries[i].target == target) {
-            ia64_alat_set_valid(env, i, false);
-        }
-    }
-}
-
 static void ia64_alat_record_load(CPUIA64State *env, uint8_t target,
                                   uint64_t address, uint8_t width)
 {
-    IA64AlatEntry *entry;
-    unsigned index;
+    uint64_t resolved;
+    bool physical;
 
     IA64_PERF_INC(IA64_PERF_ALAT_RECORD_LOAD);
     if (target == 0 || target >= IA64_GR_COUNT) {
         return;
     }
 
-    ia64_alat_invalidate_target(env, target);
-    index = env->alat.next % IA64_ALAT_COUNT;
-    entry = &env->alat.entries[index];
-    env->alat.next = (env->alat.next + 1) % IA64_ALAT_COUNT;
-
-    memset(entry, 0, sizeof(*entry));
-    entry->target = target;
-    entry->width = width;
     ia64_alat_resolve_address(env, address, MMU_DATA_LOAD,
-                              &entry->address, &entry->physical);
-    ia64_alat_set_valid(env, index, true);
+                              &resolved, &physical);
+    ia64_alat_record_gr(env, target, resolved, width, physical);
 }
 
 static void ia64_alat_invalidate_store(CPUIA64State *env, uint64_t address,
@@ -605,16 +581,37 @@ static bool exec_ldst_immediate(CPUIA64State *env,
 {
     uint64_t address = ia64_read_gr(env, decoded->base);
     uint64_t update;
+    bool check_clear;
+    bool check_no_clear;
 
     switch (decoded->kind) {
     case IA64_LDST_IMM_LOAD:
         if (decoded->target != 0) {
-            uint64_t value = ia64_ldst_read(env, address, decoded->width);
+            uint64_t value;
+
+            check_clear = decoded->memory_class == 8 ||
+                          decoded->memory_class == 0x0a;
+            check_no_clear = decoded->memory_class == 9;
+            if (check_clear || check_no_clear) {
+                uint64_t resolved;
+                bool physical;
+
+                ia64_alat_resolve_address(env, address, MMU_DATA_LOAD,
+                                          &resolved, &physical);
+                if (ia64_alat_check_gr(env, decoded->target, resolved,
+                                       decoded->width, physical,
+                                       check_clear)) {
+                    break;
+                }
+            }
+
+            value = ia64_ldst_read(env, address, decoded->width);
 
             ia64_trace_ldst_decoded(env, "load", address, decoded->width,
                                     value, decoded);
             ia64_write_gr(env, decoded->target, value);
-            if (decoded->memory_class == 2 || decoded->memory_class == 3) {
+            if (decoded->memory_class == 2 || decoded->memory_class == 3 ||
+                check_no_clear) {
                 ia64_alat_record_load(env, decoded->target, address,
                                       decoded->width);
             }

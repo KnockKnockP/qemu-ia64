@@ -1119,6 +1119,10 @@ static void test_m_unit_system_memory_management(void)
         (1ULL << 37) | (0x13ULL << 27) | (6ULL << 20) | (24ULL << 6);
     const uint64_t kernel_mov_m_ar_rsc_0_raw = 0x00141000000ULL;
     const uint64_t kernel_invala_raw = 0x00080000000ULL;
+    const uint64_t invala_e_r12_raw =
+        (1ULL << 31) | (2ULL << 27) | (12ULL << 6);
+    const uint64_t invala_e_f12_raw =
+        (1ULL << 31) | (3ULL << 27) | (12ULL << 6);
     const uint64_t kernel_loadrs_raw = 0x00050000000ULL;
     const uint64_t kernel_flushrs_raw = 0x00060000000ULL;
     CPUIA64State env;
@@ -1215,6 +1219,35 @@ static void test_m_unit_system_memory_management(void)
         g_assert_false(env.alat.entries[i].valid);
     }
     g_assert_cmpuint(env.alat.next, ==, 0);
+
+    env.alat.next = 2;
+    env.alat.entries[0].valid = true;
+    env.alat.entries[0].target = 12;
+    env.alat.entries[0].width = 8;
+    env.alat.entries[0].physical = true;
+    env.alat.entries[0].address = 0x2000;
+    env.alat.entries[1].valid = true;
+    env.alat.entries[1].target = 13;
+    env.alat.entries[1].width = 4;
+    env.alat.entries[1].address = 0x3000;
+    env.alat.valid_mask = (1u << 0) | (1u << 1);
+    g_assert_true(ia64_slot_is_m_invala(IA64_SLOT_TYPE_M,
+                                        invala_e_r12_raw));
+    g_assert_false(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,
+                                              invala_e_r12_raw));
+    g_assert_true(ia64_exec_m_invala(&env, invala_e_r12_raw));
+    g_assert_false(env.alat.entries[0].valid);
+    g_assert_true(env.alat.entries[1].valid);
+    g_assert_cmpuint(env.alat.valid_mask, ==, 1u << 1);
+    g_assert_cmpuint(env.alat.next, ==, 2);
+
+    g_assert_true(ia64_slot_is_m_invala(IA64_SLOT_TYPE_M,
+                                        invala_e_f12_raw));
+    g_assert_false(ia64_slot_is_m_system_noop(IA64_SLOT_TYPE_M,
+                                              invala_e_f12_raw));
+    g_assert_true(ia64_exec_m_invala(&env, invala_e_f12_raw));
+    g_assert_true(env.alat.entries[1].valid);
+    g_assert_cmpuint(env.alat.valid_mask, ==, 1u << 1);
 
     g_assert_true(ia64_slot_is_m_processor_mask(IA64_SLOT_TYPE_M,
                                                 kernel_rsm_0x6000_raw));
@@ -2308,6 +2341,64 @@ static void test_f_unit_reciprocal_approx_sets_predicate(void)
     g_assert_cmphex(env.fr[10].raw[1], ==, env.fr[1].raw[1]);
 }
 
+static void test_f_unit_unsigned_mod_helper_keeps_64bit_precision(void)
+{
+    const uint64_t setf_sig_f14_r32_raw = 0x0c708040380ULL;
+    const uint64_t setf_sig_f9_r33_raw = 0x0c708042240ULL;
+    const uint64_t fnorm_s1_f8_f14_raw = 0x10408e00200ULL;
+    const uint64_t fnorm_s1_f9_f9_raw = 0x10408900240ULL;
+    const uint64_t frcpa_s1_f10_p6_f8_f9_raw = 0x00630910280ULL;
+    const uint64_t fmpy_s1_f12_f8_f10_raw = 0x10450800300ULL;
+    const uint64_t fnma_s1_f11_f9_f10_f1_raw = 0x184509022c0ULL;
+    const uint64_t fma_s1_f12_f11_f12_f12_raw = 0x10460b18300ULL;
+    const uint64_t fmpy_s1_f13_f11_f11_raw = 0x10458b00340ULL;
+    const uint64_t fma_s1_f10_f11_f10_f10_raw = 0x10450b14280ULL;
+    const uint64_t fma_s1_f11_f13_f12_f12_raw = 0x10460d182c0ULL;
+    const uint64_t fma_s1_f10_f13_f10_f10_raw = 0x10450d14280ULL;
+    const uint64_t fnma_s1_f12_f9_f11_f8_raw = 0x18458910300ULL;
+    const uint64_t fma_s1_f10_f12_f10_f11_raw = 0x10450c16280ULL;
+    const uint64_t fcvt_fxu_trunc_f10_f10_raw = 0x004d8014280ULL;
+    const uint64_t xma_l_f10_f10_f9_f14_raw = 0x1d048a1c280ULL;
+    const uint64_t getf_sig_r8_f10_raw = 0x08708014200ULL;
+    const uint64_t target_addr = 0x600000000000ce00ULL;
+    const uint64_t alignment = 0x200;
+    const uint64_t quotient = target_addr / alignment;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    ia64_write_gr(&env, 32, target_addr);
+    ia64_write_gr(&env, 33, alignment);
+
+    g_assert_true(ia64_exec_m_setf(&env, setf_sig_f14_r32_raw));
+    g_assert_true(ia64_exec_m_setf(&env, setf_sig_f9_r33_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fnorm_s1_f8_f14_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fnorm_s1_f9_f9_raw));
+    g_assert_true(ia64_exec_f_reciprocal_approx(
+                       &env, frcpa_s1_f10_p6_f8_f9_raw));
+    g_assert_cmphex(env.pr & (1ULL << 6), ==, 1ULL << 6);
+
+    g_assert_true(ia64_exec_f_multiply_add(&env, fmpy_s1_f12_f8_f10_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fnma_s1_f11_f9_f10_f1_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fma_s1_f12_f11_f12_f12_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fmpy_s1_f13_f11_f11_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fma_s1_f10_f11_f10_f10_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fma_s1_f11_f13_f12_f12_raw));
+    ia64_write_gr(&env, 33, 0 - alignment);
+    g_assert_true(ia64_exec_f_multiply_add(&env, fma_s1_f10_f13_f10_f10_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fnma_s1_f12_f9_f11_f8_raw));
+    g_assert_true(ia64_exec_m_setf(&env, setf_sig_f9_r33_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fma_s1_f10_f12_f10_f11_raw));
+    g_assert_true(ia64_exec_f_misc(&env, fcvt_fxu_trunc_f10_f10_raw));
+    g_assert_true(ia64_exec_m_getf(&env, getf_sig_r8_f10_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, quotient);
+
+    g_assert_true(ia64_exec_f_select_or_xma(&env,
+                                            xma_l_f10_f10_f9_f14_raw));
+    g_assert_true(ia64_exec_m_getf(&env, getf_sig_r8_f10_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 0);
+}
+
 static void test_f_unit_misc_unsigned_trunc_conversion(void)
 {
     const uint64_t fcvt_f10_f10_raw = 0x004d8014280ULL;
@@ -2343,6 +2434,15 @@ static void test_ldst_immediate_decode(void)
     const uint64_t elilo_ld8_r16_r33_8_raw = 0x0a0c2110400ULL;
     const uint64_t elilo_ld8_r17_r33_8_raw = 0x0a0c2110440ULL;
     const uint64_t elilo_ld8_r16_r33_advanced_raw = 0x082c2100400ULL;
+    const uint64_t ld8_c_clr_r16_r33_raw =
+        (0x4ULL << 37) | (((8ULL << 2) | 3ULL) << 30) |
+        (33ULL << 20) | (16ULL << 6);
+    const uint64_t ld8_c_nc_r16_r33_raw =
+        (0x4ULL << 37) | (((9ULL << 2) | 3ULL) << 30) |
+        (33ULL << 20) | (16ULL << 6);
+    const uint64_t ld8_c_clr_acq_r16_r33_raw =
+        (0x4ULL << 37) | (((0x0aULL << 2) | 3ULL) << 30) |
+        (33ULL << 20) | (16ULL << 6);
     const uint64_t elilo_st8_spill_r39_r16_imm_raw = 0x0bec904fc00ULL;
     IA64LdstImmediate decoded;
 
@@ -2377,6 +2477,30 @@ static void test_ldst_immediate_decode(void)
     g_assert_false(decoded.base_update);
 
     g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                             ld8_c_clr_r16_r33_raw,
+                                             &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.target, ==, 16);
+    g_assert_cmpuint(decoded.base, ==, 33);
+    g_assert_cmpuint(decoded.memory_class, ==, 8);
+    g_assert_false(decoded.base_update);
+
+    g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                             ld8_c_nc_r16_r33_raw,
+                                             &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.memory_class, ==, 9);
+
+    g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                             ld8_c_clr_acq_r16_r33_raw,
+                                             &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.memory_class, ==, 0x0a);
+
+    g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
                                              elilo_st8_spill_r39_r16_imm_raw,
                                              &decoded));
     g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_STORE);
@@ -2387,6 +2511,32 @@ static void test_ldst_immediate_decode(void)
     g_assert_true(decoded.base_update);
     g_assert_false(decoded.update_from_register);
     g_assert_cmpint(decoded.immediate, ==, -16);
+}
+
+static void test_alat_check_load_helpers(void)
+{
+    CPUIA64State env;
+
+    memset(&env, 0, sizeof(env));
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_alat_record_gr(&env, 12, 0x2000, 8, true);
+    g_assert_cmpuint(env.alat.valid_mask, !=, 0);
+    g_assert_cmpuint(env.alat.valid_mask & (env.alat.valid_mask - 1), ==, 0);
+    g_assert_true(ia64_alat_check_gr(&env, 12, 0x2000, 8, true, false));
+    g_assert_cmpuint(env.alat.valid_mask, !=, 0);
+    g_assert_cmpuint(env.alat.valid_mask & (env.alat.valid_mask - 1), ==, 0);
+
+    g_assert_true(ia64_alat_check_gr(&env, 12, 0x2000, 8, true, true));
+    g_assert_cmpuint(env.alat.valid_mask, ==, 0);
+
+    ia64_alat_record_gr(&env, 12, 0x2000, 8, true);
+    g_assert_false(ia64_alat_check_gr(&env, 12, 0x2008, 8, true, true));
+    g_assert_cmpuint(env.alat.valid_mask, ==, 0);
+
+    ia64_alat_record_gr(&env, 12, 0x2000, 8, true);
+    g_assert_false(ia64_alat_check_gr(&env, 12, 0x2000, 4, true, false));
+    g_assert_cmpuint(env.alat.valid_mask, !=, 0);
+    g_assert_cmpuint(env.alat.valid_mask & (env.alat.valid_mask - 1), ==, 0);
 }
 
 static void test_m_unit_atomic_decode(void)
@@ -3442,12 +3592,16 @@ int main(int argc, char **argv)
                     test_f_unit_multiply_add_uses_ia64_operand_order);
     g_test_add_func("/ia64-insn/f-unit-reciprocal-approx",
                     test_f_unit_reciprocal_approx_sets_predicate);
+    g_test_add_func("/ia64-insn/f-unit-unsigned-mod-helper-precision",
+                    test_f_unit_unsigned_mod_helper_keeps_64bit_precision);
     g_test_add_func("/ia64-insn/f-unit-misc-unsigned-trunc-conversion",
                     test_f_unit_misc_unsigned_trunc_conversion);
     g_test_add_func("/ia64-insn/f-unit-misc-noop",
                     test_f_unit_misc_noop);
     g_test_add_func("/ia64-insn/ldst-immediate-decode",
                     test_ldst_immediate_decode);
+    g_test_add_func("/ia64-insn/alat-check-load-helpers",
+                    test_alat_check_load_helpers);
     g_test_add_func("/ia64-insn/m-unit-atomic-decode",
                     test_m_unit_atomic_decode);
     g_test_add_func("/ia64-insn/floating-memory-decode",

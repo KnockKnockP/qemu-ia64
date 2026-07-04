@@ -359,6 +359,10 @@ bool ia64_slot_is_m_loadrs(IA64SlotType type, uint64_t raw);
 void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg);
 void ia64_alat_set_valid(CPUIA64State *env, unsigned index, bool valid);
 void ia64_alat_reconstruct_transients(CPUIA64State *env);
+void ia64_alat_record_gr(CPUIA64State *env, uint32_t target,
+                         uint64_t address, uint8_t width, bool physical);
+bool ia64_alat_check_gr(CPUIA64State *env, uint32_t reg, uint64_t address,
+                        uint8_t width, bool physical, bool clear);
 bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw);
 bool ia64_slot_pair_is_lx_movl(uint64_t l_raw, uint64_t x_raw);
 uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw);

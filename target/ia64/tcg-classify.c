@@ -232,14 +232,12 @@ static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
     case 4:
     case 5:
     case 6:
-    case 8:
-    case 9:
-    case 0x0a:
         return true;
     default:
         /*
-         * Advanced loads (classes 2/3) need ALAT recording after the normal
-         * destination invalidation, so leave them on the helper path for now.
+         * Advanced loads (classes 2/3) and check loads (classes 8/9/A) need
+         * ALAT state handling around the target write, so leave them on the
+         * interpreter path for now.
          */
         return false;
     }

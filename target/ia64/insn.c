@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
-#include <math.h>
 #include "exception.h"
+#include "fpu/softfloat.h"
 #include "insn.h"
 #include "mem.h"
 #include "perf.h"
@@ -15,8 +15,6 @@
 #define IA64_FR_SPECIAL_EXPONENT 0x1ffff
 #define IA64_FR_NATVAL_EXPONENT 0x1fffe
 #define IA64_FR_INTEGER_BIT UINT64_C(0x8000000000000000)
-#define IA64_FR_TWO_TO_63 0x1.0p63
-#define IA64_FR_TWO_TO_64_L 0x1.0p64L
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
@@ -506,6 +504,60 @@ void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
     }
 }
 
+void ia64_alat_record_gr(CPUIA64State *env, uint32_t target,
+                         uint64_t address, uint8_t width, bool physical)
+{
+    IA64AlatEntry *entry;
+    unsigned index;
+
+    if (!env || target == 0 || target >= IA64_GR_COUNT || width == 0) {
+        return;
+    }
+
+    ia64_alat_invalidate_gr(env, target);
+    index = env->alat.next % IA64_ALAT_COUNT;
+    entry = &env->alat.entries[index];
+    env->alat.next = (env->alat.next + 1) % IA64_ALAT_COUNT;
+
+    memset(entry, 0, sizeof(*entry));
+    entry->target = target;
+    entry->width = width;
+    entry->physical = physical;
+    entry->address = address;
+    ia64_alat_set_valid(env, index, true);
+}
+
+bool ia64_alat_check_gr(CPUIA64State *env, uint32_t reg, uint64_t address,
+                        uint8_t width, bool physical, bool clear)
+{
+    uint32_t valid_mask;
+
+    if (!env || reg >= IA64_GR_COUNT || width == 0) {
+        return false;
+    }
+
+    valid_mask = env->alat.valid_mask;
+    if (valid_mask == 0) {
+        return false;
+    }
+
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        IA64AlatEntry *entry = &env->alat.entries[i];
+
+        if ((valid_mask & (1u << i)) == 0 || entry->target != reg) {
+            continue;
+        }
+
+        if (clear) {
+            ia64_alat_set_valid(env, i, false);
+        }
+        return entry->physical == physical && entry->width == width &&
+               entry->address == address;
+    }
+
+    return false;
+}
+
 void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
 {
     if (!env || reg >= IA64_GR_COUNT || reg == 0) {
@@ -696,83 +748,119 @@ static bool ia64_fr_is_finite_nonzero(const IA64FloatReg *reg)
            reg->raw[0] != 0;
 }
 
-static double ia64_fr_to_double(const IA64FloatReg *reg)
+static bool ia64_fpu_trace_enabled(CPUIA64State *env)
 {
-    double value;
+    static int initialized;
+    static bool enabled;
+    static bool filtered;
+    static uint64_t filter_start;
+    static uint64_t filter_end;
 
-    if (ia64_fr_is_natval(reg) || ia64_fr_is_nan(reg)) {
-        return NAN;
-    }
-    if (ia64_fr_is_infinity(reg)) {
-        return ia64_fr_sign(reg) ? -INFINITY : INFINITY;
-    }
-    if (ia64_fr_is_zero(reg) || reg->raw[0] == 0) {
-        return ia64_fr_sign(reg) ? -0.0 : 0.0;
+    if (!initialized) {
+        const char *trace = g_getenv("VIBTANIUM_FPU_TRACE");
+        const char *addr = g_getenv("VIBTANIUM_FPU_TRACE_IP");
+        const char *size = g_getenv("VIBTANIUM_FPU_TRACE_SIZE");
+
+        enabled = trace != NULL && *trace != '\0';
+        if (enabled && addr != NULL && *addr != '\0') {
+            char *endptr = NULL;
+            uint64_t parsed_size = IA64_BUNDLE_SIZE;
+
+            filter_start = g_ascii_strtoull(addr, &endptr, 0);
+            filtered = endptr != addr;
+            if (size != NULL && *size != '\0') {
+                endptr = NULL;
+                parsed_size = g_ascii_strtoull(size, &endptr, 0);
+                if (endptr == size || parsed_size == 0) {
+                    parsed_size = IA64_BUNDLE_SIZE;
+                }
+            }
+            filter_end = filter_start + parsed_size - 1;
+        }
+        initialized = 1;
     }
 
-    value = ((double)reg->raw[0] / IA64_FR_TWO_TO_63) *
-            ldexp(1.0, (int)ia64_fr_exponent(reg) - IA64_FR_EXPONENT_BIAS);
-    return ia64_fr_sign(reg) ? -value : value;
+    return enabled && (!filtered ||
+                       (env->ip >= filter_start && env->ip <= filter_end));
 }
 
-static void ia64_write_fr_from_double(CPUIA64State *env, uint32_t reg,
-                                      double value)
+static void ia64_fpu_trace_fr(const char *tag, CPUIA64State *env,
+                              uint64_t raw, uint32_t freg)
 {
-    bool sign;
-    double magnitude;
-    int exponent;
-    long double scaled;
-    long double rounded;
-    uint64_t significand;
+    const IA64FloatReg *reg = &env->fr[ia64_map_fr(env, freg)];
+
+    fprintf(stderr,
+            "[ia64-fpu] %s ip=0x%016" PRIx64
+            " raw=0x%011" PRIx64 " f%u={raw0=0x%016" PRIx64
+            " raw1=0x%016" PRIx64 "}\n",
+            tag, env->ip, raw, freg, reg->raw[0], reg->raw[1]);
+}
+
+static void ia64_float_status_init(float_status *status)
+{
+    set_float_rounding_mode(float_round_nearest_even, status);
+    set_float_2nan_prop_rule(float_2nan_prop_x87, status);
+    set_float_default_nan_pattern(0b01000000, status);
+    set_floatx80_rounding_precision(floatx80_precision_x, status);
+}
+
+static floatx80 ia64_fr_to_floatx80(const IA64FloatReg *reg)
+{
+    bool sign = ia64_fr_sign(reg);
+    int32_t exponent = ia64_fr_exponent(reg);
+    uint64_t significand = reg->raw[0];
+    int32_t soft_exponent;
+    uint16_t soft_sign = sign ? 0x8000 : 0;
+
+    if (ia64_fr_is_natval(reg) || ia64_fr_is_nan(reg)) {
+        return make_floatx80(soft_sign | 0x7fff,
+                             IA64_FR_INTEGER_BIT | 1);
+    }
+    if (ia64_fr_is_infinity(reg)) {
+        return make_floatx80(soft_sign | 0x7fff, IA64_FR_INTEGER_BIT);
+    }
+    if (ia64_fr_is_zero(reg) || significand == 0) {
+        return make_floatx80(soft_sign, 0);
+    }
+
+    while ((significand & IA64_FR_INTEGER_BIT) == 0) {
+        significand <<= 1;
+        exponent--;
+    }
+    soft_exponent = exponent - IA64_FR_EXPONENT_BIAS + 0x3fff;
+    if (soft_exponent <= 0) {
+        return make_floatx80(soft_sign, 0);
+    }
+    if (soft_exponent >= 0x7fff) {
+        return make_floatx80(soft_sign | 0x7fff, IA64_FR_INTEGER_BIT);
+    }
+
+    return make_floatx80(soft_sign | (uint16_t)soft_exponent, significand);
+}
+
+static void ia64_write_fr_from_floatx80(CPUIA64State *env, uint32_t reg,
+                                        floatx80 value)
+{
+    bool sign = (value.high & 0x8000) != 0;
+    uint32_t exponent = value.high & 0x7fff;
 
     if (!env || reg >= IA64_FR_COUNT || reg < 2) {
         return;
     }
 
-    if (isnan(value)) {
-        ia64_write_fr_parts(env, reg, signbit(value),
-                            IA64_FR_SPECIAL_EXPONENT,
-                            IA64_FR_INTEGER_BIT | 1);
+    if (exponent == 0x7fff) {
+        ia64_write_fr_parts(env, reg, sign, IA64_FR_SPECIAL_EXPONENT,
+                            value.low);
         return;
     }
-    if (isinf(value)) {
-        ia64_write_fr_parts(env, reg, signbit(value),
-                            IA64_FR_SPECIAL_EXPONENT,
-                            IA64_FR_INTEGER_BIT);
-        return;
-    }
-    if (value == 0.0) {
-        ia64_write_fr_parts(env, reg, signbit(value),
-                            IA64_FR_SPECIAL_EXPONENT, 0);
-        return;
-    }
-
-    sign = signbit(value);
-    magnitude = fabs(value);
-    exponent = (int)floor(log2(magnitude));
-    scaled = (long double)magnitude / ldexpl(1.0L, exponent);
-    scaled *= (long double)IA64_FR_TWO_TO_63;
-    rounded = rintl(scaled);
-
-    if (rounded >= IA64_FR_TWO_TO_64_L) {
-        ia64_write_fr_parts(env, reg, sign,
-                            IA64_FR_EXPONENT_BIAS + exponent + 1,
-                            IA64_FR_INTEGER_BIT);
-        return;
-    }
-
-    significand = (uint64_t)rounded;
-    if (significand == 0) {
+    if (exponent == 0 || value.low == 0) {
         ia64_write_fr_parts(env, reg, sign, IA64_FR_SPECIAL_EXPONENT, 0);
         return;
     }
-    if (significand < IA64_FR_INTEGER_BIT) {
-        significand <<= 1;
-        exponent--;
-    }
 
-    ia64_write_fr_parts(env, reg, sign, IA64_FR_EXPONENT_BIAS + exponent,
-                        significand);
+    ia64_write_fr_parts(env, reg, sign,
+                        exponent - 0x3fff + IA64_FR_EXPONENT_BIAS,
+                        value.low);
 }
 
 static uint64_t ia64_read_fr_significand(CPUIA64State *env, uint32_t reg)
@@ -840,27 +928,89 @@ static void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
                                  bits & 0x000fffffffffffffULL, 52);
 }
 
-static uint64_t ia64_float_to_fixed(double value, bool unsigned_form,
-                                    bool truncate)
+static uint64_t ia64_round_shift_right_u64(uint64_t value, unsigned shift,
+                                           bool truncate)
 {
-    double rounded;
+    uint64_t quotient;
+    uint64_t remainder;
+    uint64_t half;
 
-    if (isnan(value) || isinf(value)) {
+    if (shift == 0) {
+        return value;
+    }
+    if (shift >= 65) {
+        return 0;
+    }
+    if (shift == 64) {
+        quotient = 0;
+        if (truncate || value < IA64_FR_INTEGER_BIT) {
+            return 0;
+        }
+        return value > IA64_FR_INTEGER_BIT ? 1 : 0;
+    }
+
+    quotient = value >> shift;
+    if (truncate) {
+        return quotient;
+    }
+
+    remainder = value & ((UINT64_C(1) << shift) - 1);
+    half = UINT64_C(1) << (shift - 1);
+    if (remainder > half || (remainder == half && (quotient & 1) != 0)) {
+        quotient++;
+    }
+    return quotient;
+}
+
+static uint64_t ia64_float_reg_to_fixed(const IA64FloatReg *reg,
+                                        bool unsigned_form, bool truncate)
+{
+    uint32_t exponent;
+    uint64_t magnitude;
+    int shift;
+
+    if (ia64_fr_is_natval(reg) || ia64_fr_is_nan(reg) ||
+        ia64_fr_is_infinity(reg)) {
+        return IA64_FR_INTEGER_BIT;
+    }
+    if (ia64_fr_is_zero(reg) || reg->raw[0] == 0) {
+        return 0;
+    }
+    if (unsigned_form && ia64_fr_sign(reg)) {
         return IA64_FR_INTEGER_BIT;
     }
 
-    rounded = truncate ? trunc(value) : nearbyint(value);
-    if (unsigned_form) {
-        if (rounded < 0.0 || rounded >= 0x1.0p64) {
+    exponent = ia64_fr_exponent(reg);
+    shift = (int)exponent - IA64_FR_EXPONENT_BIAS - 63;
+    if (shift >= 0) {
+        unsigned __int128 widened;
+
+        if (shift >= 64) {
             return IA64_FR_INTEGER_BIT;
         }
-        return (uint64_t)rounded;
+        widened = (unsigned __int128)reg->raw[0] << shift;
+        if (widened > UINT64_MAX) {
+            return IA64_FR_INTEGER_BIT;
+        }
+        magnitude = (uint64_t)widened;
+    } else {
+        magnitude = ia64_round_shift_right_u64(reg->raw[0], -shift,
+                                               truncate);
     }
 
-    if (rounded < -0x1.0p63 || rounded >= 0x1.0p63) {
+    if (unsigned_form) {
+        return magnitude;
+    }
+    if (ia64_fr_sign(reg)) {
+        if (magnitude > IA64_FR_INTEGER_BIT) {
+            return IA64_FR_INTEGER_BIT;
+        }
+        return 0 - magnitude;
+    }
+    if (magnitude >= IA64_FR_INTEGER_BIT) {
         return IA64_FR_INTEGER_BIT;
     }
-    return (uint64_t)(int64_t)rounded;
+    return magnitude;
 }
 
 bool ia64_slot_is_m34_alloc(IA64SlotType type, uint64_t raw)
@@ -2551,20 +2701,39 @@ bool ia64_exec_m_virtual_translation(CPUIA64State *env, uint64_t raw)
 
 bool ia64_slot_is_m_invala(IA64SlotType type, uint64_t raw)
 {
-    return type == IA64_SLOT_TYPE_M &&
-           ia64_slot_major_opcode(raw) == 0 &&
-           ((raw >> 33) & 0x7) == 0 &&
-           ((raw >> 31) & 0x3) == 1 &&
-           ((raw >> 27) & 0xf) == 0;
+    uint8_t x4;
+
+    if (type != IA64_SLOT_TYPE_M ||
+        ia64_slot_major_opcode(raw) != 0 ||
+        ((raw >> 33) & 0x7) != 0 ||
+        ((raw >> 31) & 0x3) != 1) {
+        return false;
+    }
+
+    x4 = (raw >> 27) & 0xf;
+    return x4 == 0 || x4 == 2 || x4 == 3;
 }
 
 bool ia64_exec_m_invala(CPUIA64State *env, uint64_t raw)
 {
+    uint8_t x4;
+
     if (!env || !ia64_slot_is_m_invala(IA64_SLOT_TYPE_M, raw)) {
         return false;
     }
 
-    memset(&env->alat, 0, sizeof(env->alat));
+    x4 = (raw >> 27) & 0xf;
+    if (x4 == 0) {
+        memset(&env->alat, 0, sizeof(env->alat));
+    } else if (x4 == 2) {
+        ia64_alat_invalidate_gr(env, (raw >> 6) & 0x7f);
+    } else {
+        /*
+         * Floating-point advanced loads are not modeled yet, so there are no
+         * FP-tagged ALAT entries to invalidate.  Still consume the instruction
+         * architecturally instead of reporting an unsupported M27 encoding.
+         */
+    }
     return true;
 }
 
@@ -3648,6 +3817,14 @@ bool ia64_exec_m_setf(CPUIA64State *env, uint64_t raw)
     switch (format) {
     case 0:
         ia64_write_fr_parts(env, f1, false, IA64_FR_INTEGER_EXPONENT, value);
+        if (ia64_fpu_trace_enabled(env)) {
+            fprintf(stderr,
+                    "[ia64-fpu] setf.sig ip=0x%016" PRIx64
+                    " raw=0x%011" PRIx64 " f%u=r%u"
+                    " value=0x%016" PRIx64 "\n",
+                    env->ip, raw, f1, r2, value);
+            ia64_fpu_trace_fr("setf.sig.result", env, raw, f1);
+        }
         return true;
     case 1:
         ia64_write_fr_parts(env, f1, (value & (UINT64_C(1) << 17)) != 0,
@@ -3710,6 +3887,14 @@ bool ia64_exec_m_getf(CPUIA64State *env, uint64_t raw)
     }
 
     ia64_write_gr(env, r1, value);
+    if (ia64_fpu_trace_enabled(env)) {
+        ia64_fpu_trace_fr("getf.source", env, raw, f2);
+        fprintf(stderr,
+                "[ia64-fpu] getf.sig ip=0x%016" PRIx64
+                " raw=0x%011" PRIx64 " r%u=f%u"
+                " value=0x%016" PRIx64 "\n",
+                env->ip, raw, r1, f2, value);
+    }
     return true;
 }
 
@@ -4244,14 +4429,17 @@ bool ia64_exec_f_multiply_add(CPUIA64State *env, uint64_t raw)
     uint32_t f2;
     uint32_t f3;
     uint32_t f4;
-    double addend;
-    double multiplicand;
-    double multiplier;
-    double result;
+    float_status status = { 0 };
+    floatx80 addend;
+    floatx80 multiplicand;
+    floatx80 multiplier;
+    floatx80 product;
+    floatx80 result;
 
     if (!env || !ia64_slot_is_f_multiply_add(IA64_SLOT_TYPE_F, raw)) {
         return false;
     }
+    ia64_float_status_init(&status);
 
     major = ia64_slot_major_opcode(raw);
     f1 = (raw >> 6) & 0x7f;
@@ -4259,28 +4447,43 @@ bool ia64_exec_f_multiply_add(CPUIA64State *env, uint64_t raw)
     f3 = (raw >> 20) & 0x7f;
     f4 = (raw >> 27) & 0x7f;
 
-    addend = ia64_fr_to_double(&env->fr[ia64_map_fr(env, f2)]);
-    multiplicand = ia64_fr_to_double(&env->fr[ia64_map_fr(env, f3)]);
-    multiplier = ia64_fr_to_double(&env->fr[ia64_map_fr(env, f4)]);
+    addend = ia64_fr_to_floatx80(&env->fr[ia64_map_fr(env, f2)]);
+    multiplicand = ia64_fr_to_floatx80(&env->fr[ia64_map_fr(env, f3)]);
+    multiplier = ia64_fr_to_floatx80(&env->fr[ia64_map_fr(env, f4)]);
+    product = floatx80_mul(multiplicand, multiplier, &status);
 
     switch (major) {
     case 0x8:
     case 0x9:
-        result = multiplicand * multiplier + addend;
+        result = floatx80_add(product, addend, &status);
         break;
     case 0x0a:
     case 0x0b:
-        result = multiplicand * multiplier - addend;
+        result = floatx80_sub(product, addend, &status);
         break;
     case 0x0c:
     case 0x0d:
-        result = -(multiplicand * multiplier) + addend;
+        result = floatx80_sub(addend, product, &status);
         break;
     default:
         return false;
     }
 
-    ia64_write_fr_from_double(env, f1, result);
+    ia64_write_fr_from_floatx80(env, f1, result);
+    if (ia64_fpu_trace_enabled(env)) {
+        fprintf(stderr,
+                "[ia64-fpu] fma-family ip=0x%016" PRIx64
+                " raw=0x%011" PRIx64 " f%u=f%u,f%u,f%u"
+                " addend=0x%04x:%016" PRIx64
+                " multiplicand=0x%04x:%016" PRIx64
+                " multiplier=0x%04x:%016" PRIx64
+                " result=0x%04x:%016" PRIx64
+                " pr=0x%016" PRIx64 "\n",
+                env->ip, raw, f1, f2, f3, f4, addend.high, addend.low,
+                multiplicand.high, multiplicand.low, multiplier.high,
+                multiplier.low, result.high, result.low, env->pr);
+        ia64_fpu_trace_fr("fma-family.result", env, raw, f1);
+    }
     return true;
 }
 
@@ -4302,14 +4505,18 @@ bool ia64_exec_f_reciprocal_approx(CPUIA64State *env, uint64_t raw)
     uint32_t f3;
     uint8_t p2;
     bool q;
-    IA64FloatReg numerator;
+    IA64FloatReg numerator = { 0 };
     IA64FloatReg denominator;
-    double result;
+    float_status status = { 0 };
+    floatx80 numerator80;
+    floatx80 denominator80;
+    floatx80 result;
     bool predicate;
 
     if (!env || !ia64_slot_is_f_reciprocal_approx(IA64_SLOT_TYPE_F, raw)) {
         return false;
     }
+    ia64_float_status_init(&status);
 
     f1 = (raw >> 6) & 0x7f;
     q = ((raw >> 36) & 0x1) != 0;
@@ -4323,11 +4530,14 @@ bool ia64_exec_f_reciprocal_approx(CPUIA64State *env, uint64_t raw)
         ia64_write_pr(env, p2, false);
         return true;
     }
+    denominator80 = ia64_fr_to_floatx80(&denominator);
 
     if (q) {
         predicate = ia64_fr_is_finite_nonzero(&denominator) &&
                     !ia64_fr_sign(&denominator);
-        result = 1.0 / sqrt(ia64_fr_to_double(&denominator));
+        result = floatx80_div(floatx80_one,
+                              floatx80_sqrt(denominator80, &status),
+                              &status);
     } else {
         numerator = env->fr[ia64_map_fr(env, f2)];
         if (ia64_fr_is_natval(&numerator)) {
@@ -4335,16 +4545,30 @@ bool ia64_exec_f_reciprocal_approx(CPUIA64State *env, uint64_t raw)
             ia64_write_pr(env, p2, false);
             return true;
         }
+        numerator80 = ia64_fr_to_floatx80(&numerator);
 
         predicate = ia64_fr_is_finite_nonzero(&numerator) &&
                     ia64_fr_is_finite_nonzero(&denominator);
         result = predicate
-            ? 1.0 / ia64_fr_to_double(&denominator)
-            : ia64_fr_to_double(&numerator) / ia64_fr_to_double(&denominator);
+            ? floatx80_div(floatx80_one, denominator80, &status)
+            : floatx80_div(numerator80, denominator80, &status);
     }
 
-    ia64_write_fr_from_double(env, f1, result);
+    ia64_write_fr_from_floatx80(env, f1, result);
     ia64_write_pr(env, p2, predicate);
+    if (ia64_fpu_trace_enabled(env)) {
+        fprintf(stderr,
+                "[ia64-fpu] frcpa ip=0x%016" PRIx64
+                " raw=0x%011" PRIx64 " f%u,p%u=f%u,f%u"
+                " numerator=0x%016" PRIx64 ":%05" PRIx64
+                " denominator=0x%016" PRIx64 ":%05" PRIx64
+                " result=0x%04x:%016" PRIx64
+                " predicate=%u pr=0x%016" PRIx64 "\n",
+                env->ip, raw, f1, p2, f2, f3, numerator.raw[0],
+                numerator.raw[1], denominator.raw[0], denominator.raw[1],
+                result.high, result.low, predicate, env->pr);
+        ia64_fpu_trace_fr("frcpa.result", env, raw, f1);
+    }
     return true;
 }
 
@@ -4402,12 +4626,29 @@ bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
         if (ia64_fr_is_natval(source)) {
             ia64_write_fr_natval(env, f1);
         } else if (x6 == 0x1c) {
-            ia64_write_fr_from_double(env, f1, (double)(int64_t)source->raw[0]);
+            float_status status = { 0 };
+
+            ia64_float_status_init(&status);
+            ia64_write_fr_from_floatx80(
+                env, f1, int64_to_floatx80((int64_t)source->raw[0],
+                                            &status));
         } else {
+            uint64_t fixed = ia64_float_reg_to_fixed(source, unsigned_form,
+                                                     truncate);
+
             ia64_write_fr_significand(
-                env, f1,
-                ia64_float_to_fixed(ia64_fr_to_double(source),
-                                    unsigned_form, truncate));
+                env, f1, fixed);
+            if (ia64_fpu_trace_enabled(env)) {
+                fprintf(stderr,
+                        "[ia64-fpu] fcvt.fixed ip=0x%016" PRIx64
+                        " raw=0x%011" PRIx64 " f%u=f%u"
+                        " unsigned=%u trunc=%u source=0x%016" PRIx64
+                        ":%05" PRIx64
+                        " fixed=0x%016" PRIx64 "\n",
+                        env->ip, raw, f1, f2, unsigned_form, truncate,
+                        source->raw[0], source->raw[1], fixed);
+                ia64_fpu_trace_fr("fcvt.fixed.result", env, raw, f1);
+            }
         }
         return true;
     }
@@ -4477,6 +4718,17 @@ bool ia64_exec_f_select_or_xma(CPUIA64State *env, uint64_t raw)
     }
 
     ia64_write_fr_significand(env, f1, result);
+    if (ia64_fpu_trace_enabled(env)) {
+        fprintf(stderr,
+                "[ia64-fpu] select-xma ip=0x%016" PRIx64
+                " raw=0x%011" PRIx64 " f%u=f%u,f%u,f%u"
+                " x=%u x2=%u source2=0x%016" PRIx64
+                " source3=0x%016" PRIx64 " source4=0x%016" PRIx64
+                " result=0x%016" PRIx64 "\n",
+                env->ip, raw, f1, f2, f3, f4, x, x2, source2,
+                source3, source4, result);
+        ia64_fpu_trace_fr("select-xma.result", env, raw, f1);
+    }
     return true;
 }
 
@@ -4921,28 +5173,29 @@ static bool ia64_floating_compare_matches(const IA64FloatReg *left_reg,
                                           IA64FloatingCompareRelation relation,
                                           bool *source_unavailable)
 {
-    bool unordered;
-    double left;
-    double right;
+    float_status status = { 0 };
+    FloatRelation compare;
 
     if (ia64_fr_is_natval(left_reg) || ia64_fr_is_natval(right_reg)) {
         *source_unavailable = true;
         return false;
     }
 
-    unordered = ia64_fr_is_nan(left_reg) || ia64_fr_is_nan(right_reg);
-    left = ia64_fr_to_double(left_reg);
-    right = ia64_fr_to_double(right_reg);
+    ia64_float_status_init(&status);
+    compare = floatx80_compare_quiet(ia64_fr_to_floatx80(left_reg),
+                                     ia64_fr_to_floatx80(right_reg),
+                                     &status);
 
     switch (relation) {
     case IA64_FLOAT_CMP_EQ:
-        return !unordered && left == right;
+        return compare == float_relation_equal;
     case IA64_FLOAT_CMP_LT:
-        return !unordered && left < right;
+        return compare == float_relation_less;
     case IA64_FLOAT_CMP_LE:
-        return !unordered && left <= right;
+        return compare == float_relation_less ||
+               compare == float_relation_equal;
     case IA64_FLOAT_CMP_UNORD:
-        return unordered;
+        return compare == float_relation_unordered;
     default:
         g_assert_not_reached();
     }

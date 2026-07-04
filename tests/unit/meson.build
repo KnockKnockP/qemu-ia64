@@ -52,6 +52,7 @@ tests = {
   'test-envlist': [],
   'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
   'test-ia64-tcg-classify': [
+    meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/insn.c',
@@ -60,6 +61,7 @@ tests = {
     meson.project_source_root() / 'target/ia64/tcg-classify.c',
   ],
   'test-ia64-insn': [
+    meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/insn.c',
@@ -67,6 +69,7 @@ tests = {
     meson.project_source_root() / 'target/ia64/perf.c',
   ],
   'test-ia64-memory-exceptions': [
+    meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/insn.c',
@@ -75,6 +78,7 @@ tests = {
   ],
   'test-ia64-efi-app': [
     'test-ia64-efi-acpi-stubs.c',
+    meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'hw/acpi/aml-build.c',
     meson.project_source_root() / 'hw/ia64/efi.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
