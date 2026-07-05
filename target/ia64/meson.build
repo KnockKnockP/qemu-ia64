@@ -1,3 +1,12 @@
+# Extend the existing scalar-ALU dispatch point with packed compare support
+# without carrying a large insn.c rewrite in this branch.  Meson requires
+# project link arguments to be declared before any build targets.
+add_project_link_arguments(
+  '-Wl,--wrap=ia64_slot_is_alu_add',
+  '-Wl,--wrap=ia64_exec_alu_add',
+  language: 'c',
+)
+
 ia64_ss = ss.source_set()
 ia64_ss.add(files(
   'bundle.c',
@@ -14,13 +23,5 @@ ia64_ss.add(files(
   'tcg-classify.c',
   'translate.c',
 ))
-
-# Extend the existing scalar-ALU dispatch point with packed compare support
-# without carrying a large insn.c rewrite in this branch.
-add_project_link_arguments(
-  '-Wl,--wrap=ia64_slot_is_alu_add',
-  '-Wl,--wrap=ia64_exec_alu_add',
-  language: 'c',
-)
 
 target_arch += {'ia64': ia64_ss}
