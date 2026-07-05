@@ -878,6 +878,9 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     bool has_ldst;
     bool needs_fallback;
 
+    if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_BUNDLE)) {
+        return false;
+    }
     if (!ia64_tcg_build_fast_bundle(bundle, &fast)) {
         return false;
     }
@@ -1055,6 +1058,10 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     TCGv_i64 tmp;
     bool has_ldst;
 
+    if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_BRANCH)) {
+        IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
+        return false;
+    }
     if (!ia64_tcg_build_direct_branch(bundle, pc, &branch)) {
         return false;
     }

@@ -29,6 +29,10 @@
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+#define IA64_PSR_MFL_BIT UINT64_C(0x0000000000000010)
+#define IA64_PSR_MFH_BIT UINT64_C(0x0000000000000020)
+#define IA64_PSR_DFL_BIT UINT64_C(0x0000000000040000)
+#define IA64_PSR_DFH_BIT UINT64_C(0x0000000000080000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_PFS_CFM_MASK UINT64_C(0x0000003fffffffff)
@@ -111,6 +115,116 @@ void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
         env->cr[IA64_CR_IIM] = iim;
     }
     *next_ip = env->ip;
+}
+
+void ia64_deliver_disabled_fp_interruption(CPUIA64State *env, bool high,
+                                           uint64_t *next_ip)
+{
+    ia64_deliver_exception(env,
+                           high ? IA64_EXCEPTION_DISABLED_FP_HIGH
+                                : IA64_EXCEPTION_DISABLED_FP_LOW,
+                           env->ip, MMU_DATA_LOAD, "disabled fp-register");
+    *next_ip = env->ip;
+}
+
+static bool ia64_fp_regs_fault(CPUIA64State *env, const uint32_t *regs,
+                               unsigned count, bool *high)
+{
+    uint64_t psr = ia64_env_psr(env);
+    bool dfl = (psr & IA64_PSR_DFL_BIT) != 0;
+    bool dfh = (psr & IA64_PSR_DFH_BIT) != 0;
+
+    if (!dfl && !dfh) {
+        return false;
+    }
+    for (unsigned i = 0; i < count; i++) {
+        uint32_t reg = regs[i];
+
+        if (reg >= 32 && reg < IA64_FR_COUNT && dfh) {
+            *high = true;
+            return true;
+        }
+        if (reg >= 2 && reg < 32 && dfl) {
+            *high = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ia64_slot_raises_disabled_fp(CPUIA64State *env, IA64SlotType type,
+                                  uint64_t raw, bool *high)
+{
+    uint64_t psr = ia64_env_psr(env);
+    uint32_t regs[4];
+    unsigned count = 0;
+    IA64FloatingMemoryInstruction fldst;
+
+    if ((psr & (IA64_PSR_DFL_BIT | IA64_PSR_DFH_BIT)) == 0) {
+        return false;
+    }
+
+    if (type == IA64_SLOT_TYPE_F) {
+        if (ia64_slot_is_f_multiply_add(type, raw) ||
+            ia64_slot_is_f_select_or_xma(type, raw)) {
+            regs[count++] = (raw >> 6) & 0x7f;
+            regs[count++] = (raw >> 13) & 0x7f;
+            regs[count++] = (raw >> 20) & 0x7f;
+            regs[count++] = (raw >> 27) & 0x7f;
+        } else if (ia64_slot_is_f_reciprocal_approx(type, raw)) {
+            regs[count++] = (raw >> 6) & 0x7f;
+            if (((raw >> 36) & 0x1) == 0) {
+                regs[count++] = (raw >> 13) & 0x7f;
+            }
+            regs[count++] = (raw >> 20) & 0x7f;
+        } else if (ia64_slot_is_f_misc(type, raw)) {
+            uint8_t x6 = (raw >> 27) & 0x3f;
+
+            if (x6 == 0x01) {
+                return false;
+            }
+            regs[count++] = (raw >> 6) & 0x7f;
+            regs[count++] = (raw >> 13) & 0x7f;
+            if (x6 < 0x18 || x6 > 0x1c) {
+                regs[count++] = (raw >> 20) & 0x7f;
+            }
+        } else if (ia64_slot_major_opcode(raw) == 0x4 ||
+                   ia64_slot_major_opcode(raw) == 0x5) {
+            /* fcmp (major 4) reads f2/f3; fclass (major 5) reads f2. */
+            regs[count++] = (raw >> 13) & 0x7f;
+            if (ia64_slot_major_opcode(raw) == 0x4) {
+                regs[count++] = (raw >> 20) & 0x7f;
+            }
+        } else {
+            return false;
+        }
+        return ia64_fp_regs_fault(env, regs, count, high);
+    }
+
+    if (type != IA64_SLOT_TYPE_M) {
+        return false;
+    }
+
+    if (ia64_slot_is_m_setf(type, raw)) {
+        regs[count++] = (raw >> 6) & 0x7f;
+        return ia64_fp_regs_fault(env, regs, count, high);
+    }
+    if (ia64_slot_is_m_getf(type, raw)) {
+        regs[count++] = (raw >> 13) & 0x7f;
+        return ia64_fp_regs_fault(env, regs, count, high);
+    }
+    if (ia64_decode_floating_memory(type, raw, &fldst)) {
+        if (fldst.kind == IA64_FLOAT_MEM_PREFETCH) {
+            return false;
+        }
+        regs[count++] = fldst.freg;
+        if (fldst.kind == IA64_FLOAT_MEM_LOAD_PAIR) {
+            regs[count++] = fldst.freg2;
+        }
+        return ia64_fp_regs_fault(env, regs, count, high);
+    }
+
+    return false;
 }
 
 bool ia64_pal_uses_stacked_calling_convention(uint64_t function_id)
@@ -669,6 +783,16 @@ static uint32_t ia64_map_fr(CPUIA64State *env, uint32_t reg)
     return 32 + ((reg - 32 + env->rse.rrb_fr) % (IA64_FR_COUNT - 32));
 }
 
+void ia64_note_fr_write(CPUIA64State *env, uint32_t reg)
+{
+    /*
+     * Writes to the FP register file set PSR.mfl/mfh; the OS uses the
+     * modified bits to decide whether a partition must be saved on a
+     * context switch (Linux gates the lazy f32-f127 save on PSR.mfh).
+     */
+    env->psr |= reg >= 32 ? IA64_PSR_MFH_BIT : IA64_PSR_MFL_BIT;
+}
+
 static void ia64_write_fr_parts(CPUIA64State *env, uint32_t reg,
                                 bool sign, uint32_t exponent,
                                 uint64_t significand)
@@ -683,6 +807,7 @@ static void ia64_write_fr_parts(CPUIA64State *env, uint32_t reg,
     env->fr[mapped].raw[0] = significand;
     env->fr[mapped].raw[1] = (exponent & 0x1ffff) |
                              ((uint64_t)(sign ? 1 : 0) << 17);
+    ia64_note_fr_write(env, reg);
 }
 
 static bool ia64_fr_sign(const IA64FloatReg *reg)
@@ -4758,6 +4883,7 @@ bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
 
     env->fr[target].raw[0] = env->fr[source3].raw[0];
     env->fr[target].raw[1] = exponent | ((uint64_t)sign << 17);
+    ia64_note_fr_write(env, f1);
     return true;
 }
 

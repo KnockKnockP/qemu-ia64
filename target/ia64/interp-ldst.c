@@ -386,6 +386,136 @@ static void ia64_st_le_unaligned(CPUIA64State *env, uint64_t address,
     }
 }
 
+/*
+ * Debug shadow of RSE backing-store spills (VIBTANIUM_RSE_SHADOW=1).
+ * Every RSE spill records address->value; every RSE fill/loadrs read
+ * cross-checks guest memory against the shadow.  Plain guest stores
+ * invalidate overlapping entries, so a fill that reads a value the RSE
+ * never spilled ("unspilled") or that diverged from the spilled value
+ * ("mismatch") points at lost or corrupted stacked-register state.
+ * Region-7 addresses only (kernel RBS) to bound noise.
+ */
+typedef struct IA64RseShadowEntry {
+    uint64_t value;
+    bool from_guest_store;
+} IA64RseShadowEntry;
+
+static GHashTable *ia64_rse_shadow_table;
+static uint64_t ia64_rse_shadow_spills;
+static uint64_t ia64_rse_shadow_checks;
+static uint64_t ia64_rse_shadow_virgin;
+static uint64_t ia64_rse_shadow_guest_fill;
+static uint64_t ia64_rse_shadow_mismatches;
+static uint64_t ia64_rse_shadow_guest_mismatches;
+static int ia64_rse_shadow_logged;
+
+static bool ia64_rse_shadow_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_RSE_SHADOW") != NULL;
+        if (enabled) {
+            ia64_rse_shadow_table =
+                g_hash_table_new_full(g_direct_hash, g_direct_equal,
+                                      NULL, g_free);
+        }
+    }
+    return enabled != 0;
+}
+
+static bool ia64_rse_shadow_tracked(uint64_t address)
+{
+    return (address >> 61) == 7;
+}
+
+static void ia64_rse_shadow_set(uint64_t address, uint64_t value,
+                                bool from_guest_store)
+{
+    IA64RseShadowEntry *entry = g_new(IA64RseShadowEntry, 1);
+
+    entry->value = value;
+    entry->from_guest_store = from_guest_store;
+    g_hash_table_insert(ia64_rse_shadow_table, (gpointer)address, entry);
+}
+
+static void ia64_rse_shadow_note_spill(uint64_t address, uint64_t value)
+{
+    if (!ia64_rse_shadow_enabled() || !ia64_rse_shadow_tracked(address)) {
+        return;
+    }
+    ia64_rse_shadow_set(address, value, false);
+    ia64_rse_shadow_spills++;
+}
+
+static void ia64_rse_shadow_note_store(uint64_t address, uint8_t width,
+                                       uint64_t value)
+{
+    if (!ia64_rse_shadow_enabled() || !ia64_rse_shadow_tracked(address)) {
+        return;
+    }
+    if (width == 8 && (address & 7) == 0) {
+        ia64_rse_shadow_set(address, value, true);
+        return;
+    }
+    for (uint64_t a = address & ~7ULL; a <= ((address + width - 1) & ~7ULL);
+         a += 8) {
+        g_hash_table_remove(ia64_rse_shadow_table, (gpointer)a);
+    }
+}
+
+static void ia64_rse_shadow_summary(void)
+{
+    fprintf(stderr,
+            "[ia64-rse-shadow] SUMMARY checks=%" PRIu64
+            " spills=%" PRIu64 " virgin=%" PRIu64
+            " guest-fill=%" PRIu64 " rse-mismatch=%" PRIu64
+            " guest-mismatch=%" PRIu64 "\n",
+            ia64_rse_shadow_checks, ia64_rse_shadow_spills,
+            ia64_rse_shadow_virgin, ia64_rse_shadow_guest_fill,
+            ia64_rse_shadow_mismatches, ia64_rse_shadow_guest_mismatches);
+}
+
+static void ia64_rse_shadow_check_fill(CPUIA64State *env, uint64_t address,
+                                       uint64_t value)
+{
+    IA64RseShadowEntry *entry;
+
+    if (!ia64_rse_shadow_enabled() || !ia64_rse_shadow_tracked(address)) {
+        return;
+    }
+    ia64_rse_shadow_checks++;
+    if ((ia64_rse_shadow_checks & 0xffff) == 0) {
+        ia64_rse_shadow_summary();
+    }
+    entry = g_hash_table_lookup(ia64_rse_shadow_table, (gpointer)address);
+    if (entry == NULL) {
+        ia64_rse_shadow_virgin++;
+        return;
+    }
+    if (entry->value == value) {
+        if (entry->from_guest_store) {
+            ia64_rse_shadow_guest_fill++;
+        }
+        return;
+    }
+    if (entry->from_guest_store) {
+        ia64_rse_shadow_guest_mismatches++;
+    } else {
+        ia64_rse_shadow_mismatches++;
+    }
+    if (ia64_rse_shadow_logged < 60) {
+        ia64_rse_shadow_logged++;
+        fprintf(stderr,
+                "[ia64-rse-shadow] MISMATCH%s ip=0x%016" PRIx64
+                " addr=0x%016" PRIx64 " mem=0x%016" PRIx64
+                " shadow=0x%016" PRIx64 "\n",
+                entry->from_guest_store ? "-GUEST" : "-RSE", env->ip,
+                address, value, entry->value);
+        ia64_rse_shadow_summary();
+    }
+}
+
 static uint64_t ia64_ldst_read(CPUIA64State *env, uint64_t address,
                                uint8_t width)
 {
@@ -424,6 +554,7 @@ static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
                             uint8_t width, uint64_t value)
 {
     IA64_PERF_INC(IA64_PERF_LDST_WRITE);
+    ia64_rse_shadow_note_store(address, width, value);
     ia64_trace_ldst(env, "store", address, width, value);
 
     if (width > 1 && (address & (width - 1)) != 0) {

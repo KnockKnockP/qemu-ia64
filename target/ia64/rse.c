@@ -16,10 +16,12 @@ static void ia64_exec_flushrs(CPUIA64State *env)
 
     first_slot = ia64_rse_dirty_partition_first_slot(env, dirty);
     for (uint32_t i = 0; i < dirty; i++) {
+        uint64_t value = env->rse.stacked_gr[
+            ia64_rse_wrap_slot(first_slot + i)];
+
         address = ia64_rse_reg_address(address);
-        ia64_ldst_write(env, address, 8,
-                        env->rse.stacked_gr[
-                            ia64_rse_wrap_slot(first_slot + i)]);
+        ia64_ldst_write(env, address, 8, value);
+        ia64_rse_shadow_note_spill(address, value);
         address += 8;
     }
 
@@ -35,7 +37,10 @@ static uint64_t ia64_rse_read_backing_store_register(CPUIA64State *env,
                                                      uint64_t address,
                                                      void *opaque)
 {
-    return ia64_ldst_read(env, address, 8);
+    uint64_t value = ia64_ldst_read(env, address, 8);
+
+    ia64_rse_shadow_check_fill(env, address, value);
+    return value;
 }
 
 static bool ia64_rse_trace_enabled(void)

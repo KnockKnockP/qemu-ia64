@@ -1023,6 +1023,25 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
                 continue;
             }
         }
+        {
+            bool fp_high;
+
+            /*
+             * PSR.dfl/dfh make FP register accesses fault so the OS can
+             * lazily switch FP partitions (Linux relies on the f32-f127
+             * Disabled FP-Register fault for its per-task fph ownership).
+             * The bundle is not a TB boundary, so leave the TB immediately:
+             * the surrounding translated code would otherwise keep running
+             * later bundles inside the interruption delivery window.
+             */
+            if (ia64_slot_raises_disabled_fp(env, type, raw, &fp_high)) {
+                uint64_t handler_ip;
+
+                ia64_deliver_disabled_fp_interruption(env, fp_high,
+                                                      &handler_ip);
+                cpu_loop_exit(env_cpu(env));
+            }
+        }
         IA64_PERF_INC(IA64_PERF_INTERP_SLOT_EXECUTED);
         if (fallback_plan != 0) {
             IA64TcgFallbackPlanOp planned_op =

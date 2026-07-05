@@ -158,6 +158,17 @@ typedef enum IA64TcgFastLdstMode {
 IA64TcgFastLdstMode ia64_tcg_fast_ldst_mode(void);
 bool ia64_tcg_fast_ldst_memory_inline_enabled(void);
 
+typedef enum IA64TcgFastDisable {
+    IA64_TCG_FAST_DISABLE_BUNDLE = 1u << 0,
+    IA64_TCG_FAST_DISABLE_BRANCH = 1u << 1,
+    IA64_TCG_FAST_DISABLE_INDIRECT = 1u << 2,
+    IA64_TCG_FAST_DISABLE_MOVSYS = 1u << 3,
+    IA64_TCG_FAST_DISABLE_ALLOC = 1u << 4,
+} IA64TcgFastDisable;
+
+uint32_t ia64_tcg_fast_disable_mask(void);
+bool ia64_tcg_fast_disabled(IA64TcgFastDisable feature);
+
 typedef enum IA64TcgFallbackPlanOp {
     IA64_TCG_FALLBACK_PLAN_GENERIC,
     IA64_TCG_FALLBACK_PLAN_ALLOC,

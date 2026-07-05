@@ -306,6 +306,8 @@ typedef enum IA64ExceptionKind {
     IA64_EXCEPTION_GENERAL_EXCEPTION,
     IA64_EXCEPTION_BREAK,
     IA64_EXCEPTION_EXTERNAL_INTERRUPT,
+    IA64_EXCEPTION_DISABLED_FP_LOW,
+    IA64_EXCEPTION_DISABLED_FP_HIGH,
 } IA64ExceptionKind;
 
 typedef struct IA64ExceptionRecord {
@@ -314,6 +316,8 @@ typedef struct IA64ExceptionRecord {
     vaddr address;
     int32_t access_type;
     uint64_t vector;
+    /* OR-ed into CR.ISR at delivery (ISR.code bits, e.g. fp-high=2). */
+    uint64_t isr_code;
     bool pending;
     uint8_t message[160];
 } IA64ExceptionRecord;

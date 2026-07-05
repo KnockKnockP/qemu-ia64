@@ -230,6 +230,11 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env);
 void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env);
 void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
                                      uint64_t *next_ip, const char *detail);
+void ia64_deliver_disabled_fp_interruption(CPUIA64State *env, bool high,
+                                           uint64_t *next_ip);
+bool ia64_slot_raises_disabled_fp(CPUIA64State *env, IA64SlotType type,
+                                  uint64_t raw, bool *high);
+void ia64_note_fr_write(CPUIA64State *env, uint32_t reg);
 bool ia64_pal_uses_stacked_calling_convention(uint64_t function_id);
 
 const char *ia64_insn_status_name(IA64InsnStatus status);

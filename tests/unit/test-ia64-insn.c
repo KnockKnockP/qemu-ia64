@@ -2166,6 +2166,77 @@ static void test_m_unit_getf_significand(void)
     g_assert_cmphex(ia64_read_gr(&env, 21), ==, 0x1234);
 }
 
+static void test_disabled_fp_register_fault(void)
+{
+    /* fma f32 = f33, f34, f35 (major 8, F1). */
+    const uint64_t fma_high_raw = (0x8ULL << 37) | (35ULL << 27) |
+                                  (33ULL << 20) | (34ULL << 13) |
+                                  (32ULL << 6);
+    /* fma f6 = f7, f8, f9: low partition only. */
+    const uint64_t fma_low_raw = (0x8ULL << 37) | (9ULL << 27) |
+                                 (8ULL << 20) | (7ULL << 13) |
+                                 (6ULL << 6);
+    const uint64_t getf_high_raw = make_m_getf_raw(0x1c, 21, 40);
+    const uint64_t getf_low_raw = make_m_getf_raw(0x1c, 21, 10);
+    CPUIA64State env;
+    bool high = false;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    /* No dfl/dfh: nothing faults. */
+    g_assert_false(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_F,
+                                                fma_high_raw, &high));
+    g_assert_false(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_M,
+                                                getf_high_raw, &high));
+
+    /* dfh: only f32-f127 accesses fault, with the high code. */
+    env.psr |= IA64_PSR_DFH_BIT;
+    g_assert_true(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_F,
+                                               fma_high_raw, &high));
+    g_assert_true(high);
+    g_assert_false(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_F,
+                                                fma_low_raw, &high));
+    g_assert_true(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_M,
+                                               getf_high_raw, &high));
+    g_assert_true(high);
+    g_assert_false(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_M,
+                                                getf_low_raw, &high));
+
+    /* dfl: f2-f31 accesses fault with the low code. */
+    env.psr &= ~IA64_PSR_DFH_BIT;
+    env.psr |= IA64_PSR_DFL_BIT;
+    g_assert_true(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_F,
+                                               fma_low_raw, &high));
+    g_assert_false(high);
+    g_assert_false(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_M,
+                                                getf_high_raw, &high));
+
+    /* Non-FP slots never fault. */
+    g_assert_false(ia64_slot_raises_disabled_fp(&env, IA64_SLOT_TYPE_I,
+                                                fma_low_raw, &high));
+}
+
+static void test_fp_write_sets_modified_bits(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    g_assert_cmphex(env.psr & (IA64_PSR_MFL_BIT | IA64_PSR_MFH_BIT), ==, 0);
+
+    ia64_note_fr_write(&env, 6);
+    g_assert_cmphex(env.psr & IA64_PSR_MFL_BIT, ==, IA64_PSR_MFL_BIT);
+    g_assert_cmphex(env.psr & IA64_PSR_MFH_BIT, ==, 0);
+
+    ia64_note_fr_write(&env, 40);
+    g_assert_cmphex(env.psr & IA64_PSR_MFH_BIT, ==, IA64_PSR_MFH_BIT);
+
+    /* The setf exec path must set mfl via the shared write helper. */
+    env.psr &= ~(IA64_PSR_MFL_BIT | IA64_PSR_MFH_BIT);
+    ia64_write_gr(&env, 17, 0x1234);
+    g_assert_true(ia64_exec_m_setf(&env, 0x0c70802220aULL));
+    g_assert_cmphex(env.psr & IA64_PSR_MFL_BIT, ==, IA64_PSR_MFL_BIT);
+}
+
 static void test_m_unit_getf_all_memory_forms(void)
 {
     const uint64_t getf_exp_r22_f10_raw = make_m_getf_raw(0x1d, 22, 10);
@@ -3768,6 +3839,10 @@ int main(int argc, char **argv)
                     test_m_unit_getf_significand);
     g_test_add_func("/ia64-insn/m-unit-getf-memory-forms",
                     test_m_unit_getf_all_memory_forms);
+    g_test_add_func("/ia64-insn/disabled-fp-register-fault",
+                    test_disabled_fp_register_fault);
+    g_test_add_func("/ia64-insn/fp-write-sets-modified-bits",
+                    test_fp_write_sets_modified_bits);
     g_test_add_func("/ia64-insn/floating-ieee-memory-bit-conversions",
                     test_floating_ieee_memory_bit_conversions);
     g_test_add_func("/ia64-insn/floating-spill-format-constants",

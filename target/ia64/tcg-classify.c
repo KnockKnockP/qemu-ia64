@@ -226,7 +226,8 @@ static bool ia64_tcg_system_mov_trace_enabled(void)
         enabled = g_getenv("VIBTANIUM_BRANCH_TRACE") != NULL ||
                   g_getenv("VIBTANIUM_AR_TRACE") != NULL;
     }
-    return enabled != 0;
+    return enabled != 0 ||
+           ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_MOVSYS);
 }
 
 static bool ia64_tcg_fast_ar_is_plain(uint32_t reg)
@@ -278,6 +279,58 @@ static bool ia64_tcg_ldst_is_memory_access(const IA64LdstImmediate *ldst)
 {
     return ldst->kind == IA64_LDST_IMM_LOAD ||
            ldst->kind == IA64_LDST_IMM_STORE;
+}
+
+uint32_t ia64_tcg_fast_disable_mask(void)
+{
+    /*
+     * VIBTANIUM_TCG_FAST_DISABLE selectively routes fast-path features back
+     * to the interpreter helpers, for isolating miscompares to a lowering
+     * feature without rebuilding.  Comma-separated: "bundle" (fast ALU
+     * bundles), "branch" (all direct-branch lowering, including the indirect
+     * kind), "indirect" (indirect-branch kind only), "movsys" (mov to/from
+     * BR/AR fast ops), "alloc" (alloc fast op), or "all".
+     */
+    static int mask = -1;
+
+    if (mask < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_FAST_DISABLE");
+        int parsed = 0;
+
+        if (value != NULL) {
+            gchar **parts = g_strsplit(value, ",", -1);
+
+            for (gchar **p = parts; *p != NULL; p++) {
+                const gchar *name = g_strstrip(*p);
+
+                if (g_ascii_strcasecmp(name, "bundle") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_BUNDLE;
+                } else if (g_ascii_strcasecmp(name, "branch") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_BRANCH;
+                } else if (g_ascii_strcasecmp(name, "indirect") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_INDIRECT;
+                } else if (g_ascii_strcasecmp(name, "movsys") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_MOVSYS;
+                } else if (g_ascii_strcasecmp(name, "alloc") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_ALLOC;
+                } else if (g_ascii_strcasecmp(name, "all") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_BUNDLE |
+                              IA64_TCG_FAST_DISABLE_BRANCH |
+                              IA64_TCG_FAST_DISABLE_INDIRECT |
+                              IA64_TCG_FAST_DISABLE_MOVSYS |
+                              IA64_TCG_FAST_DISABLE_ALLOC;
+                }
+            }
+            g_strfreev(parts);
+        }
+        mask = parsed;
+    }
+    return (uint32_t)mask;
+}
+
+bool ia64_tcg_fast_disabled(IA64TcgFastDisable feature)
+{
+    return (ia64_tcg_fast_disable_mask() & feature) != 0;
 }
 
 IA64TcgFastLdstMode ia64_tcg_fast_ldst_mode(void)
@@ -772,7 +825,8 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
          * the alloc executes, so an alloc that enables rotation would stale
          * the mapping used by later fast slots.
          */
-        if (((raw >> 27) & 0x0f) != 0 ||
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_ALLOC) ||
+            ((raw >> 27) & 0x0f) != 0 ||
             !ia64_tcg_fast_set_target(slot, r1)) {
             return false;
         }
@@ -1532,7 +1586,8 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
         uint8_t major = ia64_slot_major_opcode(raw);
         uint8_t x6 = (raw >> 27) & 0x3f;
 
-        if (predicate >= 16 ||
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_INDIRECT) ||
+            predicate >= 16 ||
             !(major == 0x1 ||
               (major == 0x0 && (x6 == 0x20 || x6 == 0x21)))) {
             return false;

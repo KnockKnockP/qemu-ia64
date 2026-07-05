@@ -131,6 +131,10 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
         return "break";
     case IA64_EXCEPTION_EXTERNAL_INTERRUPT:
         return "external-interrupt";
+    case IA64_EXCEPTION_DISABLED_FP_LOW:
+        return "disabled-fp-register-low";
+    case IA64_EXCEPTION_DISABLED_FP_HIGH:
+        return "disabled-fp-register-high";
     default:
         return "unknown";
     }
@@ -235,6 +239,14 @@ static void ia64_record_exception_common(CPUIA64State *env,
     case IA64_EXCEPTION_EXTERNAL_INTERRUPT:
         record->vector = 0x3000;
         break;
+    case IA64_EXCEPTION_DISABLED_FP_LOW:
+        record->vector = 0x5500;
+        record->isr_code = 1;
+        break;
+    case IA64_EXCEPTION_DISABLED_FP_HIGH:
+        record->vector = 0x5500;
+        record->isr_code = 2;
+        break;
     case IA64_EXCEPTION_NONE:
     default:
         record->vector = 0;
@@ -257,7 +269,8 @@ static void ia64_record_exception_common(CPUIA64State *env,
     env->cr[IA64_CR_IFA] = address;
     env->cr[IA64_CR_IIPA] = address;
     env->cr[IA64_CR_ISR] = ia64_interruption_isr(ia64_env_psr(env),
-                                                 access_type);
+                                                 access_type) |
+                           env->exception.isr_code;
 }
 
 void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
@@ -355,7 +368,8 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
                            (address & ~0xfULL) : env->ip;
     env->cr[IA64_CR_IFA] = address;
     env->cr[IA64_CR_ISR] = ia64_interruption_isr(ia64_env_psr(env),
-                                                 access_type);
+                                                 access_type) |
+                           env->exception.isr_code;
     if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_DATA_TLB_MISS ||
         kind == IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS ||

@@ -20,6 +20,7 @@ static void helper_write_fr_raw(CPUIA64State *env, uint32_t reg,
     mapped = helper_map_fr(env, reg);
     env->fr[mapped].raw[0] = low;
     env->fr[mapped].raw[1] = high;
+    ia64_note_fr_write(env, reg);
 }
 
 static void exec_floating_load(CPUIA64State *env,
