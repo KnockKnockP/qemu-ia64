@@ -374,6 +374,68 @@ void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
     }
 }
 
+/*
+ * Mandatory RSE spill.  Real hardware has only IA64_RSE_PHYS_STACKED_REGS
+ * physical stacked registers, so the architecturally visible dirty partition
+ * (AR.BSP - AR.BSPSTORE) can never exceed capacity minus the current frame:
+ * when alloc grows the frame past that bound the RSE stalls and stores the
+ * oldest dirty registers to the backing store, advancing AR.BSPSTORE.
+ *
+ * The emulated stacked file is larger than hardware's, but the bound must
+ * still be enforced because guests rely on it: Linux computes the user
+ * dirty-partition byte count at kernel entry and stashes it shifted into the
+ * 14-bit RSC.loadrs field (minstate.h "shl r18=r18,16").  An unbounded dirty
+ * partition eventually exceeds 0x3fff bytes, the shift silently truncates,
+ * and the kernel-exit loadrs + AR.BSPSTORE rebase reconstruct a user AR.BSP
+ * thousands of slots too low -- after which deep call-stack unwinds (perl was
+ * the first guest program to hit this) walk the br.ret fill below the
+ * backing-store bottom and the process dies with SIGSEGV.
+ *
+ * Spilled stores are idempotent (same values to the same addresses) and
+ * AR.BSPSTORE is only advanced after the loop, so a page fault raised by
+ * write_register mid-spill restarts the whole alloc cleanly.
+ */
+uint32_t ia64_rse_spill_excess_dirty(CPUIA64State *env, uint32_t new_sof,
+                                     IA64RSEWriteRegisterFn write_register,
+                                     void *opaque)
+{
+    uint32_t dirty;
+    uint32_t excess;
+    uint32_t first_slot;
+    uint64_t address;
+
+    if (!env || !write_register || env->rse.bspstore == 0) {
+        return 0;
+    }
+
+    dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
+    if (dirty + new_sof <= IA64_RSE_PHYS_STACKED_REGS) {
+        return 0;
+    }
+
+    excess = MIN(dirty + new_sof - IA64_RSE_PHYS_STACKED_REGS, dirty);
+    first_slot = ia64_rse_dirty_partition_first_slot(env, dirty);
+    address = env->rse.bspstore;
+    for (uint32_t i = 0; i < excess; i++) {
+        uint64_t value = env->rse.stacked_gr[
+            ia64_rse_wrap_slot(first_slot + i)];
+
+        address = ia64_rse_reg_address(address);
+        write_register(env, address, value, opaque);
+        address += 8;
+    }
+
+    env->rse.bspstore = address;
+    env->rse.bsp_load = address;
+    env->ar[IA64_AR_BSPSTORE] = address;
+    dirty = ia64_rse_num_regs(env->rse.bspstore, env->rse.bsp);
+    env->rse.clean_count = dirty < env->rse.current_frame_base
+        ? env->rse.current_frame_base - dirty
+        : 0;
+    ia64_rse_sync_ar(env);
+    return excess;
+}
+
 uint32_t ia64_rse_load_restored_frame(CPUIA64State *env, uint32_t count,
                                       IA64RSEReadRegisterFn read_register,
                                       void *opaque)

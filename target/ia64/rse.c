@@ -43,6 +43,15 @@ static uint64_t ia64_rse_read_backing_store_register(CPUIA64State *env,
     return value;
 }
 
+static void ia64_rse_write_backing_store_register(CPUIA64State *env,
+                                                  uint64_t address,
+                                                  uint64_t value,
+                                                  void *opaque)
+{
+    ia64_ldst_write(env, address, 8, value);
+    ia64_rse_shadow_note_spill(address, value);
+}
+
 static bool ia64_rse_trace_enabled(void)
 {
     static int enabled = -1;
@@ -51,6 +60,43 @@ static bool ia64_rse_trace_enabled(void)
         enabled = g_getenv("VIBTANIUM_RSE_TRACE") != NULL;
     }
     return enabled != 0;
+}
+
+/*
+ * Enforce the physical stacked register file bound before alloc grows the
+ * current frame: spill the oldest dirty registers to the backing store so
+ * that dirty + sof never exceeds IA64_RSE_PHYS_STACKED_REGS, exactly like
+ * hardware's mandatory RSE stores.  See ia64_rse_spill_excess_dirty for why
+ * guests break without this.
+ */
+static void ia64_rse_spill_for_alloc(CPUIA64State *env, uint64_t raw)
+{
+    uint32_t new_sof = (raw >> 13) & 0x7f;
+    uint64_t old_bspstore = env->rse.bspstore;
+    uint32_t spilled;
+
+    spilled = ia64_rse_spill_excess_dirty(
+        env, new_sof, ia64_rse_write_backing_store_register, NULL);
+    if (spilled == 0) {
+        return;
+    }
+    IA64_PERF_INC(IA64_PERF_OP_RSE_ALLOC_SPILL);
+    IA64_PERF_ADD(IA64_PERF_OP_RSE_ALLOC_SPILL_REG, spilled);
+    if (ia64_rse_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-rse] ip=0x%016" PRIx64
+                " alloc-spill sof=%u spilled=%u"
+                " bspstore=0x%016" PRIx64 "->0x%016" PRIx64
+                " bsp=0x%016" PRIx64 "\n",
+                env->ip, new_sof, spilled, old_bspstore,
+                env->rse.bspstore, env->rse.bsp);
+    }
+}
+
+static void ia64_exec_alloc_with_spill(CPUIA64State *env, uint64_t raw)
+{
+    ia64_rse_spill_for_alloc(env, raw);
+    ia64_exec_m34_alloc(env, raw);
 }
 
 static void ia64_rse_sync_ar_after_fill(CPUIA64State *env)

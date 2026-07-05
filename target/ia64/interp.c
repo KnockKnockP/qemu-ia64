@@ -632,7 +632,7 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
 void HELPER(fast_alloc)(CPUIA64State *env, uint64_t raw)
 {
     IA64_PERF_INC(IA64_PERF_OP_ALLOC);
-    ia64_exec_m34_alloc(env, raw);
+    ia64_exec_alloc_with_spill(env, raw);
 }
 
 typedef enum IA64PlannedSlotResult {
@@ -651,7 +651,7 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         return IA64_PLANNED_SLOT_GENERIC;
     case IA64_TCG_FALLBACK_PLAN_ALLOC:
         IA64_PERF_INC(IA64_PERF_OP_ALLOC);
-        ia64_exec_m34_alloc(env, raw);
+        ia64_exec_alloc_with_spill(env, raw);
         return IA64_PLANNED_SLOT_CONTINUE;
     case IA64_TCG_FALLBACK_PLAN_MOV_FROM_BRANCH:
         IA64_PERF_INC(IA64_PERF_OP_BRANCH_REGISTER);
@@ -1080,7 +1080,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         }
         if (ia64_slot_is_m34_alloc(type, raw)) {
             IA64_PERF_INC(IA64_PERF_OP_ALLOC);
-            ia64_exec_m34_alloc(env, raw);
+            ia64_exec_alloc_with_spill(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mov_ip(type, raw)) {

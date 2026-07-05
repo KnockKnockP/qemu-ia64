@@ -250,9 +250,17 @@ void ia64_rse_set_dirty_partition(CPUIA64State *env, uint64_t start,
 uint64_t ia64_rse_reg_address(uint64_t address);
 uint32_t ia64_rse_dirty_partition_first_slot(CPUIA64State *env,
                                              uint32_t count);
+/* Physical stacked register file capacity (r32-r127 on real hardware). */
+#define IA64_RSE_PHYS_STACKED_REGS 96
+
 typedef uint64_t (*IA64RSEReadRegisterFn)(CPUIA64State *env,
                                           uint64_t address,
                                           void *opaque);
+typedef void (*IA64RSEWriteRegisterFn)(CPUIA64State *env, uint64_t address,
+                                       uint64_t value, void *opaque);
+uint32_t ia64_rse_spill_excess_dirty(CPUIA64State *env, uint32_t new_sof,
+                                     IA64RSEWriteRegisterFn write_register,
+                                     void *opaque);
 void ia64_rse_load_dirty_partition(CPUIA64State *env, uint64_t load_start,
                                    uint64_t load_end,
                                    IA64RSEReadRegisterFn read_register,

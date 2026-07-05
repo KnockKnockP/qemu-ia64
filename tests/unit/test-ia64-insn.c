@@ -771,6 +771,104 @@ static void test_rse_reconstructs_clean_partition_after_load(void)
     g_assert_cmpuint(env.rse.clean_count, ==, 0);
 }
 
+typedef struct TestRSEWriteCapture {
+    uint64_t address[32];
+    uint64_t value[32];
+    uint32_t count;
+} TestRSEWriteCapture;
+
+static void test_rse_write_backing_store_register(CPUIA64State *env,
+                                                  uint64_t address,
+                                                  uint64_t value,
+                                                  void *opaque)
+{
+    TestRSEWriteCapture *capture = opaque;
+
+    g_assert_nonnull(env);
+    g_assert_nonnull(capture);
+    g_assert_cmpuint(capture->count, <, G_N_ELEMENTS(capture->address));
+    capture->address[capture->count] = address;
+    capture->value[capture->count] = value;
+    capture->count++;
+}
+
+static void test_rse_alloc_spill_keeps_physical_bound(void)
+{
+    TestRSEWriteCapture capture = { 0 };
+    CPUIA64State env;
+    uint64_t address;
+    uint32_t spilled;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    /*
+     * 90 dirty registers below the current frame, backing store positioned
+     * so the spill crosses a NaT-collection slot (0x61f8 has slot number
+     * 0x3f).  Growing the frame to sof=20 exceeds the 96-register physical
+     * file by 14, so exactly the 14 oldest dirty registers must spill.
+     */
+    env.rse.current_frame_base = 90;
+    env.rse.bspstore = 0x61e0;
+    env.rse.bsp = ia64_rse_skip_regs(env.rse.bspstore, 90);
+    env.rse.bsp_load = env.rse.bspstore;
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+    for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
+        env.rse.stacked_gr[i] = 0xb0d0000000000000ULL | i;
+    }
+
+    spilled = ia64_rse_spill_excess_dirty(
+        &env, 20, test_rse_write_backing_store_register, &capture);
+
+    g_assert_cmpuint(spilled, ==, 14);
+    g_assert_cmpuint(capture.count, ==, 14);
+    address = 0x61e0;
+    for (uint32_t i = 0; i < 14; i++) {
+        address = ia64_rse_reg_address(address);
+        g_assert_cmphex(capture.address[i], ==, address);
+        g_assert_cmphex(capture.value[i], ==, 0xb0d0000000000000ULL | i);
+        address += 8;
+    }
+    /* 0x61f8 is a NaT collection slot and must have been skipped. */
+    g_assert_cmphex(capture.address[3], ==, 0x6200);
+    g_assert_cmphex(env.rse.bspstore, ==,
+                    ia64_rse_skip_regs(0x61e0, 14));
+    g_assert_cmphex(env.rse.bsp_load, ==, env.rse.bspstore);
+    g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==, env.rse.bspstore);
+    g_assert_cmpuint(ia64_rse_num_regs(env.rse.bspstore, env.rse.bsp) + 20,
+                     ==, IA64_RSE_PHYS_STACKED_REGS);
+    g_assert_cmpuint(env.rse.clean_count, ==, 14);
+}
+
+static void test_rse_alloc_spill_noop_paths(void)
+{
+    TestRSEWriteCapture capture = { 0 };
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 50;
+    env.rse.bspstore = 0x6000;
+    env.rse.bsp = ia64_rse_skip_regs(env.rse.bspstore, 50);
+    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
+    env.ar[IA64_AR_BSP] = env.rse.bsp;
+
+    /* dirty (50) + sof (40) fits in the physical file: no spill. */
+    g_assert_cmpuint(ia64_rse_spill_excess_dirty(
+                         &env, 40, test_rse_write_backing_store_register,
+                         &capture),
+                     ==, 0);
+    g_assert_cmpuint(capture.count, ==, 0);
+    g_assert_cmphex(env.rse.bspstore, ==, 0x6000);
+
+    /* An uninitialized backing store never spills. */
+    env.rse.bspstore = 0;
+    env.rse.bsp = 0x8000;
+    g_assert_cmpuint(ia64_rse_spill_excess_dirty(
+                         &env, 96, test_rse_write_backing_store_register,
+                         &capture),
+                     ==, 0);
+    g_assert_cmpuint(capture.count, ==, 0);
+}
+
 static void test_i_unit_mov_ip_and_nop(void)
 {
     const uint64_t mov_ip_r35_raw = 0x001800008c0ULL;
@@ -3769,6 +3867,10 @@ int main(int argc, char **argv)
                     test_rse_restored_frame_uses_bsp_load);
     g_test_add_func("/ia64-insn/rse-reconstructs-clean-partition-after-load",
                     test_rse_reconstructs_clean_partition_after_load);
+    g_test_add_func("/ia64-insn/rse-alloc-spill-keeps-physical-bound",
+                    test_rse_alloc_spill_keeps_physical_bound);
+    g_test_add_func("/ia64-insn/rse-alloc-spill-noop-paths",
+                    test_rse_alloc_spill_noop_paths);
     g_test_add_func("/ia64-insn/i-unit-mov-ip-and-nop",
                     test_i_unit_mov_ip_and_nop);
     g_test_add_func("/ia64-insn/i-unit-break-delivers-interruption-state",
