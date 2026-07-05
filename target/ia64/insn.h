@@ -403,6 +403,8 @@ bool ia64_slot_is_alu_shladd(IA64SlotType type, uint64_t raw);
 bool ia64_exec_alu_shladd(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_packed_i2(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_packed_alu(IA64SlotType type, uint64_t raw);
+bool ia64_exec_packed_alu(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_mux(IA64SlotType type, uint64_t raw);
 bool ia64_exec_i_mux(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_i_bit_count(IA64SlotType type, uint64_t raw);

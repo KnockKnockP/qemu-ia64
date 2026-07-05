@@ -103,6 +103,16 @@ static uint64_t make_i2_packed_raw(uint8_t za, uint8_t zb,
            ((uint64_t)r2 << 13) | ((uint64_t)r1 << 6);
 }
 
+static uint64_t make_packed_alu_raw(uint8_t za, uint8_t zb, uint8_t x4,
+                                    uint8_t x2b, uint8_t r1, uint8_t r2,
+                                    uint8_t r3)
+{
+    return (8ULL << 37) | ((uint64_t)za << 36) | (1ULL << 34) |
+           ((uint64_t)zb << 33) | ((uint64_t)x4 << 29) |
+           ((uint64_t)x2b << 27) | ((uint64_t)r3 << 20) |
+           ((uint64_t)r2 << 13) | ((uint64_t)r1 << 6);
+}
+
 static uint64_t make_extract_raw(bool sign_extend, uint8_t r1, uint8_t r3,
                                  uint8_t position, uint8_t length)
 {
@@ -1982,6 +1992,87 @@ static void test_alu_logic_addp4_and_shladd(void)
                                           shladd_r19_r20_r21_raw));
     g_assert_true(ia64_exec_alu_shladd(&env, shladd_r19_r20_r21_raw));
     g_assert_cmphex(ia64_read_gr(&env, 19), ==, 17);
+}
+
+static void test_packed_alu_a9_a10_family(void)
+{
+    /* The Debian base-install frontier: pcmp1.eq r57 = r62, r63 (qp p2). */
+    const uint64_t debian_pcmp1_eq_raw = make_packed_alu_raw(0, 0, 9, 0,
+                                                             57, 62, 63) | 2;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    /* The scalar ALU predicates must not claim this x2a==1 encoding. */
+    g_assert_cmphex(debian_pcmp1_eq_raw, ==, 0x10523f7ce42ULL);
+    g_assert_false(ia64_slot_is_alu_add(IA64_SLOT_TYPE_M, debian_pcmp1_eq_raw));
+    g_assert_true(ia64_slot_is_packed_alu(IA64_SLOT_TYPE_M,
+                                          debian_pcmp1_eq_raw));
+
+    ia64_write_gr(&env, 62, 0x0011223344556677ULL);
+    ia64_write_gr(&env, 63, 0x00ff223344ff6677ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, debian_pcmp1_eq_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 57), ==, 0xff00ffffff00ffffULL);
+
+    /* pcmp1.gt r1 = r2, r3 (signed per byte). */
+    const uint64_t pcmp1_gt_raw = make_packed_alu_raw(0, 0, 9, 1, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x7f00000000000080ULL);
+    ia64_write_gr(&env, 3, 0x0100000000000001ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, pcmp1_gt_raw));
+    /* lane0: (s8)0x80=-128 > 1? no. lane7: 0x7f=127 > 1? yes. */
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0xff00000000000000ULL);
+
+    /* padd1 modulo. */
+    const uint64_t padd1_raw = make_packed_alu_raw(0, 0, 0, 0, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x0102030405060708ULL);
+    ia64_write_gr(&env, 3, 0x1020304050607080ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, padd1_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x1122334455667788ULL);
+
+    /* padd1.uuu saturates each unsigned byte to 0xff. */
+    const uint64_t padd1_uuu_raw = make_packed_alu_raw(0, 0, 0, 2, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0xffffffffffffffffULL);
+    ia64_write_gr(&env, 3, 0x0101010101010101ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, padd1_uuu_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0xffffffffffffffffULL);
+
+    /* padd2.sss saturates a positive overflow to 0x7fff. */
+    const uint64_t padd2_sss_raw = make_packed_alu_raw(0, 1, 0, 1, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x0000000000007fffULL);
+    ia64_write_gr(&env, 3, 0x0000000000000001ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, padd2_sss_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x0000000000007fffULL);
+
+    /* psub1 modulo, per byte. */
+    const uint64_t psub1_raw = make_packed_alu_raw(0, 0, 1, 0, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x1020304050607080ULL);
+    ia64_write_gr(&env, 3, 0x0102030405060708ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, psub1_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x0f1e2d3c4b5a6978ULL);
+
+    /* pavg1 vs pavg1.raz differ on the round bit. */
+    const uint64_t pavg1_raw = make_packed_alu_raw(0, 0, 2, 2, 1, 2, 3);
+    const uint64_t pavg1_raz_raw = make_packed_alu_raw(0, 0, 2, 3, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x0000000000000003ULL);
+    ia64_write_gr(&env, 3, 0x0000000000000004ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, pavg1_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x0000000000000003ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, pavg1_raz_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x0000000000000004ULL);
+
+    /* pshladd2 count=1: sat((s16)r2 << 1) + (s16)r3, per 16-bit lane. */
+    const uint64_t pshladd2_raw = make_packed_alu_raw(0, 1, 4, 1, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x0000000000000002ULL);
+    ia64_write_gr(&env, 3, 0x0000000000000003ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, pshladd2_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x0000000000000007ULL);
+
+    /* pshradd2 count=1: ((s16)r2 >> 1) + (s16)r3, per 16-bit lane. */
+    const uint64_t pshradd2_raw = make_packed_alu_raw(0, 1, 6, 1, 1, 2, 3);
+    ia64_write_gr(&env, 2, 0x0000000000000008ULL);
+    ia64_write_gr(&env, 3, 0x0000000000000001ULL);
+    g_assert_true(ia64_exec_packed_alu(&env, pshradd2_raw));
+    g_assert_cmphex(ia64_read_gr(&env, 1), ==, 0x0000000000000005ULL);
 }
 
 static void test_i_unit_mux_permutations(void)
@@ -3917,6 +4008,8 @@ int main(int argc, char **argv)
                     test_alu_sub_register_form);
     g_test_add_func("/ia64-insn/alu-logic-addp4-and-shladd",
                     test_alu_logic_addp4_and_shladd);
+    g_test_add_func("/ia64-insn/packed-alu-a9-a10-family",
+                    test_packed_alu_a9_a10_family);
     g_test_add_func("/ia64-insn/i-unit-mux-permutations",
                     test_i_unit_mux_permutations);
     g_test_add_func("/ia64-insn/i-unit-packed-i2-frontier-mix4r",

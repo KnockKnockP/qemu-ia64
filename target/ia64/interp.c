@@ -1409,6 +1409,11 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
             }
             continue;
         }
+        if (ia64_slot_is_packed_alu(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
+            ia64_exec_packed_alu(env, raw);
+            continue;
+        }
         if (ia64_slot_is_alu_add(type, raw)) {
             IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_alu_add(env, raw);

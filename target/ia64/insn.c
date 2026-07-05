@@ -3786,6 +3786,323 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
+/*
+ * Parallel (multimedia) integer ALU, major opcode 0x8, x2a == 1.
+ *
+ * Covers the A9 arithmetic family (padd/psub with modulo and saturating
+ * forms, pavg, pavgsub, pcmp) and the A10 shift-and-add family
+ * (pshladd2/pshradd2).  Element width is selected by the za/zb pair:
+ *   (za,zb) = (0,0) -> 1 byte, (0,1) -> 2 byte, (1,0) -> 4 byte.
+ * These share the same major opcode and unit routing as the scalar ALU
+ * ops (which all use x2a != 1), so the interpreter dispatches this family
+ * on its own predicate.
+ */
+typedef enum IA64PackedAluOp {
+    IA64_PACKED_ALU_INVALID = 0,
+    IA64_PACKED_ALU_PADD,
+    IA64_PACKED_ALU_PSUB,
+    IA64_PACKED_ALU_PAVG,
+    IA64_PACKED_ALU_PAVGSUB,
+    IA64_PACKED_ALU_PCMP,
+    IA64_PACKED_ALU_PSHLADD,
+    IA64_PACKED_ALU_PSHRADD,
+} IA64PackedAluOp;
+
+static IA64PackedAluOp ia64_decode_packed_alu(uint64_t raw, unsigned *width_out,
+                                              unsigned *mod_out)
+{
+    uint8_t za;
+    uint8_t zb;
+    uint8_t x4;
+    uint8_t x2b;
+    unsigned width;
+
+    if (ia64_slot_major_opcode(raw) != 0x8 || ((raw >> 34) & 0x3) != 1) {
+        return IA64_PACKED_ALU_INVALID;
+    }
+
+    za = (raw >> 36) & 0x1;
+    zb = (raw >> 33) & 0x1;
+    x4 = (raw >> 29) & 0xf;
+    x2b = (raw >> 27) & 0x3;
+
+    if (za == 0 && zb == 0) {
+        width = 1;
+    } else if (za == 0 && zb == 1) {
+        width = 2;
+    } else if (za == 1 && zb == 0) {
+        width = 4;
+    } else {
+        return IA64_PACKED_ALU_INVALID;
+    }
+
+    *width_out = width;
+    *mod_out = x2b;
+
+    switch (x4) {
+    case 0: /* padd: x2b 0=modulo 1=sss 2=uuu 3=uus */
+    case 1: /* psub: same modifier layout */
+        if (width == 4 && x2b != 0) {
+            return IA64_PACKED_ALU_INVALID; /* no 4-byte saturating form */
+        }
+        return x4 == 0 ? IA64_PACKED_ALU_PADD : IA64_PACKED_ALU_PSUB;
+    case 2: /* pavg: x2b 2=normal 3=raz */
+        if (width == 4 || (x2b != 2 && x2b != 3)) {
+            return IA64_PACKED_ALU_INVALID;
+        }
+        return IA64_PACKED_ALU_PAVG;
+    case 3: /* pavgsub: x2b 2 only */
+        if (width == 4 || x2b != 2) {
+            return IA64_PACKED_ALU_INVALID;
+        }
+        return IA64_PACKED_ALU_PAVGSUB;
+    case 4: /* pshladd2: 2-byte only, x2b = count2 */
+        return width == 2 ? IA64_PACKED_ALU_PSHLADD : IA64_PACKED_ALU_INVALID;
+    case 6: /* pshradd2: 2-byte only, x2b = count2 */
+        return width == 2 ? IA64_PACKED_ALU_PSHRADD : IA64_PACKED_ALU_INVALID;
+    case 9: /* pcmp: x2b 0=eq 1=gt */
+        return x2b <= 1 ? IA64_PACKED_ALU_PCMP : IA64_PACKED_ALU_INVALID;
+    default:
+        return IA64_PACKED_ALU_INVALID;
+    }
+}
+
+static uint64_t ia64_packed_mask(unsigned width)
+{
+    return width == 4 ? UINT32_MAX : ((UINT64_C(1) << (width * 8)) - 1);
+}
+
+static uint64_t ia64_packed_read_lane(uint64_t value, unsigned width,
+                                      unsigned lane)
+{
+    switch (width) {
+    case 1:
+        return ia64_packed_u8(value, lane);
+    case 2:
+        return ia64_packed_u16(value, lane);
+    default:
+        return ia64_packed_u32(value, lane);
+    }
+}
+
+static uint64_t ia64_packed_write_lane(uint64_t result, unsigned width,
+                                       unsigned lane, uint64_t value)
+{
+    switch (width) {
+    case 1:
+        return ia64_packed_set_u8(result, lane, (uint8_t)value);
+    case 2:
+        return ia64_packed_set_u16(result, lane, (uint16_t)value);
+    default:
+        return ia64_packed_set_u32(result, lane, (uint32_t)value);
+    }
+}
+
+static int64_t ia64_packed_sext(uint64_t lane, unsigned width)
+{
+    return ia64_sign_extend(lane, width * 8);
+}
+
+static uint16_t ia64_saturate_unsigned_i16(int64_t value)
+{
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 0xffff) {
+        return 0xffff;
+    }
+    return value;
+}
+
+static uint64_t ia64_packed_saturate(int64_t value, unsigned width,
+                                     bool result_signed)
+{
+    if (width == 1) {
+        return result_signed ? ia64_saturate_signed_i8(value)
+                             : ia64_saturate_unsigned_i8(value);
+    }
+    return result_signed ? ia64_saturate_signed_i16(value)
+                         : ia64_saturate_unsigned_i16(value);
+}
+
+static uint64_t ia64_packed_addsub_lane(uint64_t x, uint64_t y, unsigned width,
+                                        unsigned mod, bool subtract)
+{
+    int64_t left;
+    int64_t right;
+    int64_t temp;
+    bool result_signed;
+
+    if (mod == 0) { /* modulo form: truncate, sign is irrelevant */
+        temp = subtract ? (int64_t)(x - y) : (int64_t)(x + y);
+        return (uint64_t)temp & ia64_packed_mask(width);
+    }
+
+    switch (mod) {
+    case 1: /* sss: signed result, signed sources */
+        left = ia64_packed_sext(x, width);
+        right = ia64_packed_sext(y, width);
+        result_signed = true;
+        break;
+    case 3: /* uus: unsigned result, unsigned r2, signed r3 */
+        left = (int64_t)x;
+        right = ia64_packed_sext(y, width);
+        result_signed = false;
+        break;
+    default: /* uuu: unsigned result, unsigned sources */
+        left = (int64_t)x;
+        right = (int64_t)y;
+        result_signed = false;
+        break;
+    }
+
+    temp = subtract ? left - right : left + right;
+    return ia64_packed_saturate(temp, width, result_signed);
+}
+
+static uint64_t ia64_packed_avg_lane(uint64_t x, uint64_t y, unsigned width,
+                                     bool raz)
+{
+    uint64_t sum = x + y; /* zero-extended sources, no overflow at 64 bits */
+
+    if (raz) {
+        return ((sum + 1) >> 1) & ia64_packed_mask(width);
+    }
+    return (((sum >> 1) | (sum & 1))) & ia64_packed_mask(width);
+}
+
+static uint64_t ia64_packed_avgsub_lane(uint64_t x, uint64_t y, unsigned width)
+{
+    uint64_t field_mask = (UINT64_C(1) << (width * 8 + 1)) - 1;
+    uint64_t temp = (x - y) & field_mask; /* width+1 bit unsigned field */
+
+    return (((temp >> 1) | (temp & 1))) & ia64_packed_mask(width);
+}
+
+static uint64_t ia64_packed_cmp_lane(uint64_t x, uint64_t y, unsigned width,
+                                     bool greater_than)
+{
+    bool match = greater_than
+        ? ia64_packed_sext(x, width) > ia64_packed_sext(y, width)
+        : x == y;
+
+    return match ? ia64_packed_mask(width) : 0;
+}
+
+static uint64_t ia64_packed_shladd2_lane(uint64_t x, uint64_t y, unsigned count)
+{
+    int64_t max = 0x7fff;
+    int64_t min = -0x8000;
+    int64_t temp = ia64_packed_sext(x, 2) << count;
+    int64_t res;
+
+    if (temp > max) {
+        res = max;
+    } else if (temp < min) {
+        res = min;
+    } else {
+        res = temp + ia64_packed_sext(y, 2);
+        if (res > max) {
+            res = max;
+        } else if (res < min) {
+            res = min;
+        }
+    }
+    return (uint64_t)res & 0xffff;
+}
+
+static uint64_t ia64_packed_shradd2_lane(uint64_t x, uint64_t y, unsigned count)
+{
+    int64_t max = 0x7fff;
+    int64_t min = -0x8000;
+    int64_t res = (ia64_packed_sext(x, 2) >> count) + ia64_packed_sext(y, 2);
+
+    if (res > max) {
+        res = max;
+    } else if (res < min) {
+        res = min;
+    }
+    return (uint64_t)res & 0xffff;
+}
+
+bool ia64_slot_is_packed_alu(IA64SlotType type, uint64_t raw)
+{
+    unsigned width;
+    unsigned mod;
+
+    if (type != IA64_SLOT_TYPE_M && type != IA64_SLOT_TYPE_I) {
+        return false;
+    }
+    return ia64_decode_packed_alu(raw, &width, &mod) != IA64_PACKED_ALU_INVALID;
+}
+
+bool ia64_exec_packed_alu(CPUIA64State *env, uint64_t raw)
+{
+    IA64PackedAluOp op;
+    unsigned width;
+    unsigned mod;
+    unsigned lanes;
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint64_t source2;
+    uint64_t source3;
+    uint64_t result = 0;
+
+    if (!env) {
+        return false;
+    }
+
+    op = ia64_decode_packed_alu(raw, &width, &mod);
+    if (op == IA64_PACKED_ALU_INVALID) {
+        return false;
+    }
+
+    r1 = (raw >> 6) & 0x7f;
+    r2 = (raw >> 13) & 0x7f;
+    r3 = (raw >> 20) & 0x7f;
+    source2 = ia64_read_gr(env, r2);
+    source3 = ia64_read_gr(env, r3);
+    lanes = 8 / width;
+
+    for (unsigned lane = 0; lane < lanes; lane++) {
+        uint64_t x = ia64_packed_read_lane(source2, width, lane);
+        uint64_t y = ia64_packed_read_lane(source3, width, lane);
+        uint64_t out;
+
+        switch (op) {
+        case IA64_PACKED_ALU_PADD:
+            out = ia64_packed_addsub_lane(x, y, width, mod, false);
+            break;
+        case IA64_PACKED_ALU_PSUB:
+            out = ia64_packed_addsub_lane(x, y, width, mod, true);
+            break;
+        case IA64_PACKED_ALU_PAVG:
+            out = ia64_packed_avg_lane(x, y, width, mod == 3);
+            break;
+        case IA64_PACKED_ALU_PAVGSUB:
+            out = ia64_packed_avgsub_lane(x, y, width);
+            break;
+        case IA64_PACKED_ALU_PCMP:
+            out = ia64_packed_cmp_lane(x, y, width, mod == 1);
+            break;
+        case IA64_PACKED_ALU_PSHLADD:
+            out = ia64_packed_shladd2_lane(x, y, mod);
+            break;
+        case IA64_PACKED_ALU_PSHRADD:
+            out = ia64_packed_shradd2_lane(x, y, mod);
+            break;
+        default:
+            return false;
+        }
+
+        result = ia64_packed_write_lane(result, width, lane, out);
+    }
+
+    ia64_write_gr(env, r1, result);
+    return true;
+}
+
 bool ia64_slot_is_i_mux(IA64SlotType type, uint64_t raw)
 {
     uint8_t za;
