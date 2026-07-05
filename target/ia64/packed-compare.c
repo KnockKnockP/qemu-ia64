@@ -5,14 +5,14 @@
 
 /*
  * The current interpreter dispatch reaches major-opcode 0x8 ALU/MM-ALU slots
- * through ia64_slot_is_alu_add()/ia64_exec_alu_add().  Until insn.c grows a
- * first-class packed-ALU dispatcher, use the linker --wrap hook installed from
- * meson.build to extend that existing dispatch point with the packed compare
- * subset needed by Debian installer code.
+ * through ia64_slot_is_alu_add()/ia64_exec_alu_add().  insn-packed-wrapper.c
+ * compiles the existing scalar implementation under *_scalar names, and this
+ * file provides the public entry points with the packed compare subset layered
+ * in front.
  */
 
-bool __real_ia64_slot_is_alu_add(IA64SlotType type, uint64_t raw);
-bool __real_ia64_exec_alu_add(CPUIA64State *env, uint64_t raw);
+bool ia64_slot_is_alu_add_scalar(IA64SlotType type, uint64_t raw);
+bool ia64_exec_alu_add_scalar(CPUIA64State *env, uint64_t raw);
 
 static unsigned ia64_packed_compare_width(uint64_t raw)
 {
@@ -119,17 +119,17 @@ static bool ia64_exec_packed_compare(CPUIA64State *env, uint64_t raw)
     return true;
 }
 
-bool __wrap_ia64_slot_is_alu_add(IA64SlotType type, uint64_t raw)
+bool ia64_slot_is_alu_add(IA64SlotType type, uint64_t raw)
 {
     return ia64_slot_is_packed_compare(type, raw) ||
-           __real_ia64_slot_is_alu_add(type, raw);
+           ia64_slot_is_alu_add_scalar(type, raw);
 }
 
-bool __wrap_ia64_exec_alu_add(CPUIA64State *env, uint64_t raw)
+bool ia64_exec_alu_add(CPUIA64State *env, uint64_t raw)
 {
     if (ia64_raw_is_packed_compare(raw)) {
         return ia64_exec_packed_compare(env, raw);
     }
 
-    return __real_ia64_exec_alu_add(env, raw);
+    return ia64_exec_alu_add_scalar(env, raw);
 }
