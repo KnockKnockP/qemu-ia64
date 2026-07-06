@@ -30,6 +30,8 @@ bool ia64_debug_hooks_active(void)
     if (enabled < 0) {
         enabled = ia64_debug_env_enabled("VIBTANIUM_EXECVE_TRACE") ||
                   ia64_debug_env_enabled("VIBTANIUM_SYSCALL_TRACE") ||
+                  ia64_debug_env_enabled("VIBTANIUM_SYSCALL_ERRTRACE") ||
+                  ia64_debug_env_enabled("VIBTANIUM_STAT_DUMP") ||
                   ia64_debug_env_enabled("VIBTANIUM_UEVENT_TRACE") ||
                   ia64_debug_env_enabled("VIBTANIUM_IA64_PROGRESS") ||
                   ia64_debug_env_enabled("VIBTANIUM_BUNDLE_TRACE_IP") ||
@@ -46,6 +48,72 @@ static bool ia64_syscall_trace_enabled(void)
         enabled = g_getenv("VIBTANIUM_SYSCALL_TRACE") != NULL;
     }
     return enabled != 0;
+}
+
+/*
+ * Low-noise variant: record each syscall's arguments at entry, then at the
+ * ret_from_syscall hook print *only* the syscalls that failed (r10 == -1),
+ * paired with their name/args/errno. This survives a full noisy boot without
+ * drowning in successful calls, and pinpoints a mis-emulated syscall path.
+ * Gated behind its own knob so it is free when disabled.
+ */
+static bool ia64_syscall_errtrace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_SYSCALL_ERRTRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
+/*
+ * VIBTANIUM_STAT_DUMP=1: at every stat/lstat/fstat/newfstatat return, dump the
+ * st_dev/st_ino/st_nlink/st_mode the kernel copied to userspace. Used to catch
+ * the FTS_CWDFD "cannot search" failure: gnulib compares newfstatat(path) vs
+ * fstat(fd) dev/ino; if the kernel stat copy-out is mis-emulated the two
+ * disagree and find aborts even though every syscall "succeeds".
+ */
+static bool ia64_stat_dump_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_STAT_DUMP") != NULL;
+    }
+    return enabled != 0;
+}
+
+typedef struct IA64SyscallTrack {
+    bool valid;
+    uint64_t user_tp;      /* r13 at the user gate (thread pointer) */
+    uint64_t nr;
+    uint64_t arg[4];
+    uint64_t ip;
+} IA64SyscallTrack;
+
+/*
+ * A syscall's user-mode gate entry (r13 = user thread pointer) and its
+ * kernel-mode ret_from_syscall hook (r13 = kernel `current`) carry different
+ * r13 values, so we cannot pair them by thread pointer. But a *synchronous*
+ * syscall (the failing openat/fchdir/ioctl/etc. we care about) does not sleep:
+ * on the single vCPU its gate entry is immediately followed by its own return
+ * with no other user gate entry in between. So the most-recent entry is the
+ * one returning. One global slot is therefore sufficient and correct for the
+ * error-pairing we need.
+ */
+static IA64SyscallTrack ia64_last_syscall;
+
+static void ia64_syscall_track_record(CPUIA64State *env, uint64_t nr)
+{
+    ia64_last_syscall.valid = true;
+    ia64_last_syscall.user_tp = ia64_read_gr(env, 13);
+    ia64_last_syscall.nr = nr;
+    ia64_last_syscall.arg[0] = ia64_read_gr(env, 32);
+    ia64_last_syscall.arg[1] = ia64_read_gr(env, 33);
+    ia64_last_syscall.arg[2] = ia64_read_gr(env, 34);
+    ia64_last_syscall.arg[3] = ia64_read_gr(env, 35);
+    ia64_last_syscall.ip = env->ip;
 }
 
 static const char *ia64_linux_syscall_name(uint64_t nr)
@@ -612,11 +680,17 @@ void ia64_trace_linux_syscall_break(CPUIA64State *env,
     uint64_t nr;
     uint64_t cpl;
 
-    if (!ia64_syscall_trace_enabled() || iim != IA64_LINUX_BREAK_SYSCALL) {
+    if (iim != IA64_LINUX_BREAK_SYSCALL) {
         return;
     }
 
     nr = ia64_read_gr(env, 15);
+    if (ia64_syscall_errtrace_enabled() || ia64_stat_dump_enabled()) {
+        ia64_syscall_track_record(env, nr);
+    }
+    if (!ia64_syscall_trace_enabled()) {
+        return;
+    }
     cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
     fprintf(stderr,
             "[ia64-syscall] %s nr=%" PRIu64 "(%s) ip=0x%016" PRIx64
@@ -1113,14 +1187,19 @@ void ia64_trace_epc_syscall(CPUIA64State *env)
     uint64_t nr;
     uint64_t cpl;
 
-    if (!ia64_syscall_trace_enabled() ||
-        !ia64_trace_ip_list_contains(env->ip, known_epc_ips,
+    if (!ia64_trace_ip_list_contains(env->ip, known_epc_ips,
                                      ARRAY_SIZE(known_epc_ips),
                                      "VIBTANIUM_SYSCALL_EPC_IPS")) {
         return;
     }
 
     nr = ia64_read_gr(env, 15);
+    if (ia64_syscall_errtrace_enabled() || ia64_stat_dump_enabled()) {
+        ia64_syscall_track_record(env, nr);
+    }
+    if (!ia64_syscall_trace_enabled()) {
+        return;
+    }
     cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
     fprintf(stderr,
             "[ia64-syscall] epc nr=%" PRIu64 "(%s) ip=0x%016" PRIx64
@@ -1152,8 +1231,7 @@ void ia64_trace_syscall_return(CPUIA64State *env)
     uint64_t r8;
     uint64_t r10;
 
-    if (!ia64_syscall_trace_enabled() ||
-        !ia64_trace_ip_list_contains(env->ip, known_return_ips,
+    if (!ia64_trace_ip_list_contains(env->ip, known_return_ips,
                                      ARRAY_SIZE(known_return_ips),
                                      "VIBTANIUM_SYSCALL_RET_IPS")) {
         return;
@@ -1161,6 +1239,70 @@ void ia64_trace_syscall_return(CPUIA64State *env)
 
     r8 = ia64_read_gr(env, 8);
     r10 = ia64_read_gr(env, 10);
+
+    /*
+     * At this hook (ia64_ret_from_syscall) r8 still holds the *raw* kernel
+     * return value: negative in the [-4095, -1] MAX_ERRNO window means the
+     * syscall failed with errno = -r8. (r10 here is a scratch value, not the
+     * 0/-1 error flag that only exists after the userspace fixup.)
+     */
+    if (ia64_syscall_errtrace_enabled() &&
+        (int64_t)r8 < 0 && (int64_t)r8 >= -4095) {
+        uint64_t current = ia64_read_gr(env, 13);
+        int64_t err = -(int64_t)r8;
+        IA64SyscallTrack *t = ia64_last_syscall.valid ? &ia64_last_syscall : NULL;
+
+        if (t != NULL) {
+            fprintf(stderr,
+                    "[ia64-syscall-err] nr=%" PRIu64 "(%s) errno=%" PRId64
+                    " a0=0x%016" PRIx64 " a1=0x%016" PRIx64
+                    " a2=0x%016" PRIx64 " a3=0x%016" PRIx64
+                    " user_tp=0x%016" PRIx64 " kcurrent=0x%016" PRIx64 "\n",
+                    t->nr, ia64_linux_syscall_name(t->nr), err,
+                    t->arg[0], t->arg[1], t->arg[2], t->arg[3],
+                    t->user_tp, current);
+        } else {
+            fprintf(stderr,
+                    "[ia64-syscall-err] nr=? errno=%" PRId64
+                    " kcurrent=0x%016" PRIx64 "\n",
+                    err, current);
+        }
+    }
+
+    if (ia64_stat_dump_enabled() && ia64_last_syscall.valid &&
+        (int64_t)r8 >= 0) {
+        uint64_t nr = ia64_last_syscall.nr;
+        uint64_t buf = 0;
+        const char *name = NULL;
+
+        switch (nr) {
+        case 1210: name = "stat";       buf = ia64_last_syscall.arg[1]; break;
+        case 1211: name = "lstat";      buf = ia64_last_syscall.arg[1]; break;
+        case 1212: name = "fstat";      buf = ia64_last_syscall.arg[1]; break;
+        case 1286: name = "newfstatat"; buf = ia64_last_syscall.arg[2]; break;
+        default: break;
+        }
+        if (name != NULL && buf != 0) {
+            uint64_t words[6] = {0};
+
+            if (cpu_memory_rw_debug(env_cpu(env), buf, words,
+                                    sizeof(words), false) == 0) {
+                /* ia64 struct stat: dev@0 ino@8 nlink@16 mode(lo)/uid(hi)@24 */
+                fprintf(stderr,
+                        "[ia64-stat] %s buf=0x%016" PRIx64
+                        " st_dev=0x%016" PRIx64 " st_ino=0x%016" PRIx64
+                        " st_nlink=0x%016" PRIx64 " st_mode=0%o"
+                        " a0=0x%016" PRIx64 "\n",
+                        name, buf, words[0], words[1], words[2],
+                        (unsigned)(words[3] & 0xffffffff),
+                        ia64_last_syscall.arg[0]);
+            }
+        }
+    }
+
+    if (!ia64_syscall_trace_enabled()) {
+        return;
+    }
     fprintf(stderr,
             "[ia64-syscall] ret ip=0x%016" PRIx64
             " current=0x%016" PRIx64 " r8=0x%016" PRIx64
