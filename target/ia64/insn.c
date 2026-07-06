@@ -1863,7 +1863,12 @@ bool ia64_slot_is_m_check_advanced(IA64SlotType type, uint64_t raw)
     }
 
     x3 = (raw >> 33) & 0x7;
-    return x3 == 4 || x3 == 5;
+    /*
+     * Opcode 0 x3 (Table 4-42): 4=chk.a.nc int (M22), 5=chk.a.clr int (M22),
+     * 6=chk.a.nc fp (M23), 7=chk.a.clr fp (M23).  All four share the same
+     * imm20b/target25 branch layout and are handled together below.
+     */
+    return x3 >= 4 && x3 <= 7;
 }
 
 bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
@@ -1871,6 +1876,8 @@ bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
 {
     uint8_t target;
     uint8_t x3;
+    bool fp_form;
+    bool clear;
     int alat_index;
 
     if (!env || !target_ip ||
@@ -1878,11 +1885,28 @@ bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
         return false;
     }
 
-    target = (raw >> 6) & 0x7f;
     x3 = (raw >> 33) & 0x7;
+    fp_form = x3 >= 6;          /* 6/7 = chk.a fp (M23); 4/5 = chk.a int (M22) */
+    clear = (x3 & 0x1) != 0;    /* odd x3 is the .clr variant */
+
+    if (fp_form) {
+        /*
+         * Floating-point advanced loads (ldf.a/ldf.sa) are not tracked in the
+         * ALAT model: the FP load classes and ldf.c always reperform the
+         * access, so the FR half of the ALAT is permanently empty.  A missing
+         * ALAT entry requires chk.a to branch to the compiler-provided
+         * recovery code, which reloads the value.  This is architecturally
+         * valid (the ALAT may drop entries at any time) and, crucially, avoids
+         * aliasing an FR check against a same-numbered GR entry.
+         */
+        *target_ip = bundle_ip + ia64_branch_displacement(raw);
+        return true;
+    }
+
+    target = (raw >> 6) & 0x7f;
     alat_index = ia64_alat_find_gr(env, target);
     if (alat_index >= 0) {
-        if (x3 == 5) {
+        if (clear) {
             ia64_alat_set_valid(env, alat_index, false);
         }
         *target_ip = bundle_ip + IA64_BUNDLE_SIZE;
