@@ -1,0 +1,7 @@
+# Generated build artifacts
+strings.S
+*.o
+*.elf
+*.bin
+*.efi
+selftest-run.log

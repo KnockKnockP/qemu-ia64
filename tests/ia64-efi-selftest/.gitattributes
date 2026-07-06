@@ -1,0 +1,6 @@
+# These are executed by bash / assembled by GNU as; keep LF on all platforms
+# so core.autocrlf=true checkouts don't inject CR into scripts or sources.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.S    text eol=lf
+*.ld   text eol=lf
