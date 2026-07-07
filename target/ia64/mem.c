@@ -376,9 +376,11 @@ static bool ia64_vhpt_walk_enabled(CPUIA64State *env,
                (IA64_PSR_DT_BIT | IA64_PSR_IT_BIT | IA64_PSR_IC_BIT);
     case MMU_DATA_LOAD:
     case MMU_DATA_STORE:
-        return (psr & IA64_PSR_DT_BIT) != 0;
+        return (psr & (IA64_PSR_DT_BIT | IA64_PSR_IC_BIT)) ==
+               (IA64_PSR_DT_BIT | IA64_PSR_IC_BIT);
     default:
-        return (psr & IA64_PSR_RT_BIT) != 0;
+        return (psr & (IA64_PSR_RT_BIT | IA64_PSR_IC_BIT)) ==
+               (IA64_PSR_RT_BIT | IA64_PSR_IC_BIT);
     }
 }
 

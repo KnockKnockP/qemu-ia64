@@ -673,6 +673,28 @@ void ia64_alat_reconstruct_transients(CPUIA64State *env)
     env->alat.valid_mask = valid_mask;
 }
 
+static void ia64_alat_invalidate_all(CPUIA64State *env)
+{
+    uint32_t valid_mask;
+
+    if (!env) {
+        return;
+    }
+
+    valid_mask = env->alat.valid_mask;
+    if (valid_mask == 0) {
+        return;
+    }
+
+    env->alat.next = 0;
+    env->alat.valid_mask = 0;
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        if (valid_mask & (1u << i)) {
+            env->alat.entries[i].valid = false;
+        }
+    }
+}
+
 void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
 {
     uint32_t valid_mask;
@@ -3044,7 +3066,7 @@ bool ia64_exec_m_invala(CPUIA64State *env, uint64_t raw)
 
     x4 = (raw >> 27) & 0xf;
     if (x4 == 0) {
-        memset(&env->alat, 0, sizeof(env->alat));
+        ia64_alat_invalidate_all(env);
     } else if (x4 == 2) {
         ia64_alat_invalidate_gr(env, (raw >> 6) & 0x7f);
     } else {
