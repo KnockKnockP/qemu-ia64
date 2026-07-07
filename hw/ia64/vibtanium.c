@@ -39,6 +39,11 @@ typedef struct VibtaniumPciHostState {
     PCIHostState parent_obj;
 } VibtaniumPciHostState;
 
+typedef struct VibtaniumPciBarAllocator {
+    uint64_t io_next;
+    uint64_t mem_next;
+} VibtaniumPciBarAllocator;
+
 OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumPciHostState, VIBTANIUM_PCI_HOST)
 
 static void vibtanium_isa_init(VibtaniumMachineState *vms)
@@ -62,30 +67,127 @@ static void vibtanium_pci_set_irq(void *opaque, int irq_num, int level)
     qemu_set_irq(vms->pci_irqs[irq_num], level);
 }
 
-static void vibtanium_configure_firmware_pci(VibtaniumMachineState *vms)
+static uint64_t vibtanium_align_pci_base(uint64_t base, uint64_t size)
 {
-    if (!vms->pci_ide) {
+    if (base > UINT64_MAX - (size - 1)) {
+        error_report("vibtanium PCI region allocation overflow");
+        exit(1);
+    }
+
+    return (base + size - 1) & ~(size - 1);
+}
+
+static uint64_t vibtanium_alloc_pci_region(const char *kind,
+                                           uint64_t *next,
+                                           uint64_t limit,
+                                           uint64_t size,
+                                           const PCIDevice *dev,
+                                           int region_num)
+{
+    uint64_t base = vibtanium_align_pci_base(*next, size);
+
+    if (base > limit || size > limit - base) {
+        error_report("vibtanium PCI %s BAR allocation failed for %s "
+                     "region %d size=0x%" PRIx64,
+                     kind, dev->name, region_num, size);
+        exit(1);
+    }
+
+    *next = base + size;
+    return base;
+}
+
+static void vibtanium_assign_pci_device_bars(PCIBus *bus,
+                                             PCIDevice *dev,
+                                             void *opaque)
+{
+    VibtaniumPciBarAllocator *alloc = opaque;
+    uint16_t command = pci_get_word(dev->config + PCI_COMMAND);
+    bool assigned = false;
+
+    for (int i = 0; i < PCI_NUM_REGIONS; i++) {
+        PCIIORegion *region = &dev->io_regions[i];
+        uint64_t addr;
+        uint32_t config_addr;
+
+        if (i == PCI_ROM_SLOT || !region->size ||
+            pci_get_bar_addr(dev, i) != PCI_BAR_UNMAPPED) {
+            continue;
+        }
+
+        config_addr = pci_bar(dev, i);
+        if (region->type & PCI_BASE_ADDRESS_SPACE_IO) {
+            addr = vibtanium_alloc_pci_region(
+                "I/O", &alloc->io_next,
+                VIBTANIUM_PCI_IO_BASE + VIBTANIUM_PCI_IO_SIZE,
+                region->size, dev, i);
+            pci_default_write_config(
+                dev, config_addr,
+                addr | (region->type & ~PCI_BASE_ADDRESS_IO_MASK), 4);
+            command |= PCI_COMMAND_IO;
+        } else {
+            uint64_t flags = region->type & ~PCI_BASE_ADDRESS_MEM_MASK;
+
+            addr = vibtanium_alloc_pci_region(
+                "MMIO", &alloc->mem_next,
+                VIBTANIUM_PCI_MMIO_BASE + VIBTANIUM_PCI_MMIO_SIZE,
+                region->size, dev, i);
+            pci_default_write_config(dev, config_addr,
+                                     (uint32_t)(addr | flags), 4);
+            if (region->type & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+                pci_default_write_config(dev, config_addr + 4,
+                                         (uint32_t)(addr >> 32), 4);
+            }
+            command |= PCI_COMMAND_MEMORY;
+        }
+        assigned = true;
+    }
+
+    if (assigned) {
+        pci_default_write_config(dev, PCI_COMMAND,
+                                 command | PCI_COMMAND_MASTER, 2);
+    }
+}
+
+static void vibtanium_assign_pci_bars(VibtaniumMachineState *vms)
+{
+    VibtaniumPciBarAllocator alloc = {
+        .io_next = VIBTANIUM_PCI_DYNAMIC_IO_BASE,
+        .mem_next = VIBTANIUM_PCI_MMIO_BASE,
+    };
+
+    if (!vms->pci_bus) {
         return;
     }
 
-    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_0,
-                             VIBTANIUM_IDE_PRIMARY_CMD_BASE |
-                             PCI_BASE_ADDRESS_SPACE_IO, 4);
-    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_1,
-                             VIBTANIUM_IDE_PRIMARY_CTL_BAR_BASE |
-                             PCI_BASE_ADDRESS_SPACE_IO, 4);
-    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_2,
-                             VIBTANIUM_IDE_SECONDARY_CMD_BASE |
-                             PCI_BASE_ADDRESS_SPACE_IO, 4);
-    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_3,
-                             VIBTANIUM_IDE_SECONDARY_CTL_BAR_BASE |
-                             PCI_BASE_ADDRESS_SPACE_IO, 4);
-    pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_4,
-                             VIBTANIUM_IDE_BMDMA_BASE |
-                             PCI_BASE_ADDRESS_SPACE_IO, 4);
-    pci_default_write_config(vms->pci_ide, PCI_COMMAND,
-                             PCI_COMMAND_IO | PCI_COMMAND_MASTER,
-                             2);
+    pci_for_each_device(vms->pci_bus, 0, vibtanium_assign_pci_device_bars,
+                        &alloc);
+}
+
+static void vibtanium_configure_firmware_pci(VibtaniumMachineState *vms)
+{
+    if (vms->pci_ide) {
+        pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_0,
+                                 VIBTANIUM_IDE_PRIMARY_CMD_BASE |
+                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+        pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_1,
+                                 VIBTANIUM_IDE_PRIMARY_CTL_BAR_BASE |
+                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+        pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_2,
+                                 VIBTANIUM_IDE_SECONDARY_CMD_BASE |
+                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+        pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_3,
+                                 VIBTANIUM_IDE_SECONDARY_CTL_BAR_BASE |
+                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+        pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_4,
+                                 VIBTANIUM_IDE_BMDMA_BASE |
+                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+        pci_default_write_config(vms->pci_ide, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MASTER,
+                                 2);
+    }
+
+    vibtanium_assign_pci_bars(vms);
 }
 
 static void vibtanium_reset(MachineState *machine, ResetType type)
@@ -98,6 +200,7 @@ static void vibtanium_reset(MachineState *machine, ResetType type)
 
 static void vibtanium_pci_init(VibtaniumMachineState *vms)
 {
+    MachineClass *mc = MACHINE_GET_CLASS(vms);
     PCIHostState *host;
 
     vms->pci_host = qdev_new(TYPE_VIBTANIUM_PCI_HOST);
@@ -119,6 +222,8 @@ static void vibtanium_pci_init(VibtaniumMachineState *vms)
     qdev_prop_set_uint32(&vms->pci_ide->qdev, "secondary", 1);
     pci_realize_and_unref(vms->pci_ide, vms->pci_bus, &error_fatal);
     pci_ide_create_devs(vms->pci_ide);
+
+    pci_init_nic_devices(vms->pci_bus, mc->default_nic);
 }
 
 static void vibtanium_i8042_init(VibtaniumMachineState *vms)
@@ -928,6 +1033,7 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_cpu_type = TYPE_ITANIUM2_CPU;
     mc->default_ram_size = 512 * MiB;
     mc->default_ram_id = "vibtanium.ram";
+    mc->default_nic = "e1000";
     mc->block_default_type = IF_IDE;
     mc->units_per_default_bus = MAX_IDE_DEVS;
     mc->no_cdrom = 0;

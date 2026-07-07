@@ -5,6 +5,7 @@ config VIBTANIUM
     select ACPI
     select ISA_BUS
     select PCI
+    select E1000_PCI
     select IDE_CMD646
     select PCKBD
     select SERIAL_MM

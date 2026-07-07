@@ -984,13 +984,18 @@ static Aml *build_acpi_pci0_device(void)
                                    0x0000, 0x0100));
     aml_append(crs,
                aml_word_io(AML_MIN_FIXED, AML_MAX_FIXED, AML_POS_DECODE,
-                           AML_ENTIRE_RANGE, 0x0000, 0x0000, 0xffff,
-                           0x0000, 0xffff));
+                           AML_ENTIRE_RANGE, 0x0000, VIBTANIUM_PCI_IO_BASE,
+                           VIBTANIUM_PCI_IO_BASE +
+                           VIBTANIUM_PCI_IO_SIZE - 1,
+                           0x0000, VIBTANIUM_PCI_IO_SIZE - 1));
     aml_append(crs,
                aml_dword_memory(AML_POS_DECODE, AML_MIN_FIXED,
                                 AML_MAX_FIXED, AML_NON_CACHEABLE,
-                                AML_READ_WRITE, 0x00000000, 0x80000000,
-                                0xefffffff, 0x00000000, 0x70000000));
+                                AML_READ_WRITE, 0x00000000,
+                                VIBTANIUM_PCI_MMIO_BASE,
+                                VIBTANIUM_PCI_MMIO_BASE +
+                                VIBTANIUM_PCI_MMIO_SIZE - 1,
+                                0x00000000, VIBTANIUM_PCI_MMIO_SIZE));
     aml_append(dev, aml_name_decl("_CRS", crs));
 
     for (int slot = 0; slot < 32; slot++) {
