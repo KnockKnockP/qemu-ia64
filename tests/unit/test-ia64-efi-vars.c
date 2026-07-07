@@ -103,6 +103,20 @@ static void set_var(VibtaniumEfiVarStore *store,
     g_assert_cmphex(status, ==, VIBTANIUM_EFI_SUCCESS);
 }
 
+static void test_status_codes_match_uefi(void)
+{
+    g_assert_cmphex(VIBTANIUM_EFI_SUCCESS, ==,
+                    UINT64_C(0x0000000000000000));
+    g_assert_cmphex(VIBTANIUM_EFI_UNSUPPORTED, ==,
+                    UINT64_C(0x8000000000000003));
+    g_assert_cmphex(VIBTANIUM_EFI_ACCESS_DENIED, ==,
+                    UINT64_C(0x800000000000000f));
+    g_assert_cmphex(VIBTANIUM_EFI_NOT_FOUND, ==,
+                    UINT64_C(0x800000000000000e));
+    g_assert_cmphex(VIBTANIUM_EFI_END_OF_FILE, ==,
+                    UINT64_C(0x800000000000001f));
+}
+
 static void test_loads_missing_empty_and_rejects_corrupt(void)
 {
     VibtaniumEfiVarStore store;
@@ -357,6 +371,8 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
+    g_test_add_func("/ia64-efi-vars/status-codes-match-uefi",
+                    test_status_codes_match_uefi);
     g_test_add_func("/ia64-efi-vars/load-missing-empty-corrupt",
                     test_loads_missing_empty_and_rejects_corrupt);
     g_test_add_func("/ia64-efi-vars/round-trip-json-variable",
