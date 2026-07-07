@@ -101,6 +101,8 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
     switch (kind) {
     case IA64_EXCEPTION_NONE:
         return "none";
+    case IA64_EXCEPTION_VHPT_TRANSLATION:
+        return "vhpt-translation";
     case IA64_EXCEPTION_INSTRUCTION_TLB_MISS:
         return "instruction-tlb-miss";
     case IA64_EXCEPTION_DATA_TLB_MISS:
@@ -194,6 +196,9 @@ static void ia64_record_exception_common(CPUIA64State *env,
     record->pending = kind != IA64_EXCEPTION_NONE;
 
     switch (kind) {
+    case IA64_EXCEPTION_VHPT_TRANSLATION:
+        record->vector = 0x0000;
+        break;
     case IA64_EXCEPTION_INSTRUCTION_TLB_MISS:
         record->vector = 0x0400;
         break;
@@ -298,6 +303,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     uint64_t saved_ifa;
     uint64_t saved_itir;
     uint64_t saved_iha;
+    uint64_t vhpt_iha;
     uint64_t rr;
     bool collection_disabled;
     bool data_nested_tlb;
@@ -316,6 +322,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     saved_ifa = env->cr[IA64_CR_IFA];
     saved_itir = env->cr[IA64_CR_ITIR];
     saved_iha = env->cr[IA64_CR_IHA];
+    vhpt_iha = ia64_vhpt_hash_address(env, address);
     rr = env->rr[ia64_va_region(address)];
     /*
      * PSR.ic=0 suppresses interruption-resource collection.  Keep the
@@ -372,6 +379,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
                            env->exception.isr_code;
     if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_DATA_TLB_MISS ||
+        kind == IA64_EXCEPTION_VHPT_TRANSLATION ||
         kind == IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS ||
         kind == IA64_EXCEPTION_DIRTY_BIT ||
@@ -380,11 +388,16 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         kind == IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS ||
         kind == IA64_EXCEPTION_DATA_ACCESS_RIGHTS ||
         kind == IA64_EXCEPTION_PAGE_FAULT) {
-        env->cr[IA64_CR_ITIR] = ia64_default_itir(env, address);
+        env->cr[IA64_CR_ITIR] =
+            kind == IA64_EXCEPTION_VHPT_TRANSLATION ?
+            ia64_default_itir(env, vhpt_iha) :
+            ia64_default_itir(env, address);
     }
-    if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||
+    if (kind == IA64_EXCEPTION_VHPT_TRANSLATION) {
+        env->cr[IA64_CR_IHA] = vhpt_iha;
+    } else if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||
         kind == IA64_EXCEPTION_DATA_TLB_MISS) {
-        env->cr[IA64_CR_IHA] = ia64_vhpt_hash_address(env, address);
+        env->cr[IA64_CR_IHA] = vhpt_iha;
     }
 
     ia64_env_set_psr(env, ia64_psr_for_interruption_delivery(env));

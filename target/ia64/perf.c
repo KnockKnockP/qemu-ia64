@@ -187,6 +187,16 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
         "mmu.target_translate.lookup_cache.hit",
     [IA64_PERF_TARGET_TRANSLATE_LOOKUP_CACHE_MISS] =
         "mmu.target_translate.lookup_cache.miss",
+    [IA64_PERF_VHPT_WALK] = "mmu.vhpt.walk",
+    [IA64_PERF_VHPT_WALK_SHORT] = "mmu.vhpt.walk.short",
+    [IA64_PERF_VHPT_WALK_LONG_UNSUPPORTED] =
+        "mmu.vhpt.walk.long_unsupported",
+    [IA64_PERF_VHPT_WALK_VADDR_MISS] = "mmu.vhpt.walk.vaddr_miss",
+    [IA64_PERF_VHPT_WALK_FAULT] = "mmu.vhpt.walk.fault",
+    [IA64_PERF_VHPT_WALK_READ_FAIL] = "mmu.vhpt.walk.read_fail",
+    [IA64_PERF_VHPT_WALK_INVALID] = "mmu.vhpt.walk.invalid",
+    [IA64_PERF_VHPT_WALK_INSTALL_FAIL] = "mmu.vhpt.walk.install_fail",
+    [IA64_PERF_VHPT_WALK_HIT] = "mmu.vhpt.walk.hit",
     [IA64_PERF_TARGET_TRANSLATE_OK] = "mmu.target_translate.ok",
     [IA64_PERF_TARGET_TRANSLATE_TLB_MISS] = "mmu.target_translate.tlb_miss",
     [IA64_PERF_TARGET_TRANSLATE_NOT_PRESENT] = "mmu.target_translate.not_present",
@@ -386,6 +396,7 @@ void ia64_perf_count_translate_status(unsigned status)
 void ia64_perf_count_exception_kind(unsigned kind)
 {
     switch (kind) {
+    case IA64_EXCEPTION_VHPT_TRANSLATION:
     case IA64_EXCEPTION_INSTRUCTION_TLB_MISS:
     case IA64_EXCEPTION_DATA_TLB_MISS:
     case IA64_EXCEPTION_ALTERNATE_INSTRUCTION_TLB_MISS:

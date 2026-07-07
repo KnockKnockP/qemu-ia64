@@ -4,6 +4,8 @@
 
 #include "cpu.h"
 
+struct AddressSpace;
+
 typedef enum IA64TranslateStatus {
     IA64_TRANSLATE_OK,
     IA64_TRANSLATE_BAD_ADDRESS,
@@ -30,6 +32,12 @@ typedef struct IA64TranslateResult {
     char message[160];
 } IA64TranslateResult;
 
+typedef enum IA64VHPTWalkStatus {
+    IA64_VHPT_WALK_MISS,
+    IA64_VHPT_WALK_INSTALLED,
+    IA64_VHPT_WALK_FAULT,
+} IA64VHPTWalkStatus;
+
 const char *ia64_translate_status_name(IA64TranslateStatus status);
 uint8_t ia64_va_region(vaddr address);
 uint32_t ia64_region_id(uint64_t rr);
@@ -41,6 +49,7 @@ uint8_t ia64_region_page_size(uint64_t rr);
 uint64_t ia64_default_itir(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_hash_address(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_tag(CPUIA64State *env, vaddr address);
+bool ia64_vhpt_walk_runtime_enabled(void);
 bool ia64_install_translation(CPUIA64State *env, bool instruction,
                               bool pinned, uint8_t slot,
                               vaddr virtual_address,
@@ -52,6 +61,10 @@ void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
                                      vaddr address, uint8_t page_size);
 void ia64_purge_all_translation_cache(CPUIA64State *env);
 void ia64_translation_lookup_cache_flush(CPUIA64State *env);
+IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
+                                      struct AddressSpace *as,
+                                      vaddr address,
+                                      MMUAccessType access_type);
 bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
                                     hwaddr *paddr);
 bool ia64_translate_address(CPUIA64State *env, vaddr address,

@@ -721,6 +721,36 @@ static void test_tlb_miss_delivery_vectors_to_iva(void)
     assert_delivery_psr(&env, 0);
 }
 
+static void test_vhpt_translation_vectors_to_iva(void)
+{
+    CPUIA64State env;
+    uint64_t psr = UINT64_C(0x0000100300006000);
+    vaddr miss = 0xa000000100002c00ULL;
+    uint64_t expected_iha;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = 0xa000000100001470ULL;
+    env.psr = psr;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.cr[IA64_CR_PTA] = (20ULL << 2) | (1ULL << 15) | 1ULL;
+    expected_iha = ia64_vhpt_hash_address(&env, miss);
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_VHPT_TRANSLATION,
+                           miss, MMU_DATA_LOAD, "test vhpt translation");
+
+    g_assert_true(env.exception.pending);
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_VHPT_TRANSLATION);
+    g_assert_cmphex(env.exception.vector, ==, 0x0000);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, psr);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, 0xa000000100001470ULL);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, miss);
+    g_assert_cmphex(env.cr[IA64_CR_IHA], ==, expected_iha);
+    g_assert_cmphex(env.cr[IA64_CR_ITIR], ==,
+                    ia64_default_itir(&env, expected_iha));
+    g_assert_cmphex(env.ip, ==, 0x100000);
+    assert_delivery_psr(&env, 0);
+}
+
 static void test_alternate_tlb_miss_delivery_vectors_to_iva(void)
 {
     CPUIA64State env;
@@ -967,6 +997,8 @@ int main(int argc, char **argv)
                     test_interruption_delivery_preserves_translation_bits);
     g_test_add_func("/ia64-exception/tlb-miss-delivery",
                     test_tlb_miss_delivery_vectors_to_iva);
+    g_test_add_func("/ia64-exception/vhpt-translation-delivery",
+                    test_vhpt_translation_vectors_to_iva);
     g_test_add_func("/ia64-exception/alternate-tlb-miss-delivery",
                     test_alternate_tlb_miss_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/data-tlb-miss-slot-and-access",

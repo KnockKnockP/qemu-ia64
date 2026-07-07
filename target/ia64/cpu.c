@@ -219,6 +219,8 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 {
     IA64CPU *cpu = IA64_CPU(cs);
     IA64TranslateResult result;
+    IA64VHPTWalkStatus vhpt_status = IA64_VHPT_WALK_MISS;
+    IA64ExceptionKind exception_kind = IA64_EXCEPTION_NONE;
 
     IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL);
     switch (access_type) {
@@ -235,8 +237,21 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         break;
     }
 
-    if (ia64_translate_address_no_detail(&cpu->env, address, access_type,
-                                         mmu_idx, false, &result)) {
+    if (!ia64_translate_address_no_detail(&cpu->env, address, access_type,
+                                          mmu_idx, false, &result) &&
+        !probe && result.status == IA64_TRANSLATE_TLB_MISS &&
+        ia64_vhpt_walk_runtime_enabled()) {
+        vhpt_status = ia64_try_vhpt_walk(&cpu->env, cs->as, address,
+                                         access_type);
+        if (vhpt_status == IA64_VHPT_WALK_INSTALLED) {
+            ia64_translate_address_no_detail(&cpu->env, address, access_type,
+                                             mmu_idx, false, &result);
+        } else if (vhpt_status == IA64_VHPT_WALK_FAULT) {
+            exception_kind = IA64_EXCEPTION_VHPT_TRANSLATION;
+        }
+    }
+
+    if (result.status == IA64_TRANSLATE_OK) {
         /*
          * QEMU's softmmu TLB maps one TARGET_PAGE_SIZE page per fill.  IA-64
          * page size remains part of the target-side lookup; split it here so
@@ -268,9 +283,11 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL_EXCEPTION_INST);
     }
 
-    ia64_deliver_exception_fast(
-        &cpu->env, ia64_exception_for_translate_result(&result), address,
-        access_type, NULL);
+    if (exception_kind == IA64_EXCEPTION_NONE) {
+        exception_kind = ia64_exception_for_translate_result(&result);
+    }
+    ia64_deliver_exception_fast(&cpu->env, exception_kind, address,
+                                access_type, NULL);
     IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
     cpu->env.fault_exit_pending_tb_translate = true;
     cpu_loop_exit(cs);

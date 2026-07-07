@@ -4,15 +4,22 @@
 #include "mem.h"
 #include "exec/page-protection.h"
 #include "perf.h"
+#include "system/memory.h"
 #include "trace-target_ia64.h"
 
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_REGIONLESS_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
+#define IA64_DCR_BE_BIT UINT64_C(0x0000000000000002)
+#define IA64_PTA_VE_BIT UINT64_C(0x0000000000000001)
+#define IA64_PTA_VF_BIT UINT64_C(0x0000000000000100)
 #define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
+#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
+#define IA64_VHPT_SHORT_RESERVED_MASK \
+    (UINT64_C(0x2) | UINT64_C(0x000c000000000000))
 #define IA64_TRANSLATION_LOOKUP_CACHE_PAGE_SHIFT 12
 #define IA64_TRANSLATION_LOOKUP_CACHE_MASK \
     (IA64_TRANSLATION_LOOKUP_CACHE_COUNT - 1)
@@ -31,6 +38,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
                                           IA64TranslateResult *result);
+static const char *ia64_access_kind(bool instruction);
 
 const char *ia64_translate_status_name(IA64TranslateStatus status)
 {
@@ -210,6 +218,16 @@ static bool ia64_mmu_trace_enabled(void)
     return enabled != 0;
 }
 
+bool ia64_vhpt_walk_runtime_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_VHPT_WALK") != NULL;
+    }
+    return enabled != 0;
+}
+
 static const char *ia64_translation_kind(bool instruction, bool pinned)
 {
     if (pinned) {
@@ -339,6 +357,156 @@ static const IA64TranslationEntry *ia64_lookup_translation(CPUIA64State *env,
     }
     ia64_store_translation_cache(env, instruction, address, best);
     return best;
+}
+
+static bool ia64_vhpt_walk_enabled(CPUIA64State *env,
+                                   MMUAccessType access_type, uint64_t rr)
+{
+    uint64_t psr = ia64_env_psr(env);
+
+    if ((env->cr[IA64_CR_PTA] & IA64_PTA_VE_BIT) == 0 ||
+        !ia64_region_vhpt_enabled(rr)) {
+        return false;
+    }
+
+    switch (access_type) {
+    case MMU_INST_FETCH:
+        return (psr & (IA64_PSR_DT_BIT | IA64_PSR_IT_BIT |
+                       IA64_PSR_IC_BIT)) ==
+               (IA64_PSR_DT_BIT | IA64_PSR_IT_BIT | IA64_PSR_IC_BIT);
+    case MMU_DATA_LOAD:
+    case MMU_DATA_STORE:
+        return (psr & IA64_PSR_DT_BIT) != 0;
+    default:
+        return (psr & IA64_PSR_RT_BIT) != 0;
+    }
+}
+
+static bool ia64_vhpt_short_entry_valid(uint64_t entry, uint64_t itir)
+{
+    uint8_t page_size = (itir >> 2) & 0x3f;
+
+    if (!ia64_page_size_supported(page_size)) {
+        return false;
+    }
+
+    /*
+     * For present short-format entries, bit 1 and bits 50:51 are reserved.
+     * Not-present entries are deliberately loose: software owns the ignored
+     * payload, but the walker still installs them so the retry reports a page
+     * fault rather than another TLB miss.
+     */
+    if ((entry & 1) == 0) {
+        return true;
+    }
+
+    return (entry & IA64_VHPT_SHORT_RESERVED_MASK) == 0;
+}
+
+static bool ia64_read_vhpt_u64(CPUIA64State *env, struct AddressSpace *as,
+                               hwaddr paddr, uint64_t *value)
+{
+    MemTxResult memtx;
+
+    if (!as || !value) {
+        return false;
+    }
+
+    if (env->cr[IA64_CR_DCR] & IA64_DCR_BE_BIT) {
+        *value = address_space_ldq_be(as, paddr, MEMTXATTRS_UNSPECIFIED,
+                                      &memtx);
+    } else {
+        *value = address_space_ldq_le(as, paddr, MEMTXATTRS_UNSPECIFIED,
+                                      &memtx);
+    }
+
+    return memtx == MEMTX_OK;
+}
+
+IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
+                                      struct AddressSpace *as,
+                                      vaddr address,
+                                      MMUAccessType access_type)
+{
+    IA64TranslateResult vhpt_addr;
+    uint64_t rr;
+    uint64_t pta;
+    uint64_t iha;
+    uint64_t itir;
+    uint64_t entry;
+    bool can_deliver_vhpt_fault;
+    bool instruction = access_type == MMU_INST_FETCH;
+
+    if (!env) {
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    rr = env->rr[ia64_va_region(address)];
+    if (!ia64_vhpt_walk_enabled(env, access_type, rr)) {
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    IA64_PERF_INC(IA64_PERF_VHPT_WALK);
+    pta = env->cr[IA64_CR_PTA];
+    if (pta & IA64_PTA_VF_BIT) {
+        IA64_PERF_INC(IA64_PERF_VHPT_WALK_LONG_UNSUPPORTED);
+        return IA64_VHPT_WALK_MISS;
+    }
+    IA64_PERF_INC(IA64_PERF_VHPT_WALK_SHORT);
+
+    iha = ia64_vhpt_hash_address(env, address);
+    itir = ia64_default_itir(env, address);
+    can_deliver_vhpt_fault = (ia64_env_psr(env) & IA64_PSR_IC_BIT) != 0;
+
+    if (!ia64_translate_address_common(env, iha, MMU_DATA_LOAD,
+                                       IA64_MMU_DATA_CPL0, 0, false, false,
+                                       &vhpt_addr)) {
+        IA64_PERF_INC(IA64_PERF_VHPT_WALK_VADDR_MISS);
+        trace_ia64_vhpt_walk("vaddr-miss", ia64_access_kind(instruction),
+                             address, iha, 0, 0, itir);
+        if (can_deliver_vhpt_fault &&
+            vhpt_addr.status == IA64_TRANSLATE_TLB_MISS) {
+            IA64_PERF_INC(IA64_PERF_VHPT_WALK_FAULT);
+            return IA64_VHPT_WALK_FAULT;
+        }
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    if (!ia64_read_vhpt_u64(env, as, vhpt_addr.paddr, &entry)) {
+        IA64_PERF_INC(IA64_PERF_VHPT_WALK_READ_FAIL);
+        trace_ia64_vhpt_walk("read-fail", ia64_access_kind(instruction),
+                             address, iha, vhpt_addr.paddr, 0, itir);
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    if (!ia64_vhpt_short_entry_valid(entry, itir)) {
+        IA64_PERF_INC(IA64_PERF_VHPT_WALK_INVALID);
+        trace_ia64_vhpt_walk("invalid", ia64_access_kind(instruction),
+                             address, iha, vhpt_addr.paddr, entry, itir);
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    if (!ia64_install_translation(env, instruction, false, 0, address, entry,
+                                  itir)) {
+        IA64_PERF_INC(IA64_PERF_VHPT_WALK_INSTALL_FAIL);
+        trace_ia64_vhpt_walk("install-fail", ia64_access_kind(instruction),
+                             address, iha, vhpt_addr.paddr, entry, itir);
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    IA64_PERF_INC(IA64_PERF_VHPT_WALK_HIT);
+    trace_ia64_vhpt_walk("hit", ia64_access_kind(instruction), address, iha,
+                         vhpt_addr.paddr, entry, itir);
+    if (ia64_mmu_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-vhpt-walk] status=hit kind=%s"
+                " address=0x%016" VADDR_PRIx " iha=0x%016" PRIx64
+                " paddr=0x%016" HWADDR_PRIx " entry=0x%016" PRIx64
+                " itir=0x%016" PRIx64 "\n",
+                ia64_access_kind(instruction), address, iha, vhpt_addr.paddr,
+                entry, itir);
+    }
+    return IA64_VHPT_WALK_INSTALLED;
 }
 
 static void ia64_trace_translation_candidate(const char *kind,
