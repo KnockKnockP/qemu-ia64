@@ -2649,6 +2649,53 @@ static void test_f_unit_multiply_add_uses_ia64_operand_order(void)
     g_assert_cmphex(env.fr[8].raw[1], ==, env.fr[14].raw[1]);
 }
 
+static uint64_t fma_slot_raw(uint8_t major, bool x, uint8_t sf,
+                             uint8_t f1, uint8_t f2,
+                             uint8_t f3, uint8_t f4)
+{
+    return ((uint64_t)major << 37) |
+           ((uint64_t)(x ? 1 : 0) << 36) |
+           ((uint64_t)sf << 34) |
+           ((uint64_t)f4 << 27) |
+           ((uint64_t)f3 << 20) |
+           ((uint64_t)f2 << 13) |
+           ((uint64_t)f1 << 6);
+}
+
+static void test_f_unit_fma_double_completer_rounds_result(void)
+{
+    const uint64_t fnorm_d_s0_f7_f7_raw =
+        fma_slot_raw(0x9, false, 0, 7, 0, 7, 1);
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.fr[7].raw[0] = UINT64_C(0x8000000000000400);
+    env.fr[7].raw[1] = 0x10034;
+
+    g_assert_true(ia64_slot_is_f_multiply_add(IA64_SLOT_TYPE_F,
+                                              fnorm_d_s0_f7_f7_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fnorm_d_s0_f7_f7_raw));
+    g_assert_cmphex(env.fr[7].raw[0], ==, UINT64_C(0x8000000000000000));
+    g_assert_cmphex(env.fr[7].raw[1], ==, 0x10034);
+}
+
+static void test_f_unit_fma_single_completer_rounds_result(void)
+{
+    const uint64_t fnorm_s_s0_f7_f7_raw =
+        fma_slot_raw(0x8, true, 0, 7, 0, 7, 1);
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.fr[7].raw[0] = UINT64_C(0x8000008000000000);
+    env.fr[7].raw[1] = 0x10017;
+
+    g_assert_true(ia64_slot_is_f_multiply_add(IA64_SLOT_TYPE_F,
+                                              fnorm_s_s0_f7_f7_raw));
+    g_assert_true(ia64_exec_f_multiply_add(&env, fnorm_s_s0_f7_f7_raw));
+    g_assert_cmphex(env.fr[7].raw[0], ==, UINT64_C(0x8000000000000000));
+    g_assert_cmphex(env.fr[7].raw[1], ==, 0x10017);
+}
+
 static void test_f_unit_reciprocal_approx_sets_predicate(void)
 {
     const uint64_t frcpa_f10_p6_f8_f9_raw = 0x00630910280ULL;
@@ -3054,6 +3101,47 @@ static IA64FloatReg make_test_fr(bool sign, uint32_t exponent,
     };
 
     return reg;
+}
+
+static void test_floating_compare_relation_decode_and_zero_equality(void)
+{
+    const uint64_t fcmp_lt_s0_p6_p7_f7_f6_raw = 0x903860e180ULL;
+    const uint64_t fcmp_le_s0_p6_p7_f0_f8_raw = 0x8238800180ULL;
+    IA64FloatingCompareInstruction decoded;
+    CPUIA64State env;
+
+    g_assert_true(ia64_decode_floating_compare(
+                      IA64_SLOT_TYPE_F,
+                      fcmp_lt_s0_p6_p7_f7_f6_raw,
+                      &decoded));
+    g_assert_cmpint(decoded.relation, ==, IA64_FLOAT_CMP_LT);
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_NORMAL);
+    g_assert_cmpuint(decoded.p1, ==, 6);
+    g_assert_cmpuint(decoded.p2, ==, 7);
+    g_assert_cmpuint(decoded.source2, ==, 7);
+    g_assert_cmpuint(decoded.source3, ==, 6);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_fr_from_single_bits(&env, 6, 0x3f800000);
+    ia64_write_fr_from_single_bits(&env, 7, 0);
+    g_assert_true(ia64_exec_floating_compare(&env, &decoded));
+    assert_p6_p7(&env, true, false);
+
+    g_assert_true(ia64_decode_floating_compare(
+                      IA64_SLOT_TYPE_F,
+                      fcmp_le_s0_p6_p7_f0_f8_raw,
+                      &decoded));
+    g_assert_cmpint(decoded.relation, ==, IA64_FLOAT_CMP_LE);
+    g_assert_cmpint(decoded.write_kind, ==, IA64_PRED_WRITE_NORMAL);
+    g_assert_cmpuint(decoded.p1, ==, 6);
+    g_assert_cmpuint(decoded.p2, ==, 7);
+    g_assert_cmpuint(decoded.source2, ==, 0);
+    g_assert_cmpuint(decoded.source3, ==, 8);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_fr_from_single_bits(&env, 8, 0);
+    g_assert_true(ia64_exec_floating_compare(&env, &decoded));
+    assert_p6_p7(&env, true, false);
 }
 
 static void assert_fclass_p6_p7(IA64FloatReg reg, uint16_t mask,
@@ -4056,6 +4144,10 @@ int main(int argc, char **argv)
                     test_f_unit_xma_low);
     g_test_add_func("/ia64-insn/f-unit-multiply-add-operand-order",
                     test_f_unit_multiply_add_uses_ia64_operand_order);
+    g_test_add_func("/ia64-insn/f-unit-fma-double-completer-rounding",
+                    test_f_unit_fma_double_completer_rounds_result);
+    g_test_add_func("/ia64-insn/f-unit-fma-single-completer-rounding",
+                    test_f_unit_fma_single_completer_rounds_result);
     g_test_add_func("/ia64-insn/f-unit-reciprocal-approx",
                     test_f_unit_reciprocal_approx_sets_predicate);
     g_test_add_func("/ia64-insn/f-unit-unsigned-mod-helper-precision",
@@ -4078,6 +4170,8 @@ int main(int argc, char **argv)
                     test_compare_parallel_predicate_completers);
     g_test_add_func("/ia64-insn/unc-compare-false-predicate-clear",
                     test_unc_compare_clears_targets_when_false_predicated);
+    g_test_add_func("/ia64-insn/floating-compare-relation-decode",
+                    test_floating_compare_relation_decode_and_zero_equality);
     g_test_add_func("/ia64-insn/floating-class-decode-frontier",
                     test_floating_class_decode_frontier);
     g_test_add_func("/ia64-insn/floating-class-nan-natval-masks",

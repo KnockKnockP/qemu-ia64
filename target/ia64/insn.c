@@ -25,6 +25,10 @@
 #define IA64_FCLASS_SNAN 0x040
 #define IA64_FCLASS_QNAN 0x080
 #define IA64_FCLASS_NATVAL 0x100
+#define IA64_FPSR_STATUS_FIELD_SHIFT(sf) (6 + (13 * (sf)))
+#define IA64_FPSR_STATUS_FIELD_MASK UINT64_C(0x1fff)
+#define IA64_FPSR_STATUS_RC_SHIFT 4
+#define IA64_FPSR_STATUS_RC_MASK 0x3
 #define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
@@ -1045,6 +1049,35 @@ static void ia64_float_status_init(float_status *status)
     set_float_2nan_prop_rule(float_2nan_prop_x87, status);
     set_float_default_nan_pattern(0b01000000, status);
     set_floatx80_rounding_precision(floatx80_precision_x, status);
+}
+
+static FloatRoundMode ia64_fpsr_rounding_mode(CPUIA64State *env, uint8_t sf)
+{
+    uint64_t field = (env->ar[IA64_AR_FPSR] >>
+                      IA64_FPSR_STATUS_FIELD_SHIFT(sf & 0x3)) &
+                     IA64_FPSR_STATUS_FIELD_MASK;
+
+    switch ((field >> IA64_FPSR_STATUS_RC_SHIFT) &
+            IA64_FPSR_STATUS_RC_MASK) {
+    case 0:
+        return float_round_nearest_even;
+    case 1:
+        return float_round_down;
+    case 2:
+        return float_round_up;
+    case 3:
+        return float_round_to_zero;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void ia64_float_status_init_for_sf(CPUIA64State *env,
+                                          float_status *status,
+                                          uint8_t sf)
+{
+    ia64_float_status_init(status);
+    set_float_rounding_mode(ia64_fpsr_rounding_mode(env, sf), status);
 }
 
 static floatx80 ia64_fr_to_floatx80(const IA64FloatReg *reg)
@@ -5037,13 +5070,72 @@ bool ia64_slot_is_f_multiply_add(IA64SlotType type, uint64_t raw)
     return type == IA64_SLOT_TYPE_F && major >= 0x8 && major <= 0xd;
 }
 
+typedef enum IA64FmaPrecisionCompleter {
+    IA64_FMA_PC_DYNAMIC,
+    IA64_FMA_PC_SINGLE,
+    IA64_FMA_PC_DOUBLE,
+} IA64FmaPrecisionCompleter;
+
+static bool ia64_fma_scalar_precision(uint64_t raw,
+                                      IA64FmaPrecisionCompleter *pc)
+{
+    uint8_t major = ia64_slot_major_opcode(raw);
+    bool x = ((raw >> 36) & 0x1) != 0;
+
+    if (major < 0x8 || major > 0xd) {
+        return false;
+    }
+
+    if ((major & 0x1) != 0) {
+        if (x) {
+            return false;
+        }
+        *pc = IA64_FMA_PC_DOUBLE;
+    } else {
+        *pc = x ? IA64_FMA_PC_SINGLE : IA64_FMA_PC_DYNAMIC;
+    }
+    return true;
+}
+
+static void ia64_write_fr_from_fma_result(CPUIA64State *env, uint32_t reg,
+                                          floatx80 value,
+                                          IA64FmaPrecisionCompleter pc,
+                                          uint8_t sf)
+{
+    float_status status = { 0 };
+
+    ia64_float_status_init_for_sf(env, &status, sf);
+
+    switch (pc) {
+    case IA64_FMA_PC_SINGLE:
+        ia64_write_fr_from_single_bits(env, reg,
+                                       float32_val(
+                                           floatx80_to_float32(value,
+                                                               &status)));
+        return;
+    case IA64_FMA_PC_DOUBLE:
+        ia64_write_fr_from_double_bits(env, reg,
+                                       float64_val(
+                                           floatx80_to_float64(value,
+                                                               &status)));
+        return;
+    case IA64_FMA_PC_DYNAMIC:
+        ia64_write_fr_from_floatx80(env, reg, value);
+        return;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 bool ia64_exec_f_multiply_add(CPUIA64State *env, uint64_t raw)
 {
     uint8_t major;
+    uint8_t sf;
     uint32_t f1;
     uint32_t f2;
     uint32_t f3;
     uint32_t f4;
+    IA64FmaPrecisionCompleter pc;
     float_status status = { 0 };
     floatx80 addend;
     floatx80 multiplicand;
@@ -5051,16 +5143,18 @@ bool ia64_exec_f_multiply_add(CPUIA64State *env, uint64_t raw)
     floatx80 product;
     floatx80 result;
 
-    if (!env || !ia64_slot_is_f_multiply_add(IA64_SLOT_TYPE_F, raw)) {
+    if (!env || !ia64_slot_is_f_multiply_add(IA64_SLOT_TYPE_F, raw) ||
+        !ia64_fma_scalar_precision(raw, &pc)) {
         return false;
     }
-    ia64_float_status_init(&status);
 
     major = ia64_slot_major_opcode(raw);
+    sf = (raw >> 34) & 0x3;
     f1 = (raw >> 6) & 0x7f;
     f2 = (raw >> 13) & 0x7f;
     f3 = (raw >> 20) & 0x7f;
     f4 = (raw >> 27) & 0x7f;
+    ia64_float_status_init_for_sf(env, &status, sf);
 
     addend = ia64_fr_to_floatx80(&env->fr[ia64_map_fr(env, f2)]);
     multiplicand = ia64_fr_to_floatx80(&env->fr[ia64_map_fr(env, f3)]);
@@ -5084,17 +5178,19 @@ bool ia64_exec_f_multiply_add(CPUIA64State *env, uint64_t raw)
         return false;
     }
 
-    ia64_write_fr_from_floatx80(env, f1, result);
+    ia64_write_fr_from_fma_result(env, f1, result, pc, sf);
     if (ia64_fpu_trace_enabled(env)) {
         fprintf(stderr,
                 "[ia64-fpu] fma-family ip=0x%016" PRIx64
                 " raw=0x%011" PRIx64 " f%u=f%u,f%u,f%u"
+                " pc=%u sf=%u"
                 " addend=0x%04x:%016" PRIx64
                 " multiplicand=0x%04x:%016" PRIx64
                 " multiplier=0x%04x:%016" PRIx64
                 " result=0x%04x:%016" PRIx64
                 " pr=0x%016" PRIx64 "\n",
-                env->ip, raw, f1, f2, f3, f4, addend.high, addend.low,
+                env->ip, raw, f1, f2, f3, f4, pc, sf,
+                addend.high, addend.low,
                 multiplicand.high, multiplicand.low, multiplier.high,
                 multiplier.low, result.high, result.low, env->pr);
         ia64_fpu_trace_fr("fma-family.result", env, raw, f1);
@@ -5674,9 +5770,9 @@ bool ia64_decode_floating_compare(IA64SlotType type, uint64_t raw,
 
     if (ra == 0 && rb == 0) {
         decoded->relation = IA64_FLOAT_CMP_EQ;
-    } else if (ra == 1 && rb == 0) {
-        decoded->relation = IA64_FLOAT_CMP_LT;
     } else if (ra == 0 && rb == 1) {
+        decoded->relation = IA64_FLOAT_CMP_LT;
+    } else if (ra == 1 && rb == 0) {
         decoded->relation = IA64_FLOAT_CMP_LE;
     } else {
         decoded->relation = IA64_FLOAT_CMP_UNORD;
