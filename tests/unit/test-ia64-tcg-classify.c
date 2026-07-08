@@ -19,7 +19,8 @@ enum {
         VIBTANIUM_EFI_CON_IN_SERVICE_COUNT +
         VIBTANIUM_EFI_BLOCK_IO_SERVICE_COUNT +
         VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT +
-        VIBTANIUM_EFI_FILE_SERVICE_COUNT,
+        VIBTANIUM_EFI_FILE_SERVICE_COUNT +
+        VIBTANIUM_EFI_GOP_SERVICE_COUNT,
 };
 
 static IA64DecodedBundle make_bundle(uint8_t tmpl,
@@ -160,6 +161,10 @@ static void test_efi_call_gate_ends_tb(void)
     uint64_t last_service_gate =
         VIBTANIUM_EFI_CALL_GATE_BASE +
         (IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT - 1) * IA64_BUNDLE_SIZE;
+    uint64_t first_gop_service_gate =
+        VIBTANIUM_EFI_CALL_GATE_BASE +
+        (IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT -
+         VIBTANIUM_EFI_GOP_SERVICE_COUNT) * IA64_BUNDLE_SIZE;
     uint64_t after_last_service_gate = last_service_gate + IA64_BUNDLE_SIZE;
 
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
@@ -170,6 +175,8 @@ static void test_efi_call_gate_ends_tb(void)
                     &bundle, VIBTANIUM_EFI_CALL_GATE_BASE);
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
                     &bundle, last_service_gate);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
+                    &bundle, first_gop_service_gate);
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
                     &bundle, region7_pal_alias);
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,

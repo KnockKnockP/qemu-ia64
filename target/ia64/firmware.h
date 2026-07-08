@@ -15,11 +15,8 @@
 #define IA64_FIRMWARE_EFI_BLOCK_IO_SERVICE_COUNT 4
 #define IA64_FIRMWARE_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT 1
 #define IA64_FIRMWARE_EFI_FILE_SERVICE_COUNT 10
+#define IA64_FIRMWARE_EFI_GOP_SERVICE_COUNT 3
 
-/*
- * Preserve the existing translator boundary.  GOP service gates are handled by
- * firmware dispatch, but the pre-existing classifier did not end TBs for them.
- */
 #define IA64_FIRMWARE_EFI_CLASSIFY_SERVICE_COUNT \
     (IA64_FIRMWARE_EFI_BOOT_SERVICE_COUNT + \
      IA64_FIRMWARE_EFI_RUNTIME_SERVICE_COUNT + \
@@ -27,7 +24,8 @@
      IA64_FIRMWARE_EFI_CON_IN_SERVICE_COUNT + \
      IA64_FIRMWARE_EFI_BLOCK_IO_SERVICE_COUNT + \
      IA64_FIRMWARE_EFI_SIMPLE_FILE_SYSTEM_SERVICE_COUNT + \
-     IA64_FIRMWARE_EFI_FILE_SERVICE_COUNT)
+     IA64_FIRMWARE_EFI_FILE_SERVICE_COUNT + \
+     IA64_FIRMWARE_EFI_GOP_SERVICE_COUNT)
 
 typedef bool (*IA64FirmwareDispatchFn)(CPUIA64State *env, uint64_t gate_ip);
 typedef bool (*IA64FirmwareCmdlinePendingFn)(void);

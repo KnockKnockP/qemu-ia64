@@ -10,6 +10,7 @@
 #   MINGW_BIN   directory with the MinGW runtime DLLs (added to PATH)
 #   TIMEOUT     seconds to wait for the sentinel (default 40)
 #   NVRAM       optional path to a persistent EFI variable store (-M nvram=)
+#   BOOT_MODE   media (default, temp vvfat ESP) or kernel (old -kernel path)
 #   NO_BUILD=1  skip the build step and use the existing selftest.efi
 #
 set -uo pipefail
@@ -20,6 +21,7 @@ repo_root="$(cd "$here/../.." && pwd)"
 
 SENTINEL="VIBTANIUM-SELFTEST-RESULT:"
 TIMEOUT="${TIMEOUT:-40}"
+BOOT_MODE="${BOOT_MODE:-media}"
 
 # --- locate qemu ---------------------------------------------------------
 if [ -z "${QEMU:-}" ]; then
@@ -53,13 +55,35 @@ fi
 
 # --- run -----------------------------------------------------------------
 LOG="$(mktemp 2>/dev/null || echo "$here/selftest-run.log")"
-nvram_arg=""
+esp_dir=""
+machine_arg="vibtanium,efi-boot-manager=off"
 if [ -n "${NVRAM:-}" ]; then
-    nvram_arg=",nvram=$NVRAM"
+    nvram_path="$(cygpath -am "$NVRAM" 2>/dev/null || printf '%s' "$NVRAM")"
+    machine_arg="${machine_arg},nvram=$nvram_path"
 fi
 
-"$QEMU" -M "vibtanium${nvram_arg}" -m 512M \
-        -kernel "$EFI" -display none -serial null -no-reboot \
+qemu_boot_args=()
+case "$BOOT_MODE" in
+media)
+    esp_dir="$(mktemp -d 2>/dev/null || mktemp -d "$here/selftest-esp.XXXXXX")"
+    mkdir -p "$esp_dir/EFI/BOOT"
+    cp "$EFI" "$esp_dir/EFI/BOOT/BOOTIA64.EFI"
+    printf 'vibtanium-media-ok\n' > "$esp_dir/EFI/BOOT/SELFTEST.TXT"
+    esp_path="$(cygpath -am "$esp_dir" 2>/dev/null || printf '%s' "$esp_dir")"
+    qemu_boot_args=(-drive "file=fat:rw:$esp_path,format=raw,if=ide,index=0,media=disk")
+    ;;
+kernel)
+    qemu_boot_args=(-kernel "$EFI")
+    ;;
+*)
+    echo "run.sh: invalid BOOT_MODE '$BOOT_MODE' (expected media or kernel)" >&2
+    rm -f "$LOG" 2>/dev/null || true
+    exit 1
+    ;;
+esac
+
+"$QEMU" -M "$machine_arg" -m 512M \
+        "${qemu_boot_args[@]}" -display none -serial null -no-reboot \
         >"$LOG" 2>&1 &
 qpid=$!
 winpid="$(cat "/proc/$qpid/winpid" 2>/dev/null || true)"
@@ -104,4 +128,7 @@ else
 fi
 
 rm -f "$LOG" 2>/dev/null || true
+if [ -n "$esp_dir" ]; then
+    rm -rf "$esp_dir" 2>/dev/null || true
+fi
 exit "$rc"

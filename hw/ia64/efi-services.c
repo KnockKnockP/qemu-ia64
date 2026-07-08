@@ -682,6 +682,16 @@ static uint64_t efi_guest_ldq(CPUIA64State *env, uint64_t address)
     return cpu_ldq_le_data_ra(env, address, GETPC());
 }
 
+static uint64_t efi_arg(CPUIA64State *env, unsigned index)
+{
+    if (index < 8) {
+        return ia64_read_gr(env, 32 + index);
+    }
+
+    return efi_guest_ldq(env, ia64_read_gr(env, 12) +
+                         16 + (index - 8) * sizeof(uint64_t));
+}
+
 static uint32_t efi_guest_ldl(CPUIA64State *env, uint64_t address)
 {
     return cpu_ldl_le_data_ra(env, address, GETPC());
@@ -3167,15 +3177,15 @@ static uint64_t efi_gop_set_mode(CPUIA64State *env)
 
 static uint64_t efi_gop_blt(CPUIA64State *env)
 {
-    uint64_t blt_buffer = ia64_read_gr(env, 33);
-    uint64_t operation = ia64_read_gr(env, 34);
-    uint64_t source_x = ia64_read_gr(env, 35);
-    uint64_t source_y = ia64_read_gr(env, 36);
-    uint64_t dest_x = ia64_read_gr(env, 37);
-    uint64_t dest_y = ia64_read_gr(env, 38);
-    uint64_t width = ia64_read_gr(env, 39);
-    uint64_t height = ia64_read_gr(env, 40);
-    uint64_t delta = ia64_read_gr(env, 41);
+    uint64_t blt_buffer = efi_arg(env, 1);
+    uint64_t operation = efi_arg(env, 2);
+    uint64_t source_x = efi_arg(env, 3);
+    uint64_t source_y = efi_arg(env, 4);
+    uint64_t dest_x = efi_arg(env, 5);
+    uint64_t dest_y = efi_arg(env, 6);
+    uint64_t width = efi_arg(env, 7);
+    uint64_t height = efi_arg(env, 8);
+    uint64_t delta = efi_arg(env, 9);
 
     if (width == 0 || height == 0) {
         return VIBTANIUM_EFI_SUCCESS;

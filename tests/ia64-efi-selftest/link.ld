@@ -4,8 +4,8 @@ ENTRY(_start)
 /*
  * Link everything contiguously at VIBTANIUM_EFI_APP_BASE (0x01000000) + text
  * RVA (0x1000). mkpe.py maps the flat binary as one section at that RVA with
- * ImageBase 0x01000000, so all absolute addresses (movl, the entry descriptor)
- * are already correct and no PE base relocations are required.
+ * ImageBase 0x01000000, so all absolute addresses and the IA-64 entry
+ * descriptor are already correct and no PE base relocations are required.
  *
  * The 16-byte IA-64 entry descriptor (.head) is placed first so its RVA equals
  * the PE AddressOfEntryPoint (0x1000).
@@ -21,12 +21,27 @@ SECTIONS
     . = ALIGN(8);
     *(.rodata)
     *(.rodata.*)
+    *(.srodata)
+    *(.srodata.*)
     . = ALIGN(8);
+    *(.opd)
+    *(.opd.*)
+    . = ALIGN(8);
+    *(.got)
+    *(.got.*)
+    *(.got.plt)
+    . = ALIGN(8);
+    *(.sdata)
+    *(.sdata.*)
     *(.data)
     *(.data.*)
+    *(.data.rel*)
     . = ALIGN(8);
+    *(.sbss)
+    *(.sbss.*)
     *(.bss)
     *(.bss.*)
+    *(COMMON)
     . = ALIGN(16);
   }
   /DISCARD/ : {

@@ -1,29 +1,34 @@
 # IA-64 in-emulator EFI self-test
 
-A tiny EFI application that boots through the vibtanium firmware and exercises
-newly implemented CPU opcodes and EFI services from *inside* the guest, then
-prints a machine-greppable verdict to the serial/EFI console. It gives a fast,
+A small EFI application that boots through the vibtanium firmware and exercises
+implemented EFI services from *inside* the guest, then prints a
+machine-greppable verdict to the serial/EFI console. It gives a fast,
 deterministic regression signal (seconds, no OS install) that complements the
-host-side unit tests under `tests/unit/` — those poke emulator internals in
+host-side unit tests under `tests/unit/` - those poke emulator internals in
 process; this one runs real IA-64 code through the real firmware handoff.
 
 ## What it checks
 
-| Check | What it proves |
-|-------|----------------|
-| `opcode add` | basic A-type ALU + the test harness itself |
-| `opcode movl + cmp.eq` | 64-bit immediate (MLX) and compare |
-| `opcode chk.a.clr fp takes recovery branch` | the ALAT advanced-load check for FP regs (M22/M23) — with no preceding `ldf.a` it must branch to recovery |
-| `efi ConOut->OutputString returns SUCCESS` | the EFI boot-services call path (plabel + call gate) |
-| `efi SetVariable/GetVariable round-trip` | the EFI **runtime** variable services backing NVRAM boot vars |
+| Check family | What it proves |
+|--------------|----------------|
+| IA-64 opcode smoke | Basic guest execution plus the `chk.a.clr` recovery branch helper that originally motivated this app |
+| System table / LoadedImage | Firmware handoff registers, table layout, image handle, image base/size, and configuration table plumbing |
+| Simple Text Output/Input | Console protocol dispatch, mode state, cursor/attribute methods, and WaitForKey not-ready behavior |
+| Boot memory services | TPL, watchdog/stall, pool allocation, page allocation/free, memory-map sizing/content, and ExitBootServices key validation |
+| Event/timer services | CreateEvent, SignalEvent, CheckEvent, WaitForEvent, SetTimer time warp, and CloseEvent |
+| Protocol database | HandleProtocol, LocateHandle, InstallProtocolInterface, OpenProtocol, CloseProtocol, LocateProtocol, and UninstallProtocolInterface |
+| Boot utility services | CalculateCrc32, CopyMem, and SetMem |
+| Runtime services | Get/SetTime, wakeup time, Set/Get/GetNextVariableName, high monotonic count, ConvertPointer, SetVirtualAddressMap, and ResetSystem |
+| Graphics Output Protocol | QueryMode, SetMode, and all implemented Blt operations |
+| Block/File media services | BlockIO reset/read/write-protected/flush plus SimpleFS and EFI_FILE open/read/get-info/position/write-protected paths |
 
-Add a check by writing the test in `selftest.S` (compute a 0/1 flag, call
-`report`) and adding its name string to `gen_strings.py`.
+Add checks in `selftest.c`. Keep only IA-64 entry/ABI mechanics or opcodes that
+C cannot express in `entry.S`.
 
 ## Running
 
 ```sh
-bash run.sh            # builds selftest.efi, boots it, prints PASS/FAIL, sets exit code
+bash run.sh            # builds selftest.efi, boots from a temp ESP, prints PASS/FAIL
 ```
 
 Exit status is `0` only when the guest prints
@@ -35,19 +40,20 @@ Windows PID — it never kills qemu by image name, so it is safe to run while
 another qemu (e.g. an OS install) is up.
 
 Useful overrides: `QEMU=`, `TIMEOUT=` (default 40s), `NVRAM=<file>` (attach a
-persistent EFI variable store so the SetVariable write is observable on disk),
+persistent EFI variable store), `BOOT_MODE=kernel` (old `-kernel selftest.efi`
+path; media protocol checks require the default `BOOT_MODE=media`), and
 `NO_BUILD=1` (reuse the existing `selftest.efi`).
 
 ## Build pipeline
 
-There is no IA-64 C compiler on this host, only the cross **binutils**
-(`/c/msys64/opt/ia64-binutils/bin`), so the app is hand-written assembly:
+The app is C-first and uses the local IA-64 GCC cross compiler installed at
+`/c/msys64/opt/ia64-gcc/bin/ia64-linux-gnu-gcc` plus the existing IA-64
+binutils at `/c/msys64/opt/ia64-binutils/bin`:
 
 ```
-gen_strings.py  ->  strings.S        (UTF-16LE CHAR16 tables; the GNU as '\c
-                                       char-value idiom is unreliable)
-ia64-...-as     ->  selftest.o
-ia64-...-ld     ->  selftest.elf     (link.ld: fixed base 0x01001000)
+ia64-...-as     ->  entry.o          (EFI plabel, _start, opcode helper)
+ia64-...-gcc    ->  selftest.o       (C EFI service stress test)
+ia64-...-gcc    ->  selftest.elf     (link.ld: fixed base 0x01001000)
 ia64-...-objcopy -O binary -> selftest.bin
 mkpe.py         ->  selftest.efi     (PE32+, ImageBase 0x01000000, no relocs)
 ```
@@ -60,12 +66,14 @@ The vibtanium loader (`hw/ia64/efi.c`) reads the entry point from a 16-byte
 IA-64 function descriptor (plabel) at `AddressOfEntryPoint` and, when the file
 has no base-relocation directory, loads at the PE's preferred `ImageBase`. We
 set `ImageBase = VIBTANIUM_EFI_APP_BASE (0x01000000)` and link the code at that
-base + text RVA, so every absolute address (the plabel, `movl` operands) is
-already correct. The loader does not inspect the PE Subsystem field.
+base + text RVA, so every absolute address is already correct. The second word
+of the entry descriptor is `__gp`, allowing GCC-generated IA-64 small-data/GOT
+accesses to work after firmware handoff. The loader does not inspect the PE
+Subsystem field.
 
-The same `selftest.efi` can also be dropped onto an ESP as
-`\EFI\BOOT\BOOTIA64.EFI` to exercise the media-discovery / boot-manager path
-instead of `-kernel`; `run.sh` uses `-kernel` for simplicity.
+`run.sh` copies `selftest.efi` to a temporary ESP as
+`\EFI\BOOT\BOOTIA64.EFI`; this exercises the media-discovery/cache path and
+makes BlockIO/SimpleFS/File protocol checks meaningful.
 
 ## Guest entry contract
 

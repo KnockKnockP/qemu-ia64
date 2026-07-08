@@ -2,5 +2,6 @@
 # so core.autocrlf=true checkouts don't inject CR into scripts or sources.
 *.sh   text eol=lf
 *.py   text eol=lf
+*.c    text eol=lf
 *.S    text eol=lf
 *.ld   text eol=lf
