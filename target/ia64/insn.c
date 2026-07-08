@@ -2567,6 +2567,10 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
     old = env->cr[reg];
     env->cr[reg] = value;
     switch (reg) {
+    case IA64_CR_IVA:
+        env->cr[reg] = value & ~UINT64_C(0x7fff);
+        ia64_firmware_identity_tlb_set(env, false);
+        break;
     case IA64_CR_EOI:
         env->interrupt.pending_interruption = 0;
         env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;

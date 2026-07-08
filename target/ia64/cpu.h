@@ -400,6 +400,13 @@ typedef struct CPUArchState {
     bool itc_clock_backed;
 
     /*
+     * Firmware-owned early TLB miss assist. IA-64 firmware/SAL can service
+     * identity misses until the guest installs its own IVT; disable this when
+     * software writes CR.IVA and takes ownership of miss delivery.
+     */
+    bool firmware_identity_tlb;
+
+    /*
      * Perf-only transient set by a fault-induced cpu_loop_exit and consumed
      * by the next TB translation. It is not serialized.
      */

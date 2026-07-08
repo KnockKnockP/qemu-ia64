@@ -399,6 +399,15 @@ static void test_builds_guest_firmware_tables(void)
         .removable = true,
         .cdrom = true,
     };
+    const uint8_t expected_device_path[] = {
+        0x01, 0x01, 0x06, 0x00, 0x00, 0x01,
+        0x03, 0x01, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x04, 0x02, 0x18, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x7f, 0xff, 0x04, 0x00,
+    };
     size_t blob_size = 0;
     uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
                                                       &boot_media, NULL);
@@ -470,6 +479,9 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(load_le64(firmware_ptr(blob,
                                            VIBTANIUM_EFI_LOADED_IMAGE + 32)),
                     ==, VIBTANIUM_EFI_DEVICE_PATH);
+    g_assert_cmpmem(firmware_ptr(blob, VIBTANIUM_EFI_DEVICE_PATH),
+                    sizeof(expected_device_path),
+                    expected_device_path, sizeof(expected_device_path));
     g_assert_cmphex(load_le32(firmware_ptr(blob,
                                            VIBTANIUM_EFI_LOADED_IMAGE + 48)),
                     ==, sizeof(load_options));

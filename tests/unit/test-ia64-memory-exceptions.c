@@ -264,6 +264,48 @@ static void test_region_register_change_selects_new_rid(void)
     g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
 }
 
+static void test_firmware_identity_tlb_assist_installs_data_tc(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr address = 0x00000000020005d0ULL;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_DT_BIT;
+
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+
+    ia64_firmware_identity_tlb_set(&env, true);
+    g_assert_true(ia64_firmware_identity_tlb_fill(
+        &env, address, MMU_DATA_LOAD, IA64_MMU_DATA_CPL0, &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
+    g_assert_cmphex(result.paddr, ==, address);
+    g_assert_cmpuint(result.page_size, ==, 22);
+    g_assert_true(env.memory.dtc[0].valid);
+    g_assert_cmphex(env.memory.dtc[0].vaddr_base, ==, 0x0000000002000000ULL);
+    g_assert_cmphex(env.memory.dtc[0].paddr_base, ==, 0x0000000002000000ULL);
+    g_assert_cmpuint(env.memory.next_dtc, ==, 1);
+}
+
+static void test_cr_iva_write_masks_base_and_disables_firmware_assist(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr address = 0x00000000020005d0ULL;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_DT_BIT;
+    ia64_firmware_identity_tlb_set(&env, true);
+
+    ia64_write_control_register(&env, IA64_CR_IVA, 0x00000000001f9234ULL);
+    g_assert_cmphex(env.cr[IA64_CR_IVA], ==, 0x00000000001f8000ULL);
+    g_assert_false(ia64_firmware_identity_tlb_fill(
+        &env, address, MMU_DATA_LOAD, IA64_MMU_DATA_CPL0, &result));
+}
+
 static void test_translation_cache_purge_and_same_va_remap(void)
 {
     CPUIA64State env;
@@ -974,6 +1016,10 @@ int main(int argc, char **argv)
                     test_translation_lookup_cache_refreshes_after_install);
     g_test_add_func("/ia64-memory/region-register-rid-change",
                     test_region_register_change_selects_new_rid);
+    g_test_add_func("/ia64-memory/firmware-identity-tlb-assist-data",
+                    test_firmware_identity_tlb_assist_installs_data_tc);
+    g_test_add_func("/ia64-memory/cr-iva-write-disables-firmware-assist",
+                    test_cr_iva_write_masks_base_and_disables_firmware_assist);
     g_test_add_func("/ia64-memory/tc-purge-same-va-remap",
                     test_translation_cache_purge_and_same_va_remap);
     g_test_add_func("/ia64-memory/host-tlb-flush-span",

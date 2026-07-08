@@ -146,6 +146,55 @@ static void test_loads_missing_empty_and_rejects_corrupt(void)
     cleanup_temp_var_path(dir, path);
 }
 
+static void test_load_adds_default_console_variables(void)
+{
+    VibtaniumEfiVarStore store;
+    Error *err = NULL;
+    const uint8_t expected_path[] = {
+        0x02, 0x01, 0x0c, 0x00,
+        0x41, 0xd0, 0x00, 0x05,
+        0xf8, 0x03, 0x00, 0x00,
+        0x03, 0x0e, 0x13, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0xc2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x01, 0x01,
+        0x7f, 0xff, 0x04, 0x00,
+    };
+    const uint8_t *actual = NULL;
+    size_t actual_size = 0;
+    uint32_t attributes = 0;
+    char *dir;
+    char *path = make_temp_var_path(&dir);
+
+    vibtanium_efi_varstore_init(&store);
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_null(err);
+
+    g_assert_cmphex(vibtanium_efi_varstore_get(
+                        &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
+                        "ConOut", &attributes, &actual, &actual_size),
+                    ==, VIBTANIUM_EFI_SUCCESS);
+    g_assert_cmphex(attributes, ==,
+                    VIBTANIUM_EFI_VARIABLE_NON_VOLATILE |
+                    VIBTANIUM_EFI_VARIABLE_BOOTSERVICE |
+                    VIBTANIUM_EFI_VARIABLE_RUNTIME);
+    g_assert_cmpuint(actual_size, ==, sizeof(expected_path));
+    g_assert_cmpmem(actual, actual_size, expected_path,
+                    sizeof(expected_path));
+
+    g_assert_cmphex(vibtanium_efi_varstore_get(
+                        &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
+                        "ConIn", NULL, NULL, NULL),
+                    ==, VIBTANIUM_EFI_SUCCESS);
+    g_assert_cmphex(vibtanium_efi_varstore_get(
+                        &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
+                        "ErrOut", NULL, NULL, NULL),
+                    ==, VIBTANIUM_EFI_SUCCESS);
+
+    vibtanium_efi_varstore_destroy(&store);
+    cleanup_temp_var_path(dir, path);
+}
+
 static void test_round_trips_json_variable(void)
 {
     VibtaniumEfiVarStore store;
@@ -375,6 +424,8 @@ int main(int argc, char **argv)
                     test_status_codes_match_uefi);
     g_test_add_func("/ia64-efi-vars/load-missing-empty-corrupt",
                     test_loads_missing_empty_and_rejects_corrupt);
+    g_test_add_func("/ia64-efi-vars/default-console-variables",
+                    test_load_adds_default_console_variables);
     g_test_add_func("/ia64-efi-vars/round-trip-json-variable",
                     test_round_trips_json_variable);
     g_test_add_func("/ia64-efi-vars/boot-order-yields-active-entries",

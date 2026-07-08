@@ -7,6 +7,7 @@
 #include "hw/ia64/vibtanium.h"
 #include "target/ia64/bundle.h"
 #include "target/ia64/insn.h"
+#include "target/ia64/mem.h"
 
 #define PE32_MAGIC  0x10b
 #define PE32P_MAGIC 0x20b
@@ -1312,14 +1313,75 @@ static void write_gop_protocol(uint8_t *blob, size_t size)
     wr32(info + 32, VIBTANIUM_FRAMEBUFFER_WIDTH);
 }
 
-static void write_device_path(uint8_t *blob, size_t size)
-{
-    uint8_t *path = blob_ptr(blob, size, VIBTANIUM_EFI_DEVICE_PATH, 4);
+#define EFI_DP_HARDWARE_DEVICE_PATH       0x01
+#define EFI_DP_MESSAGING_DEVICE_PATH      0x03
+#define EFI_DP_MEDIA_DEVICE_PATH          0x04
+#define EFI_DP_END_DEVICE_PATH            0x7f
+#define EFI_DP_HW_PCI                     0x01
+#define EFI_DP_MSG_ATAPI                  0x01
+#define EFI_DP_MEDIA_CDROM                0x02
+#define EFI_DP_END_ENTIRE                 0xff
+#define EFI_DP_PCI_LENGTH                 6
+#define EFI_DP_ATAPI_LENGTH               8
+#define EFI_DP_CDROM_LENGTH               24
+#define EFI_DP_END_LENGTH                 4
+#define VIBTANIUM_IDE_PCI_DEVICE          1
+#define VIBTANIUM_IDE_PCI_FUNCTION        0
+#define VIBTANIUM_IDE_CD_PRIMARY_SECONDARY 1
+#define VIBTANIUM_IDE_CD_SLAVE_MASTER     0
+#define VIBTANIUM_IDE_CD_LUN              0
 
-    path[0] = 0x7f; /* End device path. */
-    path[1] = 0xff; /* End entire device path. */
-    path[2] = 4;
-    path[3] = 0;
+static uint8_t *write_device_path_header(uint8_t *path, uint8_t type,
+                                         uint8_t subtype, uint16_t length)
+{
+    path[0] = type;
+    path[1] = subtype;
+    wr16(path + 2, length);
+    return path + length;
+}
+
+static void write_device_path(uint8_t *blob, size_t size,
+                              const VibtaniumEfiBlockDevice *boot_media,
+                              uint32_t block_size, uint64_t media_size)
+{
+    uint64_t media_blocks = block_size != 0 ? media_size / block_size : 0;
+    size_t path_length = EFI_DP_END_LENGTH;
+    uint8_t *path;
+
+    if (boot_media && boot_media->cdrom) {
+        path_length += EFI_DP_PCI_LENGTH + EFI_DP_ATAPI_LENGTH +
+            EFI_DP_CDROM_LENGTH;
+    }
+
+    path = blob_ptr(blob, size, VIBTANIUM_EFI_DEVICE_PATH, path_length);
+    if (boot_media && boot_media->cdrom) {
+        /*
+         * vibtanium wires the boot optical drive as the CMD646 secondary
+         * master. Windows IA-64 uses these standard EFI nodes to recover its
+         * BootContext and later rematch the Block I/O handle.
+         */
+        path = write_device_path_header(path, EFI_DP_HARDWARE_DEVICE_PATH,
+                                        EFI_DP_HW_PCI, EFI_DP_PCI_LENGTH);
+        path[-2] = VIBTANIUM_IDE_PCI_FUNCTION;
+        path[-1] = VIBTANIUM_IDE_PCI_DEVICE;
+
+        path = write_device_path_header(path, EFI_DP_MESSAGING_DEVICE_PATH,
+                                        EFI_DP_MSG_ATAPI,
+                                        EFI_DP_ATAPI_LENGTH);
+        path[-4] = VIBTANIUM_IDE_CD_PRIMARY_SECONDARY;
+        path[-3] = VIBTANIUM_IDE_CD_SLAVE_MASTER;
+        wr16(path - 2, VIBTANIUM_IDE_CD_LUN);
+
+        path = write_device_path_header(path, EFI_DP_MEDIA_DEVICE_PATH,
+                                        EFI_DP_MEDIA_CDROM,
+                                        EFI_DP_CDROM_LENGTH);
+        wr32(path - 20, 0);
+        wr64(path - 16, 0);
+        wr64(path - 8, media_blocks);
+    }
+
+    path = write_device_path_header(path, EFI_DP_END_DEVICE_PATH,
+                                    EFI_DP_END_ENTIRE, EFI_DP_END_LENGTH);
 }
 
 static void write_media_protocols(uint8_t *blob, size_t size,
@@ -1333,7 +1395,7 @@ static void write_media_protocols(uint8_t *blob, size_t size,
         ? media_size / block_size - 1
         : 0;
 
-    write_device_path(blob, size);
+    write_device_path(blob, size, boot_media, block_size, media_size);
 
     blob_wr64(blob, size, VIBTANIUM_EFI_BLOCK_IO,
               VIBTANIUM_EFI_PROTOCOL_REVISION);
@@ -1462,6 +1524,7 @@ bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
     env->ar[IA64_AR_BSP] = env->rse.bsp;
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
+    ia64_firmware_identity_tlb_set(env, true);
     return true;
 }
 

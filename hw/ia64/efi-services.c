@@ -8,8 +8,12 @@
 #include "hw/ia64/efi-vars.h"
 #include "hw/ia64/vibtanium.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "system/memory.h"
+#include "system/rtc.h"
+#include "system/system.h"
 #include "target/ia64/insn.h"
+#include "target/ia64/mem.h"
 #include "target/ia64/perf.h"
 #include "trace-target_ia64.h"
 
@@ -2328,6 +2332,7 @@ static void efi_enter_child_image(CPUIA64State *env, EfiChildImage *child)
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
     env->ar[IA64_AR_PFS] = 0;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
+    ia64_firmware_identity_tlb_set(env, true);
 }
 
 static uint64_t efi_start_image(CPUIA64State *env)
@@ -3044,14 +3049,20 @@ static uint64_t efi_dispatch_boot_service(CPUIA64State *env, unsigned index)
 
 static void efi_write_time(CPUIA64State *env, uint64_t time)
 {
-    efi_guest_stw(env, time, 2026);
-    efi_guest_stb(env, time + 2, 6);
-    efi_guest_stb(env, time + 3, 26);
-    efi_guest_stb(env, time + 4, 0);
-    efi_guest_stb(env, time + 5, 0);
-    efi_guest_stb(env, time + 6, 0);
+    struct tm tm;
+    int64_t now_ns;
+
+    qemu_get_timedate(&tm, 0);
+    now_ns = qemu_clock_get_ns(rtc_clock);
+
+    efi_guest_stw(env, time, tm.tm_year + 1900);
+    efi_guest_stb(env, time + 2, tm.tm_mon + 1);
+    efi_guest_stb(env, time + 3, tm.tm_mday);
+    efi_guest_stb(env, time + 4, tm.tm_hour);
+    efi_guest_stb(env, time + 5, tm.tm_min);
+    efi_guest_stb(env, time + 6, tm.tm_sec);
     efi_guest_stb(env, time + 7, 0);
-    efi_guest_stl(env, time + 8, 0);
+    efi_guest_stl(env, time + 8, now_ns % NANOSECONDS_PER_SECOND);
     efi_guest_stw(env, time + 12, EFI_UNSPECIFIED_TIMEZONE);
     efi_guest_stb(env, time + 14, 0);
     efi_guest_stb(env, time + 15, 0);

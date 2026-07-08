@@ -16,6 +16,11 @@
 
 #define EFI_BOOT_ENTRY_NAME_LEN 8
 #define EFI_MAX_VAR_NAME_CHARS 1024
+#define EFI_CONSOLE_COM1_BASE 0x3f8
+#define EFI_CONSOLE_VARIABLE_ATTRIBUTES \
+    (VIBTANIUM_EFI_VARIABLE_NON_VOLATILE | \
+     VIBTANIUM_EFI_VARIABLE_BOOTSERVICE | \
+     VIBTANIUM_EFI_VARIABLE_RUNTIME)
 
 typedef struct VibtaniumEfiVariable {
     char *guid;
@@ -26,6 +31,27 @@ typedef struct VibtaniumEfiVariable {
 
 static VibtaniumEfiVarStore global_varstore;
 static bool global_varstore_initialized;
+
+/*
+ * ACPI(PNP0500,0x3f8)/UART(115200 8N1). EFI firmware normally exposes the
+ * active console handles through ConIn/ConOut/ErrOut variables; Windows uses
+ * ConOut to carry serial redirection settings when SPCR/HCDP are insufficient.
+ */
+static const uint8_t default_console_device_path[] = {
+    0x02, 0x01, 0x0c, 0x00,             /* ACPI HID node */
+    0x41, 0xd0, 0x00, 0x05,             /* EISA PNP0500 */
+    EFI_CONSOLE_COM1_BASE & 0xff,
+    (EFI_CONSOLE_COM1_BASE >> 8) & 0xff,
+    (EFI_CONSOLE_COM1_BASE >> 16) & 0xff,
+    (EFI_CONSOLE_COM1_BASE >> 24) & 0xff,
+    0x03, 0x0e, 0x13, 0x00,             /* UART node */
+    0x00, 0x00, 0x00, 0x00,             /* reserved */
+    0x00, 0xc2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, /* 115200 */
+    0x08,                               /* data bits */
+    0x01,                               /* no parity */
+    0x01,                               /* one stop bit */
+    0x7f, 0xff, 0x04, 0x00,             /* end entire path */
+};
 
 static uint16_t rd16(const uint8_t *p)
 {
@@ -242,6 +268,40 @@ static void add_variable(VibtaniumEfiVarStore *store,
     g_ptr_array_add(store->variables, var);
 }
 
+static void add_default_variable_if_missing(VibtaniumEfiVarStore *store,
+                                            const char *name,
+                                            const uint8_t *data,
+                                            size_t data_size)
+{
+    g_autoptr(GByteArray) bytes = NULL;
+
+    if (find_variable(store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID, name)) {
+        return;
+    }
+
+    bytes = g_byte_array_sized_new(data_size);
+    g_byte_array_append(bytes, data, data_size);
+    add_variable(store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID, name,
+                 EFI_CONSOLE_VARIABLE_ATTRIBUTES, bytes);
+}
+
+static void add_default_console_variables(VibtaniumEfiVarStore *store)
+{
+    if (!store || !store->variables) {
+        return;
+    }
+
+    add_default_variable_if_missing(store, "ConIn",
+                                    default_console_device_path,
+                                    sizeof(default_console_device_path));
+    add_default_variable_if_missing(store, "ConOut",
+                                    default_console_device_path,
+                                    sizeof(default_console_device_path));
+    add_default_variable_if_missing(store, "ErrOut",
+                                    default_console_device_path,
+                                    sizeof(default_console_device_path));
+}
+
 static bool import_qapi_store(VibtaniumEfiVarStore *store,
                               UefiVarStore *vs,
                               Error **errp)
@@ -296,6 +356,8 @@ bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
     store->path = g_strdup(path);
 
     if (!path || !*path || !g_file_test(path, G_FILE_TEST_EXISTS)) {
+        add_default_console_variables(store);
+        store->dirty = false;
         return true;
     }
 
@@ -305,6 +367,8 @@ bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
         return false;
     }
     if (length == 0) {
+        add_default_console_variables(store);
+        store->dirty = false;
         return true;
     }
 
@@ -323,6 +387,9 @@ bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
     ok = import_qapi_store(store, vs, errp);
     if (!ok) {
         error_prepend(errp, "invalid NVRAM file '%s': ", path);
+    }
+    if (ok) {
+        add_default_console_variables(store);
     }
 
 out:

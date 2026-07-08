@@ -241,15 +241,19 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     if (!ia64_translate_address_no_detail(&cpu->env, address, access_type,
                                           mmu_idx, false, &result) &&
-        !probe && result.status == IA64_TRANSLATE_TLB_MISS &&
-        ia64_vhpt_walk_runtime_enabled()) {
-        vhpt_status = ia64_try_vhpt_walk(&cpu->env, cs->as, address,
-                                         access_type);
-        if (vhpt_status == IA64_VHPT_WALK_INSTALLED) {
-            ia64_translate_address_no_detail(&cpu->env, address, access_type,
-                                             mmu_idx, false, &result);
-        } else if (vhpt_status == IA64_VHPT_WALK_FAULT) {
-            exception_kind = IA64_EXCEPTION_VHPT_TRANSLATION;
+        !probe && result.status == IA64_TRANSLATE_TLB_MISS) {
+        if (!ia64_firmware_identity_tlb_fill(&cpu->env, address, access_type,
+                                             mmu_idx, &result) &&
+            ia64_vhpt_walk_runtime_enabled()) {
+            vhpt_status = ia64_try_vhpt_walk(&cpu->env, cs->as, address,
+                                             access_type);
+            if (vhpt_status == IA64_VHPT_WALK_INSTALLED) {
+                ia64_translate_address_no_detail(&cpu->env, address,
+                                                 access_type, mmu_idx, false,
+                                                 &result);
+            } else if (vhpt_status == IA64_VHPT_WALK_FAULT) {
+                exception_kind = IA64_EXCEPTION_VHPT_TRANSLATION;
+            }
         }
     }
 

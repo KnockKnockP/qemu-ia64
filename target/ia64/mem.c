@@ -18,6 +18,10 @@
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
+#define IA64_FIRMWARE_IDENTITY_PAGE_BITS 22
+#define IA64_FIRMWARE_IDENTITY_TR_ATTR \
+    (UINT64_C(1) | (UINT64_C(1) << 5) | (UINT64_C(1) << 6) | \
+     (UINT64_C(3) << 9) | (UINT64_C(1) << 52))
 #define IA64_VHPT_SHORT_RESERVED_MASK \
     (UINT64_C(0x2) | UINT64_C(0x000c000000000000))
 #define IA64_TRANSLATION_LOOKUP_CACHE_PAGE_SHIFT 12
@@ -226,6 +230,13 @@ bool ia64_vhpt_walk_runtime_enabled(void)
         enabled = g_getenv("VIBTANIUM_VHPT_WALK") != NULL;
     }
     return enabled != 0;
+}
+
+void ia64_firmware_identity_tlb_set(CPUIA64State *env, bool enabled)
+{
+    if (env) {
+        env->firmware_identity_tlb = enabled;
+    }
 }
 
 static const char *ia64_translation_kind(bool instruction, bool pinned)
@@ -766,6 +777,64 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
                 entry.accessed, entry.dirty);
     }
     return true;
+}
+
+static bool ia64_firmware_identity_region(uint8_t region)
+{
+    return region == 0 || region == 6 || region == 7;
+}
+
+bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
+                                     MMUAccessType access_type, int mmu_idx,
+                                     IA64TranslateResult *result)
+{
+    uint8_t region;
+    uint64_t rr;
+    uint64_t page_base;
+    uint64_t translation;
+    uint64_t itir;
+    bool instruction = access_type == MMU_INST_FETCH;
+
+    if (!env || !env->firmware_identity_tlb) {
+        return false;
+    }
+    if (access_type != MMU_INST_FETCH &&
+        access_type != MMU_DATA_LOAD &&
+        access_type != MMU_DATA_STORE) {
+        return false;
+    }
+    if (ia64_current_privilege_level(env->psr) != 0) {
+        return false;
+    }
+
+    region = ia64_va_region(address);
+    rr = env->rr[region];
+    if (!ia64_firmware_identity_region(region) ||
+        ia64_region_vhpt_enabled(rr)) {
+        return false;
+    }
+
+    page_base = ia64_page_base(address, IA64_FIRMWARE_IDENTITY_PAGE_BITS);
+    translation = (page_base & IA64_INSERTION_PPN_MASK) |
+                  IA64_FIRMWARE_IDENTITY_TR_ATTR;
+    itir = (uint64_t)IA64_FIRMWARE_IDENTITY_PAGE_BITS << 2;
+
+    if (!ia64_install_translation(env, instruction, false, 0, address,
+                                  translation, itir)) {
+        return false;
+    }
+
+    if (ia64_mmu_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-firmware-identity-tlb] kind=%s"
+                " address=0x%016" VADDR_PRIx " page-base=0x%016" PRIx64
+                " paddr=0x%016" PRIx64 " itir=0x%016" PRIx64 "\n",
+                ia64_access_kind(instruction), address, page_base,
+                page_base & IA64_INSERTION_PPN_MASK, itir);
+    }
+
+    return ia64_translate_address_no_detail(env, address, access_type,
+                                            mmu_idx, false, result);
 }
 
 static IA64TranslationEntry ia64_purge_probe(CPUIA64State *env, vaddr address,

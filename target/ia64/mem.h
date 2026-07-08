@@ -50,6 +50,10 @@ uint64_t ia64_default_itir(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_hash_address(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_tag(CPUIA64State *env, vaddr address);
 bool ia64_vhpt_walk_runtime_enabled(void);
+void ia64_firmware_identity_tlb_set(CPUIA64State *env, bool enabled);
+bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
+                                     MMUAccessType access_type, int mmu_idx,
+                                     IA64TranslateResult *result);
 bool ia64_install_translation(CPUIA64State *env, bool instruction,
                               bool pinned, uint8_t slot,
                               vaddr virtual_address,

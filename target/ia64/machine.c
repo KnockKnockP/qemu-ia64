@@ -187,6 +187,9 @@ static int ia64_env_post_load(void *opaque, int version_id)
     if (version_id < 3) {
         memset(&env->alat, 0, sizeof(env->alat));
     }
+    if (version_id < 4) {
+        env->firmware_identity_tlb = false;
+    }
     ia64_rse_reconstruct_transients(env);
     ia64_cpu_init_synthetic_cpuid(env);
     for (unsigned i = IA64_TC_VMSTATE_COUNT; i < IA64_TC_COUNT; i++) {
@@ -216,7 +219,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_env = {
     .name = "env",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .pre_save = ia64_env_pre_save,
     .post_load = ia64_env_post_load,
@@ -236,6 +239,7 @@ static const VMStateDescription vmstate_env = {
         VMSTATE_UINT64(ip, CPUIA64State),
         VMSTATE_UINT64(psr, CPUIA64State),
         VMSTATE_UINT64(cfm, CPUIA64State),
+        VMSTATE_BOOL_V(firmware_identity_tlb, CPUIA64State, 4),
         VMSTATE_STRUCT(rse, CPUIA64State, 0, vmstate_rse, IA64RSEState),
         VMSTATE_STRUCT(nat, CPUIA64State, 0, vmstate_nat, IA64NaTState),
         VMSTATE_STRUCT(interrupt, CPUIA64State, 0, vmstate_interrupt,

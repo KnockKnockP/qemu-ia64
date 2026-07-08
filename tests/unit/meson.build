@@ -52,6 +52,7 @@ tests = {
   'test-envlist': [],
   'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
   'test-ia64-tcg-classify': [
+    'test-ia64-address-space-stubs.c',
     meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
@@ -62,6 +63,7 @@ tests = {
     meson.project_source_root() / 'target/ia64/tcg-classify.c',
   ],
   'test-ia64-insn': [
+    'test-ia64-address-space-stubs.c',
     meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
@@ -71,6 +73,7 @@ tests = {
     meson.project_source_root() / 'target/ia64/perf.c',
   ],
   'test-ia64-memory-exceptions': [
+    'test-ia64-address-space-stubs.c',
     meson.project_source_root() / 'fpu/softfloat.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
