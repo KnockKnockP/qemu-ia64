@@ -50,18 +50,20 @@ enum {
 #define EFI_PAGE_SIZE UINT64_C(4096)
 #define EFI_MEMORY_DESCRIPTOR_SIZE UINT64_C(40)
 #define EFI_MEMORY_DESCRIPTOR_VERSION 1
-#define EFI_GUEST_RAM_TOP UINT64_C(0x20000000)
-#define EFI_LINUX_APPEND_BASE UINT64_C(0x03fff000)
+#define EFI_DEFAULT_GUEST_RAM_TOP UINT64_C(0x20000000)
+#define EFI_IA64_LOADER_WINDOW_BASE UINT64_C(0x02000000)
+#define EFI_IA64_LOADER_WINDOW_PAGES \
+    ((VIBTANIUM_EFI_POOL_BASE - EFI_IA64_LOADER_WINDOW_BASE) / EFI_PAGE_SIZE)
+#define EFI_LINUX_APPEND_BASE UINT64_C(0x09fff000)
 #define EFI_LINUX_APPEND_SIZE UINT64_C(0x00001000)
-#define EFI_PAGE_ALLOC_BASE UINT64_C(0x03000000)
+#define EFI_PAGE_ALLOC_BASE UINT64_C(0x09000000)
 #define EFI_PAGE_ALLOC_SIZE (EFI_LINUX_APPEND_BASE - EFI_PAGE_ALLOC_BASE)
 #define EFI_RUNTIME_GRANULE_BASE UINT64_C(0x00000000)
 #define EFI_RUNTIME_GRANULE_SIZE UINT64_C(0x01000000)
 #define EFI_LOW_CONVENTIONAL_BASE EFI_RUNTIME_GRANULE_SIZE
 #define EFI_LOW_CONVENTIONAL_PAGES UINT64_C(0)
-#define EFI_HIGH_CONVENTIONAL_BASE UINT64_C(0x04000000)
-#define EFI_HIGH_CONVENTIONAL_PAGES \
-    ((EFI_GUEST_RAM_TOP - EFI_HIGH_CONVENTIONAL_BASE) / EFI_PAGE_SIZE)
+#define EFI_HIGH_CONVENTIONAL_BASE \
+    (EFI_LINUX_APPEND_BASE + EFI_LINUX_APPEND_SIZE)
 #define EFI_DEFAULT_LOADER_IMAGE_PAGES \
     ((VIBTANIUM_EFI_STACK_BASE - VIBTANIUM_EFI_APP_BASE) / EFI_PAGE_SIZE)
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
@@ -212,6 +214,15 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
         },
     },
     {
+        .kind = EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
+        .range = {
+            .type = EFI_CONVENTIONAL_MEMORY,
+            .address = EFI_IA64_LOADER_WINDOW_BASE,
+            .pages = EFI_IA64_LOADER_WINDOW_PAGES,
+            .attributes = EFI_MEMORY_WB,
+        },
+    },
+    {
         .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
         .range = {
             .type = EFI_BOOT_SERVICES_DATA,
@@ -221,9 +232,9 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
         },
     },
     {
-        .kind = EFI_MEMORY_MAP_RECORD_DIRECT,
+        .kind = EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
         .range = {
-            .type = EFI_BOOT_SERVICES_DATA,
+            .type = EFI_CONVENTIONAL_MEMORY,
             .address = EFI_PAGE_ALLOC_BASE,
             .pages = EFI_PAGE_ALLOC_SIZE / EFI_PAGE_SIZE,
             .attributes = EFI_MEMORY_WB,
@@ -243,7 +254,7 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
         .range = {
             .type = EFI_CONVENTIONAL_MEMORY,
             .address = EFI_HIGH_CONVENTIONAL_BASE,
-            .pages = EFI_HIGH_CONVENTIONAL_PAGES,
+            .pages = 0,
             .attributes = EFI_MEMORY_WB,
         },
     },
@@ -272,6 +283,7 @@ static char *efi_boot_media_name;
 static bool efi_boot_media_valid;
 static uint64_t efi_pool_next = VIBTANIUM_EFI_POOL_BASE;
 static uint64_t efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
+static uint64_t efi_guest_ram_top = EFI_DEFAULT_GUEST_RAM_TOP;
 static uint64_t efi_memory_map_key = 1;
 static uint64_t efi_dynamic_handle_next = UINT64_C(0x00073000);
 static uint64_t efi_next_event_handle = VIBTANIUM_EFI_CON_IN_WAIT_EVENT + 1;
@@ -474,6 +486,32 @@ static bool efi_memory_map_trace_enabled(void)
     return enabled != 0;
 }
 
+static uint64_t efi_ram_top(void)
+{
+    return efi_guest_ram_top;
+}
+
+static uint64_t efi_high_conventional_pages(void)
+{
+    uint64_t ram_top = efi_ram_top();
+
+    if (ram_top <= EFI_HIGH_CONVENTIONAL_BASE) {
+        return 0;
+    }
+    return (ram_top - EFI_HIGH_CONVENTIONAL_BASE) / EFI_PAGE_SIZE;
+}
+
+void vibtanium_efi_set_guest_ram_size(uint64_t ram_size)
+{
+    uint64_t ram_top = ram_size & ~(EFI_PAGE_SIZE - 1);
+
+    if (ram_top == 0) {
+        ram_top = EFI_DEFAULT_GUEST_RAM_TOP;
+    }
+    efi_guest_ram_top = ram_top;
+    efi_memory_map_key++;
+}
+
 void vibtanium_efi_set_linux_cmdline_append(const char *append)
 {
     g_autofree char *trimmed = append ? g_strdup(append) : NULL;
@@ -526,17 +564,17 @@ static IA64LinuxAppendResult ia64_try_apply_linux_cmdline_append(
 
     boot_param = ia64_read_gr(env, 28);
     if (boot_param == 0 || (boot_param & 7) != 0 ||
-        boot_param + 8 > EFI_GUEST_RAM_TOP) {
+        boot_param + 8 > efi_ram_top()) {
         return IA64_LINUX_APPEND_NOT_READY;
     }
 
     command_line = cpu_ldq_le_data_ra(env, boot_param, GETPC());
-    if (command_line == 0 || command_line >= EFI_GUEST_RAM_TOP) {
+    if (command_line == 0 || command_line >= efi_ram_top()) {
         return IA64_LINUX_APPEND_NOT_READY;
     }
 
     existing = g_string_new(NULL);
-    for (unsigned i = 0; i < 1024 && command_line + i < EFI_GUEST_RAM_TOP; i++) {
+    for (unsigned i = 0; i < 1024 && command_line + i < efi_ram_top(); i++) {
         uint8_t ch = cpu_ldub_data_ra(env, command_line + i, GETPC());
 
         if (ch == 0) {
@@ -917,9 +955,11 @@ static uint64_t efi_pool_alloc_raw(uint64_t size)
 {
     uint64_t address = QEMU_ALIGN_UP(efi_pool_next, 16);
     uint64_t next = QEMU_ALIGN_UP(address + MAX(size, UINT64_C(1)), 16);
+    uint64_t pool_end = MIN(VIBTANIUM_EFI_POOL_BASE + VIBTANIUM_EFI_POOL_SIZE,
+                            efi_ram_top());
 
     if (next < address ||
-        next > VIBTANIUM_EFI_POOL_BASE + VIBTANIUM_EFI_POOL_SIZE) {
+        next > pool_end) {
         return 0;
     }
 
@@ -982,13 +1022,18 @@ static bool efi_page_range_usable(uint64_t address, uint64_t pages)
         return true;
     }
     if (efi_page_range_in_region(address, pages,
+                                 EFI_IA64_LOADER_WINDOW_BASE,
+                                 EFI_IA64_LOADER_WINDOW_PAGES)) {
+        return true;
+    }
+    if (efi_page_range_in_region(address, pages,
                                  EFI_LOW_CONVENTIONAL_BASE,
                                  EFI_LOW_CONVENTIONAL_PAGES)) {
         return true;
     }
     return efi_page_range_in_region(address, pages,
                                     EFI_HIGH_CONVENTIONAL_BASE,
-                                    EFI_HIGH_CONVENTIONAL_PAGES);
+                                    efi_high_conventional_pages());
 }
 
 static bool efi_page_range_available(uint64_t address, uint64_t pages)
@@ -996,7 +1041,7 @@ static bool efi_page_range_available(uint64_t address, uint64_t pages)
     uint64_t end;
 
     if (!efi_page_range_end(address, pages, &end) ||
-        end > EFI_GUEST_RAM_TOP || !efi_page_range_usable(address, pages)) {
+        end > efi_ram_top() || !efi_page_range_usable(address, pages)) {
         return false;
     }
 
@@ -1073,7 +1118,8 @@ static bool efi_find_free_pages(uint64_t pages, uint64_t max_address,
         uint64_t pages;
     } regions[] = {
         { EFI_PAGE_ALLOC_BASE, EFI_PAGE_ALLOC_SIZE / EFI_PAGE_SIZE },
-        { EFI_HIGH_CONVENTIONAL_BASE, EFI_HIGH_CONVENTIONAL_PAGES },
+        { EFI_HIGH_CONVENTIONAL_BASE, 0 },
+        { EFI_IA64_LOADER_WINDOW_BASE, EFI_IA64_LOADER_WINDOW_PAGES },
         { EFI_LOW_CONVENTIONAL_BASE, EFI_LOW_CONVENTIONAL_PAGES },
     };
     uint64_t allocation_end;
@@ -1084,10 +1130,16 @@ static bool efi_find_free_pages(uint64_t pages, uint64_t max_address,
 
     for (unsigned region = 0; region < ARRAY_SIZE(regions); region++) {
         uint64_t region_base = regions[region].base;
-        uint64_t region_end = region_base + regions[region].pages * EFI_PAGE_SIZE;
-        uint64_t limit_end = region_end;
+        uint64_t region_pages = regions[region].pages;
+        uint64_t region_end;
+        uint64_t limit_end;
         uint64_t cursor = region_base;
 
+        if (region_base == EFI_HIGH_CONVENTIONAL_BASE) {
+            region_pages = efi_high_conventional_pages();
+        }
+        region_end = region_base + region_pages * EFI_PAGE_SIZE;
+        limit_end = region_end;
         if (region == 0) {
             cursor = MAX(QEMU_ALIGN_UP(efi_page_alloc_next, EFI_PAGE_SIZE),
                          region_base);
@@ -1123,7 +1175,7 @@ static uint64_t efi_allocate_pages(CPUIA64State *env)
     uint64_t memory = ia64_read_gr(env, 35);
     uint32_t recorded_type;
     uint64_t address;
-    uint64_t max_address = EFI_GUEST_RAM_TOP - 1;
+    uint64_t max_address = efi_ram_top() - 1;
 
     if (memory == 0 || pages == 0) {
         return VIBTANIUM_EFI_INVALID_PARAMETER;
@@ -1187,14 +1239,35 @@ static uint64_t efi_free_pages(CPUIA64State *env)
     return VIBTANIUM_EFI_INVALID_PARAMETER;
 }
 
+static bool efi_memory_type_is_ram_backed(uint32_t type)
+{
+    return type != EFI_MEMORY_MAPPED_IO &&
+           type != EFI_MEMORY_MAPPED_IO_PORT_SPACE;
+}
+
 static unsigned efi_emit_memory_descriptor(CPUIA64State *env, uint64_t map,
                                            unsigned index,
                                            const EfiMemoryRange *range)
 {
+    EfiMemoryRange emitted = *range;
+    uint64_t end;
     uint64_t descriptor;
 
-    if (range->pages == 0) {
+    if (emitted.pages == 0) {
         return index;
+    }
+
+    if (efi_memory_type_is_ram_backed(emitted.type)) {
+        if (!efi_page_range_end(emitted.address, emitted.pages, &end) ||
+            emitted.address >= efi_ram_top()) {
+            return index;
+        }
+        if (end > efi_ram_top()) {
+            emitted.pages = (efi_ram_top() - emitted.address) / EFI_PAGE_SIZE;
+            if (emitted.pages == 0) {
+                return index;
+            }
+        }
     }
 
     if (map != 0) {
@@ -1202,16 +1275,16 @@ static unsigned efi_emit_memory_descriptor(CPUIA64State *env, uint64_t map,
             fprintf(stderr,
                     "[efi-map] index=%u type=%u phys=0x%016" PRIx64
                     " pages=0x%016" PRIx64 " attr=0x%016" PRIx64 "\n",
-                    index, range->type, range->address, range->pages,
-                    range->attributes);
+                    index, emitted.type, emitted.address, emitted.pages,
+                    emitted.attributes);
         }
         descriptor = map + index * EFI_MEMORY_DESCRIPTOR_SIZE;
-        efi_guest_stl(env, descriptor, range->type);
+        efi_guest_stl(env, descriptor, emitted.type);
         efi_guest_stl(env, descriptor + 4, 0);
-        efi_guest_stq(env, descriptor + 8, range->address);
+        efi_guest_stq(env, descriptor + 8, emitted.address);
         efi_guest_stq(env, descriptor + 16, 0);
-        efi_guest_stq(env, descriptor + 24, range->pages);
-        efi_guest_stq(env, descriptor + 32, range->attributes);
+        efi_guest_stq(env, descriptor + 24, emitted.pages);
+        efi_guest_stq(env, descriptor + 32, emitted.attributes);
     }
 
     return index + 1;
@@ -1357,9 +1430,15 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
                                                &record->range);
             break;
         case EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT:
-            index = efi_emit_split_conventional(env, map, index,
-                                                record->range.address,
-                                                record->range.pages);
+            if (record->range.address == EFI_HIGH_CONVENTIONAL_BASE) {
+                index = efi_emit_split_conventional(
+                    env, map, index, record->range.address,
+                    efi_high_conventional_pages());
+            } else {
+                index = efi_emit_split_conventional(env, map, index,
+                                                    record->range.address,
+                                                    record->range.pages);
+            }
             break;
         case EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER:
             index = efi_emit_runtime_and_loader(env, map, index,
@@ -2245,7 +2324,7 @@ static uint64_t efi_load_image(CPUIA64State *env)
 
     pages = QEMU_ALIGN_UP(probe.size, EFI_PAGE_SIZE) / EFI_PAGE_SIZE;
     vibtanium_efi_image_destroy(&probe);
-    if (!efi_find_free_pages(pages, EFI_GUEST_RAM_TOP - 1, &load_base)) {
+    if (!efi_find_free_pages(pages, efi_ram_top() - 1, &load_base)) {
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
     }
 

@@ -51,7 +51,7 @@ typedef struct MemoryRegion MemoryRegion;
 #define VIBTANIUM_EFI_STACK_SIZE        UINT64_C(0x00040000)
 #define VIBTANIUM_EFI_BACKING_STORE_BASE UINT64_C(0x01f40000)
 #define VIBTANIUM_EFI_BACKING_STORE_SIZE UINT64_C(0x00040000)
-#define VIBTANIUM_EFI_POOL_BASE         UINT64_C(0x02000000)
+#define VIBTANIUM_EFI_POOL_BASE         UINT64_C(0x08000000)
 #define VIBTANIUM_EFI_POOL_SIZE         UINT64_C(0x01000000)
 
 #define VIBTANIUM_EFI_BOOT_SERVICE_COUNT    43
@@ -208,6 +208,7 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
 bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
 void vibtanium_efi_register_loaded_image(uint64_t image_base,
                                          uint64_t image_size);
+void vibtanium_efi_set_guest_ram_size(uint64_t ram_size);
 void vibtanium_efi_register_boot_media(
     const struct VibtaniumEfiBlockDevice *boot_media);
 void vibtanium_efi_set_linux_cmdline_append(const char *append);

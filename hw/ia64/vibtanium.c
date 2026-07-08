@@ -947,6 +947,7 @@ static void vibtanium_init(MachineState *machine)
                      (uint64_t)VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET);
         exit(1);
     }
+    vibtanium_efi_set_guest_ram_size(machine->ram_size);
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
     vms->iosapic = qdev_new(TYPE_IA64_IOSAPIC);
     ia64_iosapic_set_cpu(IA64_IOSAPIC(vms->iosapic), vms->cpu);
