@@ -6,6 +6,7 @@
 #include "qapi/error.h"
 #include "cpu.h"
 #include "exception.h"
+#include "flight-recorder.h"
 #include "insn.h"
 #include "mem.h"
 #include "perf.h"
@@ -158,6 +159,7 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
     IA64_PERF_INC(IA64_PERF_INTERRUPT_DELIVERED);
+    ia64_diag_record_external_interrupt(env, interrupt_request);
     ia64_deliver_exception(env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env->ip,
                            MMU_DATA_LOAD, "external interrupt");
     return true;

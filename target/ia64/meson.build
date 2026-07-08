@@ -4,6 +4,7 @@ ia64_ss.add(files(
   'cpu.c',
   'debug-trace.c',
   'exception.c',
+  'flight-recorder.c',
   'firmware-hook.c',
   'insn.c',
   'interp.c',

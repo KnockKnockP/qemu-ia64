@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "exception.h"
+#include "flight-recorder.h"
 #include "insn.h"
 #include "mem.h"
 #include "perf.h"
@@ -405,6 +406,9 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     env->cr[IA64_CR_IIP] &= ~0xfULL;
 
 trace:
+    ia64_diag_record_exception(env, ia64_exception_name(kind), source_ip,
+                               address, env->exception.vector, old_psr);
+    ia64_diag_check_kernel_low_stack(env, "exception-delivery");
     trace_ia64_exception_deliver(ia64_exception_name(kind), source_ip,
                                  address, env->exception.vector, env->ip,
                                  env->cr[IA64_CR_IPSR],

@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "exception.h"
+#include "flight-recorder.h"
 #include "fpu/softfloat.h"
 #include "insn.h"
 #include "mem.h"
@@ -6752,6 +6753,7 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
 
         trace_ia64_rfi(bundle_ip, target, env->cr[IA64_CR_IPSR],
                        env->cr[IA64_CR_IFS], env->psr, env->cfm);
+        ia64_diag_record_rfi(env, bundle_ip, target);
         ia64_trace_user_rfi(env, bundle_ip, target);
         if (ia64_exception_trace_enabled()) {
             fprintf(stderr,

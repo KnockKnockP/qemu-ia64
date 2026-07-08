@@ -27,6 +27,7 @@
 #include "system/memory.h"
 #include "system/reset.h"
 #include "system/system.h"
+#include "target/ia64/flight-recorder.h"
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
 #include "vibtanium-internal.h"
@@ -497,13 +498,17 @@ static bool vibtanium_cache_boot_media(const VibtaniumEfiBlockDevice *src,
     return true;
 }
 
-static void vibtanium_write_guest_blob(const char *name,
+static void vibtanium_write_guest_blob(CPUIA64State *env, const char *name,
                                        hwaddr addr,
                                        const void *data,
                                        size_t size,
                                        size_t clear_size)
 {
     MemTxResult result;
+    bool live_cpu = !vibtanium_efi_cpu_is_pristine_for_handoff(env);
+
+    ia64_diag_record_firmware_write(env, name, addr, size, clear_size,
+                                    live_cpu);
 
     result = address_space_write(&address_space_memory, addr,
                                  MEMTXATTRS_UNSPECIFIED, data, size);
@@ -559,11 +564,17 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     }
 
     if (!vibtanium_efi_cpu_is_pristine_for_handoff(&vms->cpu->env)) {
+        ia64_diag_record_efi_commit(&vms->cpu->env, "skip-live-cpu",
+                                    image->source_path, image->load_base,
+                                    image->size);
         warn_report("vibtanium EFI image commit skipped because CPU state "
                     "is already initialized");
         return;
     }
 
+    ia64_diag_record_efi_commit(&vms->cpu->env, "begin",
+                                image->source_path, image->load_base,
+                                image->size);
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
                                                       image, boot_media,
                                                       &firmware_options);
@@ -571,13 +582,17 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     vibtanium_efi_register_boot_media(boot_media);
     vibtanium_efi_register_loaded_image(image->load_base, image->size);
     vibtanium_efi_set_linux_cmdline_append(linux_append);
-    vibtanium_write_guest_blob("vibtanium.efi-tables",
+    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-tables",
                                VIBTANIUM_EFI_BLOB_BASE, firmware_blob,
                                firmware_blob_size, VIBTANIUM_EFI_BLOB_SIZE);
-    vibtanium_write_guest_blob("vibtanium.efi-app", image->load_base,
+    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-app",
+                               image->load_base,
                                image->data, image->size, image->size);
     if (!vibtanium_efi_prepare_cpu(&vms->cpu->env, image)) {
         warn_report("vibtanium EFI CPU handoff skipped unexpectedly");
+    } else {
+        ia64_diag_record_efi_handoff(&vms->cpu->env, image->source_path,
+                                     image->entry, image->global_pointer);
     }
 
     warn_report("%s", image->message);
