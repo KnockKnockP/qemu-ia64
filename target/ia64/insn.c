@@ -1180,6 +1180,31 @@ static void ia64_write_fr_natval(CPUIA64State *env, uint32_t reg)
     ia64_write_fr_parts(env, reg, false, IA64_FR_NATVAL_EXPONENT, 0);
 }
 
+static uint32_t ia64_float_packed_high32(uint64_t value)
+{
+    return value >> 32;
+}
+
+static uint32_t ia64_float_packed_low32(uint64_t value)
+{
+    return value;
+}
+
+static uint64_t ia64_float_packed_pair(uint32_t high, uint32_t low)
+{
+    return ((uint64_t)high << 32) | low;
+}
+
+static uint32_t ia64_float_packed_negate_single(uint32_t value)
+{
+    return value ^ UINT32_C(0x80000000);
+}
+
+static uint32_t ia64_float_packed_extend_single_sign(uint32_t value)
+{
+    return (value & UINT32_C(0x80000000)) != 0 ? UINT32_MAX : 0;
+}
+
 static void ia64_write_fr_from_ieee_bits(CPUIA64State *env, uint32_t reg,
                                          bool sign, uint32_t exponent,
                                          uint32_t max_exponent,
@@ -5323,7 +5348,11 @@ bool ia64_slot_is_f_misc(IA64SlotType type, uint64_t raw)
 
     return x6 == 0x01 ||
            (x6 >= 0x10 && x6 <= 0x12) ||
-           (x6 >= 0x18 && x6 <= 0x1c);
+           (x6 >= 0x18 && x6 <= 0x1c) ||
+           x6 == 0x28 ||
+           (x6 >= 0x2c && x6 <= 0x2f) ||
+           (x6 >= 0x34 && x6 <= 0x36) ||
+           (x6 >= 0x39 && x6 <= 0x3d);
 }
 
 bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
@@ -5348,6 +5377,111 @@ bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
     f3 = (raw >> 20) & 0x7f;
 
     if (x6 == 0x01) {
+        return true;
+    }
+
+    if (x6 == 0x28 ||
+        (x6 >= 0x2c && x6 <= 0x2f) ||
+        (x6 >= 0x34 && x6 <= 0x36) ||
+        (x6 >= 0x39 && x6 <= 0x3d)) {
+        const IA64FloatReg *source2_reg;
+        const IA64FloatReg *source3_reg;
+        uint64_t source2_sig;
+        uint64_t source3_sig;
+        uint64_t result;
+
+        if (f1 >= IA64_FR_COUNT || f1 < 2 ||
+            f2 >= IA64_FR_COUNT || f3 >= IA64_FR_COUNT) {
+            return true;
+        }
+
+        source2_reg = &env->fr[ia64_map_fr(env, f2)];
+        source3_reg = &env->fr[ia64_map_fr(env, f3)];
+        if (ia64_fr_is_natval(source2_reg) ||
+            ia64_fr_is_natval(source3_reg)) {
+            ia64_write_fr_natval(env, f1);
+            return true;
+        }
+
+        source2_sig = source2_reg->raw[0];
+        source3_sig = source3_reg->raw[0];
+        switch (x6) {
+        case 0x28:
+            result = ia64_float_packed_pair(
+                ia64_read_fr_as_single_bits(source2_reg),
+                ia64_read_fr_as_single_bits(source3_reg));
+            break;
+        case 0x2c:
+            result = source2_sig & source3_sig;
+            break;
+        case 0x2d:
+            result = source2_sig & ~source3_sig;
+            break;
+        case 0x2e:
+            result = source2_sig | source3_sig;
+            break;
+        case 0x2f:
+            result = source2_sig ^ source3_sig;
+            break;
+        case 0x34:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_low32(source3_sig),
+                ia64_float_packed_high32(source2_sig));
+            break;
+        case 0x35:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_negate_single(
+                    ia64_float_packed_low32(source3_sig)),
+                ia64_float_packed_high32(source2_sig));
+            break;
+        case 0x36:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_low32(source3_sig),
+                ia64_float_packed_negate_single(
+                    ia64_float_packed_high32(source2_sig)));
+            break;
+        case 0x39:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_high32(source2_sig),
+                ia64_float_packed_low32(source3_sig));
+            break;
+        case 0x3a:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_low32(source2_sig),
+                ia64_float_packed_low32(source3_sig));
+            break;
+        case 0x3b:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_high32(source2_sig),
+                ia64_float_packed_high32(source3_sig));
+            break;
+        case 0x3c:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_extend_single_sign(
+                    ia64_float_packed_low32(source2_sig)),
+                ia64_float_packed_low32(source3_sig));
+            break;
+        case 0x3d:
+            result = ia64_float_packed_pair(
+                ia64_float_packed_extend_single_sign(
+                    ia64_float_packed_high32(source2_sig)),
+                ia64_float_packed_high32(source3_sig));
+            break;
+        default:
+            return false;
+        }
+
+        ia64_write_fr_significand(env, f1, result);
+        if (ia64_fpu_trace_enabled(env)) {
+            fprintf(stderr,
+                    "[ia64-fpu] packed-misc ip=0x%016" PRIx64
+                    " raw=0x%011" PRIx64 " x6=0x%02x f%u=f%u,f%u"
+                    " source2=0x%016" PRIx64 " source3=0x%016" PRIx64
+                    " result=0x%016" PRIx64 "\n",
+                    env->ip, raw, x6, f1, f2, f3, source2_sig,
+                    source3_sig, result);
+            ia64_fpu_trace_fr("packed-misc.result", env, raw, f1);
+        }
         return true;
     }
 

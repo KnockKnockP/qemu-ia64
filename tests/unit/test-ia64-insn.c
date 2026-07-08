@@ -2662,6 +2662,20 @@ static uint64_t fma_slot_raw(uint8_t major, bool x, uint8_t sf,
            ((uint64_t)f1 << 6);
 }
 
+static uint64_t f_misc_slot_raw(uint8_t x6, uint8_t f1,
+                                uint8_t f2, uint8_t f3)
+{
+    return ((uint64_t)x6 << 27) |
+           ((uint64_t)f3 << 20) |
+           ((uint64_t)f2 << 13) |
+           ((uint64_t)f1 << 6);
+}
+
+static uint64_t test_pair32(uint32_t high, uint32_t low)
+{
+    return ((uint64_t)high << 32) | low;
+}
+
 static void test_f_unit_fma_double_completer_rounds_result(void)
 {
     const uint64_t fnorm_d_s0_f7_f7_raw =
@@ -2785,6 +2799,77 @@ static void test_f_unit_misc_unsigned_trunc_conversion(void)
     g_assert_true(ia64_slot_is_f_misc(IA64_SLOT_TYPE_F, fcvt_f10_f10_raw));
     g_assert_true(ia64_exec_f_misc(&env, fcvt_f10_f10_raw));
     g_assert_cmphex(env.fr[10].raw[0], ==, 123);
+    g_assert_cmphex(env.fr[10].raw[1], ==, 0x1003e);
+}
+
+static void test_f_unit_misc_fsxt_r_frontier(void)
+{
+    const uint64_t fsxt_r_f6_f7_f7_raw = 0x001e070e180ULL;
+    CPUIA64State env;
+
+    g_assert_cmphex(fsxt_r_f6_f7_f7_raw, ==,
+                    f_misc_slot_raw(0x3c, 6, 7, 7));
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.fr[7].raw[0] = UINT64_C(0x11223344800000aa);
+    env.fr[7].raw[1] = 0x1003e;
+
+    g_assert_true(ia64_slot_is_f_misc(IA64_SLOT_TYPE_F,
+                                      fsxt_r_f6_f7_f7_raw));
+    g_assert_true(ia64_exec_f_misc(&env, fsxt_r_f6_f7_f7_raw));
+    g_assert_cmphex(env.fr[6].raw[0], ==,
+                    UINT64_C(0xffffffff800000aa));
+    g_assert_cmphex(env.fr[6].raw[1], ==, 0x1003e);
+}
+
+static void test_f_unit_misc_packed_data_family(void)
+{
+    static const struct {
+        uint8_t x6;
+        uint64_t expected;
+    } cases[] = {
+        { 0x2c, UINT64_C(0x11223344800000aa) &
+                UINT64_C(0x556677887fffff55) },
+        { 0x2d, UINT64_C(0x11223344800000aa) &
+                ~UINT64_C(0x556677887fffff55) },
+        { 0x2e, UINT64_C(0x11223344800000aa) |
+                UINT64_C(0x556677887fffff55) },
+        { 0x2f, UINT64_C(0x11223344800000aa) ^
+                UINT64_C(0x556677887fffff55) },
+        { 0x34, UINT64_C(0x7fffff5511223344) },
+        { 0x35, UINT64_C(0xffffff5511223344) },
+        { 0x36, UINT64_C(0x7fffff5591223344) },
+        { 0x39, UINT64_C(0x112233447fffff55) },
+        { 0x3a, UINT64_C(0x800000aa7fffff55) },
+        { 0x3b, UINT64_C(0x1122334455667788) },
+        { 0x3c, UINT64_C(0xffffffff7fffff55) },
+        { 0x3d, UINT64_C(0x0000000055667788) },
+    };
+    CPUIA64State env;
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(cases); i++) {
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        env.fr[8].raw[0] = UINT64_C(0x11223344800000aa);
+        env.fr[8].raw[1] = 0x1003e;
+        env.fr[9].raw[0] = UINT64_C(0x556677887fffff55);
+        env.fr[9].raw[1] = 0x1003e;
+
+        g_assert_true(ia64_slot_is_f_misc(
+                          IA64_SLOT_TYPE_F,
+                          f_misc_slot_raw(cases[i].x6, 10, 8, 9)));
+        g_assert_true(ia64_exec_f_misc(
+                          &env,
+                          f_misc_slot_raw(cases[i].x6, 10, 8, 9)));
+        g_assert_cmphex(env.fr[10].raw[0], ==, cases[i].expected);
+        g_assert_cmphex(env.fr[10].raw[1], ==, 0x1003e);
+    }
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_fr_from_single_bits(&env, 8, 0x3f800000);
+    ia64_write_fr_from_single_bits(&env, 9, 0xc0200000);
+    g_assert_true(ia64_exec_f_misc(&env, f_misc_slot_raw(0x28, 10, 8, 9)));
+    g_assert_cmphex(env.fr[10].raw[0], ==,
+                    test_pair32(0x3f800000, 0xc0200000));
     g_assert_cmphex(env.fr[10].raw[1], ==, 0x1003e);
 }
 
@@ -4154,6 +4239,10 @@ int main(int argc, char **argv)
                     test_f_unit_unsigned_mod_helper_keeps_64bit_precision);
     g_test_add_func("/ia64-insn/f-unit-misc-unsigned-trunc-conversion",
                     test_f_unit_misc_unsigned_trunc_conversion);
+    g_test_add_func("/ia64-insn/f-unit-misc-fsxt-r-frontier",
+                    test_f_unit_misc_fsxt_r_frontier);
+    g_test_add_func("/ia64-insn/f-unit-misc-packed-data-family",
+                    test_f_unit_misc_packed_data_family);
     g_test_add_func("/ia64-insn/f-unit-misc-noop",
                     test_f_unit_misc_noop);
     g_test_add_func("/ia64-insn/ldst-immediate-decode",
