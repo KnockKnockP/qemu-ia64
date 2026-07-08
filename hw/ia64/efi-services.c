@@ -38,6 +38,7 @@ enum {
 #define EFI_MAX_FILE_HANDLES 64
 #define EFI_MAX_EVENTS 64
 #define EFI_MAX_PAGE_ALLOCATIONS 64
+#define EFI_MAX_LOADED_IMAGES 8
 #define EFI_MAX_PATH_CHARS 512
 #define EFI_MAX_VAR_NAME_CHARS 1024
 #define EFI_MAX_VARIABLE_DATA_SIZE (1024 * 1024)
@@ -124,6 +125,16 @@ typedef struct EfiPageAllocation {
     uint64_t pages;
     uint32_t type;
 } EfiPageAllocation;
+
+typedef struct EfiChildImage {
+    bool in_use;
+    uint64_t handle;
+    uint64_t loaded_image;
+    uint64_t file_path;
+    uint64_t pages;
+    VibtaniumEfiImage image;
+    char path[EFI_MAX_PATH_CHARS];
+} EfiChildImage;
 
 typedef struct EfiMemoryRange {
     uint32_t type;
@@ -269,6 +280,8 @@ static EfiInstalledProtocol efi_installed_protocols[EFI_MAX_INSTALLED_PROTOCOLS]
 static EfiGuestFile efi_guest_files[EFI_MAX_FILE_HANDLES];
 static EfiGuestEvent efi_guest_events[EFI_MAX_EVENTS];
 static EfiPageAllocation efi_page_allocations[EFI_MAX_PAGE_ALLOCATIONS];
+static EfiChildImage efi_child_images[EFI_MAX_LOADED_IMAGES];
+static EfiChildImage *efi_pending_start_image;
 
 #define EFI_INPUT_QUEUE_LENGTH 32
 
@@ -379,6 +392,7 @@ static const uint8_t efi_graphics_output_guid[16] = {
 };
 
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 
 typedef enum IA64LinuxAppendResult {
     IA64_LINUX_APPEND_NOT_READY,
@@ -1014,6 +1028,39 @@ static bool efi_record_page_allocation(uint64_t address, uint64_t pages,
     return false;
 }
 
+static EfiChildImage *efi_find_child_image(uint64_t handle)
+{
+    for (unsigned i = 0; i < EFI_MAX_LOADED_IMAGES; i++) {
+        if (efi_child_images[i].in_use &&
+            efi_child_images[i].handle == handle) {
+            return &efi_child_images[i];
+        }
+    }
+    return NULL;
+}
+
+static bool efi_loaded_image_handle_valid(uint64_t handle)
+{
+    return handle == VIBTANIUM_EFI_IMAGE_HANDLE ||
+           efi_find_child_image(handle) != NULL;
+}
+
+static EfiChildImage *efi_alloc_child_image(void)
+{
+    for (unsigned i = 0; i < EFI_MAX_LOADED_IMAGES; i++) {
+        EfiChildImage *child = &efi_child_images[i];
+
+        if (!child->in_use) {
+            memset(child, 0, sizeof(*child));
+            child->in_use = true;
+            child->handle = efi_dynamic_handle_next++;
+            return child;
+        }
+    }
+
+    return NULL;
+}
+
 static bool efi_find_free_pages(uint64_t pages, uint64_t max_address,
                                 uint64_t *address)
 {
@@ -1404,7 +1451,7 @@ static uint64_t efi_exit_boot_services(CPUIA64State *env)
     uint64_t image_handle = ia64_read_gr(env, 32);
     uint64_t map_key = ia64_read_gr(env, 33);
 
-    if (image_handle != VIBTANIUM_EFI_IMAGE_HANDLE ||
+    if (!efi_loaded_image_handle_valid(image_handle) ||
         map_key != efi_memory_map_key) {
         trace_ia64_efi_exit_boot_services(env->ip, image_handle, map_key,
                                           efi_memory_map_key,
@@ -1429,6 +1476,11 @@ void vibtanium_efi_register_boot_media(
     memset(efi_installed_protocols, 0, sizeof(efi_installed_protocols));
     memset(efi_guest_events, 0, sizeof(efi_guest_events));
     memset(efi_page_allocations, 0, sizeof(efi_page_allocations));
+    for (unsigned i = 0; i < EFI_MAX_LOADED_IMAGES; i++) {
+        vibtanium_efi_image_destroy(&efi_child_images[i].image);
+        memset(&efi_child_images[i], 0, sizeof(efi_child_images[i]));
+    }
+    efi_pending_start_image = NULL;
     efi_pool_next = VIBTANIUM_EFI_POOL_BASE;
     efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
     efi_memory_map_key = 1;
@@ -1456,9 +1508,16 @@ void vibtanium_efi_register_boot_media(
 static uint64_t efi_preinstalled_interface(uint64_t handle,
                                            const uint8_t guid[16])
 {
+    EfiChildImage *child;
+
     if (handle == VIBTANIUM_EFI_IMAGE_HANDLE &&
         efi_guid_bytes_equal(guid, efi_loaded_image_guid)) {
         return VIBTANIUM_EFI_LOADED_IMAGE;
+    }
+
+    child = efi_find_child_image(handle);
+    if (child && efi_guid_bytes_equal(guid, efi_loaded_image_guid)) {
+        return child->loaded_image;
     }
 
     if (handle != VIBTANIUM_EFI_BOOT_DEVICE_HANDLE) {
@@ -1575,6 +1634,12 @@ static unsigned efi_locate_handles_for_protocol(CPUIA64State *env,
     if (efi_guid_bytes_equal(guid, efi_loaded_image_guid)) {
         efi_add_unique_handle(handles, capacity, &count,
                               VIBTANIUM_EFI_IMAGE_HANDLE);
+        for (unsigned i = 0; i < EFI_MAX_LOADED_IMAGES; i++) {
+            if (efi_child_images[i].in_use) {
+                efi_add_unique_handle(handles, capacity, &count,
+                                      efi_child_images[i].handle);
+            }
+        }
     }
 
     if (efi_guid_bytes_equal(guid, efi_simple_text_output_guid) ||
@@ -1898,6 +1963,33 @@ static void efi_read_utf16_path(CPUIA64State *env, uint64_t address,
     out[n] = '\0';
 }
 
+static void efi_read_utf16_path_bounded(CPUIA64State *env, uint64_t address,
+                                        unsigned max_chars, char *out,
+                                        size_t out_size)
+{
+    size_t n = 0;
+
+    if (out_size == 0) {
+        return;
+    }
+
+    for (unsigned i = 0; i < max_chars && n + 1 < out_size; i++) {
+        uint16_t ch = cpu_lduw_le_data_ra(env, address + i * 2, GETPC());
+
+        if (ch == 0) {
+            break;
+        }
+        if (ch == '\\') {
+            out[n++] = '/';
+        } else if (ch < 0x80) {
+            out[n++] = ch;
+        } else {
+            out[n++] = '?';
+        }
+    }
+    out[n] = '\0';
+}
+
 static void efi_join_normalized_path(const char *base, const char *name,
                                      char *out, size_t out_size)
 {
@@ -1947,6 +2039,48 @@ static void efi_join_normalized_path(const char *base, const char *name,
     g_strfreev(parts);
 }
 
+static bool efi_device_path_file_path(CPUIA64State *env, uint64_t device_path,
+                                      char *out, size_t out_size)
+{
+    bool found = false;
+
+    if (out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (device_path == 0) {
+        return false;
+    }
+
+    for (unsigned node = 0; node < 64; node++) {
+        uint8_t type = efi_guest_ldb(env, device_path);
+        uint8_t subtype = efi_guest_ldb(env, device_path + 1);
+        uint16_t length = efi_guest_ldw(env, device_path + 2);
+
+        if (length < 4) {
+            return false;
+        }
+        if (type == 0x7f) {
+            return found;
+        }
+        if (type == 0x04 && subtype == 0x04) {
+            char segment[EFI_MAX_PATH_CHARS];
+            char joined[EFI_MAX_PATH_CHARS];
+
+            efi_read_utf16_path_bounded(env, device_path + 4,
+                                        (length - 4) / 2, segment,
+                                        sizeof(segment));
+            efi_join_normalized_path(out, segment, joined, sizeof(joined));
+            g_strlcpy(out, joined, out_size);
+            found = out[0] != '\0';
+        }
+
+        device_path += length;
+    }
+
+    return found;
+}
+
 static const char *efi_file_base_name(const char *path)
 {
     const char *slash;
@@ -1967,6 +2101,254 @@ static void efi_write_utf16_ascii(CPUIA64State *env, uint64_t address,
         address += 2;
     }
     efi_guest_stw(env, address, 0);
+}
+
+static void efi_write_loaded_image_protocol(CPUIA64State *env,
+                                            uint64_t address,
+                                            const VibtaniumEfiImage *image,
+                                            uint64_t parent_handle,
+                                            uint64_t file_path)
+{
+    for (unsigned i = 0; i < 96; i++) {
+        efi_guest_stb(env, address + i, 0);
+    }
+
+    efi_guest_stl(env, address, 0x1000);
+    efi_guest_stq(env, address + 8, parent_handle);
+    efi_guest_stq(env, address + 16, VIBTANIUM_EFI_SYSTEM_TABLE);
+    efi_guest_stq(env, address + 24, VIBTANIUM_EFI_BOOT_DEVICE_HANDLE);
+    efi_guest_stq(env, address + 32, file_path);
+    efi_guest_stq(env, address + 64, image->load_base);
+    efi_guest_stq(env, address + 72, image->size);
+    efi_guest_stl(env, address + 80, EFI_LOADER_CODE);
+    efi_guest_stl(env, address + 84, EFI_LOADER_DATA);
+}
+
+static uint64_t efi_load_image_read_source(CPUIA64State *env,
+                                           uint64_t device_path,
+                                           uint64_t source_buffer,
+                                           uint64_t source_size,
+                                           uint8_t **file_data,
+                                           size_t *file_size,
+                                           char *source,
+                                           size_t source_size_chars,
+                                           char *path,
+                                           size_t path_size)
+{
+    if (file_data) {
+        *file_data = NULL;
+    }
+    if (file_size) {
+        *file_size = 0;
+    }
+    if (path_size != 0) {
+        path[0] = '\0';
+    }
+
+    if (source_buffer != 0 || source_size != 0) {
+        if (source_buffer == 0 || source_size == 0 ||
+            source_size > EFI_MAX_FILE_READ_BYTES) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+        *file_data = g_malloc(source_size);
+        efi_guest_read_bytes(env, source_buffer, *file_data, source_size);
+        *file_size = source_size;
+        g_strlcpy(source, "<source-buffer>", source_size_chars);
+        return VIBTANIUM_EFI_SUCCESS;
+    }
+
+    if (!efi_boot_media_valid ||
+        !efi_device_path_file_path(env, device_path, path, path_size)) {
+        return VIBTANIUM_EFI_NOT_FOUND;
+    }
+
+    {
+        char storage_path[EFI_MAX_PATH_CHARS + 2];
+        VibtaniumEfiStorageReport report = {
+            .status = VIBTANIUM_EFI_STORAGE_NOT_FOUND,
+            .message = "path has not been opened",
+        };
+        Error *local_err = NULL;
+
+        g_snprintf(storage_path, sizeof(storage_path), "/%s", path);
+        if (!vibtanium_efi_media_read_path(&efi_boot_media, storage_path,
+                                           file_data, file_size, source,
+                                           source_size_chars, &report,
+                                           &local_err)) {
+            uint64_t status = efi_storage_status_to_efi(report.status);
+
+            if (efi_trace_enabled()) {
+                fprintf(stderr,
+                        "[efi-load-image] path='%s' status=%s reason=%s\n",
+                        storage_path,
+                        vibtanium_efi_storage_status_name(report.status),
+                        report.message);
+            }
+            error_free(local_err);
+            return status;
+        }
+    }
+
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static uint64_t efi_load_image(CPUIA64State *env)
+{
+    uint64_t parent_handle = ia64_read_gr(env, 33);
+    uint64_t device_path = ia64_read_gr(env, 34);
+    uint64_t source_buffer = ia64_read_gr(env, 35);
+    uint64_t source_size = ia64_read_gr(env, 36);
+    uint64_t image_handle_out = efi_arg(env, 5);
+    g_autofree uint8_t *file_data = NULL;
+    size_t file_size = 0;
+    char source[384];
+    char path[EFI_MAX_PATH_CHARS];
+    VibtaniumEfiImage probe;
+    VibtaniumEfiImage loaded;
+    EfiChildImage *child;
+    Error *local_err = NULL;
+    uint64_t status;
+    uint64_t pages;
+    uint64_t load_base;
+
+    memset(&probe, 0, sizeof(probe));
+    memset(&loaded, 0, sizeof(loaded));
+    source[0] = '\0';
+    path[0] = '\0';
+
+    if (image_handle_out == 0 || parent_handle == 0) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+    efi_guest_stq(env, image_handle_out, 0);
+
+    status = efi_load_image_read_source(env, device_path, source_buffer,
+                                        source_size, &file_data, &file_size,
+                                        source, sizeof(source), path,
+                                        sizeof(path));
+    if (status != VIBTANIUM_EFI_SUCCESS) {
+        return status;
+    }
+
+    if (!vibtanium_efi_image_from_buffer(source, file_data, file_size, 0,
+                                         &probe, &local_err)) {
+        if (efi_trace_enabled()) {
+            fprintf(stderr, "[efi-load-image] %s\n",
+                    error_get_pretty(local_err));
+        }
+        error_free(local_err);
+        return VIBTANIUM_EFI_LOAD_ERROR;
+    }
+
+    pages = QEMU_ALIGN_UP(probe.size, EFI_PAGE_SIZE) / EFI_PAGE_SIZE;
+    vibtanium_efi_image_destroy(&probe);
+    if (!efi_find_free_pages(pages, EFI_GUEST_RAM_TOP - 1, &load_base)) {
+        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    local_err = NULL;
+    if (!vibtanium_efi_image_from_buffer(source, file_data, file_size,
+                                         load_base, &loaded, &local_err)) {
+        if (efi_trace_enabled()) {
+            fprintf(stderr, "[efi-load-image] %s\n",
+                    error_get_pretty(local_err));
+        }
+        error_free(local_err);
+        return VIBTANIUM_EFI_LOAD_ERROR;
+    }
+
+    pages = QEMU_ALIGN_UP(loaded.size, EFI_PAGE_SIZE) / EFI_PAGE_SIZE;
+    if (!efi_page_range_available(loaded.load_base, pages)) {
+        vibtanium_efi_image_destroy(&loaded);
+        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    child = efi_alloc_child_image();
+    if (!child) {
+        vibtanium_efi_image_destroy(&loaded);
+        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    child->loaded_image = efi_pool_alloc_raw(96);
+    if (child->loaded_image == 0) {
+        memset(child, 0, sizeof(*child));
+        vibtanium_efi_image_destroy(&loaded);
+        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    if (!efi_record_page_allocation(loaded.load_base, pages, EFI_LOADER_CODE)) {
+        vibtanium_efi_image_destroy(&loaded);
+        memset(child, 0, sizeof(*child));
+        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    efi_guest_write_bytes(env, loaded.load_base, loaded.data, loaded.size);
+    child->pages = pages;
+    child->file_path = device_path;
+    child->image = loaded;
+    g_strlcpy(child->path, path[0] ? path : source, sizeof(child->path));
+    efi_write_loaded_image_protocol(env, child->loaded_image, &child->image,
+                                    parent_handle, child->file_path);
+    efi_guest_stq(env, image_handle_out, child->handle);
+
+    warn_report("%s", child->image.message);
+    warn_report("vibtanium EFI LoadImage handle=0x%016" PRIx64
+                " parent=0x%016" PRIx64 " path=%s"
+                " loaded-image=0x%016" PRIx64,
+                child->handle, parent_handle, child->path,
+                child->loaded_image);
+    return VIBTANIUM_EFI_SUCCESS;
+}
+
+static void efi_enter_child_image(CPUIA64State *env, EfiChildImage *child)
+{
+    const VibtaniumEfiImage *image = &child->image;
+
+    warn_report("vibtanium EFI StartImage handle=0x%016" PRIx64
+                " entry=0x%016" PRIx64 " gp=0x%016" PRIx64
+                " path=%s",
+                child->handle, image->entry, image->global_pointer,
+                child->path);
+
+    env->ip = image->entry;
+    env->cr[IA64_CR_IIP] = image->entry;
+    env->psr |= IA64_PSR_BN_BIT;
+    env->pr = 1;
+    ia64_set_cfm(env, 0);
+    ia64_write_gr(env, 0, 0);
+    ia64_write_gr(env, 1, image->global_pointer);
+    ia64_write_gr(env, 12,
+                  VIBTANIUM_EFI_STACK_BASE + VIBTANIUM_EFI_STACK_SIZE - 16);
+    ia64_write_gr(env, 32, child->handle);
+    ia64_write_gr(env, 33, VIBTANIUM_EFI_SYSTEM_TABLE);
+
+    env->rse.bsp = VIBTANIUM_EFI_BACKING_STORE_BASE;
+    env->rse.bspstore = VIBTANIUM_EFI_BACKING_STORE_BASE;
+    env->rse.bsp_load = VIBTANIUM_EFI_BACKING_STORE_BASE;
+    env->ar[IA64_AR_BSP] = env->rse.bsp;
+    env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
+    env->ar[IA64_AR_PFS] = 0;
+    env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
+}
+
+static uint64_t efi_start_image(CPUIA64State *env)
+{
+    uint64_t image_handle = ia64_read_gr(env, 32);
+    uint64_t exit_data_size = ia64_read_gr(env, 33);
+    uint64_t exit_data = ia64_read_gr(env, 34);
+    EfiChildImage *child = efi_find_child_image(image_handle);
+
+    if (!child) {
+        return VIBTANIUM_EFI_INVALID_PARAMETER;
+    }
+    if (exit_data_size != 0) {
+        efi_guest_stq(env, exit_data_size, 0);
+    }
+    if (exit_data != 0) {
+        efi_guest_stq(env, exit_data, 0);
+    }
+
+    efi_pending_start_image = child;
+    return VIBTANIUM_EFI_SUCCESS;
 }
 
 static uint64_t efi_simplefs_open_volume(CPUIA64State *env)
@@ -2637,6 +3019,10 @@ static uint64_t efi_dispatch_boot_service(CPUIA64State *env, unsigned index)
         return efi_handle_protocol(env);
     case VIBTANIUM_EFI_BOOT_LOCATE_HANDLE_INDEX:
         return efi_locate_handle(env);
+    case VIBTANIUM_EFI_BOOT_LOAD_IMAGE_INDEX:
+        return efi_load_image(env);
+    case VIBTANIUM_EFI_BOOT_START_IMAGE_INDEX:
+        return efi_start_image(env);
     case VIBTANIUM_EFI_BOOT_EXIT_BOOT_SERVICES_INDEX:
         return efi_exit_boot_services(env);
     case VIBTANIUM_EFI_BOOT_OPEN_PROTOCOL_INDEX:
@@ -3337,6 +3723,7 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         return vibtanium_firmware_dispatch_gate(env, gate_ip);
     }
 
+    efi_pending_start_image = NULL;
     IA64_PERF_INC(IA64_PERF_FIRMWARE_EFI);
     if (service_index < EFI_RUNTIME_SERVICE_BASE) {
         result = efi_dispatch_boot_service(env,
@@ -3377,6 +3764,11 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
 
     ia64_write_gr(env, 8, result);
     efi_trace_service(env, service_index, result);
+    if (result == VIBTANIUM_EFI_SUCCESS && efi_pending_start_image) {
+        efi_enter_child_image(env, efi_pending_start_image);
+        efi_pending_start_image = NULL;
+        return true;
+    }
     ia64_return_from_call_frame(env, env->br[0]);
     return true;
 }

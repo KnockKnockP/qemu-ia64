@@ -22,6 +22,7 @@ typedef struct IsoRecord {
 } IsoRecord;
 
 typedef enum FatType {
+    FAT_TYPE_12,
     FAT_TYPE_16,
     FAT_TYPE_32,
 } FatType;
@@ -282,26 +283,58 @@ static void fat_lfn_prepend(char *name, size_t name_len, const char *segment)
 
 static const char *fat_type_name(const FatContext *fat)
 {
-    return fat->type == FAT_TYPE_32 ? "FAT32" : "FAT16";
+    switch (fat->type) {
+    case FAT_TYPE_12:
+        return "FAT12";
+    case FAT_TYPE_16:
+        return "FAT16";
+    case FAT_TYPE_32:
+    default:
+        return "FAT32";
+    }
 }
 
 static uint32_t fat_next_cluster(const FatContext *fat, uint32_t cluster)
 {
     if (cluster >= fat->cluster_count + 2) {
-        return fat->type == FAT_TYPE_32 ? 0x0fffffff : 0xffff;
+        switch (fat->type) {
+        case FAT_TYPE_12:
+            return 0x0fff;
+        case FAT_TYPE_16:
+            return 0xffff;
+        case FAT_TYPE_32:
+        default:
+            return 0x0fffffff;
+        }
     }
 
-    if (fat->type == FAT_TYPE_32) {
+    switch (fat->type) {
+    case FAT_TYPE_12:
+    {
+        uint32_t offset = cluster + cluster / 2;
+        uint16_t value = rd16(fat->fat + offset);
+
+        return cluster & 1 ? value >> 4 : value & 0x0fff;
+    }
+    case FAT_TYPE_16:
+        return rd16(fat->fat + cluster * 2);
+    case FAT_TYPE_32:
+    default:
         return rd32(fat->fat + (uint64_t)cluster * 4) & 0x0fffffff;
     }
-
-    return rd16(fat->fat + cluster * 2);
 }
 
 static bool fat_cluster_is_eoc(const FatContext *fat, uint32_t cluster)
 {
-    return fat->type == FAT_TYPE_32 ? cluster >= 0x0ffffff8
-                                    : cluster >= 0xfff8;
+    switch (fat->type) {
+    case FAT_TYPE_12:
+        return cluster >= 0x0ff8;
+    case FAT_TYPE_16:
+        return cluster >= 0xfff8;
+    case FAT_TYPE_32:
+    default:
+        return cluster >= 0x0ffffff8;
+    }
 }
 
 static uint64_t fat_cluster_offset(const FatContext *fat, uint32_t cluster)
@@ -389,15 +422,14 @@ static bool fat_init(FatContext *fat,
         fat->sectors_per_cluster;
 
     if (fat->cluster_count < 4085) {
-        error_setg(errp, "FAT cluster count %u is FAT12/unsupported",
-                   fat->cluster_count);
-        report_set(report, VIBTANIUM_EFI_STORAGE_UNSUPPORTED,
-                   "FAT cluster count %u is FAT12/unsupported",
-                   fat->cluster_count);
-        return false;
-    }
-
-    if (fat->cluster_count < 65525) {
+        fat->type = FAT_TYPE_12;
+        if (fat->root_entries == 0 || sectors_per_fat16 == 0) {
+            error_setg(errp, "FAT12 volume has no fixed root directory");
+            report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
+                       "FAT12 volume has no fixed root directory");
+            return false;
+        }
+    } else if (fat->cluster_count < 65525) {
         fat->type = FAT_TYPE_16;
         if (fat->root_entries == 0 || sectors_per_fat16 == 0) {
             error_setg(errp, "FAT16 volume has no fixed root directory");
@@ -431,8 +463,12 @@ static bool fat_init(FatContext *fat,
                    "%s table is too large", fat_type_name(fat));
         return false;
     }
-    min_fat_bytes = ((uint64_t)fat->cluster_count + 2) *
-                    (fat->type == FAT_TYPE_32 ? 4 : 2);
+    if (fat->type == FAT_TYPE_12) {
+        min_fat_bytes = (((uint64_t)fat->cluster_count + 2) * 3 + 1) / 2;
+    } else {
+        min_fat_bytes = ((uint64_t)fat->cluster_count + 2) *
+                        (fat->type == FAT_TYPE_32 ? 4 : 2);
+    }
     if (fat_bytes < min_fat_bytes) {
         error_setg(errp, "%s table is too small", fat_type_name(fat));
         report_set(report, VIBTANIUM_EFI_STORAGE_INVALID_FILESYSTEM,
@@ -522,7 +558,7 @@ static bool fat_load_directory(FatContext *fat,
 {
     *entries = g_byte_array_new();
 
-    if (root && fat->type == FAT_TYPE_16) {
+    if (root && fat->type != FAT_TYPE_32) {
         g_byte_array_set_size(*entries, fat->root_dir_size);
         if (!fat_read_bytes(fat, fat->root_dir_offset, fat->root_dir_size,
                             (*entries)->data, report, errp)) {
