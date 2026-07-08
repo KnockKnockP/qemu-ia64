@@ -1316,11 +1316,30 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
     return blob;
 }
 
-void vibtanium_efi_prepare_cpu(CPUIA64State *env,
+bool vibtanium_efi_cpu_is_pristine_for_handoff(const CPUIA64State *env)
+{
+    if (!env) {
+        return false;
+    }
+
+    return env->ip == 0 &&
+           env->cr[IA64_CR_IIP] == 0 &&
+           env->cr[IA64_CR_IVA] == 0 &&
+           env->gr[12] == 0 &&
+           env->rse.bsp == 0 &&
+           env->rse.bspstore == 0 &&
+           env->ar[IA64_AR_BSP] == 0 &&
+           env->ar[IA64_AR_BSPSTORE] == 0;
+}
+
+bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
                                const VibtaniumEfiImage *image)
 {
     if (!env || !image) {
-        return;
+        return false;
+    }
+    if (!vibtanium_efi_cpu_is_pristine_for_handoff(env)) {
+        return false;
     }
 
     env->ip = image->entry;
@@ -1343,6 +1362,7 @@ void vibtanium_efi_prepare_cpu(CPUIA64State *env,
     env->ar[IA64_AR_BSP] = env->rse.bsp;
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
+    return true;
 }
 
 const char *vibtanium_efi_status_name(uint64_t status)

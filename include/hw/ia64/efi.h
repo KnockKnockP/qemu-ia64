@@ -194,7 +194,8 @@ uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
 bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline);
 void vibtanium_efi_image_destroy(VibtaniumEfiImage *image);
 
-void vibtanium_efi_prepare_cpu(CPUIA64State *env,
+bool vibtanium_efi_cpu_is_pristine_for_handoff(const CPUIA64State *env);
+bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
                                const VibtaniumEfiImage *image);
 uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiImage *image,

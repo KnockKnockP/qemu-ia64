@@ -558,6 +558,12 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
         exit(1);
     }
 
+    if (!vibtanium_efi_cpu_is_pristine_for_handoff(&vms->cpu->env)) {
+        warn_report("vibtanium EFI image commit skipped because CPU state "
+                    "is already initialized");
+        return;
+    }
+
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
                                                       image, boot_media,
                                                       &firmware_options);
@@ -570,7 +576,9 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                                firmware_blob_size, VIBTANIUM_EFI_BLOB_SIZE);
     vibtanium_write_guest_blob("vibtanium.efi-app", image->load_base,
                                image->data, image->size, image->size);
-    vibtanium_efi_prepare_cpu(&vms->cpu->env, image);
+    if (!vibtanium_efi_prepare_cpu(&vms->cpu->env, image)) {
+        warn_report("vibtanium EFI CPU handoff skipped unexpectedly");
+    }
 
     warn_report("%s", image->message);
     warn_report("vibtanium EFI handoff image-handle=0x%016" PRIx64

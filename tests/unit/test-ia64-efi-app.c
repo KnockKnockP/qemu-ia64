@@ -240,7 +240,9 @@ static void test_prepare_cpu_entry_abi(void)
     g_assert_null(err);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
-    vibtanium_efi_prepare_cpu(&env, &image);
+    g_assert_true(vibtanium_efi_cpu_is_pristine_for_handoff(&env));
+    g_assert_true(vibtanium_efi_prepare_cpu(&env, &image));
+    g_assert_false(vibtanium_efi_cpu_is_pristine_for_handoff(&env));
 
     g_assert_cmphex(env.ip, ==,
                     VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
@@ -264,6 +266,61 @@ static void test_prepare_cpu_entry_abi(void)
                     VIBTANIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.ar[IA64_AR_KR0], ==, VIBTANIUM_IO_PORT_BASE);
     g_assert_cmphex(env.gr[0], ==, 0);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
+static void test_prepare_cpu_preserves_restored_state(void)
+{
+    const uint64_t live_ip = UINT64_C(0xa000000100012ba0);
+    const uint64_t live_iva = UINT64_C(0xa000000100000000);
+    const uint64_t live_gp = UINT64_C(0xa000000100bd2000);
+    const uint64_t live_sp = UINT64_C(0xa000000100bc7d80);
+    const uint64_t live_tp = UINT64_C(0xe00000000a818000);
+    const uint64_t live_bsp = UINT64_C(0xa000000100bc0f18);
+    const uint64_t live_bspstore = UINT64_C(0xa000000100bc0ed8);
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    VibtaniumEfiImage image;
+    CPUIA64State env;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64,
+                           VIBTANIUM_EFI_APP_BASE, false);
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic.efi", pe,
+                                                 sizeof(pe),
+                                                 VIBTANIUM_EFI_APP_BASE,
+                                                 &image, &err));
+    g_assert_null(err);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = live_ip;
+    env.cr[IA64_CR_IIP] = live_ip;
+    env.cr[IA64_CR_IVA] = live_iva;
+    ia64_write_gr(&env, 1, live_gp);
+    ia64_write_gr(&env, 12, live_sp);
+    ia64_write_gr(&env, 13, live_tp);
+    env.rse.bsp = live_bsp;
+    env.rse.bspstore = live_bspstore;
+    env.rse.bsp_load = live_bspstore;
+    env.ar[IA64_AR_BSP] = live_bsp;
+    env.ar[IA64_AR_BSPSTORE] = live_bspstore;
+    env.ar[IA64_AR_KR0] = UINT64_C(0xfeedface);
+    ia64_set_cfm(&env, ia64_make_cfm(43, 21, 5));
+
+    g_assert_false(vibtanium_efi_cpu_is_pristine_for_handoff(&env));
+    g_assert_false(vibtanium_efi_prepare_cpu(&env, &image));
+    g_assert_cmphex(env.ip, ==, live_ip);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, live_ip);
+    g_assert_cmphex(env.cr[IA64_CR_IVA], ==, live_iva);
+    g_assert_cmphex(env.gr[1], ==, live_gp);
+    g_assert_cmphex(ia64_read_gr(&env, 12), ==, live_sp);
+    g_assert_cmphex(ia64_read_gr(&env, 13), ==, live_tp);
+    g_assert_cmphex(env.rse.bsp, ==, live_bsp);
+    g_assert_cmphex(env.rse.bspstore, ==, live_bspstore);
+    g_assert_cmphex(env.ar[IA64_AR_BSP], ==, live_bsp);
+    g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==, live_bspstore);
+    g_assert_cmphex(env.ar[IA64_AR_KR0], ==, UINT64_C(0xfeedface));
+    g_assert_cmphex(env.cfm, ==, ia64_make_cfm(43, 21, 5));
 
     vibtanium_efi_image_destroy(&image);
 }
@@ -722,6 +779,8 @@ int main(int argc, char **argv)
                     test_rejects_non_ia64_pe);
     g_test_add_func("/ia64-efi-app/prepare-cpu-entry-abi",
                     test_prepare_cpu_entry_abi);
+    g_test_add_func("/ia64-efi-app/prepare-cpu-preserves-restored-state",
+                    test_prepare_cpu_preserves_restored_state);
     g_test_add_func("/ia64-efi-app/build-guest-firmware-tables",
                     test_builds_guest_firmware_tables);
     g_test_add_func("/ia64-efi-app/build-hcdp-serial-console-table",
