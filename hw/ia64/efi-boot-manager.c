@@ -397,6 +397,8 @@ static bool vibtanium_boot_choice_is_fallback(
 static void vibtanium_boot_manager_draw_maintenance(
     VibtaniumEfiBootManagerState *bm)
 {
+    const char *bit_hint;
+
     vibtanium_efi_console_set_attribute(VIBTANIUM_EFI_BOOT_MANAGER_ATTR);
     vibtanium_efi_console_enable_cursor(false);
     vibtanium_efi_console_clear();
@@ -447,11 +449,16 @@ static void vibtanium_boot_manager_draw_maintenance(
         }
     }
 
+    if (!vibtanium_builtin_bit_available()) {
+        bit_hint =
+            "Built In Test (BIT) not compiled in (-Dvibtanium_bit=false)";
+    } else if (bm->vms->built_in_test) {
+        bit_hint = "B: run Built In Test (BIT)";
+    } else {
+        bit_hint = "Built In Test (BIT) disabled by -M built-in-test=off";
+    }
     vibtanium_boot_manager_print_line(
-        18, VIBTANIUM_EFI_BOOT_MANAGER_MUTED,
-        bm->vms->built_in_test
-        ? "B: run Built In Test (BIT)"
-        : "Built In Test (BIT) disabled by -M built-in-test=off");
+        18, VIBTANIUM_EFI_BOOT_MANAGER_MUTED, "%s", bit_hint);
     vibtanium_boot_manager_print_line(
         19, VIBTANIUM_EFI_BOOT_MANAGER_MUTED,
         "A: add media fallback   R: remove NVRAM entry   E: edit NVRAM entry");
@@ -944,6 +951,12 @@ static void vibtanium_boot_manager_reorder_selected_nvram(
 
 static bool vibtanium_boot_manager_boot_bit(VibtaniumEfiBootManagerState *bm)
 {
+    if (!vibtanium_builtin_bit_available()) {
+        vibtanium_boot_manager_set_status(
+            bm, "Built In Test was not compiled into this QEMU build.");
+        return false;
+    }
+
     if (!bm->vms->built_in_test) {
         vibtanium_boot_manager_set_status(
             bm, "Built In Test is disabled by -M built-in-test=off.");

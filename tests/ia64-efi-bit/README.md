@@ -12,6 +12,10 @@ menu. Rebuild it after changing `bit.c`; `build.sh` also refreshes
 `hw/ia64/efi-bit-blob.c`, and both generated files must be committed with the
 source.
 
+The normal QEMU build does **not** require the IA-64 GCC toolchain. It compiles
+the committed `hw/ia64/efi-bit-blob.c` with the host compiler. The toolchain is
+only needed when you intentionally rebuild `bit.efi` from `bit.c`.
+
 ## Toolchain Setup
 
 Use an MSYS2 MINGW64 shell and keep the IA-64 tools in the standard local
@@ -67,7 +71,8 @@ another qemu (e.g. an OS install) is up.
 Useful overrides: `QEMU=`, `TIMEOUT=` (default 40s), `NVRAM=<file>` (attach a
 persistent EFI variable store), `BOOT_MODE=kernel` (old `-kernel bit.efi`
 path; media protocol checks require the default `BOOT_MODE=media`), and
-`NO_BUILD=1` (reuse the existing `bit.efi`).
+`SKIP_BIT_BUILD=1` (or the older `NO_BUILD=1`) to reuse the existing
+`bit.efi`.
 
 ## Firmware Menu
 
@@ -81,6 +86,18 @@ Disable the menu entry with:
 ```sh
 qemu-system-ia64 -M vibtanium,built-in-test=off ...
 ```
+
+Compile QEMU without the embedded BIT blob with either:
+
+```sh
+meson setup build-ia64-perf -Dvibtanium_bit=false ...
+# or, through QEMU's configure wrapper:
+../configure --disable-vibtanium-bit ...
+```
+
+With that build-time opt-out, QEMU does not compile or link `efi-bit.c` or
+`efi-bit-blob.c`; the emulator still boots normally, and the maintenance menu
+reports that BIT was not compiled in.
 
 ## Build pipeline
 

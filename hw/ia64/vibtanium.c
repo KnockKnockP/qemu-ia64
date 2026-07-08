@@ -9,7 +9,9 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
+#ifdef CONFIG_VIBTANIUM_BIT
 #include "hw/ia64/efi-bit.h"
+#endif
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/efi-vars.h"
@@ -673,6 +675,7 @@ bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
 bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
                                 MachineState *machine)
 {
+#ifdef CONFIG_VIBTANIUM_BIT
     Error *local_err = NULL;
     VibtaniumEfiImage image;
     VibtaniumEfiBlockDevice bit_media;
@@ -704,6 +707,20 @@ bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
     vibtanium_trace_loader_frontier(&image);
     vibtanium_efi_image_destroy(&image);
     return true;
+#else
+    (void)vms;
+    (void)machine;
+    return false;
+#endif
+}
+
+bool vibtanium_builtin_bit_available(void)
+{
+#ifdef CONFIG_VIBTANIUM_BIT
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
@@ -1027,6 +1044,12 @@ static void vibtanium_set_built_in_test(Object *obj, bool value, Error **errp)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
+    if (value && !vibtanium_builtin_bit_available()) {
+        error_setg(errp,
+                   "Built In Test was not compiled into this QEMU build");
+        return;
+    }
+
     vms->built_in_test = value;
 }
 
@@ -1100,7 +1123,7 @@ static void vibtanium_machine_instance_init(Object *obj)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
-    vms->built_in_test = true;
+    vms->built_in_test = vibtanium_builtin_bit_available();
 }
 
 static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
@@ -1131,7 +1154,8 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
                                    vibtanium_get_built_in_test,
                                    vibtanium_set_built_in_test);
     object_class_property_set_description(oc, "built-in-test",
-        "Expose the embedded IA-64 EFI Built In Test in the firmware menu");
+        "Expose the embedded IA-64 EFI Built In Test in the firmware menu "
+        "(requires a vibtanium_bit=true build)");
 
     object_class_property_add_bool(oc, "hcdp-serial-console",
                                    vibtanium_get_hcdp_serial_console,

@@ -11,7 +11,8 @@
 #   TIMEOUT     seconds to wait for the sentinel (default 40)
 #   NVRAM       optional path to a persistent EFI variable store (-M nvram=)
 #   BOOT_MODE   media (default, temp vvfat ESP) or kernel (old -kernel path)
-#   NO_BUILD=1  skip the build step and use the existing bit.efi
+#   SKIP_BIT_BUILD=1 or NO_BUILD=1
+#               skip the build step and use the existing bit.efi
 #
 set -uo pipefail
 
@@ -44,7 +45,8 @@ if [ -d "$MINGW_BIN" ]; then
 fi
 
 # --- build ---------------------------------------------------------------
-if [ "${NO_BUILD:-0}" != "1" ]; then
+skip_build="${SKIP_BIT_BUILD:-${NO_BUILD:-0}}"
+if [ "$skip_build" != "1" ]; then
     bash "$here/build.sh" >/dev/null
 fi
 EFI="$here/bit.efi"
