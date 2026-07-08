@@ -23,7 +23,8 @@ bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
     }
     pc &= IA64_REGION_OFFSET_MASK;
     if (pc == IA64_FIRMWARE_EFI_PAL_PROC ||
-        pc == IA64_FIRMWARE_EFI_SAL_PROC) {
+        pc == IA64_FIRMWARE_EFI_SAL_PROC ||
+        pc == IA64_FIRMWARE_EFI_START_IMAGE_RETURN_GATE) {
         return true;
     }
 

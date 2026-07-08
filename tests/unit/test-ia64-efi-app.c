@@ -633,6 +633,9 @@ static void test_builds_guest_firmware_tables(void)
                     !=, 0);
     g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_SAL_GP)),
                     ==, 0);
+    g_assert_cmphex(firmware_ptr(blob,
+                                 VIBTANIUM_EFI_START_IMAGE_RETURN_GATE)[0],
+                    !=, 0);
 
     g_assert_cmphex(load_le32(firmware_ptr(blob, VIBTANIUM_EFI_HCDP_TABLE)),
                     ==, 0);

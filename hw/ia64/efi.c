@@ -1448,6 +1448,8 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
     for (unsigned i = 0; i < EFI_SERVICE_DESCRIPTOR_COUNT; i++) {
         write_service_descriptor(blob, VIBTANIUM_EFI_BLOB_SIZE, i);
     }
+    write_return_gate(blob, VIBTANIUM_EFI_BLOB_SIZE,
+                      VIBTANIUM_EFI_START_IMAGE_RETURN_GATE);
 
     write_loaded_image(blob, VIBTANIUM_EFI_BLOB_SIZE, image);
     write_console_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE);
