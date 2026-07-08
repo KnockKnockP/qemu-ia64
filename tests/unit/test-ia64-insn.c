@@ -2893,6 +2893,12 @@ static void test_ldst_immediate_decode(void)
     const uint64_t elilo_ld8_r16_r33_8_raw = 0x0a0c2110400ULL;
     const uint64_t elilo_ld8_r17_r33_8_raw = 0x0a0c2110440ULL;
     const uint64_t elilo_ld8_r16_r33_advanced_raw = 0x082c2100400ULL;
+    const uint64_t ld8_s_r16_r33_raw =
+        (0x4ULL << 37) | (((1ULL << 2) | 3ULL) << 30) |
+        (33ULL << 20) | (16ULL << 6);
+    const uint64_t ld8_sa_r16_r33_raw =
+        (0x4ULL << 37) | (((3ULL << 2) | 3ULL) << 30) |
+        (33ULL << 20) | (16ULL << 6);
     const uint64_t ld8_c_clr_r16_r33_raw =
         (0x4ULL << 37) | (((8ULL << 2) | 3ULL) << 30) |
         (33ULL << 20) | (16ULL << 6);
@@ -2936,6 +2942,20 @@ static void test_ldst_immediate_decode(void)
     g_assert_false(decoded.base_update);
 
     g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                             ld8_s_r16_r33_raw,
+                                             &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.memory_class, ==, 1);
+
+    g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                             ld8_sa_r16_r33_raw,
+                                             &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.memory_class, ==, 3);
+
+    g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
                                              ld8_c_clr_r16_r33_raw,
                                              &decoded));
     g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
@@ -2970,6 +2990,21 @@ static void test_ldst_immediate_decode(void)
     g_assert_true(decoded.base_update);
     g_assert_false(decoded.update_from_register);
     g_assert_cmpint(decoded.immediate, ==, -16);
+}
+
+static void test_general_register_write_clears_nat(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_gr_nat(&env, 22, true);
+    g_assert_true(ia64_read_gr_nat(&env, 22));
+
+    ia64_write_gr(&env, 22, 0x1234);
+    g_assert_false(ia64_read_gr_nat(&env, 22));
+
+    ia64_write_gr_nat(&env, 0, true);
+    g_assert_false(ia64_read_gr_nat(&env, 0));
 }
 
 static void test_alat_check_load_helpers(void)
@@ -4247,6 +4282,8 @@ int main(int argc, char **argv)
                     test_f_unit_misc_noop);
     g_test_add_func("/ia64-insn/ldst-immediate-decode",
                     test_ldst_immediate_decode);
+    g_test_add_func("/ia64-insn/gr-write-clears-nat",
+                    test_general_register_write_clears_nat);
     g_test_add_func("/ia64-insn/alat-check-load-helpers",
                     test_alat_check_load_helpers);
     g_test_add_func("/ia64-insn/m-unit-atomic-decode",

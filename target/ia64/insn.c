@@ -51,8 +51,6 @@
 #define IA64_TPR_MIC_MASK UINT64_C(0xf0)
 #define IA64_TPR_MMI_BIT UINT64_C(0x0000000000010000)
 
-static bool ia64_read_gr_nat(CPUIA64State *env, uint32_t reg);
-
 static uint64_t ia64_default_region_register(unsigned index)
 {
     return ((uint64_t)(index & 0x00ffffff) << 8) | (UINT64_C(12) << 2);
@@ -776,6 +774,7 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
     if (!env || reg >= IA64_GR_COUNT || reg == 0) {
         if (env) {
             env->gr[0] = 0;
+            env->nat.gr_nat[0] &= ~1ULL;
         }
         return;
     }
@@ -792,6 +791,7 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
         env->rse.stacked_gr[slot] = value;
         env->rse.clean_count = MIN(env->rse.clean_count, slot);
     }
+    ia64_write_gr_nat(env, reg, false);
     ia64_alat_invalidate_gr(env, reg);
     env->gr[0] = 0;
 }
@@ -6019,12 +6019,28 @@ static bool ia64_compare_matches(uint64_t left, uint64_t right,
     }
 }
 
-static bool ia64_read_gr_nat(CPUIA64State *env, uint32_t reg)
+bool ia64_read_gr_nat(CPUIA64State *env, uint32_t reg)
 {
     if (!env || reg >= IA64_GR_COUNT) {
         return false;
     }
     return (env->nat.gr_nat[reg / 64] & (1ULL << (reg % 64))) != 0;
+}
+
+void ia64_write_gr_nat(CPUIA64State *env, uint32_t reg, bool nat)
+{
+    uint64_t bit;
+
+    if (!env || reg >= IA64_GR_COUNT) {
+        return;
+    }
+
+    bit = UINT64_C(1) << (reg % 64);
+    if (nat && reg != 0) {
+        env->nat.gr_nat[reg / 64] |= bit;
+    } else {
+        env->nat.gr_nat[reg / 64] &= ~bit;
+    }
 }
 
 static void ia64_apply_predicate_pair_write(CPUIA64State *env,

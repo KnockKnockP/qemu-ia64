@@ -15,6 +15,8 @@
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
 #define IA64_PSR_RT_BIT   UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_PTE_P_BIT    UINT64_C(0x0000000000000001)
+#define IA64_PTE_A_BIT    UINT64_C(0x0000000000000020)
 #define IA64_PSR_DELIVERY_CLEARED_MASK \
     (IA64_PSR_I_BIT | IA64_PSR_IC_BIT | IA64_PSR_RI_MASK | \
      IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK)
@@ -75,6 +77,32 @@ static void test_physical_region_alias_path(void)
     g_assert_nonnull(strstr(result.message, "physical mode region-bit strip"));
     g_assert_cmphex(env.memory.last_vaddr, ==, alias);
     g_assert_cmpint(env.memory.last_status, ==, IA64_TRANSLATE_OK);
+}
+
+static void test_instruction_translation_reports_exception_deferral(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr address = 0x4000;
+    uint64_t itir = test_rr(0x11, 12, false);
+    uint64_t pte = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                   (3ULL << 9) | (1ULL << 52) | 0x200000;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_TB_PSR_IT_BIT;
+    env.rr[0] = test_rr(0x11, 12, false);
+
+    g_assert_true(ia64_install_translation(&env, true, false, 0, address,
+                                           pte, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                         IA64_MMU_INST_CPL0, true,
+                                         &result));
+    g_assert_true(result.exception_deferral);
+
+    env.psr = 0;
+    g_assert_true(ia64_translate_address(&env, 0x1000, MMU_DATA_LOAD,
+                                         0, true, &result));
+    g_assert_false(result.exception_deferral);
 }
 
 static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
@@ -1002,6 +1030,8 @@ int main(int argc, char **argv)
                     test_identity_debug_memory_path);
     g_test_add_func("/ia64-memory/physical-region-alias",
                     test_physical_region_alias_path);
+    g_test_add_func("/ia64-memory/instruction-exception-deferral",
+                    test_instruction_translation_reports_exception_deferral);
     g_test_add_func("/ia64-memory/tcg-tb-flags-mmu-index-cpl",
                     test_tcg_tb_flags_and_mmu_indexes_include_cpl);
     g_test_add_func("/ia64-memory/translated-miss",

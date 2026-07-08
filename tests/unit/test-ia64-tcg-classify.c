@@ -717,7 +717,7 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     const uint64_t ld8_r2_r3_8_raw = make_ldst_load_update_raw(3, 2, 3, 8);
     const uint64_t ld8_r16_r17_raw = make_ldst_load_raw(3, 16, 17);
     const uint64_t ld8_acq_r22_r23_raw =
-        make_ldst_load_class_raw(1, 3, 22, 23);
+        make_ldst_load_class_raw(5, 3, 22, 23);
     const uint64_t st8_r4_r5_raw = make_ldst_store_raw(3, 4, 5);
     const uint64_t st8_rel_r6_r7_raw =
         make_ldst_store_class_raw(0x0d, 3, 6, 7);
@@ -823,8 +823,10 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
     const uint64_t ld8_advanced_r2_r3_raw =
         (4ULL << 37) | ((uint64_t)((2 << 2) | 3) << 30) |
         (3ULL << 20) | (2ULL << 6);
+    const uint64_t ld8_speculative_r2_r3_raw =
+        make_ldst_load_class_raw(1, 3, 2, 3);
     const uint64_t ld8_sa_r24_r25_raw =
-        make_ldst_load_class_raw(8, 3, 24, 25);
+        make_ldst_load_class_raw(3, 3, 24, 25);
     IA64DecodedBundle bundle;
     IA64TcgFastBundle fast;
 
@@ -857,6 +859,11 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
                     ==, IA64_TCG_FALLBACK_FAST_LDST_DEPENDENCY);
 
     bundle = make_bundle(0x00, ld8_advanced_r2_r3_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_true(ia64_tcg_bundle_has_ldst_immediate(&bundle));
+
+    bundle = make_bundle(0x00, ld8_speculative_r2_r3_raw,
                          IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
     g_assert_true(ia64_tcg_bundle_has_ldst_immediate(&bundle));

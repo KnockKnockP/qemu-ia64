@@ -261,16 +261,15 @@ static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
 {
     switch (memory_class) {
     case 0:
-    case 1:
     case 4:
     case 5:
     case 6:
         return true;
     default:
         /*
-         * Advanced loads (classes 2/3) and check loads (classes 8/9/A) need
-         * ALAT state handling around the target write, so leave them on the
-         * interpreter path for now.
+         * Control-speculative loads (classes 1/3), advanced loads (2/3), and
+         * check loads (8/9/A) need NaT/ALAT handling around the target write,
+         * so leave them on the interpreter path for now.
          */
         return false;
     }

@@ -29,6 +29,7 @@ typedef struct IA64TranslateResult {
     bool debug;
     bool identity;
     bool vhpt_enabled;
+    bool exception_deferral;
     char message[160];
 } IA64TranslateResult;
 

@@ -270,6 +270,8 @@ uint32_t ia64_rse_load_restored_frame(CPUIA64State *env, uint32_t count,
                                       void *opaque);
 uint64_t ia64_read_gr(CPUIA64State *env, uint32_t reg);
 void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value);
+bool ia64_read_gr_nat(CPUIA64State *env, uint32_t reg);
+void ia64_write_gr_nat(CPUIA64State *env, uint32_t reg, bool nat);
 bool ia64_read_pr(CPUIA64State *env, uint32_t predicate);
 void ia64_write_pr(CPUIA64State *env, uint32_t predicate, bool value);
 void ia64_itc_sync(CPUIA64State *env);

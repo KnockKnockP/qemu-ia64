@@ -965,6 +965,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         result->paddr = 0;
         result->prot = 0;
         result->identity = false;
+        result->exception_deferral = false;
         result->message[0] = '\0';
     }
     result->vaddr = address;
@@ -1024,6 +1025,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
     result->paddr = entry->paddr_base | (address & ia64_page_mask(entry->page_size));
     result->prot = ia64_entry_prot(entry);
     result->identity = result->paddr == address;
+    result->exception_deferral = entry->exception_deferral;
 
     if (!entry->present) {
         result->status = IA64_TRANSLATE_NOT_PRESENT;
