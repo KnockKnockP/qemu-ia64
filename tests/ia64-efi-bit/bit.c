@@ -1,5 +1,5 @@
 /*
- * IA-64 in-emulator EFI self-test application.
+ * IA-64 in-emulator EFI BIT application.
  *
  * Boots as an EFI image under the vibtanium firmware and exercises the EFI
  * service families implemented by hw/ia64/efi-services.c from inside the
@@ -48,6 +48,8 @@ typedef int bool;
 #define VIBTANIUM_EFI_CON_OUT 0x00081000UL
 #define VIBTANIUM_FRAMEBUFFER_WIDTH 640UL
 #define VIBTANIUM_FRAMEBUFFER_HEIGHT 400UL
+#define BIT_MEDIA_TEXT "vibtanium-bit-ok"
+#define BIT_MEDIA_TEXT_LEN (sizeof(BIT_MEDIA_TEXT) - 1)
 
 #define BS_RAISE_TPL 0
 #define BS_RESTORE_TPL 1
@@ -339,7 +341,7 @@ static const EfiGuid graphics_output_guid = {
     0x9042a9deU, 0x23dcU, 0x4a38U,
     { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a },
 };
-static const EfiGuid selftest_variable_guid = {
+static const EfiGuid bit_variable_guid = {
     0x8be4df61U, 0x93caU, 0x11d2U,
     { 0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x99 },
 };
@@ -353,12 +355,12 @@ static CHAR16 conout_probe[] = {
     'b', 'e', '\r', '\n', 0
 };
 static CHAR16 empty_string[] = { 0 };
-static CHAR16 selftest_var_name[] = {
-    'V', 'i', 'b', 'S', 'e', 'l', 'f', 'T', 'e', 's', 't', 'C', 0
+static CHAR16 bit_var_name[] = {
+    'V', 'i', 'b', 'B', 'I', 'T', 'C', 0
 };
 static CHAR16 media_asset_path[] = {
-    '\\', 'E', 'F', 'I', '\\', 'B', 'O', 'O', 'T', '\\', 'S', 'E', 'L', 'F',
-    'T', 'E', 'S', 'T', '.', 'T', 'X', 'T', 0
+    '\\', 'E', 'F', 'I', '\\', 'B', 'O', 'O', 'T', '\\', 'B', 'I', 'T',
+    '.', 'T', 'X', 'T', 0
 };
 static CHAR16 media_self_path[] = {
     '\\', 'E', 'F', 'I', '\\', 'B', 'O', 'O', 'T', '\\', 'B', 'O', 'O', 'T',
@@ -848,14 +850,14 @@ static bool test_runtime_services(void)
                     EFI_SUCCESS);
 
     ok &= check("efi RuntimeServices Set/GetVariable",
-                call5(rt->fn[RT_SET_VARIABLE], (uint64_t)selftest_var_name,
-                      (uint64_t)&selftest_variable_guid,
+                call5(rt->fn[RT_SET_VARIABLE], (uint64_t)bit_var_name,
+                      (uint64_t)&bit_variable_guid,
                       EFI_VARIABLE_NON_VOLATILE |
                       EFI_VARIABLE_BOOTSERVICE_ACCESS |
                       EFI_VARIABLE_RUNTIME_ACCESS,
                       sizeof(data), (uint64_t)data) == EFI_SUCCESS &&
-                call5(rt->fn[RT_GET_VARIABLE], (uint64_t)selftest_var_name,
-                      (uint64_t)&selftest_variable_guid, (uint64_t)&attrs,
+                call5(rt->fn[RT_GET_VARIABLE], (uint64_t)bit_var_name,
+                      (uint64_t)&bit_variable_guid, (uint64_t)&attrs,
                       (uint64_t)&out_size, (uint64_t)out) == EFI_SUCCESS &&
                 attrs == (EFI_VARIABLE_NON_VOLATILE |
                           EFI_VARIABLE_BOOTSERVICE_ACCESS |
@@ -865,8 +867,8 @@ static bool test_runtime_services(void)
 
     out_size = 4;
     ok &= check("efi RuntimeServices GetVariable buffer-too-small",
-                call5(rt->fn[RT_GET_VARIABLE], (uint64_t)selftest_var_name,
-                      (uint64_t)&selftest_variable_guid, 0,
+                call5(rt->fn[RT_GET_VARIABLE], (uint64_t)bit_var_name,
+                      (uint64_t)&bit_variable_guid, 0,
                       (uint64_t)&out_size, (uint64_t)out) ==
                     EFI_BUFFER_TOO_SMALL &&
                 out_size == sizeof(data));
@@ -901,8 +903,8 @@ static bool test_runtime_services(void)
                        call4(rt->fn[RT_RESET_SYSTEM], 0, 0, 0, 0),
                        EFI_SUCCESS);
 
-    call5(rt->fn[RT_SET_VARIABLE], (uint64_t)selftest_var_name,
-          (uint64_t)&selftest_variable_guid, 0, 0, 0);
+    call5(rt->fn[RT_SET_VARIABLE], (uint64_t)bit_var_name,
+          (uint64_t)&bit_variable_guid, 0, 0, 0);
     return ok;
 }
 
@@ -1114,8 +1116,8 @@ static bool test_file_protocol(EfiSimpleFileSystemProtocol *simplefs)
                  call3(file->fn[FILE_READ], (uint64_t)file,
                        (uint64_t)&size, (uint64_t)file_buffer) ==
                     EFI_SUCCESS) &&
-                size >= 19 &&
-                ascii_prefix_equal(file_buffer, "vibtanium-media-ok"));
+                size >= BIT_MEDIA_TEXT_LEN &&
+                ascii_prefix_equal(file_buffer, BIT_MEDIA_TEXT));
 
     if (file) {
         size = 0;
@@ -1130,10 +1132,11 @@ static bool test_file_protocol(EfiSimpleFileSystemProtocol *simplefs)
                      call4(file->fn[FILE_GET_INFO], (uint64_t)file,
                            (uint64_t)&file_info_guid, (uint64_t)&size,
                            (uint64_t)file_info_buffer) == EFI_SUCCESS) &&
-                    (*(uint64_t *)(file_info_buffer + 8)) >= 19 &&
+                    (*(uint64_t *)(file_info_buffer + 8)) >=
+                        BIT_MEDIA_TEXT_LEN &&
                     call2(file->fn[FILE_GET_POSITION], (uint64_t)file,
                           (uint64_t)&pos) == EFI_SUCCESS &&
-                    pos >= 19 &&
+                    pos >= BIT_MEDIA_TEXT_LEN &&
                     call2(file->fn[FILE_SET_POSITION], (uint64_t)file, 0) ==
                         EFI_SUCCESS &&
                     (size = 4,
@@ -1152,7 +1155,7 @@ static bool test_file_protocol(EfiSimpleFileSystemProtocol *simplefs)
         call1(file->fn[FILE_CLOSE], (uint64_t)file);
     }
 
-    ok &= check("efi File->Open self image",
+    ok &= check("efi File->Open BIT image",
                 call5(root->fn[FILE_OPEN], (uint64_t)root,
                       (uint64_t)&self, (uint64_t)media_self_path,
                       EFI_FILE_MODE_READ, 0) == EFI_SUCCESS &&
@@ -1198,7 +1201,7 @@ void efi_main(uint64_t image_handle, EfiSystemTable *system_table)
     g_st = system_table;
     g_conout = system_table ? system_table->con_out : NULL;
 
-    puts_ascii("vibtanium efi self-test: start\r\n");
+    puts_ascii("vibtanium efi BIT: start\r\n");
     check("ia64 opcode smoke", opcode_smoke());
     test_system_table();
     test_conout();
@@ -1212,8 +1215,8 @@ void efi_main(uint64_t image_handle, EfiSystemTable *system_table)
     test_runtime_services();
 
     if (g_fail_count == 0) {
-        puts_ascii("VIBTANIUM-SELFTEST-RESULT: ALL PASS\r\n");
+        puts_ascii("VIBTANIUM-BIT-RESULT: ALL PASS\r\n");
     } else {
-        puts_ascii("VIBTANIUM-SELFTEST-RESULT: FAILURES\r\n");
+        puts_ascii("VIBTANIUM-BIT-RESULT: FAILURES\r\n");
     }
 }

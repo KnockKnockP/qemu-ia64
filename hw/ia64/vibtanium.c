@@ -9,6 +9,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
+#include "hw/ia64/efi-bit.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/efi-vars.h"
@@ -669,6 +670,42 @@ bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
     return true;
 }
 
+bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
+                                MachineState *machine)
+{
+    Error *local_err = NULL;
+    VibtaniumEfiImage image;
+    VibtaniumEfiBlockDevice bit_media;
+
+    if (!vms->built_in_test) {
+        return false;
+    }
+
+    if (!vibtanium_efi_image_from_buffer("vibtanium-bit.efi",
+                                         vibtanium_efi_bit_blob,
+                                         vibtanium_efi_bit_blob_size,
+                                         VIBTANIUM_EFI_APP_BASE, &image,
+                                         &local_err)) {
+        error_reportf_err(local_err, "could not load embedded IA-64 BIT: ");
+        return false;
+    }
+
+    if (!vibtanium_efi_bit_media_device(&bit_media, &local_err)) {
+        error_reportf_err(local_err,
+                          "could not build embedded IA-64 BIT media: ");
+        vibtanium_efi_image_destroy(&image);
+        return false;
+    }
+
+    warn_report("vibtanium EFI boot manager selected embedded BIT "
+                "image-bytes=%zu media-bytes=%" PRIu64,
+                vibtanium_efi_bit_blob_size, bit_media.size);
+    vibtanium_commit_efi_image(vms, machine, &image, &bit_media);
+    vibtanium_trace_loader_frontier(&image);
+    vibtanium_efi_image_destroy(&image);
+    return true;
+}
+
 bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
                                  MachineState *machine,
                                  VibtaniumEfiBlockDevice *dev,
@@ -979,6 +1016,20 @@ static void vibtanium_set_efi_auto_enter(Object *obj, bool value, Error **errp)
     vms->efi_auto_enter = value;
 }
 
+static bool vibtanium_get_built_in_test(Object *obj, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    return vms->built_in_test;
+}
+
+static void vibtanium_set_built_in_test(Object *obj, bool value, Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    vms->built_in_test = value;
+}
+
 static bool vibtanium_get_hcdp_serial_console(Object *obj, Error **errp)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
@@ -1045,6 +1096,13 @@ static void vibtanium_machine_finalize(Object *obj)
     g_free(vms->efi_boot_manager);
 }
 
+static void vibtanium_machine_instance_init(Object *obj)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    vms->built_in_test = true;
+}
+
 static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -1069,6 +1127,12 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "efi-auto-enter",
         "Queue one EFI Simple Text Input Enter key at firmware reset");
 
+    object_class_property_add_bool(oc, "built-in-test",
+                                   vibtanium_get_built_in_test,
+                                   vibtanium_set_built_in_test);
+    object_class_property_set_description(oc, "built-in-test",
+        "Expose the embedded IA-64 EFI Built In Test in the firmware menu");
+
     object_class_property_add_bool(oc, "hcdp-serial-console",
                                    vibtanium_get_hcdp_serial_console,
                                    vibtanium_set_hcdp_serial_console);
@@ -1092,6 +1156,7 @@ static const TypeInfo vibtanium_machine_typeinfo = {
     .name = TYPE_VIBTANIUM_MACHINE,
     .parent = TYPE_MACHINE,
     .instance_size = sizeof(VibtaniumMachineState),
+    .instance_init = vibtanium_machine_instance_init,
     .class_init = vibtanium_machine_class_init,
     .instance_finalize = vibtanium_machine_finalize,
 };

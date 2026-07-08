@@ -4,4 +4,5 @@ strings.S
 *.elf
 *.bin
 *.efi
-selftest-run.log
+!bit.efi
+bit-run.log

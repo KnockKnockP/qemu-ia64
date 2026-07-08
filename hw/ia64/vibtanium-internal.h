@@ -25,6 +25,8 @@ void vibtanium_blk_media_device_cleanup(VibtaniumEfiBlockDevice *dev);
 
 bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
                                      MachineState *machine);
+bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
+                                MachineState *machine);
 bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
                                  MachineState *machine,
                                  VibtaniumEfiBlockDevice *dev,

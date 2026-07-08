@@ -100,6 +100,7 @@ struct VibtaniumMachineState {
     char *nvram_path;
     char *efi_boot_manager;
     VibtaniumEfiBootManagerState *boot_manager;
+    bool built_in_test;
     bool efi_auto_enter;
     bool hcdp_serial_console;
     uint8_t vga_crtc_index;

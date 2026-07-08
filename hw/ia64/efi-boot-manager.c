@@ -448,6 +448,11 @@ static void vibtanium_boot_manager_draw_maintenance(
     }
 
     vibtanium_boot_manager_print_line(
+        18, VIBTANIUM_EFI_BOOT_MANAGER_MUTED,
+        bm->vms->built_in_test
+        ? "B: run Built In Test (BIT)"
+        : "Built In Test (BIT) disabled by -M built-in-test=off");
+    vibtanium_boot_manager_print_line(
         19, VIBTANIUM_EFI_BOOT_MANAGER_MUTED,
         "A: add media fallback   R: remove NVRAM entry   E: edit NVRAM entry");
     vibtanium_boot_manager_print_line(
@@ -531,6 +536,18 @@ static bool vibtanium_boot_manager_consume_boot_next(
     return true;
 }
 
+static void vibtanium_boot_manager_resume_guest(
+    VibtaniumEfiBootManagerState *bm)
+{
+    VibtaniumMachineState *vms = bm->vms;
+
+    bm->booted = true;
+    timer_del(bm->timer);
+    vibtanium_efi_console_enable_cursor(false);
+    CPU(vms->cpu)->halted = false;
+    cpu_resume(CPU(vms->cpu));
+}
+
 static bool vibtanium_boot_manager_boot_choice(
     VibtaniumEfiBootManagerState *bm)
 {
@@ -590,11 +607,7 @@ static bool vibtanium_boot_manager_boot_choice(
         return false;
     }
 
-    bm->booted = true;
-    timer_del(bm->timer);
-    vibtanium_efi_console_enable_cursor(false);
-    CPU(vms->cpu)->halted = false;
-    cpu_resume(CPU(vms->cpu));
+    vibtanium_boot_manager_resume_guest(bm);
     return true;
 }
 
@@ -929,6 +942,23 @@ static void vibtanium_boot_manager_reorder_selected_nvram(
     vibtanium_boot_manager_rebuild_choices(bm);
 }
 
+static bool vibtanium_boot_manager_boot_bit(VibtaniumEfiBootManagerState *bm)
+{
+    if (!bm->vms->built_in_test) {
+        vibtanium_boot_manager_set_status(
+            bm, "Built In Test is disabled by -M built-in-test=off.");
+        return false;
+    }
+
+    if (!vibtanium_load_builtin_bit(bm->vms, bm->machine)) {
+        vibtanium_boot_manager_set_status(bm, "Built In Test failed to load.");
+        return false;
+    }
+
+    vibtanium_boot_manager_resume_guest(bm);
+    return true;
+}
+
 static void vibtanium_boot_manager_process_maintenance_key(
     VibtaniumEfiBootManagerState *bm,
     const VibtaniumEfiInputKey *key)
@@ -954,6 +984,8 @@ static void vibtanium_boot_manager_process_maintenance_key(
         vibtanium_boot_manager_reorder_selected_nvram(bm, -1);
     } else if (g_ascii_toupper(ch) == 'D') {
         vibtanium_boot_manager_reorder_selected_nvram(bm, 1);
+    } else if (g_ascii_toupper(ch) == 'B') {
+        vibtanium_boot_manager_boot_bit(bm);
     }
 }
 

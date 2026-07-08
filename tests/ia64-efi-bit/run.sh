@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build (if needed) and run the IA-64 EFI self-test under qemu-system-ia64,
+# Build (if needed) and run the IA-64 EFI BIT under qemu-system-ia64,
 # then report PASS/FAIL based on the sentinel line the guest prints.
 #
 # Exit status: 0 = all checks passed, 1 = failure / crash / timeout.
@@ -11,7 +11,7 @@
 #   TIMEOUT     seconds to wait for the sentinel (default 40)
 #   NVRAM       optional path to a persistent EFI variable store (-M nvram=)
 #   BOOT_MODE   media (default, temp vvfat ESP) or kernel (old -kernel path)
-#   NO_BUILD=1  skip the build step and use the existing selftest.efi
+#   NO_BUILD=1  skip the build step and use the existing bit.efi
 #
 set -uo pipefail
 
@@ -19,7 +19,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 repo_root="$(cd "$here/../.." && pwd)"
 
-SENTINEL="VIBTANIUM-SELFTEST-RESULT:"
+SENTINEL="VIBTANIUM-BIT-RESULT:"
 TIMEOUT="${TIMEOUT:-40}"
 BOOT_MODE="${BOOT_MODE:-media}"
 
@@ -47,14 +47,14 @@ fi
 if [ "${NO_BUILD:-0}" != "1" ]; then
     bash "$here/build.sh" >/dev/null
 fi
-EFI="$here/selftest.efi"
+EFI="$here/bit.efi"
 if [ ! -f "$EFI" ]; then
     echo "run.sh: $EFI not found (build failed?)" >&2
     exit 1
 fi
 
 # --- run -----------------------------------------------------------------
-LOG="$(mktemp 2>/dev/null || echo "$here/selftest-run.log")"
+LOG="$(mktemp 2>/dev/null || echo "$here/bit-run.log")"
 esp_dir=""
 machine_arg="vibtanium,efi-boot-manager=off"
 if [ -n "${NVRAM:-}" ]; then
@@ -65,10 +65,10 @@ fi
 qemu_boot_args=()
 case "$BOOT_MODE" in
 media)
-    esp_dir="$(mktemp -d 2>/dev/null || mktemp -d "$here/selftest-esp.XXXXXX")"
+    esp_dir="$(mktemp -d 2>/dev/null || mktemp -d "$here/bit-esp.XXXXXX")"
     mkdir -p "$esp_dir/EFI/BOOT"
     cp "$EFI" "$esp_dir/EFI/BOOT/BOOTIA64.EFI"
-    printf 'vibtanium-media-ok\n' > "$esp_dir/EFI/BOOT/SELFTEST.TXT"
+    printf 'vibtanium-bit-ok\n' > "$esp_dir/EFI/BOOT/BIT.TXT"
     esp_path="$(cygpath -am "$esp_dir" 2>/dev/null || printf '%s' "$esp_dir")"
     qemu_boot_args=(-drive "file=fat:rw:$esp_path,format=raw,if=ide,index=0,media=disk")
     ;;
@@ -110,8 +110,8 @@ for _ in 1 2 3 4 5; do
 done
 
 # --- report --------------------------------------------------------------
-echo "----- self-test serial output -----"
-grep -aE "self-test:|\[PASS\]|\[FAIL\]|$SENTINEL" "$LOG" || cat "$LOG"
+echo "----- BIT serial output -----"
+grep -aE "BIT:|\[PASS\]|\[FAIL\]|$SENTINEL" "$LOG" || cat "$LOG"
 echo "-----------------------------------"
 
 rc=1

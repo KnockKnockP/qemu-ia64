@@ -1,7 +1,7 @@
 /*
- * IA-64 EFI self-test entry shim.
+ * IA-64 EFI BIT entry shim.
  *
- * The real test lives in selftest.c. This file only provides the IA-64 EFI
+ * The real test lives in bit.c. This file only provides the IA-64 EFI
  * entry descriptor, transfers the firmware handoff registers to efi_main(),
  * and keeps one instruction-level helper that C cannot express.
  *
