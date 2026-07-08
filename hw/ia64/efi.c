@@ -19,6 +19,7 @@
 #define PE32P_DATA_DIRECTORY_OFFSET 112
 #define PE_DIRECTORY_BASE_RELOCATION 5
 #define PE_BASE_RELOCATION_ABSOLUTE 0
+#define PE_BASE_RELOCATION_IA64_IMM64 9
 #define PE_BASE_RELOCATION_DIR64    10
 
 #define MAX_EFI_IMAGE_SIZE (128 * 1024 * 1024)
@@ -237,6 +238,97 @@ static void write_ia64_bundle(uint8_t *blob, size_t size, uint64_t address,
     }
 }
 
+static unsigned __int128 ia64_bundle_raw_from_bytes(const uint8_t *bundle)
+{
+    unsigned __int128 raw = 0;
+
+    for (int i = IA64_BUNDLE_SIZE - 1; i >= 0; i--) {
+        raw = (raw << 8) | bundle[i];
+    }
+    return raw;
+}
+
+static void ia64_bundle_raw_to_bytes(uint8_t *bundle, unsigned __int128 raw)
+{
+    for (int i = 0; i < IA64_BUNDLE_SIZE; i++) {
+        bundle[i] = raw >> (i * 8);
+    }
+}
+
+static void ia64_bundle_store_lx_slots(uint8_t *bundle,
+                                       uint64_t l_raw,
+                                       uint64_t x_raw)
+{
+    unsigned __int128 raw = ia64_bundle_raw_from_bytes(bundle);
+    const unsigned __int128 slot1_mask =
+        (unsigned __int128)IA64_SLOT_MASK << 46;
+    const unsigned __int128 slot2_mask =
+        (unsigned __int128)IA64_SLOT_MASK << 87;
+
+    raw &= ~(slot1_mask | slot2_mask);
+    raw |= (unsigned __int128)(l_raw & IA64_SLOT_MASK) << 46;
+    raw |= (unsigned __int128)(x_raw & IA64_SLOT_MASK) << 87;
+    ia64_bundle_raw_to_bytes(bundle, raw);
+}
+
+static void ia64_lx_movl_set_imm64(uint64_t *l_raw, uint64_t *x_raw,
+                                   uint64_t value)
+{
+    const uint64_t x_imm_mask = (0x7fULL << 13) |
+                                (1ULL << 21) |
+                                (0x1fULL << 22) |
+                                (0x1ffULL << 27) |
+                                (1ULL << 36);
+
+    *l_raw = (value >> 22) & IA64_SLOT_MASK;
+    *x_raw &= ~x_imm_mask;
+    *x_raw |= (value & 0x7fULL) << 13;
+    *x_raw |= ((value >> 21) & 0x1ULL) << 21;
+    *x_raw |= ((value >> 16) & 0x1fULL) << 22;
+    *x_raw |= ((value >> 7) & 0x1ffULL) << 27;
+    *x_raw |= ((value >> 63) & 0x1ULL) << 36;
+}
+
+static bool apply_ia64_imm64_relocation(uint8_t *memory_image,
+                                        uint32_t size_of_image,
+                                        uint32_t fixup_rva,
+                                        uint64_t delta,
+                                        Error **errp)
+{
+    uint32_t bundle_rva = fixup_rva & ~(IA64_BUNDLE_SIZE - 1);
+    uint8_t *bundle;
+    IA64DecodedBundle decoded;
+    uint64_t value;
+
+    if (bundle_rva > size_of_image ||
+        IA64_BUNDLE_SIZE > size_of_image - bundle_rva) {
+        error_setg(errp,
+                   "EFI image IA64_IMM64 relocation target 0x%x is outside "
+                   "image",
+                   fixup_rva);
+        return false;
+    }
+
+    bundle = memory_image + bundle_rva;
+    if (!ia64_decode_bundle(bundle, &decoded) ||
+        !decoded.info->long_immediate ||
+        decoded.info->slot_type[1] != IA64_SLOT_TYPE_L ||
+        decoded.info->slot_type[2] != IA64_SLOT_TYPE_X ||
+        !ia64_slot_pair_is_lx_movl(decoded.slot[1], decoded.slot[2])) {
+        error_setg(errp,
+                   "EFI image IA64_IMM64 relocation target 0x%x is not an "
+                   "MLX movl bundle",
+                   fixup_rva);
+        return false;
+    }
+
+    value = ia64_lx_movl_imm64(decoded.slot[1], decoded.slot[2]);
+    ia64_lx_movl_set_imm64(&decoded.slot[1], &decoded.slot[2],
+                           value + delta);
+    ia64_bundle_store_lx_slots(bundle, decoded.slot[1], decoded.slot[2]);
+    return true;
+}
+
 static void write_return_gate(uint8_t *blob, size_t size, uint64_t address)
 {
     const uint64_t nop = 1ULL << 27;
@@ -344,6 +436,14 @@ static bool apply_base_relocations(uint8_t *memory_image,
 
             switch (type) {
             case PE_BASE_RELOCATION_ABSOLUTE:
+                break;
+            case PE_BASE_RELOCATION_IA64_IMM64:
+                if (!apply_ia64_imm64_relocation(memory_image,
+                                                 size_of_image,
+                                                 fixup_rva, delta,
+                                                 errp)) {
+                    return false;
+                }
                 break;
             case PE_BASE_RELOCATION_DIR64:
                 if (fixup_rva > size_of_image ||

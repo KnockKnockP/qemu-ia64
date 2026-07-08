@@ -4,6 +4,7 @@
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/bios-linker-loader.h"
 #include "hw/core/boards.h"
+#include "system/memory.h"
 
 int acpi_checksum(const uint8_t *data, int len)
 {
@@ -60,4 +61,16 @@ bool machine_defines_cache_at_topo_level(const MachineState *ms,
                                          CpuTopologyLevel topology)
 {
     return false;
+}
+
+uint64_t address_space_ldq_be(AddressSpace *as, hwaddr addr,
+                              MemTxAttrs attrs, MemTxResult *result)
+{
+    g_assert_not_reached();
+}
+
+uint64_t address_space_ldq_le(AddressSpace *as, hwaddr addr,
+                              MemTxAttrs attrs, MemTxResult *result)
+{
+    g_assert_not_reached();
 }

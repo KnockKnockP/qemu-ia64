@@ -18,9 +18,11 @@
 #define SYNTHETIC_RAW_OFFSET 0x200
 #define SYNTHETIC_TEXT_RVA 0x1000
 #define SYNTHETIC_DESCRIPTOR_RVA 0x1100
+#define SYNTHETIC_MOVL_RVA 0x1120
 #define SYNTHETIC_RELOC_RVA 0x1180
 #define SYNTHETIC_IMAGE_SIZE 0x2000
 #define SYNTHETIC_GP_RVA 0x1800
+#define SYNTHETIC_MOVL_TARGET 36
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 
 static void store_le16(uint8_t *p, uint16_t value)
@@ -62,6 +64,32 @@ static uint32_t load_le32(const uint8_t *p)
         value = (value << 8) | p[i];
     }
     return value;
+}
+
+static void store_ia64_bundle(uint8_t *p, uint8_t tmpl,
+                              uint64_t slot0, uint64_t slot1,
+                              uint64_t slot2)
+{
+    unsigned __int128 raw = (tmpl & 0x1f) |
+        ((unsigned __int128)(slot0 & IA64_SLOT_MASK) << 5) |
+        ((unsigned __int128)(slot1 & IA64_SLOT_MASK) << 46) |
+        ((unsigned __int128)(slot2 & IA64_SLOT_MASK) << 87);
+
+    for (int i = 0; i < IA64_BUNDLE_SIZE; i++) {
+        p[i] = raw >> (i * 8);
+    }
+}
+
+static void make_lx_movl(uint64_t value, uint8_t target,
+                         uint64_t *l_raw, uint64_t *x_raw)
+{
+    *l_raw = (value >> 22) & IA64_SLOT_MASK;
+    *x_raw = (6ULL << 37) | ((uint64_t)target << 6) |
+             ((value & 0x7fULL) << 13) |
+             (((value >> 21) & 0x1ULL) << 21) |
+             (((value >> 16) & 0x1fULL) << 22) |
+             (((value >> 7) & 0x1ffULL) << 27) |
+             (((value >> 63) & 0x1ULL) << 36);
 }
 
 static uint8_t byte_sum(const uint8_t *p, size_t size)
@@ -177,6 +205,36 @@ static void make_synthetic_ia64_pe(uint8_t *pe,
         store_le16(reloc + 12, 0);
         store_le16(reloc + 14, 0);
     }
+}
+
+static void make_synthetic_ia64_pe_with_movl_reloc(uint8_t *pe)
+{
+    uint8_t *optional;
+    uint8_t *movl;
+    uint8_t *reloc;
+    uint64_t l_raw;
+    uint64_t x_raw;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64, 0, true);
+
+    optional = pe + SYNTHETIC_PE_OFFSET + 4 + 20;
+    store_le32(optional + 112 + 5 * 8 + 4, 20);
+
+    movl = pe + SYNTHETIC_RAW_OFFSET +
+           (SYNTHETIC_MOVL_RVA - SYNTHETIC_TEXT_RVA);
+    make_lx_movl(SYNTHETIC_GP_RVA, SYNTHETIC_MOVL_TARGET,
+                 &l_raw, &x_raw);
+    store_ia64_bundle(movl, 0x04, IA64_INSN_NOP_RAW, l_raw, x_raw);
+
+    reloc = pe + SYNTHETIC_RAW_OFFSET +
+            (SYNTHETIC_RELOC_RVA - SYNTHETIC_TEXT_RVA);
+    store_le32(reloc + 4, 20);
+    store_le16(reloc + 12,
+               (9 << 12) |
+               (SYNTHETIC_MOVL_RVA + 1 - SYNTHETIC_TEXT_RVA));
+    store_le16(reloc + 14, 0);
+    store_le16(reloc + 16, 0);
+    store_le16(reloc + 18, 0);
 }
 
 static void test_loads_synthetic_ia64_pe(void)
@@ -667,6 +725,32 @@ static void test_relocates_ia64_entry_descriptor(void)
     vibtanium_efi_image_destroy(&image);
 }
 
+static void test_relocates_ia64_movl_imm64(void)
+{
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    VibtaniumEfiImage image;
+    IA64DecodedBundle decoded;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe_with_movl_reloc(pe);
+
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic-movl.efi", pe,
+                                                 sizeof(pe),
+                                                 VIBTANIUM_EFI_APP_BASE,
+                                                 &image, &err));
+    g_assert_null(err);
+    g_assert_true(ia64_decode_bundle(image.data + SYNTHETIC_MOVL_RVA,
+                                     &decoded));
+    g_assert_true(ia64_slot_pair_is_lx_movl(decoded.slot[1],
+                                            decoded.slot[2]));
+    g_assert_cmpuint((decoded.slot[2] >> 6) & 0x7f, ==,
+                     SYNTHETIC_MOVL_TARGET);
+    g_assert_cmphex(ia64_lx_movl_imm64(decoded.slot[1], decoded.slot[2]),
+                    ==, VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
 static void test_loads_fixed_ia64_pe_at_preferred_base(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
@@ -787,6 +871,8 @@ int main(int argc, char **argv)
                     test_builds_hcdp_serial_console_table);
     g_test_add_func("/ia64-efi-app/relocate-entry-descriptor",
                     test_relocates_ia64_entry_descriptor);
+    g_test_add_func("/ia64-efi-app/relocate-ia64-movl-imm64",
+                    test_relocates_ia64_movl_imm64);
     g_test_add_func("/ia64-efi-app/load-fixed-at-preferred-base",
                     test_loads_fixed_ia64_pe_at_preferred_base);
     g_test_add_func("/ia64-efi-app/decode-sign-extended-uint32-args",
