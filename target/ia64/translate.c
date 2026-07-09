@@ -837,19 +837,21 @@ static bool ia64_tr_fast_bundle_uses_stacked_gr(const IA64TcgFastBundle *fast)
 static bool ia64_tr_fast_bundle_needs_runtime_fallback(
     const IA64TcgFastBundle *fast)
 {
-    /*
-     * The interpreter path does not yet model integer NaT consumption better
-     * than the translated fast path, so a source-NaT guard only bloats the
-     * generated TB without increasing architectural fidelity.  Reintroduce NaT
-     * fallback as a compact helper when real NaT exception semantics land.
-     */
-    return ia64_tr_fast_bundle_uses_stacked_gr(fast);
+    return ia64_tr_fast_bundle_uses_stacked_gr(fast) ||
+           fast->source_nat_mask != 0;
 }
 
 static void ia64_tr_emit_fast_bundle_guards(
     DisasContext *ctx, const IA64TcgFastBundle *fast, TCGLabel *fallback,
     TCGv_i64 ldst_address[IA64_SLOT_COUNT])
 {
+    if (fast->source_nat_mask != 0) {
+        TCGv_i64 nat = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_andi_i64(nat, nat, fast->source_nat_mask);
+        tcg_gen_brcondi_i64(TCG_COND_NE, nat, 0, fallback);
+    }
     if (ia64_tr_fast_bundle_uses_stacked_gr(fast)) {
         TCGv_i32 sor = tcg_temp_new_i32();
 

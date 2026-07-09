@@ -973,6 +973,36 @@ static void test_data_tlb_miss_records_slot_and_access(void)
     assert_delivery_psr(&env, 0);
 }
 
+static void test_register_nat_consumption_delivery_vectors_to_iva(void)
+{
+    CPUIA64State env;
+    uint64_t psr = ia64_psr_with_ri(UINT64_C(0x0000100300006000), 1);
+    vaddr ip = 0xa00000010015fcf0ULL;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = psr;
+    env.cr[IA64_CR_IVA] = 0x100000;
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION,
+                           ip, MMU_DATA_LOAD, "register NaT");
+
+    g_assert_true(env.exception.pending);
+    g_assert_cmpint(env.exception.kind, ==,
+                    IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION);
+    g_assert_cmphex(env.exception.vector, ==, 0x5600);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, psr);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, ip);
+    g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                    IA64_ISR_EI_SHIFT, ==, 1);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK,
+                    ==, IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_R_BIT);
+    g_assert_cmphex(env.ip, ==, 0x105600);
+    assert_delivery_psr(&env, 0);
+}
+
 static void test_non_nested_exception_with_ic_clear_preserves_collection_state(void)
 {
     CPUIA64State env;
@@ -1170,6 +1200,8 @@ int main(int argc, char **argv)
                     test_alternate_tlb_miss_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/data-tlb-miss-slot-and-access",
                     test_data_tlb_miss_records_slot_and_access);
+    g_test_add_func("/ia64-exception/register-nat-consumption-delivery",
+                    test_register_nat_consumption_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/ic-clear-preserves-collection-state",
                     test_non_nested_exception_with_ic_clear_preserves_collection_state);
     g_test_add_func("/ia64-exception/data-nested-tlb-delivery",

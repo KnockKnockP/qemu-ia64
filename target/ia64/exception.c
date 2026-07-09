@@ -197,6 +197,8 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
         return "disabled-fp-register-low";
     case IA64_EXCEPTION_DISABLED_FP_HIGH:
         return "disabled-fp-register-high";
+    case IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION:
+        return "register-nat-consumption";
     default:
         return "unknown";
     }
@@ -311,6 +313,10 @@ static void ia64_record_exception_common(CPUIA64State *env,
     case IA64_EXCEPTION_DISABLED_FP_HIGH:
         record->vector = 0x5500;
         record->isr_code = 2;
+        break;
+    case IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION:
+        record->vector = 0x5600;
+        record->isr_code = IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION;
         break;
     case IA64_EXCEPTION_NONE:
     default:

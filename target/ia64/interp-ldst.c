@@ -663,6 +663,29 @@ static bool ia64_ldst_force_deferred(CPUIA64State *env, uint8_t target)
     return true;
 }
 
+static bool ia64_ldst_defer_nat_consumption(CPUIA64State *env,
+                                            const IA64LdstImmediate *decoded)
+{
+    if (!ia64_ldst_is_control_speculative(decoded->memory_class)) {
+        return false;
+    }
+
+    ia64_write_gr_nat(env, decoded->target, true);
+    ia64_alat_invalidate_gr(env, decoded->target);
+    return true;
+}
+
+static G_NORETURN void ia64_exit_after_register_nat_consumption(
+    CPUIA64State *env, MMUAccessType access_type, const char *detail)
+{
+    CPUState *cpu = env_cpu(env);
+
+    ia64_deliver_exception(env, IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION,
+                           env->ip, access_type, detail);
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu_loop_exit(cpu);
+}
+
 static bool ia64_ldst_maybe_defer_control_speculative(
     CPUIA64State *env, const IA64LdstImmediate *decoded, uint64_t address)
 {
@@ -756,12 +779,18 @@ static void ia64_trace_atomic(CPUIA64State *env,
 static bool exec_m_atomic(CPUIA64State *env,
                           const IA64AtomicInstruction *decoded)
 {
-    uint64_t address = ia64_read_gr(env, decoded->base);
+    uint64_t address;
     uint64_t old_value;
     uint64_t store_value = 0;
     uint64_t compare_value = 0;
     uint64_t mask = ia64_width_mask(decoded->width);
     bool write_memory = false;
+
+    if (ia64_read_gr_nat(env, decoded->base)) {
+        ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
+                                                 "atomic base NaT");
+    }
+    address = ia64_read_gr(env, decoded->base);
 
     IA64_PERF_INC(IA64_PERF_ATOMIC_MEMORY_OP);
     if (decoded->kind == IA64_ATOMIC_CMPXCHG) {
@@ -776,11 +805,19 @@ static bool exec_m_atomic(CPUIA64State *env,
 
     switch (decoded->kind) {
     case IA64_ATOMIC_CMPXCHG:
+        if (ia64_read_gr_nat(env, decoded->source)) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
+                                                     "cmpxchg source NaT");
+        }
         store_value = ia64_read_gr(env, decoded->source);
         compare_value = env->ar[IA64_AR_CCV] & mask;
         write_memory = (old_value & mask) == compare_value;
         break;
     case IA64_ATOMIC_XCHG:
+        if (ia64_read_gr_nat(env, decoded->source)) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
+                                                     "xchg source NaT");
+        }
         store_value = ia64_read_gr(env, decoded->source);
         write_memory = true;
         break;
@@ -806,13 +843,22 @@ static bool exec_m_atomic(CPUIA64State *env,
 static bool exec_ldst_immediate(CPUIA64State *env,
                                 const IA64LdstImmediate *decoded)
 {
-    uint64_t address = ia64_read_gr(env, decoded->base);
+    uint64_t address;
     uint64_t update;
     bool check_clear;
     bool check_no_clear;
 
     switch (decoded->kind) {
     case IA64_LDST_IMM_LOAD:
+        if (ia64_read_gr_nat(env, decoded->base)) {
+            if (ia64_ldst_defer_nat_consumption(env, decoded)) {
+                env->gr[0] = 0;
+                return true;
+            }
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
+                                                     "load base NaT");
+        }
+        address = ia64_read_gr(env, decoded->base);
         if (decoded->target != 0) {
             uint64_t value;
 
@@ -851,7 +897,19 @@ static bool exec_ldst_immediate(CPUIA64State *env,
         break;
     case IA64_LDST_IMM_STORE:
     {
-        uint64_t value = ia64_read_gr(env, decoded->source);
+        uint64_t value;
+
+        if (ia64_read_gr_nat(env, decoded->base)) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
+                                                     "store base NaT");
+        }
+        if (ia64_read_gr_nat(env, decoded->source)) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
+                                                     "store source NaT");
+        }
+
+        address = ia64_read_gr(env, decoded->base);
+        value = ia64_read_gr(env, decoded->source);
 
         ia64_trace_ldst_decoded(env, "store", address, decoded->width,
                                 value, decoded);
@@ -859,12 +917,22 @@ static bool exec_ldst_immediate(CPUIA64State *env,
         break;
     }
     case IA64_LDST_IMM_PREFETCH:
+        if (ia64_read_gr_nat(env, decoded->base)) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
+                                                     "prefetch base NaT");
+        }
+        address = ia64_read_gr(env, decoded->base);
         break;
     default:
         g_assert_not_reached();
     }
 
     if (decoded->base_update) {
+        if (decoded->update_from_register &&
+            ia64_read_gr_nat(env, decoded->update_source)) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
+                                                     "base update NaT");
+        }
         update = decoded->update_from_register
             ? ia64_read_gr(env, decoded->update_source)
             : (uint64_t)decoded->immediate;
