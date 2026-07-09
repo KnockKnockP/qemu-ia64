@@ -715,6 +715,8 @@ bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
         return false;
     }
 
+    g_strlcpy(image.efi_file_path, VIBTANIUM_EFI_FALLBACK_PATH,
+              sizeof(image.efi_file_path));
     warn_report("vibtanium EFI boot manager selected embedded BIT "
                 "image-bytes=%zu media-bytes=%" PRIu64,
                 vibtanium_efi_bit_blob_size, bit_media.size);
@@ -790,6 +792,7 @@ bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
         return false;
     }
 
+    g_strlcpy(image.efi_file_path, boot_path, sizeof(image.efi_file_path));
     if (entry && entry->load_options && entry->load_options->len != 0) {
         image.load_options_size = entry->load_options->len;
         image.load_options = g_memdup2(entry->load_options->data,

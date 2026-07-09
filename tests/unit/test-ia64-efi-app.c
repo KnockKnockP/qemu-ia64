@@ -66,6 +66,11 @@ static uint32_t load_le32(const uint8_t *p)
     return value;
 }
 
+static uint16_t load_le16(const uint8_t *p)
+{
+    return p[0] | ((uint16_t)p[1] << 8);
+}
+
 static void store_ia64_bundle(uint8_t *p, uint8_t tmpl,
                               uint64_t slot0, uint64_t slot1,
                               uint64_t slot2)
@@ -396,6 +401,7 @@ static void test_builds_guest_firmware_tables(void)
         .size = 0x123450,
         .load_options = load_options,
         .load_options_size = sizeof(load_options),
+        .efi_file_path = "/efi/boot/bootia64.efi",
     };
     VibtaniumEfiBlockDevice boot_media = {
         .size = 2048 * 10,
@@ -436,6 +442,7 @@ static void test_builds_guest_firmware_tables(void)
     const uint8_t *madt;
     const uint8_t *dbgp;
     const uint8_t *facs;
+    const uint8_t *loaded_image_file_path;
     uint64_t rsdp_addr;
     uint64_t sal_table_addr;
     uint64_t rsdt_addr;
@@ -446,6 +453,8 @@ static void test_builds_guest_firmware_tables(void)
     uint64_t dbgp_addr;
     uint64_t facs_addr;
     uint32_t dsdt_length;
+    size_t loaded_image_file_path_chars;
+    uint16_t loaded_image_file_path_length;
     unsigned block_io_base;
     unsigned simplefs_base;
 
@@ -486,10 +495,35 @@ static void test_builds_guest_firmware_tables(void)
                     ==, VIBTANIUM_EFI_SYSTEM_TABLE);
     g_assert_cmphex(load_le64(firmware_ptr(blob,
                                            VIBTANIUM_EFI_LOADED_IMAGE + 32)),
-                    ==, VIBTANIUM_EFI_DEVICE_PATH);
+                    ==, VIBTANIUM_EFI_LOADED_IMAGE_FILE_PATH);
     g_assert_cmpmem(firmware_ptr(blob, VIBTANIUM_EFI_DEVICE_PATH),
                     sizeof(expected_device_path),
                     expected_device_path, sizeof(expected_device_path));
+    loaded_image_file_path = firmware_ptr(
+        blob, VIBTANIUM_EFI_LOADED_IMAGE_FILE_PATH);
+    loaded_image_file_path_chars = strlen(image.efi_file_path);
+    loaded_image_file_path_length = 4 + (loaded_image_file_path_chars + 1) * 2;
+    g_assert_cmphex(loaded_image_file_path[0], ==, 0x04);
+    g_assert_cmphex(loaded_image_file_path[1], ==, 0x04);
+    g_assert_cmphex(load_le16(loaded_image_file_path + 2), ==,
+                    loaded_image_file_path_length);
+    for (size_t i = 0; i < loaded_image_file_path_chars; i++) {
+        uint16_t expected_ch =
+            image.efi_file_path[i] == '/' ? '\\' : image.efi_file_path[i];
+
+        g_assert_cmphex(load_le16(loaded_image_file_path + 4 + i * 2), ==,
+                        expected_ch);
+    }
+    g_assert_cmphex(load_le16(loaded_image_file_path + 4 +
+                              loaded_image_file_path_chars * 2),
+                    ==, 0);
+    g_assert_cmphex(loaded_image_file_path[loaded_image_file_path_length],
+                    ==, 0x7f);
+    g_assert_cmphex(loaded_image_file_path[loaded_image_file_path_length + 1],
+                    ==, 0xff);
+    g_assert_cmphex(load_le16(loaded_image_file_path +
+                              loaded_image_file_path_length + 2),
+                    ==, 0x04);
     g_assert_cmphex(load_le32(firmware_ptr(blob,
                                            VIBTANIUM_EFI_LOADED_IMAGE + 48)),
                     ==, sizeof(load_options));

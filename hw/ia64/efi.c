@@ -853,7 +853,7 @@ static void write_loaded_image(uint8_t *blob, size_t size,
     blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 24,
               VIBTANIUM_EFI_BOOT_DEVICE_HANDLE);
     blob_wr64(blob, size, VIBTANIUM_EFI_LOADED_IMAGE + 32,
-              VIBTANIUM_EFI_DEVICE_PATH);
+              VIBTANIUM_EFI_LOADED_IMAGE_FILE_PATH);
     if (load_options_size != 0) {
         memcpy(blob_ptr(blob, size, VIBTANIUM_EFI_LOAD_OPTIONS,
                         load_options_size),
@@ -1360,6 +1360,7 @@ static void write_gop_protocol(uint8_t *blob, size_t size)
 #define EFI_DP_HW_PCI                     0x01
 #define EFI_DP_MSG_ATAPI                  0x01
 #define EFI_DP_MEDIA_CDROM                0x02
+#define EFI_DP_MEDIA_FILE_PATH            0x04
 #define EFI_DP_END_ENTIRE                 0xff
 #define EFI_DP_PCI_LENGTH                 6
 #define EFI_DP_ATAPI_LENGTH               8
@@ -1378,6 +1379,34 @@ static uint8_t *write_device_path_header(uint8_t *path, uint8_t type,
     path[1] = subtype;
     wr16(path + 2, length);
     return path + length;
+}
+
+static void write_file_path_device_path(uint8_t *blob, size_t size,
+                                        uint64_t address,
+                                        const char *file_path)
+{
+    size_t chars = file_path && *file_path ? strlen(file_path) : 0;
+    size_t node_length = chars != 0 ? 4 + (chars + 1) * 2 : 0;
+    size_t path_length = node_length + EFI_DP_END_LENGTH;
+    uint8_t *path = blob_ptr(blob, size, address, path_length);
+
+    if (chars != 0) {
+        uint8_t *text = path + 4;
+
+        path = write_device_path_header(path, EFI_DP_MEDIA_DEVICE_PATH,
+                                        EFI_DP_MEDIA_FILE_PATH,
+                                        node_length);
+        for (const char *p = file_path; *p; p++) {
+            uint16_t ch = *p == '/' ? '\\' : (uint8_t)*p;
+
+            wr16(text, ch);
+            text += 2;
+        }
+        wr16(text, 0);
+    }
+
+    path = write_device_path_header(path, EFI_DP_END_DEVICE_PATH,
+                                    EFI_DP_END_ENTIRE, EFI_DP_END_LENGTH);
 }
 
 static void write_device_path(uint8_t *blob, size_t size,
@@ -1425,7 +1454,8 @@ static void write_device_path(uint8_t *blob, size_t size,
 }
 
 static void write_media_protocols(uint8_t *blob, size_t size,
-                                  const VibtaniumEfiBlockDevice *boot_media)
+                                  const VibtaniumEfiBlockDevice *boot_media,
+                                  const VibtaniumEfiImage *image)
 {
     uint32_t block_size = boot_media && boot_media->block_size
         ? boot_media->block_size
@@ -1436,6 +1466,9 @@ static void write_media_protocols(uint8_t *blob, size_t size,
         : 0;
 
     write_device_path(blob, size, boot_media, block_size, media_size);
+    write_file_path_device_path(blob, size,
+                                VIBTANIUM_EFI_LOADED_IMAGE_FILE_PATH,
+                                image ? image->efi_file_path : NULL);
 
     blob_wr64(blob, size, VIBTANIUM_EFI_BLOCK_IO,
               VIBTANIUM_EFI_PROTOCOL_REVISION);
@@ -1494,7 +1527,7 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
     write_loaded_image(blob, VIBTANIUM_EFI_BLOB_SIZE, image);
     write_console_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE);
     write_gop_protocol(blob, VIBTANIUM_EFI_BLOB_SIZE);
-    write_media_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE, boot_media);
+    write_media_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE, boot_media, image);
     write_service_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
                         VIBTANIUM_EFI_BOOT_SERVICES,
                         0x56524553544f4f42ULL,
