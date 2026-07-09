@@ -2412,7 +2412,14 @@ static uint64_t efi_load_image(CPUIA64State *env)
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
     }
 
-    if (!efi_record_page_allocation(loaded.load_base, pages, EFI_LOADER_CODE)) {
+    /*
+     * Keep firmware-owned LoadImage pages out of the OS free list.  The
+     * loaded-image protocol still reports normal loader code/data types, but
+     * some IA-64 loaders do not mirror late EFI image allocations into their
+     * handoff memory descriptors before ExitBootServices.
+     */
+    if (!efi_record_page_allocation(loaded.load_base, pages,
+                                    EFI_RESERVED_MEMORY_TYPE)) {
         vibtanium_efi_image_destroy(&loaded);
         memset(child, 0, sizeof(*child));
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
