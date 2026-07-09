@@ -2112,6 +2112,113 @@ static bool ia64_psr_trace_enabled(void)
     return enabled != 0;
 }
 
+static const char *ia64_cr_trace_name(uint32_t reg)
+{
+    switch (reg) {
+    case IA64_CR_DCR:
+        return "dcr";
+    case IA64_CR_ITM:
+        return "itm";
+    case IA64_CR_IVA:
+        return "iva";
+    case IA64_CR_PTA:
+        return "pta";
+    case IA64_CR_IPSR:
+        return "ipsr";
+    case IA64_CR_ISR:
+        return "isr";
+    case IA64_CR_IIP:
+        return "iip";
+    case IA64_CR_IFA:
+        return "ifa";
+    case IA64_CR_ITIR:
+        return "itir";
+    case IA64_CR_IIPA:
+        return "iipa";
+    case IA64_CR_IFS:
+        return "ifs";
+    case IA64_CR_IIM:
+        return "iim";
+    case IA64_CR_IHA:
+        return "iha";
+    case IA64_CR_TPR:
+        return "tpr";
+    case IA64_CR_EOI:
+        return "eoi";
+    case IA64_CR_IRR0:
+        return "irr0";
+    case IA64_CR_IRR1:
+        return "irr1";
+    case IA64_CR_IRR2:
+        return "irr2";
+    case IA64_CR_IRR3:
+        return "irr3";
+    case IA64_CR_ITV:
+        return "itv";
+    case IA64_CR_IVR:
+        return "ivr";
+    default:
+        return "cr";
+    }
+}
+
+static int ia64_cr_trace_filter(void)
+{
+    static int initialized;
+    static int filter;
+
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_CR_TRACE_REG");
+        char *endptr = NULL;
+
+        filter = -1;
+        if (value && *value) {
+            unsigned long parsed = g_ascii_strtoull(value, &endptr, 0);
+
+            if (endptr != value && parsed < IA64_CR_COUNT) {
+                filter = (int)parsed;
+            }
+        }
+        initialized = 1;
+    }
+    return filter;
+}
+
+static bool ia64_cr_trace_enabled(uint32_t reg)
+{
+    static int enabled = -1;
+    int filter;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_CR_TRACE") != NULL;
+    }
+    if (!enabled) {
+        return false;
+    }
+    filter = ia64_cr_trace_filter();
+    return filter < 0 || filter == (int)reg;
+}
+
+static void ia64_trace_cr(CPUIA64State *env, const char *op, uint32_t reg,
+                          uint64_t old_value, uint64_t new_value)
+{
+    if (!ia64_cr_trace_enabled(reg)) {
+        return;
+    }
+
+    fprintf(stderr,
+            "[ia64-cr] ip=0x%016" PRIx64 " op=%s cr%u.%s"
+            " old=0x%016" PRIx64 " new=0x%016" PRIx64
+            " psr=0x%016" PRIx64 " tpr=0x%016" PRIx64
+            " ivr=0x%016" PRIx64 " irr3=0x%016" PRIx64
+            " pending=%u active=%" PRIu64 " vector=0x%016" PRIx64 "\n",
+            env->ip, op, reg, ia64_cr_trace_name(reg), old_value, new_value,
+            ia64_env_psr(env), env->cr[IA64_CR_TPR], env->cr[IA64_CR_IVR],
+            env->cr[IA64_CR_IRR3], env->interrupt.pending,
+            env->interrupt.pending_interruption,
+            env->interrupt.pending_vector);
+}
+
 uint64_t ia64_processor_mask_immediate(uint64_t raw)
 {
     return (((raw >> 36) & 0x1) << 23) |
@@ -2222,6 +2329,14 @@ bool ia64_exec_m_mov_to_processor_status(CPUIA64State *env, uint64_t raw)
     source = (raw >> 13) & 0x7f;
     value = ia64_read_gr(env, source);
     write_mask = x6 == 0x29 ? IA64_PSR_USER_MASK : IA64_PSR_LOWER_MASK;
+    if (ia64_psr_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-psr-mask] ip=0x%016" PRIx64 " op=mov-to-psr"
+                " mask=0x%016" PRIx64 " old=0x%016" PRIx64
+                " new=0x%016" PRIx64 "\n",
+                env->ip, write_mask, ia64_env_psr(env),
+                (ia64_env_psr(env) & ~write_mask) | (value & write_mask));
+    }
     ia64_env_set_psr(env, (ia64_env_psr(env) & ~write_mask) |
                           (value & write_mask));
     return true;
@@ -2618,10 +2733,13 @@ void ia64_reconcile_interrupt_state(CPUIA64State *env)
 
 uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
 {
+    uint64_t old;
+
     if (!env || reg >= IA64_CR_COUNT) {
         return 0;
     }
 
+    old = env->cr[reg];
     switch (reg) {
     case IA64_CR_IVR:
     {
@@ -2631,9 +2749,11 @@ uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
             ia64_clear_pending_external_interrupt(env, vector);
             env->interrupt.pending_interruption = 1;
             env->cr[IA64_CR_IVR] = vector;
+            ia64_trace_cr(env, "read", reg, old, vector);
             return vector;
         }
         env->cr[IA64_CR_IVR] = IA64_INTERRUPT_SPURIOUS_VECTOR;
+        ia64_trace_cr(env, "read", reg, old, IA64_INTERRUPT_SPURIOUS_VECTOR);
         return IA64_INTERRUPT_SPURIOUS_VECTOR;
     }
     case IA64_CR_IRR0:
@@ -2641,8 +2761,10 @@ uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg)
     case IA64_CR_IRR2:
     case IA64_CR_IRR3:
         ia64_refresh_pending_external_interrupt(env);
+        ia64_trace_cr(env, "read", reg, old, env->cr[reg]);
         return env->cr[reg];
     default:
+        ia64_trace_cr(env, "read", reg, old, env->cr[reg]);
         return env->cr[reg];
     }
 }
@@ -2697,6 +2819,7 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
     default:
         break;
     }
+    ia64_trace_cr(env, "write", reg, old, env->cr[reg]);
 }
 
 bool ia64_slot_is_m_mov_to_control(IA64SlotType type, uint64_t raw)
@@ -5818,8 +5941,9 @@ bool ia64_decode_ldst_immediate(IA64SlotType type, uint64_t raw,
     load_like = memory_class == 0 || memory_class == 1 ||
                 memory_class == 2 || memory_class == 3 ||
                 memory_class == 4 || memory_class == 5 ||
-                memory_class == 6 || memory_class == 8 ||
-                memory_class == 9 || memory_class == 0x0a;
+                (memory_class == 6 && size_code == 3) ||
+                memory_class == 8 || memory_class == 9 ||
+                memory_class == 0x0a;
     store_like = memory_class == 0x0c || memory_class == 0x0d ||
                  (memory_class == 0x0e && size_code == 3);
 

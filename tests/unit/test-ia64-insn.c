@@ -3019,6 +3019,12 @@ static void test_ldst_immediate_decode(void)
     const uint64_t ld8_c_clr_acq_r16_r33_raw =
         (0x4ULL << 37) | (((0x0aULL << 2) | 3ULL) << 30) |
         (33ULL << 20) | (16ULL << 6);
+    const uint64_t ld8_fill_r28_r33_raw =
+        (0x4ULL << 37) | (((6ULL << 2) | 3ULL) << 30) |
+        (33ULL << 20) | (28ULL << 6);
+    const uint64_t ld4_fill_reserved_r28_r33_raw =
+        (0x4ULL << 37) | (((6ULL << 2) | 2ULL) << 30) |
+        (33ULL << 20) | (28ULL << 6);
     const uint64_t elilo_st8_spill_r39_r16_imm_raw = 0x0bec904fc00ULL;
     IA64LdstImmediate decoded;
 
@@ -3089,6 +3095,20 @@ static void test_ldst_immediate_decode(void)
     g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
     g_assert_cmpuint(decoded.width, ==, 8);
     g_assert_cmpuint(decoded.memory_class, ==, 0x0a);
+    g_assert_false(ia64_ldst_immediate_is_fill(&decoded));
+
+    g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                             ld8_fill_r28_r33_raw,
+                                             &decoded));
+    g_assert_cmpint(decoded.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.width, ==, 8);
+    g_assert_cmpuint(decoded.target, ==, 28);
+    g_assert_cmpuint(decoded.base, ==, 33);
+    g_assert_cmpuint(decoded.memory_class, ==, 6);
+    g_assert_true(ia64_ldst_immediate_is_fill(&decoded));
+    g_assert_false(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                              ld4_fill_reserved_r28_r33_raw,
+                                              &decoded));
 
     g_assert_true(ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
                                              elilo_st8_spill_r39_r16_imm_raw,
@@ -3101,6 +3121,7 @@ static void test_ldst_immediate_decode(void)
     g_assert_true(decoded.base_update);
     g_assert_false(decoded.update_from_register);
     g_assert_cmpint(decoded.immediate, ==, -16);
+    g_assert_true(ia64_ldst_immediate_is_spill(&decoded));
 }
 
 static void test_general_register_write_clears_nat(void)

@@ -253,8 +253,7 @@ static bool ia64_tcg_fast_ar_is_plain(uint32_t reg)
 
 static bool ia64_tcg_fast_ldst_store_class(uint8_t memory_class)
 {
-    return memory_class == 0x0c || memory_class == 0x0d ||
-           memory_class == 0x0e;
+    return memory_class == 0x0c || memory_class == 0x0d;
 }
 
 static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
@@ -263,13 +262,12 @@ static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
     case 0:
     case 4:
     case 5:
-    case 6:
         return true;
     default:
         /*
          * Control-speculative loads (classes 1/3), advanced loads (2/3), and
-         * check loads (8/9/A) need NaT/ALAT handling around the target write,
-         * so leave them on the interpreter path for now.
+         * fill/check loads (6/8/9/A) need NaT/ALAT handling around the target
+         * write, so leave them on the interpreter path for now.
          */
         return false;
     }

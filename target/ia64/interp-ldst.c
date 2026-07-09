@@ -652,6 +652,17 @@ static void ia64_ldst_apply_base_update(CPUIA64State *env,
     ia64_write_gr(env, decoded->base, address + update);
 }
 
+static uint64_t ia64_ldst_unat_bit(uint64_t address)
+{
+    return UINT64_C(1) << ia64_rse_nat_collection_bit(address);
+}
+
+static void ia64_ldst_write_unat(CPUIA64State *env, uint64_t unat)
+{
+    env->nat.unat = unat;
+    env->ar[IA64_AR_UNAT] = unat;
+}
+
 static const char *ia64_atomic_name(IA64AtomicKind kind, bool release)
 {
     switch (kind) {
@@ -823,9 +834,16 @@ static bool exec_ldst_immediate(CPUIA64State *env,
 
             value = ia64_ldst_read(env, address, decoded->width);
 
-            ia64_trace_ldst_decoded(env, "load", address, decoded->width,
-                                    value, decoded);
+            ia64_trace_ldst_decoded(
+                env,
+                ia64_ldst_immediate_is_fill(decoded) ? "fill" : "load",
+                address, decoded->width, value, decoded);
             ia64_write_gr(env, decoded->target, value);
+            if (ia64_ldst_immediate_is_fill(decoded)) {
+                ia64_write_gr_nat(
+                    env, decoded->target,
+                    (env->nat.unat & ia64_ldst_unat_bit(address)) != 0);
+            }
             if (decoded->memory_class == 2 || decoded->memory_class == 3 ||
                 check_no_clear) {
                 ia64_alat_record_load(env, decoded->target, address,
@@ -841,7 +859,8 @@ static bool exec_ldst_immediate(CPUIA64State *env,
             ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
                                                      "store base NaT");
         }
-        if (ia64_read_gr_nat(env, decoded->source)) {
+        if (!ia64_ldst_immediate_is_spill(decoded) &&
+            ia64_read_gr_nat(env, decoded->source)) {
             ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
                                                      "store source NaT");
         }
@@ -849,9 +868,21 @@ static bool exec_ldst_immediate(CPUIA64State *env,
         address = ia64_read_gr(env, decoded->base);
         value = ia64_read_gr(env, decoded->source);
 
-        ia64_trace_ldst_decoded(env, "store", address, decoded->width,
-                                value, decoded);
+        ia64_trace_ldst_decoded(
+            env, ia64_ldst_immediate_is_spill(decoded) ? "spill" : "store",
+            address, decoded->width, value, decoded);
         ia64_ldst_write(env, address, decoded->width, value);
+        if (ia64_ldst_immediate_is_spill(decoded)) {
+            uint64_t bit = ia64_ldst_unat_bit(address);
+            uint64_t unat = env->nat.unat;
+
+            if (ia64_read_gr_nat(env, decoded->source)) {
+                unat |= bit;
+            } else {
+                unat &= ~bit;
+            }
+            ia64_ldst_write_unat(env, unat);
+        }
         break;
     }
     case IA64_LDST_IMM_PREFETCH:

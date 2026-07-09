@@ -755,6 +755,16 @@ static uint64_t ia64_progress_trace_interval(void)
     return interval;
 }
 
+static bool ia64_debug_break_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_DEBUG_BREAK_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
 static bool ia64_progress_trace_ip_matches(uint64_t ip)
 {
     static int initialized;
@@ -930,6 +940,26 @@ void ia64_progress_trace_break_slot(CPUIA64State *env,
                 " translate-failed %s\n",
                 env->ip, detail);
     }
+    if (ia64_debug_break_trace_enabled()) {
+        fprintf(stderr,
+                "[ia64-debug-break] source=0x%016" PRIx64
+                " iim=0x%016" PRIx64 " b0=0x%016" PRIx64
+                " pfs=0x%016" PRIx64 " pr=0x%016" PRIx64
+                " r12=0x%016" PRIx64 " r13=0x%016" PRIx64
+                " r32=0x%016" PRIx64 " r33=0x%016" PRIx64
+                " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
+                " r36=0x%016" PRIx64 " r37=0x%016" PRIx64
+                " r38=0x%016" PRIx64 " r39=0x%016" PRIx64
+                " r32nat=%u r33nat=%u r34nat=%u r35nat=%u\n",
+                env->ip, iim, env->br[0], env->ar[IA64_AR_PFS], env->pr,
+                ia64_read_gr(env, 12), ia64_read_gr(env, 13),
+                ia64_read_gr(env, 32), ia64_read_gr(env, 33),
+                ia64_read_gr(env, 34), ia64_read_gr(env, 35),
+                ia64_read_gr(env, 36), ia64_read_gr(env, 37),
+                ia64_read_gr(env, 38), ia64_read_gr(env, 39),
+                ia64_read_gr_nat(env, 32), ia64_read_gr_nat(env, 33),
+                ia64_read_gr_nat(env, 34), ia64_read_gr_nat(env, 35));
+    }
     fflush(stderr);
 }
 
@@ -1095,6 +1125,10 @@ void ia64_state_trace_bundle(CPUIA64State *env)
             " r44=0x%016" PRIx64 " r45=0x%016" PRIx64
             " r46=0x%016" PRIx64 " r47=0x%016" PRIx64
             " r48=0x%016" PRIx64 " r49=0x%016" PRIx64
+            " r70=0x%016" PRIx64 " r71=0x%016" PRIx64
+            " r72=0x%016" PRIx64 " r73=0x%016" PRIx64
+            " r74=0x%016" PRIx64 " r75=0x%016" PRIx64
+            " r76=0x%016" PRIx64
             " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64
             " itc=0x%016" PRIx64 " itm=0x%016" PRIx64
             " itv=0x%016" PRIx64 " tpr=0x%016" PRIx64
@@ -1122,6 +1156,10 @@ void ia64_state_trace_bundle(CPUIA64State *env)
             ia64_read_gr(env, 44), ia64_read_gr(env, 45),
             ia64_read_gr(env, 46), ia64_read_gr(env, 47),
             ia64_read_gr(env, 48), ia64_read_gr(env, 49),
+            ia64_read_gr(env, 70), ia64_read_gr(env, 71),
+            ia64_read_gr(env, 72), ia64_read_gr(env, 73),
+            ia64_read_gr(env, 74), ia64_read_gr(env, 75),
+            ia64_read_gr(env, 76),
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
             env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM],
             env->cr[IA64_CR_ITV], env->cr[IA64_CR_TPR],

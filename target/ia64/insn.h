@@ -65,6 +65,24 @@ typedef struct IA64LdstImmediate {
     int64_t immediate;
 } IA64LdstImmediate;
 
+static inline bool ia64_ldst_immediate_is_fill(
+    const IA64LdstImmediate *decoded)
+{
+    return decoded &&
+           decoded->kind == IA64_LDST_IMM_LOAD &&
+           decoded->memory_class == 6 &&
+           decoded->width == 8;
+}
+
+static inline bool ia64_ldst_immediate_is_spill(
+    const IA64LdstImmediate *decoded)
+{
+    return decoded &&
+           decoded->kind == IA64_LDST_IMM_STORE &&
+           decoded->memory_class == 0x0e &&
+           decoded->width == 8;
+}
+
 typedef enum IA64AtomicKind {
     IA64_ATOMIC_CMPXCHG,
     IA64_ATOMIC_XCHG,

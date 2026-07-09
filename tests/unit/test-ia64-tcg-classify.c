@@ -722,8 +722,6 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     const uint64_t st8_r4_r5_raw = make_ldst_store_raw(3, 4, 5);
     const uint64_t st8_rel_r6_r7_raw =
         make_ldst_store_class_raw(0x0d, 3, 6, 7);
-    const uint64_t st8_spill_r8_r9_raw =
-        make_ldst_store_class_raw(0x0e, 3, 8, 9);
     const uint64_t prefetch_r10_raw = make_ldst_prefetch_raw(3, 10);
     IA64DecodedBundle bundle;
     IA64TcgFastBundle fast;
@@ -795,13 +793,6 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpuint(fast.slot[1].slot_index, ==, 1);
 
     bundle = make_bundle(0x08, IA64_INSN_NOP_RAW,
-                         st8_spill_r8_r9_raw, IA64_INSN_NOP_RAW);
-    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
-    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_LDST_STORE);
-    g_assert_cmpuint(fast.slot[1].source2, ==, 8);
-    g_assert_cmpuint(fast.slot[1].base, ==, 9);
-
-    bundle = make_bundle(0x08, IA64_INSN_NOP_RAW,
                          prefetch_r10_raw, IA64_INSN_NOP_RAW);
     g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
     g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_NOP);
@@ -828,6 +819,10 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
         make_ldst_load_class_raw(1, 3, 2, 3);
     const uint64_t ld8_sa_r24_r25_raw =
         make_ldst_load_class_raw(3, 3, 24, 25);
+    const uint64_t ld8_fill_r26_r27_raw =
+        make_ldst_load_class_raw(6, 3, 26, 27);
+    const uint64_t st8_spill_r8_r9_raw =
+        make_ldst_store_class_raw(0x0e, 3, 8, 9);
     IA64DecodedBundle bundle;
     IA64TcgFastBundle fast;
 
@@ -873,6 +868,20 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
                          IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
     g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
     g_assert_true(ia64_tcg_bundle_has_ldst_immediate(&bundle));
+
+    bundle = make_bundle(0x00, ld8_fill_r26_r27_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_true(ia64_tcg_bundle_has_ldst_immediate(&bundle));
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS);
+
+    bundle = make_bundle(0x00, st8_spill_r8_r9_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_true(ia64_tcg_bundle_has_ldst_immediate(&bundle));
+    g_assert_cmpint(ia64_tcg_fallback_reason_for_bundle(&bundle, 0x1000),
+                    ==, IA64_TCG_FALLBACK_FAST_LDST_MEMORY_CLASS);
 }
 
 static void test_fallback_plan_classifies_hot_helper_slots(void)
