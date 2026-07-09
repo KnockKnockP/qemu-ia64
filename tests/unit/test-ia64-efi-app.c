@@ -134,6 +134,11 @@ static const uint8_t efi_hcdp_table_guid[16] = {
     0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98,
 };
 
+static const uint8_t efi_acpi_table_guid[16] = {
+    0x30, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11,
+    0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
+};
+
 static const uint8_t efi_acpi20_table_guid[16] = {
     0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11,
     0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81,
@@ -419,6 +424,7 @@ static void test_builds_guest_firmware_tables(void)
     uint64_t handle_protocol_descriptor;
     uint64_t handle_protocol_gate;
     const uint8_t *config_entry;
+    const uint8_t *acpi20_config_entry;
     const uint8_t *sal_config_entry;
     const uint8_t *sal_table;
     const uint8_t *sal_entry;
@@ -428,6 +434,7 @@ static void test_builds_guest_firmware_tables(void)
     const uint8_t *fadt;
     const uint8_t *dsdt;
     const uint8_t *madt;
+    const uint8_t *dbgp;
     const uint8_t *facs;
     uint64_t rsdp_addr;
     uint64_t sal_table_addr;
@@ -436,6 +443,7 @@ static void test_builds_guest_firmware_tables(void)
     uint64_t fadt_addr;
     uint64_t dsdt_addr;
     uint64_t madt_addr;
+    uint64_t dbgp_addr;
     uint64_t facs_addr;
     uint32_t dsdt_length;
     unsigned block_io_base;
@@ -451,7 +459,7 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(runtime_services, ==, VIBTANIUM_EFI_RUNTIME_SERVICES);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SYSTEM_TABLE + 104)),
-                    ==, 2);
+                    ==, 3);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SYSTEM_TABLE + 112)),
                     ==, VIBTANIUM_EFI_CONFIGURATION_TABLE);
@@ -526,14 +534,17 @@ static void test_builds_guest_firmware_tables(void)
                     (VIBTANIUM_EFI_BOOT_SERVICE_COUNT + 4) * 16);
 
     config_entry = firmware_ptr(blob, VIBTANIUM_EFI_CONFIGURATION_TABLE);
-    g_assert_cmpmem(config_entry, 16, efi_acpi20_table_guid, 16);
+    g_assert_cmpmem(config_entry, 16, efi_acpi_table_guid, 16);
     rsdp_addr = load_le64(config_entry + 16);
     g_assert_cmphex(rsdp_addr, ==, VIBTANIUM_EFI_ACPI_RSDP);
-    sal_config_entry = config_entry + 24;
+    acpi20_config_entry = config_entry + 24;
+    g_assert_cmpmem(acpi20_config_entry, 16, efi_acpi20_table_guid, 16);
+    g_assert_cmphex(load_le64(acpi20_config_entry + 16), ==, rsdp_addr);
+    sal_config_entry = config_entry + 48;
     g_assert_cmpmem(sal_config_entry, 16, efi_sal_system_table_guid, 16);
     sal_table_addr = load_le64(sal_config_entry + 16);
     g_assert_cmphex(sal_table_addr, ==, VIBTANIUM_EFI_SAL_SYSTEM_TABLE);
-    g_assert_false(bytes_contain(config_entry, 72,
+    g_assert_false(bytes_contain(config_entry, 96,
                                  efi_hcdp_table_guid,
                                  sizeof(efi_hcdp_table_guid)));
 
@@ -548,17 +559,19 @@ static void test_builds_guest_firmware_tables(void)
 
     rsdt = firmware_ptr(blob, rsdt_addr);
     g_assert_cmpmem(rsdt, 4, "RSDT", 4);
-    g_assert_cmphex(load_le32(rsdt + 4), ==, 44);
-    g_assert_cmphex(byte_sum(rsdt, 44), ==, 0);
+    g_assert_cmphex(load_le32(rsdt + 4), ==, 48);
+    g_assert_cmphex(byte_sum(rsdt, 48), ==, 0);
     fadt_addr = load_le32(rsdt + 36);
     madt_addr = load_le32(rsdt + 40);
+    dbgp_addr = load_le32(rsdt + 44);
 
     xsdt = firmware_ptr(blob, xsdt_addr);
     g_assert_cmpmem(xsdt, 4, "XSDT", 4);
-    g_assert_cmphex(load_le32(xsdt + 4), ==, 52);
-    g_assert_cmphex(byte_sum(xsdt, 52), ==, 0);
+    g_assert_cmphex(load_le32(xsdt + 4), ==, 60);
+    g_assert_cmphex(byte_sum(xsdt, 60), ==, 0);
     g_assert_cmphex(load_le64(xsdt + 36), ==, fadt_addr);
     g_assert_cmphex(load_le64(xsdt + 44), ==, madt_addr);
+    g_assert_cmphex(load_le64(xsdt + 52), ==, dbgp_addr);
 
     fadt = firmware_ptr(blob, fadt_addr);
     g_assert_cmpmem(fadt, 4, "FACP", 4);
@@ -595,16 +608,28 @@ static void test_builds_guest_firmware_tables(void)
 
     madt = firmware_ptr(blob, madt_addr);
     g_assert_cmpmem(madt, 4, "APIC", 4);
-    g_assert_cmphex(load_le32(madt + 4), ==, 76);
-    g_assert_cmphex(byte_sum(madt, 76), ==, 0);
+    g_assert_cmphex(load_le32(madt + 4), ==, 72);
+    g_assert_cmphex(byte_sum(madt, 72), ==, 0);
     g_assert_cmphex(load_le32(madt + 36), ==, 0xfee00000);
     g_assert_cmpuint(madt[44], ==, 7);
-    g_assert_cmpuint(madt[45], ==, 16);
+    g_assert_cmpuint(madt[45], ==, 12);
     g_assert_cmphex(load_le32(madt + 52), ==, 1);
-    g_assert_cmpuint(madt[60], ==, 6);
-    g_assert_cmpuint(madt[61], ==, 16);
-    g_assert_cmphex(load_le32(madt + 64), ==, 0);
-    g_assert_cmphex(load_le64(madt + 68), ==, 0xfec00000);
+    g_assert_cmpuint(madt[56], ==, 6);
+    g_assert_cmpuint(madt[57], ==, 16);
+    g_assert_cmphex(load_le32(madt + 60), ==, 0);
+    g_assert_cmphex(load_le64(madt + 64), ==, 0xfec00000);
+
+    dbgp = firmware_ptr(blob, dbgp_addr);
+    g_assert_cmpmem(dbgp, 4, "DBGP", 4);
+    g_assert_cmphex(load_le32(dbgp + 4), ==, 52);
+    g_assert_cmpuint(dbgp[8], ==, 1);
+    g_assert_cmphex(byte_sum(dbgp, 52), ==, 0);
+    g_assert_cmpuint(dbgp[36], ==, 0);
+    g_assert_cmpuint(dbgp[40], ==, 1);
+    g_assert_cmpuint(dbgp[41], ==, 8);
+    g_assert_cmpuint(dbgp[42], ==, 0);
+    g_assert_cmpuint(dbgp[43], ==, 1);
+    g_assert_cmphex(load_le64(dbgp + 44), ==, VIBTANIUM_LEGACY_COM1_BASE);
 
     facs = firmware_ptr(blob, facs_addr);
     g_assert_cmpmem(facs, 4, "FACS", 4);
@@ -691,10 +716,10 @@ static void test_builds_hcdp_serial_console_table(void)
     g_assert_cmpuint(blob_size, ==, VIBTANIUM_EFI_BLOB_SIZE);
     g_assert_cmphex(load_le64(firmware_ptr(
                          blob, VIBTANIUM_EFI_SYSTEM_TABLE + 104)),
-                    ==, 3);
+                    ==, 4);
 
     config_entry = firmware_ptr(blob, VIBTANIUM_EFI_CONFIGURATION_TABLE);
-    hcdp_config_entry = config_entry + 48;
+    hcdp_config_entry = config_entry + 72;
     g_assert_cmpmem(hcdp_config_entry, 16, efi_hcdp_table_guid, 16);
     hcdp_table_addr = load_le64(hcdp_config_entry + 16);
     g_assert_cmphex(hcdp_table_addr, ==, VIBTANIUM_EFI_HCDP_TABLE);

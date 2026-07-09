@@ -33,12 +33,13 @@
 #define HCDP_UART_LENGTH 48
 #define ACPI_TABLE_HEADER_LENGTH 36
 #define ACPI_RSDP_LENGTH 36
-#define ACPI_RSDT_ENTRY_COUNT 2
+#define ACPI_RSDT_ENTRY_COUNT 3
 #define ACPI_RSDT_LENGTH (ACPI_TABLE_HEADER_LENGTH + \
                           ACPI_RSDT_ENTRY_COUNT * 4)
 #define ACPI_XSDT_LENGTH (ACPI_TABLE_HEADER_LENGTH + \
                           ACPI_RSDT_ENTRY_COUNT * 8)
 #define ACPI_FADT_LENGTH 244
+#define ACPI_DBGP_LENGTH 52
 #define ACPI_MADT_LOCAL_SAPIC_LENGTH 12
 #define ACPI_MADT_IO_SAPIC_LENGTH 16
 #define ACPI_MADT_LENGTH \
@@ -61,6 +62,7 @@ typedef struct VibtaniumFirmwareLayout {
     uint64_t acpi_fadt;
     uint64_t acpi_dsdt;
     uint64_t acpi_madt;
+    uint64_t acpi_dbgp;
     uint64_t acpi_facs;
 } VibtaniumFirmwareLayout;
 
@@ -167,6 +169,8 @@ static void firmware_layout_build(VibtaniumFirmwareLayout *layout,
         firmware_alloc_range(&cursor, dsdt_length, 0x100);
     layout->acpi_madt =
         firmware_alloc_range(&cursor, ACPI_MADT_LENGTH, 0x100);
+    layout->acpi_dbgp =
+        firmware_alloc_range(&cursor, ACPI_DBGP_LENGTH, 0x40);
     layout->acpi_facs =
         firmware_alloc_range(&cursor, ACPI_FACS_LENGTH, 0x40);
 }
@@ -808,6 +812,11 @@ static const uint8_t efi_hcdp_table_guid[16] = {
     0x82, 0x79, 0xa8, 0x4b, 0x79, 0x61, 0x78, 0x98,
 };
 
+static const uint8_t efi_acpi_table_guid[16] = {
+    0x30, 0x2d, 0x9d, 0xeb, 0x88, 0x2d, 0xd3, 0x11,
+    0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
+};
+
 static const uint8_t efi_acpi20_table_guid[16] = {
     0x71, 0xe8, 0x68, 0x88, 0xf1, 0xe4, 0xd3, 0x11,
     0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81,
@@ -865,17 +874,21 @@ static void write_configuration_table(uint8_t *blob, size_t size,
                                       bool hcdp_serial_console)
 {
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE,
-               efi_acpi20_table_guid);
+               efi_acpi_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 16,
               layout->acpi_rsdp);
     write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 24,
-               efi_sal_system_table_guid);
+               efi_acpi20_table_guid);
     blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 40,
+              layout->acpi_rsdp);
+    write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 48,
+               efi_sal_system_table_guid);
+    blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 64,
               layout->sal_system_table);
     if (hcdp_serial_console) {
-        write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 48,
+        write_guid(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 72,
                    efi_hcdp_table_guid);
-        blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 64,
+        blob_wr64(blob, size, VIBTANIUM_EFI_CONFIGURATION_TABLE + 88,
                   layout->hcdp_table);
     }
 }
@@ -978,9 +991,11 @@ static GArray *build_acpi_rsdt_table(const VibtaniumFirmwareLayout *layout)
 
     g_assert_cmphex(layout->acpi_fadt, <=, UINT32_MAX);
     g_assert_cmphex(layout->acpi_madt, <=, UINT32_MAX);
+    g_assert_cmphex(layout->acpi_dbgp, <=, UINT32_MAX);
     acpi_table_begin(&table, table_data);
     build_append_int_noprefix(table_data, layout->acpi_fadt, 4);
     build_append_int_noprefix(table_data, layout->acpi_madt, 4);
+    build_append_int_noprefix(table_data, layout->acpi_dbgp, 4);
     acpi_table_end(NULL, &table);
     return table_data;
 }
@@ -998,6 +1013,7 @@ static GArray *build_acpi_xsdt_table(const VibtaniumFirmwareLayout *layout)
     acpi_table_begin(&table, table_data);
     build_append_int_noprefix(table_data, layout->acpi_fadt, 8);
     build_append_int_noprefix(table_data, layout->acpi_madt, 8);
+    build_append_int_noprefix(table_data, layout->acpi_dbgp, 8);
     acpi_table_end(NULL, &table);
     return table_data;
 }
@@ -1179,6 +1195,28 @@ static GArray *build_acpi_madt_table(void)
     return table_data;
 }
 
+static GArray *build_acpi_dbgp_table(void)
+{
+    GArray *table_data = acpi_table_array_new();
+    AcpiTable table = {
+        .sig = "DBGP",
+        .rev = 1,
+        .oem_id = ACPI_OEM_ID,
+        .oem_table_id = ACPI_OEM_TABLE_ID,
+    };
+    uint8_t *dbgp;
+
+    acpi_table_begin(&table, table_data);
+    g_array_set_size(table_data, ACPI_DBGP_LENGTH);
+    dbgp = (uint8_t *)table_data->data + table.table_offset;
+
+    dbgp[36] = 0; /* Full 16550 register interface. */
+    write_acpi_gas(dbgp + 40, ACPI_ADR_SPACE_SYSTEM_IO, 8, 1,
+                   VIBTANIUM_LEGACY_COM1_BASE);
+    acpi_table_end(NULL, &table);
+    return table_data;
+}
+
 static void write_acpi_facs(uint8_t *blob, size_t size,
                             const VibtaniumFirmwareLayout *layout)
 {
@@ -1198,6 +1236,7 @@ static void write_acpi_tables(uint8_t *blob, size_t size,
     GArray *xsdt = build_acpi_xsdt_table(layout);
     GArray *fadt = build_acpi_fadt_table(layout);
     GArray *madt = build_acpi_madt_table();
+    GArray *dbgp = build_acpi_dbgp_table();
 
     write_acpi_root_pointer(blob, size, layout);
     firmware_copy_table(blob, size, layout->acpi_rsdt, rsdt);
@@ -1205,12 +1244,14 @@ static void write_acpi_tables(uint8_t *blob, size_t size,
     firmware_copy_table(blob, size, layout->acpi_fadt, fadt);
     firmware_copy_table(blob, size, layout->acpi_dsdt, dsdt);
     firmware_copy_table(blob, size, layout->acpi_madt, madt);
+    firmware_copy_table(blob, size, layout->acpi_dbgp, dbgp);
     write_acpi_facs(blob, size, layout);
 
     g_array_free(rsdt, true);
     g_array_free(xsdt, true);
     g_array_free(fadt, true);
     g_array_free(madt, true);
+    g_array_free(dbgp, true);
 }
 
 static void write_system_table(uint8_t *blob, size_t size,
@@ -1473,7 +1514,7 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
         write_hcdp_table(blob, VIBTANIUM_EFI_BLOB_SIZE, &layout);
     }
     write_system_table(blob, VIBTANIUM_EFI_BLOB_SIZE,
-                       hcdp_serial_console ? 3 : 2);
+                       hcdp_serial_console ? 4 : 3);
 
     g_array_free(dsdt, true);
     return blob;
