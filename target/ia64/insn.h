@@ -8,6 +8,7 @@
 
 #define IA64_INSN_NOP_RAW 0x08000000ULL
 #define IA64_STACKED_GR_MASK (IA64_STACKED_GR_COUNT - 1)
+#define IA64_RNAT_VALID_MASK (~(UINT64_C(1) << 63))
 
 #if (IA64_STACKED_GR_COUNT & IA64_STACKED_GR_MASK) != 0
 #error "IA64_STACKED_GR_COUNT must remain a power of two"
@@ -248,8 +249,16 @@ void ia64_rse_mark_dirty_partition(CPUIA64State *env, uint32_t count);
 void ia64_rse_set_dirty_partition(CPUIA64State *env, uint64_t start,
                                   uint64_t end);
 uint64_t ia64_rse_reg_address(uint64_t address);
+bool ia64_rse_address_is_rnat_slot(uint64_t address);
+uint64_t ia64_rse_rnat_address(uint64_t address);
+uint32_t ia64_rse_nat_collection_bit(uint64_t address);
 uint32_t ia64_rse_dirty_partition_first_slot(CPUIA64State *env,
                                              uint32_t count);
+bool ia64_rse_read_physical_nat(CPUIA64State *env, uint32_t slot);
+void ia64_rse_write_physical_nat(CPUIA64State *env, uint32_t slot, bool nat);
+void ia64_rse_sync_rnat(CPUIA64State *env);
+void ia64_rse_write_rnat(CPUIA64State *env, uint64_t value);
+void ia64_rse_clear_rnat(CPUIA64State *env);
 /* Physical stacked register file capacity (r32-r127 on real hardware). */
 #define IA64_RSE_PHYS_STACKED_REGS 96
 
@@ -430,6 +439,7 @@ void ia64_float_reg_to_spill(const IA64FloatReg *reg,
                              uint64_t *mantissa);
 void ia64_float_reg_from_spill(uint64_t sign_exponent, uint64_t mantissa,
                                IA64FloatReg *reg);
+void ia64_write_fr_natval(CPUIA64State *env, uint32_t reg);
 void ia64_write_fr_from_single_bits(CPUIA64State *env, uint32_t reg,
                                     uint32_t bits);
 void ia64_write_fr_from_double_bits(CPUIA64State *env, uint32_t reg,
@@ -440,6 +450,9 @@ bool ia64_decode_m_atomic(IA64SlotType type, uint64_t raw,
                           IA64AtomicInstruction *decoded);
 bool ia64_decode_floating_memory(IA64SlotType type, uint64_t raw,
                                  IA64FloatingMemoryInstruction *decoded);
+bool ia64_defer_floating_speculative_load(
+    CPUIA64State *env, const IA64FloatingMemoryInstruction *decoded,
+    vaddr address, bool base_nat);
 bool ia64_decode_floating_compare(IA64SlotType type, uint64_t raw,
                                   IA64FloatingCompareInstruction *decoded);
 bool ia64_exec_floating_compare_qualified(

@@ -38,6 +38,8 @@
 #define VIBTANIUM_DEFAULT_LINUX_APPEND ""
 #define TYPE_VIBTANIUM_PCI_HOST "vibtanium-pci-host"
 #define TYPE_VIBTANIUM_IDE "cmd646-ide"
+#define VIBTANIUM_PIB_INTA_OFFSET UINT64_C(0x1e0000)
+#define VIBTANIUM_PIB_XTPR_OFFSET UINT64_C(0x1e0008)
 
 typedef struct VibtaniumPciHostState {
     PCIHostState parent_obj;
@@ -257,9 +259,15 @@ static void vibtanium_i8042_init(VibtaniumMachineState *vms)
 static uint64_t vibtanium_local_sapic_ipi_read(void *opaque, hwaddr offset,
                                                unsigned size)
 {
-    (void)opaque;
-    (void)offset;
-    (void)size;
+    /*
+     * The upper half of the architectural Processor Interrupt Block exposes
+     * one-byte INTA and XTPR locations. Vibtanium has no 8259A-compatible
+     * ExtINT source, so INTA currently supplies vector zero.
+     */
+    if (offset == VIBTANIUM_PIB_INTA_OFFSET && size == 1) {
+        return 0;
+    }
+
     return 0;
 }
 
@@ -271,8 +279,15 @@ static void vibtanium_local_sapic_ipi_write(void *opaque, hwaddr offset,
     uint64_t delivery_mode = (value >> 8) & 0x7;
     uint64_t vector = value & 0xff;
 
-    (void)offset;
-    (void)size;
+    if (offset == VIBTANIUM_PIB_XTPR_OFFSET && size == 1) {
+        vms->local_sapic_xtpr = value;
+        return;
+    }
+
+    if (offset >= VIBTANIUM_LOCAL_SAPIC_IPI_SIZE ||
+        size != 8 || (offset & 7) != 0) {
+        return;
+    }
 
     if (delivery_mode != 0) {
         return;
@@ -288,11 +303,11 @@ static const MemoryRegionOps vibtanium_local_sapic_ipi_ops = {
     .write = vibtanium_local_sapic_ipi_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
-        .min_access_size = 4,
+        .min_access_size = 1,
         .max_access_size = 8,
     },
     .impl = {
-        .min_access_size = 4,
+        .min_access_size = 1,
         .max_access_size = 8,
     },
 };
@@ -976,12 +991,13 @@ static void vibtanium_init(MachineState *machine)
     memory_region_add_subregion(sysmem, VIBTANIUM_KERNEL_ALIAS_BASE,
                                 &vms->kernel_alias);
 
-    memory_region_init_io(&vms->local_sapic_ipi, OBJECT(machine),
+    memory_region_init_io(&vms->local_sapic_pib, OBJECT(machine),
                           &vibtanium_local_sapic_ipi_ops, vms,
-                          "vibtanium.local-sapic-ipi",
-                          VIBTANIUM_LOCAL_SAPIC_IPI_SIZE);
-    memory_region_add_subregion(sysmem, VIBTANIUM_LOCAL_SAPIC_IPI_BASE,
-                                &vms->local_sapic_ipi);
+                          "vibtanium.local-sapic-pib",
+                          VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_SIZE);
+    memory_region_add_subregion(sysmem,
+                                VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_BASE,
+                                &vms->local_sapic_pib);
 
     vms->uart = serial_mm_init(
         sysmem, VIBTANIUM_UART_BASE, 0,

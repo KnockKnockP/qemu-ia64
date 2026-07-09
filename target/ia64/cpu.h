@@ -9,6 +9,7 @@
 #define IA64_GR_COUNT 128
 #define IA64_STATIC_GR_COUNT 32
 #define IA64_STACKED_GR_COUNT 4096
+#define IA64_RSE_NAT_WORDS ((IA64_STACKED_GR_COUNT + 63) / 64)
 #define IA64_FR_COUNT 128
 #define IA64_PR_COUNT 64
 #define IA64_BR_COUNT 8
@@ -221,12 +222,14 @@ typedef struct IA64RSEState {
      */
     uint32_t clean_count;
     uint64_t stacked_gr[IA64_STACKED_GR_COUNT];
+    uint64_t stacked_nat[IA64_RSE_NAT_WORDS];
 } IA64RSEState;
 
 typedef struct IA64NaTState {
     /*
-     * Placeholder NaT state. gr_nat carries one bit for each general register;
-     * UNAT/RNAT are mirrored into the application register file during reset.
+     * Static general-register NaT state. Stacked-register physical NaTs live
+     * with the RSE state because the implementation has more physical stacked
+     * slots than the 96 architectural stacked register numbers.
      */
     uint64_t gr_nat[2];
     uint64_t unat;

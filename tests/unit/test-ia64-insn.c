@@ -528,6 +528,8 @@ static void test_rse_bspstore_write_preserves_dirty_boundary(void)
     env.rse.bsp = 0x2000;
     env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
     env.ar[IA64_AR_BSP] = env.rse.bsp;
+    env.rse.rnat = UINT64_C(1) << 12;
+    ia64_rse_sync_rnat(&env);
     ia64_write_gr(&env, 33, 0x3018);
 
     g_assert_true(ia64_slot_is_mov_to_application(IA64_SLOT_TYPE_I,
@@ -535,6 +537,8 @@ static void test_rse_bspstore_write_preserves_dirty_boundary(void)
     g_assert_true(ia64_exec_mov_to_application(&env, IA64_SLOT_TYPE_I,
                                                mov_ar_bspstore_r33_raw));
     g_assert_cmphex(env.rse.bspstore, ==, 0x3018);
+    g_assert_cmphex(env.rse.rnat, ==, 0);
+    g_assert_cmphex(env.ar[IA64_AR_RNAT], ==, 0);
     g_assert_cmpuint(env.rse.clean_count, ==, 101);
 }
 
@@ -570,7 +574,7 @@ static void test_rse_loadrs_dirty_partition_survives_bspstore_switch(void)
 
 typedef struct TestRSEBackingStore {
     uint64_t first_address;
-    uint64_t value[8];
+    uint64_t value[16];
     uint32_t read_count;
     bool forbid_reads;
 } TestRSEBackingStore;
@@ -706,6 +710,43 @@ static void test_rse_loadrs_reads_clean_prefix_only(void)
     g_assert_cmpuint(env.rse.clean_count, ==, 4);
 }
 
+static void test_rse_load_restores_nat_from_rnat_collection(void)
+{
+    const uint64_t start = 0x61e0;
+    const uint64_t rnat = (UINT64_C(1) << 60) | (UINT64_C(1) << 62);
+    TestRSEBackingStore store = {
+        .first_address = start,
+        .value = {
+            0xa100000000000000ULL, 0xa211111111111111ULL,
+            0xa322222222222222ULL, rnat,
+            0xa433333333333333ULL, 0xa544444444444444ULL,
+        },
+    };
+    CPUIA64State env;
+    uint64_t end = ia64_rse_skip_regs(start, 5);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 20;
+    env.rse.rnat = UINT64_C(1);
+    ia64_rse_sync_rnat(&env);
+    ia64_rse_load_dirty_partition(&env, start, end,
+                                  test_rse_read_backing_store_register,
+                                  &store);
+    ia64_rse_set_dirty_partition(&env, start, end);
+
+    g_assert_cmpuint(store.read_count, ==, 6);
+    g_assert_cmphex(env.rse.stacked_gr[15], ==, store.value[0]);
+    g_assert_cmphex(env.rse.stacked_gr[16], ==, store.value[1]);
+    g_assert_cmphex(env.rse.stacked_gr[17], ==, store.value[2]);
+    g_assert_cmphex(env.rse.stacked_gr[18], ==, store.value[4]);
+    g_assert_cmphex(env.rse.stacked_gr[19], ==, store.value[5]);
+    g_assert_true(ia64_rse_read_physical_nat(&env, 15));
+    g_assert_false(ia64_rse_read_physical_nat(&env, 16));
+    g_assert_true(ia64_rse_read_physical_nat(&env, 17));
+    g_assert_true(ia64_rse_read_physical_nat(&env, 18));
+    g_assert_false(ia64_rse_read_physical_nat(&env, 19));
+}
+
 static void test_rse_restored_frame_uses_bsp_load(void)
 {
     TestRSEBackingStore store = {
@@ -822,27 +863,39 @@ static void test_rse_alloc_spill_keeps_physical_bound(void)
     env.rse.bsp_load = env.rse.bspstore;
     env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
     env.ar[IA64_AR_BSP] = env.rse.bsp;
+    env.rse.rnat = 0;
+    ia64_rse_sync_rnat(&env);
     for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
         env.rse.stacked_gr[i] = 0xb0d0000000000000ULL | i;
     }
+    ia64_rse_write_physical_nat(&env, 1, true);
+    ia64_rse_write_physical_nat(&env, 4, true);
 
     spilled = ia64_rse_spill_excess_dirty(
         &env, 20, test_rse_write_backing_store_register, &capture);
 
     g_assert_cmpuint(spilled, ==, 14);
-    g_assert_cmpuint(capture.count, ==, 14);
+    g_assert_cmpuint(capture.count, ==, 15);
     address = 0x61e0;
-    for (uint32_t i = 0; i < 14; i++) {
-        address = ia64_rse_reg_address(address);
+    for (uint32_t i = 0, reg = 0; i < capture.count; i++) {
         g_assert_cmphex(capture.address[i], ==, address);
-        g_assert_cmphex(capture.value[i], ==, 0xb0d0000000000000ULL | i);
+        if (ia64_rse_address_is_rnat_slot(address)) {
+            g_assert_cmphex(capture.value[i], ==,
+                            UINT64_C(1) << 61);
+        } else {
+            g_assert_cmphex(capture.value[i], ==,
+                            0xb0d0000000000000ULL | reg);
+            reg++;
+        }
         address += 8;
     }
-    /* 0x61f8 is a NaT collection slot and must have been skipped. */
-    g_assert_cmphex(capture.address[3], ==, 0x6200);
+    g_assert_cmphex(capture.address[3], ==, 0x61f8);
+    g_assert_cmphex(capture.address[4], ==, 0x6200);
     g_assert_cmphex(env.rse.bspstore, ==,
                     ia64_rse_skip_regs(0x61e0, 14));
     g_assert_cmphex(env.rse.bsp_load, ==, env.rse.bspstore);
+    g_assert_cmphex(env.rse.rnat, ==, UINT64_C(1) << 1);
+    g_assert_cmphex(env.ar[IA64_AR_RNAT], ==, env.rse.rnat);
     g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==, env.rse.bspstore);
     g_assert_cmpuint(ia64_rse_num_regs(env.rse.bspstore, env.rse.bsp) + 20,
                      ==, IA64_RSE_PHYS_STACKED_REGS);
@@ -1153,6 +1206,25 @@ static void test_application_register_moves(void)
     g_assert_true(ia64_exec_mov_to_application(&env, IA64_SLOT_TYPE_M,
                                                mov_m_ar_pfs_r36_raw));
     g_assert_cmphex(env.ar[IA64_AR_PFS], ==, 0x456);
+}
+
+static void test_rnat_application_register_masks_only_slot63(void)
+{
+    const uint64_t mov_ar_rnat_r33_raw =
+        (0x2aULL << 27) | (IA64_AR_RNAT << 20) | (33ULL << 13);
+    const uint64_t expected = (UINT64_C(1) << 62) | UINT64_C(1);
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_gr(&env, 33, expected | (UINT64_C(1) << 63));
+
+    g_assert_true(ia64_slot_is_mov_to_application(IA64_SLOT_TYPE_I,
+                                                  mov_ar_rnat_r33_raw));
+    g_assert_true(ia64_exec_mov_to_application(&env, IA64_SLOT_TYPE_I,
+                                               mov_ar_rnat_r33_raw));
+    g_assert_cmphex(env.rse.rnat, ==, expected);
+    g_assert_cmphex(env.ar[IA64_AR_RNAT], ==, expected);
+    g_assert_cmphex(env.nat.rnat, ==, expected);
 }
 
 static void test_m_unit_system_memory_management(void)
@@ -3046,6 +3118,60 @@ static void test_general_register_write_clears_nat(void)
     g_assert_false(ia64_read_gr_nat(&env, 0));
 }
 
+static void test_stacked_register_nat_uses_physical_slot(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 10;
+    ia64_set_cfm(&env, ia64_make_cfm(4, 4, 0));
+
+    ia64_write_gr_nat(&env, 33, true);
+    g_assert_true(ia64_read_gr_nat(&env, 33));
+    g_assert_true(ia64_rse_read_physical_nat(&env, 11));
+
+    env.rse.current_frame_base = 20;
+    g_assert_false(ia64_read_gr_nat(&env, 33));
+    g_assert_true(ia64_rse_read_physical_nat(&env, 11));
+}
+
+static void test_stacked_register_nat_high_slot_uses_rse_bitmap(void)
+{
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rse.current_frame_base = 424;
+    ia64_set_cfm(&env, ia64_make_cfm(15, 10, 0));
+    env.nat.gr_nat[0] = 0xaaaaaaaaaaaaaaaaULL;
+    env.nat.gr_nat[1] = 0x5555555555555555ULL;
+    env.nat.unat = 0x1111222233334444ULL;
+    env.nat.rnat = 0x5555666677778888ULL;
+    env.interrupt.pending_interruption = 0x0123456789abcdefULL;
+    env.interrupt.pending_vector = 0xfedcba9876543210ULL;
+
+    ia64_write_gr_nat(&env, 38, true);
+    g_assert_true(ia64_read_gr_nat(&env, 38));
+    g_assert_true(ia64_rse_read_physical_nat(&env, 430));
+    g_assert_cmphex(env.nat.gr_nat[0], ==, 0xaaaaaaaaaaaaaaaaULL);
+    g_assert_cmphex(env.nat.gr_nat[1], ==, 0x5555555555555555ULL);
+    g_assert_cmphex(env.nat.unat, ==, 0x1111222233334444ULL);
+    g_assert_cmphex(env.nat.rnat, ==, 0x5555666677778888ULL);
+    g_assert_cmphex(env.interrupt.pending_interruption, ==,
+                    0x0123456789abcdefULL);
+    g_assert_cmphex(env.interrupt.pending_vector, ==, 0xfedcba9876543210ULL);
+
+    ia64_write_gr(&env, 38, 0x10fee48);
+    g_assert_false(ia64_read_gr_nat(&env, 38));
+    g_assert_false(ia64_rse_read_physical_nat(&env, 430));
+    g_assert_cmphex(env.nat.gr_nat[0], ==, 0xaaaaaaaaaaaaaaaaULL);
+    g_assert_cmphex(env.nat.gr_nat[1], ==, 0x5555555555555555ULL);
+    g_assert_cmphex(env.nat.unat, ==, 0x1111222233334444ULL);
+    g_assert_cmphex(env.nat.rnat, ==, 0x5555666677778888ULL);
+    g_assert_cmphex(env.interrupt.pending_interruption, ==,
+                    0x0123456789abcdefULL);
+    g_assert_cmphex(env.interrupt.pending_vector, ==, 0xfedcba9876543210ULL);
+}
+
 static void test_alat_check_load_helpers(void)
 {
     CPUIA64State env;
@@ -3195,6 +3321,37 @@ static void test_floating_memory_decode(void)
     g_assert_cmpuint(decoded.base, ==, 10);
     g_assert_cmpuint(decoded.memory_class, ==, 0);
     g_assert_false(decoded.base_update);
+}
+
+static void assert_fr_natval(const CPUIA64State *env, uint32_t reg)
+{
+    g_assert_cmphex(env->fr[reg].raw[0], ==, 0);
+    g_assert_cmphex(env->fr[reg].raw[1] & 0x1ffff, ==,
+                    IA64_TEST_FR_NATVAL_EXPONENT);
+    g_assert_cmphex(env->fr[reg].raw[1] >> 17, ==, 0);
+}
+
+static void test_floating_speculative_load_defer_writes_natval(void)
+{
+    CPUIA64State env;
+    IA64FloatingMemoryInstruction decoded;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_ED_BIT;
+    ia64_write_fr_from_double_bits(&env, 8, UINT64_C(0x3ff0000000000000));
+    ia64_write_fr_from_double_bits(&env, 9, UINT64_C(0x4000000000000000));
+
+    memset(&decoded, 0, sizeof(decoded));
+    decoded.kind = IA64_FLOAT_MEM_LOAD_PAIR;
+    decoded.memory_class = 1;
+    decoded.freg = 8;
+    decoded.freg2 = 9;
+
+    g_assert_true(ia64_defer_floating_speculative_load(&env, &decoded,
+                                                       0xdead0000, false));
+    assert_fr_natval(&env, 8);
+    assert_fr_natval(&env, 9);
+    g_assert_cmphex(env.psr & IA64_PSR_ED_BIT, ==, 0);
 }
 
 static void test_compare_immediate_updates_predicates(void)
@@ -4201,6 +4358,8 @@ int main(int argc, char **argv)
                     test_rse_loadrs_preserves_dirty_frame_uncovered_by_rfi);
     g_test_add_func("/ia64-insn/rse-loadrs-reads-clean-prefix-only",
                     test_rse_loadrs_reads_clean_prefix_only);
+    g_test_add_func("/ia64-insn/rse-load-restores-rnat-collection",
+                    test_rse_load_restores_nat_from_rnat_collection);
     g_test_add_func("/ia64-insn/rse-restored-frame-uses-bsp-load",
                     test_rse_restored_frame_uses_bsp_load);
     g_test_add_func("/ia64-insn/rse-reconstructs-clean-partition-after-load",
@@ -4229,6 +4388,8 @@ int main(int argc, char **argv)
                     test_i_unit_mov_to_branch);
     g_test_add_func("/ia64-insn/application-register-moves",
                     test_application_register_moves);
+    g_test_add_func("/ia64-insn/rnat-application-register-mask",
+                    test_rnat_application_register_masks_only_slot63);
     g_test_add_func("/ia64-insn/m-unit-system-memory-management",
                     test_m_unit_system_memory_management);
     g_test_add_func("/ia64-insn/translation-access-dirty-bits",
@@ -4325,12 +4486,18 @@ int main(int argc, char **argv)
                     test_ldst_immediate_decode);
     g_test_add_func("/ia64-insn/gr-write-clears-nat",
                     test_general_register_write_clears_nat);
+    g_test_add_func("/ia64-insn/stacked-gr-nat-physical-slot",
+                    test_stacked_register_nat_uses_physical_slot);
+    g_test_add_func("/ia64-insn/stacked-gr-nat-high-slot-bitmap",
+                    test_stacked_register_nat_high_slot_uses_rse_bitmap);
     g_test_add_func("/ia64-insn/alat-check-load-helpers",
                     test_alat_check_load_helpers);
     g_test_add_func("/ia64-insn/m-unit-atomic-decode",
                     test_m_unit_atomic_decode);
     g_test_add_func("/ia64-insn/floating-memory-decode",
                     test_floating_memory_decode);
+    g_test_add_func("/ia64-insn/floating-speculative-load-defer-natval",
+                    test_floating_speculative_load_defer_writes_natval);
     g_test_add_func("/ia64-insn/compare-immediate-predicate-write",
                     test_compare_immediate_updates_predicates);
     g_test_add_func("/ia64-insn/compare-parallel-predicate-write",

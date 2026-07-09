@@ -13,8 +13,10 @@
 #define IA64_PSR_IC_BIT   UINT64_C(0x0000000000002000)
 #define IA64_PSR_I_BIT    UINT64_C(0x0000000000004000)
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
+#define IA64_PSR_ED_BIT   UINT64_C(0x0000080000000000)
 #define IA64_PSR_RT_BIT   UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_DCR_DM_BIT   UINT64_C(0x0000000000000100)
 #define IA64_PTE_P_BIT    UINT64_C(0x0000000000000001)
 #define IA64_PTE_A_BIT    UINT64_C(0x0000000000000020)
 #define IA64_PSR_DELIVERY_CLEARED_MASK \
@@ -192,6 +194,38 @@ static void test_speculative_load_exception_records_isr_sp_ed(void)
                     ==, 0);
     g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_ED_BIT),
                     ==, 0);
+}
+
+static void test_control_speculative_load_deferral_policy(void)
+{
+    CPUIA64State env;
+    vaddr ip = 0x4000;
+    vaddr miss = 0x6000;
+    uint64_t itir = test_rr(0x33, 12, false);
+    uint64_t code_pte_ed = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                           (7ULL << 9) | (1ULL << 52);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_ED_BIT;
+    g_assert_true(ia64_control_speculative_load_defer(&env, 1, false,
+                                                      miss, NULL));
+    g_assert_cmphex(env.psr & IA64_PSR_ED_BIT, ==, 0);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_IT_BIT | IA64_TB_PSR_DT_BIT;
+    env.cr[IA64_CR_DCR] = IA64_DCR_DM_BIT;
+    env.rr[0] = test_rr(0x33, 12, false);
+    g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
+                                           code_pte_ed, itir));
+    g_assert_true(ia64_control_speculative_load_defer(&env, 1, false,
+                                                      miss, NULL));
+
+    env.cr[IA64_CR_DCR] = 0;
+    g_assert_false(ia64_control_speculative_load_defer(&env, 1, false,
+                                                       miss, NULL));
+    g_assert_false(ia64_control_speculative_load_defer(&env, 0, false,
+                                                       miss, NULL));
 }
 
 static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
@@ -1153,6 +1187,8 @@ int main(int argc, char **argv)
                     test_instruction_translation_reports_exception_deferral);
     g_test_add_func("/ia64-exception/speculative-load-isr-sp-ed",
                     test_speculative_load_exception_records_isr_sp_ed);
+    g_test_add_func("/ia64-memory/control-speculative-load-deferral-policy",
+                    test_control_speculative_load_deferral_policy);
     g_test_add_func("/ia64-memory/tcg-tb-flags-mmu-index-cpl",
                     test_tcg_tb_flags_and_mmu_indexes_include_cpl);
     g_test_add_func("/ia64-memory/translated-miss",

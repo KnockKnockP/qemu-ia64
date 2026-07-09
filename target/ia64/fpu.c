@@ -115,28 +115,58 @@ static bool exec_floating_memory(CPUIA64State *env,
 {
     uint64_t address = ia64_read_gr(env, decoded->base);
     uint64_t update;
+    bool base_nat = ia64_read_gr_nat(env, decoded->base);
 
     switch (decoded->kind) {
     case IA64_FLOAT_MEM_LOAD:
+        if (ia64_defer_floating_speculative_load(env, decoded, address,
+                                                 base_nat)) {
+            break;
+        }
+        if (base_nat) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
+                                                     "floating load base NaT");
+        }
         exec_floating_load(env, decoded, address);
         break;
     case IA64_FLOAT_MEM_LOAD_PAIR:
+        if (ia64_defer_floating_speculative_load(env, decoded, address,
+                                                 base_nat)) {
+            break;
+        }
+        if (base_nat) {
+            ia64_exit_after_register_nat_consumption(
+                env, MMU_DATA_LOAD, "floating load pair base NaT");
+        }
         exec_floating_load_pair(env, decoded, address);
         break;
     case IA64_FLOAT_MEM_STORE:
+        if (base_nat) {
+            ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
+                                                     "floating store base NaT");
+        }
         exec_floating_store(env, decoded, address);
         break;
     case IA64_FLOAT_MEM_PREFETCH:
+        if (base_nat) {
+            ia64_exit_after_register_nat_consumption(
+                env, MMU_DATA_LOAD, "floating prefetch base NaT");
+        }
         break;
     default:
         g_assert_not_reached();
     }
 
     if (decoded->base_update) {
-        update = decoded->update_from_register
-            ? ia64_read_gr(env, decoded->update_source)
-            : (uint64_t)decoded->immediate;
-        ia64_write_gr(env, decoded->base, address + update);
+        if (decoded->update_from_register &&
+            ia64_read_gr_nat(env, decoded->update_source)) {
+            ia64_write_gr_nat(env, decoded->base, true);
+        } else {
+            update = decoded->update_from_register
+                ? ia64_read_gr(env, decoded->update_source)
+                : (uint64_t)decoded->immediate;
+            ia64_write_gr(env, decoded->base, address + update);
+        }
     }
     return true;
 }

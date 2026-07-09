@@ -15,14 +15,32 @@ static void ia64_exec_flushrs(CPUIA64State *env)
     }
 
     first_slot = ia64_rse_dirty_partition_first_slot(env, dirty);
-    for (uint32_t i = 0; i < dirty; i++) {
-        uint64_t value = env->rse.stacked_gr[
-            ia64_rse_wrap_slot(first_slot + i)];
+    for (uint32_t i = 0; i < dirty;) {
+        uint32_t slot;
+        uint64_t value;
 
-        address = ia64_rse_reg_address(address);
+        if (ia64_rse_address_is_rnat_slot(address)) {
+            ia64_ldst_write(env, address, 8, env->rse.rnat);
+            ia64_rse_shadow_note_spill(address, env->rse.rnat);
+            ia64_rse_clear_rnat(env);
+            address += 8;
+            continue;
+        }
+
+        slot = ia64_rse_wrap_slot(first_slot + i);
+        value = env->rse.stacked_gr[slot];
+        if (ia64_rse_read_physical_nat(env, slot)) {
+            env->rse.rnat |=
+                UINT64_C(1) << ia64_rse_nat_collection_bit(address);
+        } else {
+            env->rse.rnat &=
+                ~(UINT64_C(1) << ia64_rse_nat_collection_bit(address));
+        }
+        ia64_rse_sync_rnat(env);
         ia64_ldst_write(env, address, 8, value);
         ia64_rse_shadow_note_spill(address, value);
         address += 8;
+        i++;
     }
 
     env->rse.bspstore = address;
@@ -103,7 +121,7 @@ static void ia64_rse_sync_ar_after_fill(CPUIA64State *env)
 {
     env->ar[IA64_AR_BSP] = env->rse.bsp;
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
-    env->ar[IA64_AR_RNAT] = env->rse.rnat;
+    ia64_rse_sync_rnat(env);
 }
 
 /*
@@ -235,6 +253,7 @@ static void ia64_exec_loadrs(CPUIA64State *env)
                                       NULL);
     }
     ia64_rse_set_dirty_partition(env, start, end);
+    ia64_rse_clear_rnat(env);
     if (ia64_rse_trace_enabled()) {
         fprintf(stderr,
                 "[ia64-rse] ip=0x%016" PRIx64

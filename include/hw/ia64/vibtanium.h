@@ -21,7 +21,8 @@ typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 #define VIBTANIUM_KERNEL_ALIAS_BASE UINT64_C(0x100000000)
 #define VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET UINT64_C(0x04000000)
 #define VIBTANIUM_IO_PORT_BASE UINT64_C(0x0000000200000000)
-#define VIBTANIUM_LOCAL_SAPIC_IPI_BASE UINT64_C(0xfee00000)
+#define VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_BASE UINT64_C(0xfee00000)
+#define VIBTANIUM_LOCAL_SAPIC_IPI_BASE VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_BASE
 #define VIBTANIUM_IOSAPIC_BASE UINT64_C(0xfec00000)
 #define VIBTANIUM_UART_BASE     UINT64_C(0xff000000)
 #define VIBTANIUM_FRAMEBUFFER_BASE UINT64_C(0xff100000)
@@ -64,6 +65,7 @@ typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 #define VIBTANIUM_VGA_CRTC_REGISTER_COUNT 0x19
 #define VIBTANIUM_IO_PORT_SIZE  (64 * MiB)
 #define VIBTANIUM_LOCAL_SAPIC_IPI_SIZE (1 * MiB)
+#define VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_SIZE (2 * MiB)
 #define VIBTANIUM_IOSAPIC_SIZE  UINT64_C(0x100)
 #define VIBTANIUM_IOSAPIC_REDIRECTION_COUNT 24
 #define VIBTANIUM_UART_SLOT_SIZE UINT64_C(0x100)
@@ -93,7 +95,8 @@ struct VibtaniumMachineState {
     MemoryRegion kernel_alias;
     MemoryRegion vga_legacy;
     MemoryRegion io_port_space;
-    MemoryRegion local_sapic_ipi;
+    MemoryRegion local_sapic_pib;
+    uint8_t local_sapic_xtpr;
     MemoryRegion framebuffer;
     MemoryRegion nvram;
     MemoryRegion firmware;

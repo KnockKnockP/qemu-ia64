@@ -112,6 +112,7 @@ static void test_helper_flags_are_conservative(void)
     g_assert_cmphex(helper_flags_for("firmware_call_gate"), ==, 0);
     g_assert_cmphex(helper_flags_for("start_fast_bundle"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_fast_bundle"), ==, 0);
+    g_assert_cmphex(helper_flags_for("fast_gr_nat_any"), ==, 0);
     g_assert_cmphex(helper_flags_for("fast_ldst_load"), ==, 0);
     g_assert_cmphex(helper_flags_for("fast_ldst_store"), ==, 0);
     g_assert_cmphex(helper_flags_for("finish_direct_branch_bundle"), ==, 0);

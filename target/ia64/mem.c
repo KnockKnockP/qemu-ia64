@@ -10,12 +10,17 @@
 #define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_REGIONLESS_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_DCR_BE_BIT UINT64_C(0x0000000000000002)
+#define IA64_DCR_DM_BIT UINT64_C(0x0000000000000100)
+#define IA64_DCR_DP_BIT UINT64_C(0x0000000000000200)
+#define IA64_DCR_DR_BIT UINT64_C(0x0000000000001000)
+#define IA64_DCR_DA_BIT UINT64_C(0x0000000000002000)
 #define IA64_PTA_VE_BIT UINT64_C(0x0000000000000001)
 #define IA64_PTA_VF_BIT UINT64_C(0x0000000000000100)
 #define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
+#define IA64_PSR_ED_BIT UINT64_C(0x0000080000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
 #define IA64_FIRMWARE_IDENTITY_PAGE_BITS 22
@@ -1112,4 +1117,91 @@ void ia64_format_translate_result(const IA64TranslateResult *result,
              result->access_type, result->mmu_idx, result->page_size,
              result->debug ? "yes" : "no",
              result->identity ? "yes" : "no", result->message);
+}
+
+bool ia64_memory_class_is_control_speculative(uint8_t memory_class)
+{
+    return memory_class == 1 || memory_class == 3;
+}
+
+static bool ia64_current_itlb_exception_deferral(CPUIA64State *env)
+{
+    IA64TranslateResult result;
+
+    if ((ia64_env_psr(env) & IA64_PSR_IT_BIT) == 0) {
+        return false;
+    }
+
+    return ia64_translate_address_no_detail(env, env->ip, MMU_INST_FETCH,
+                                            0, true, &result) &&
+           result.exception_deferral;
+}
+
+bool ia64_control_speculative_load_fault_deferred(
+    CPUIA64State *env, const IA64TranslateResult *result)
+{
+    uint64_t psr;
+    uint64_t dcr;
+    bool recovery_model;
+
+    if (!env || !result) {
+        return false;
+    }
+
+    psr = ia64_env_psr(env);
+    dcr = env->cr[IA64_CR_DCR];
+
+    if ((psr & IA64_PSR_IC_BIT) == 0) {
+        return true;
+    }
+
+    recovery_model = (psr & IA64_PSR_IT_BIT) != 0 &&
+                     ia64_current_itlb_exception_deferral(env);
+
+    switch (result->status) {
+    case IA64_TRANSLATE_BAD_ADDRESS:
+    case IA64_TRANSLATE_UNIMPLEMENTED:
+        return true;
+    case IA64_TRANSLATE_TLB_MISS:
+        return recovery_model && (dcr & IA64_DCR_DM_BIT) != 0;
+    case IA64_TRANSLATE_NOT_PRESENT:
+        return recovery_model && (dcr & IA64_DCR_DP_BIT) != 0;
+    case IA64_TRANSLATE_ACCESS_BIT:
+        return recovery_model && (dcr & IA64_DCR_DA_BIT) != 0;
+    case IA64_TRANSLATE_ACCESS_DENIED:
+        return recovery_model && (dcr & IA64_DCR_DR_BIT) != 0;
+    default:
+        return false;
+    }
+}
+
+bool ia64_control_speculative_load_defer(CPUIA64State *env,
+                                         uint8_t memory_class,
+                                         bool base_nat, vaddr address,
+                                         IA64TranslateResult *fault)
+{
+    IA64TranslateResult local_fault;
+
+    if (!env || !ia64_memory_class_is_control_speculative(memory_class)) {
+        return false;
+    }
+
+    if (base_nat) {
+        return true;
+    }
+
+    if ((ia64_env_psr(env) & IA64_PSR_ED_BIT) != 0) {
+        ia64_env_set_psr(env, ia64_env_psr(env) & ~IA64_PSR_ED_BIT);
+        return true;
+    }
+
+    if (ia64_translate_address_no_detail(env, address, MMU_DATA_LOAD,
+                                         0, false, &local_fault)) {
+        return false;
+    }
+
+    if (fault) {
+        *fault = local_fault;
+    }
+    return ia64_control_speculative_load_fault_deferred(env, &local_fault);
 }

@@ -22,7 +22,7 @@ static const VMStateDescription vmstate_float_reg = {
 
 static const VMStateDescription vmstate_rse = {
     .name = "rse",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT64(rsc, IA64RSEState),
@@ -39,6 +39,8 @@ static const VMStateDescription vmstate_rse = {
         VMSTATE_UINT32(current_frame_base, IA64RSEState),
         VMSTATE_UINT64_ARRAY(stacked_gr, IA64RSEState,
                              IA64_STACKED_GR_COUNT),
+        VMSTATE_UINT64_ARRAY_V(stacked_nat, IA64RSEState,
+                               IA64_RSE_NAT_WORDS, 2),
         VMSTATE_END_OF_LIST()
     }
 };

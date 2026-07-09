@@ -1,13 +1,5 @@
 /* Included by interp.c. */
 
-#define IA64_DCR_DM_BIT UINT64_C(0x0000000000000100)
-#define IA64_DCR_DP_BIT UINT64_C(0x0000000000000200)
-#define IA64_DCR_DR_BIT UINT64_C(0x0000000000001000)
-#define IA64_DCR_DA_BIT UINT64_C(0x0000000000002000)
-#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
-#define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
-#define IA64_PSR_ED_BIT UINT64_C(0x0000080000000000)
-
 static uint64_t ia64_ld_le_unaligned(CPUIA64State *env, uint64_t address,
                                      uint8_t width)
 {
@@ -602,71 +594,10 @@ static void ia64_probe_store_access(CPUIA64State *env, uint64_t address)
     }
 }
 
-static bool ia64_ldst_is_control_speculative(uint8_t memory_class)
-{
-    return memory_class == 1 || memory_class == 3;
-}
-
-static bool ia64_current_itlb_exception_deferral(CPUIA64State *env)
-{
-    IA64TranslateResult result;
-
-    if ((ia64_env_psr(env) & IA64_PSR_IT_BIT) == 0) {
-        return false;
-    }
-
-    return ia64_translate_address_no_detail(env, env->ip, MMU_INST_FETCH,
-                                            0, true, &result) &&
-           result.exception_deferral;
-}
-
-static bool ia64_ldst_fault_deferred(CPUIA64State *env,
-                                     const IA64TranslateResult *result)
-{
-    uint64_t psr = ia64_env_psr(env);
-    uint64_t dcr = env->cr[IA64_CR_DCR];
-    bool recovery_model;
-
-    if ((psr & IA64_PSR_IC_BIT) == 0) {
-        return true;
-    }
-
-    recovery_model = (psr & IA64_PSR_IT_BIT) != 0 &&
-                     ia64_current_itlb_exception_deferral(env);
-
-    switch (result->status) {
-    case IA64_TRANSLATE_BAD_ADDRESS:
-    case IA64_TRANSLATE_UNIMPLEMENTED:
-        return true;
-    case IA64_TRANSLATE_TLB_MISS:
-        return recovery_model && (dcr & IA64_DCR_DM_BIT) != 0;
-    case IA64_TRANSLATE_NOT_PRESENT:
-        return recovery_model && (dcr & IA64_DCR_DP_BIT) != 0;
-    case IA64_TRANSLATE_ACCESS_BIT:
-        return recovery_model && (dcr & IA64_DCR_DA_BIT) != 0;
-    case IA64_TRANSLATE_ACCESS_DENIED:
-        return recovery_model && (dcr & IA64_DCR_DR_BIT) != 0;
-    default:
-        return false;
-    }
-}
-
-static bool ia64_ldst_force_deferred(CPUIA64State *env, uint8_t target)
-{
-    if ((ia64_env_psr(env) & IA64_PSR_ED_BIT) == 0) {
-        return false;
-    }
-
-    env->psr &= ~IA64_PSR_ED_BIT;
-    ia64_write_gr_nat(env, target, true);
-    ia64_alat_invalidate_gr(env, target);
-    return true;
-}
-
 static bool ia64_ldst_defer_nat_consumption(CPUIA64State *env,
                                             const IA64LdstImmediate *decoded)
 {
-    if (!ia64_ldst_is_control_speculative(decoded->memory_class)) {
+    if (!ia64_memory_class_is_control_speculative(decoded->memory_class)) {
         return false;
     }
 
@@ -689,28 +620,36 @@ static G_NORETURN void ia64_exit_after_register_nat_consumption(
 static bool ia64_ldst_maybe_defer_control_speculative(
     CPUIA64State *env, const IA64LdstImmediate *decoded, uint64_t address)
 {
-    IA64TranslateResult result;
-
-    if (!ia64_ldst_is_control_speculative(decoded->memory_class)) {
-        return false;
-    }
-
-    if (ia64_ldst_force_deferred(env, decoded->target)) {
-        return true;
-    }
-
-    if (ia64_translate_address_no_detail(env, address, MMU_DATA_LOAD,
-                                         0, false, &result)) {
-        return false;
-    }
-
-    if (!ia64_ldst_fault_deferred(env, &result)) {
+    if (!ia64_control_speculative_load_defer(env, decoded->memory_class,
+                                             false, address, NULL)) {
         return false;
     }
 
     ia64_write_gr_nat(env, decoded->target, true);
     ia64_alat_invalidate_gr(env, decoded->target);
     return true;
+}
+
+static void ia64_ldst_apply_base_update(CPUIA64State *env,
+                                        const IA64LdstImmediate *decoded,
+                                        uint64_t address)
+{
+    uint64_t update;
+
+    if (!decoded->base_update) {
+        return;
+    }
+
+    if (decoded->update_from_register &&
+        ia64_read_gr_nat(env, decoded->update_source)) {
+        ia64_write_gr_nat(env, decoded->base, true);
+        return;
+    }
+
+    update = decoded->update_from_register
+        ? ia64_read_gr(env, decoded->update_source)
+        : (uint64_t)decoded->immediate;
+    ia64_write_gr(env, decoded->base, address + update);
 }
 
 static const char *ia64_atomic_name(IA64AtomicKind kind, bool release)
@@ -844,7 +783,6 @@ static bool exec_ldst_immediate(CPUIA64State *env,
                                 const IA64LdstImmediate *decoded)
 {
     uint64_t address;
-    uint64_t update;
     bool check_clear;
     bool check_no_clear;
 
@@ -927,17 +865,7 @@ static bool exec_ldst_immediate(CPUIA64State *env,
         g_assert_not_reached();
     }
 
-    if (decoded->base_update) {
-        if (decoded->update_from_register &&
-            ia64_read_gr_nat(env, decoded->update_source)) {
-            ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
-                                                     "base update NaT");
-        }
-        update = decoded->update_from_register
-            ? ia64_read_gr(env, decoded->update_source)
-            : (uint64_t)decoded->immediate;
-        ia64_write_gr(env, decoded->base, address + update);
-    }
+    ia64_ldst_apply_base_update(env, decoded, address);
     env->gr[0] = 0;
     return true;
 }

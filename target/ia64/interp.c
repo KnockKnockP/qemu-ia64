@@ -309,6 +309,31 @@ static void ia64_alat_invalidate_gr_mask(CPUIA64State *env, uint64_t dest_mask)
     }
 }
 
+static void ia64_gr_nat_clear_mask(CPUIA64State *env, uint64_t dest_mask)
+{
+    dest_mask &= ~1ULL;
+    while (dest_mask != 0) {
+        unsigned reg = ctz64(dest_mask);
+
+        ia64_write_gr_nat(env, reg, false);
+        dest_mask &= dest_mask - 1;
+    }
+}
+
+uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask)
+{
+    source_mask &= ~1ULL;
+    while (source_mask != 0) {
+        unsigned reg = ctz64(source_mask);
+
+        if (ia64_read_gr_nat(env, reg)) {
+            return 1;
+        }
+        source_mask &= source_mask - 1;
+    }
+    return 0;
+}
+
 #include "interp-ldst.c"
 
 #include "rse.c"
@@ -453,6 +478,7 @@ void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
                                 uint64_t dest_mask)
 {
     ia64_alat_invalidate_gr_mask(env, dest_mask);
+    ia64_gr_nat_clear_mask(env, dest_mask);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
 }
@@ -550,11 +576,12 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
+    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
+    ia64_gr_nat_clear_mask(env, prefix_dest_mask);
     if (is_call) {
         /* env->ip still holds the call bundle; the return IP derives from it. */
         ia64_branch_call_effects(env, call_branch_reg, env->ip);
     }
-    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
     ia64_finish_tcg_ticks(env, pending_bundle_count + 1);
@@ -597,6 +624,9 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
+    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
+    ia64_gr_nat_clear_mask(env, prefix_dest_mask);
+
     /*
      * The return-frame fill below can touch the backing store and fault;
      * publish the branch slot the way the interpreter loop does so delivery
@@ -622,7 +652,6 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
                   env->ip, raw);
     }
 
-    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
     ia64_finish_tcg_ticks(env, pending_bundle_count + 1);
