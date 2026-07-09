@@ -765,6 +765,48 @@ static bool ia64_debug_break_trace_enabled(void)
     return enabled != 0;
 }
 
+static const char *ia64_debug_break_service_name(uint64_t iim)
+{
+    switch (iim) {
+    case 0x80014:
+        return "print";
+    case 0x80015:
+        return "prompt";
+    case 0x80016:
+        return "stop";
+    case 0x80017:
+        return "load-symbols";
+    case 0x80018:
+        return "unload-symbols";
+    case 0x80019:
+        return "command-string";
+    default:
+        return NULL;
+    }
+}
+
+static uint64_t ia64_debug_bugcheck_data_address(void)
+{
+    static int initialized;
+    static uint64_t address;
+
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_BUGCHECK_DATA");
+
+        if (value != NULL && *value != '\0') {
+            char *endptr = NULL;
+
+            address = g_ascii_strtoull(value, &endptr, 0);
+            if (endptr == value) {
+                address = 0;
+            }
+        }
+        initialized = 1;
+    }
+
+    return address;
+}
+
 static bool ia64_progress_trace_ip_matches(uint64_t ip)
 {
     static int initialized;
@@ -888,6 +930,7 @@ void ia64_progress_trace_break_slot(CPUIA64State *env,
     IA64TranslateResult inst_result = {0};
     uint8_t live_bytes[IA64_BUNDLE_SIZE];
     bool have_live_bytes = false;
+    bool debug_break_trace = ia64_debug_break_trace_enabled();
     MemTxResult memtx = MEMTX_ERROR;
 
     if (!ia64_progress_trace_enabled()) {
@@ -895,7 +938,8 @@ void ia64_progress_trace_break_slot(CPUIA64State *env,
     }
 
     break_slot_count++;
-    if (break_slot_count > 16 && (break_slot_count & UINT64_C(0xffff)) != 0) {
+    if (!debug_break_trace && break_slot_count > 16 &&
+        (break_slot_count & UINT64_C(0xffff)) != 0) {
         return;
     }
 
@@ -940,25 +984,131 @@ void ia64_progress_trace_break_slot(CPUIA64State *env,
                 " translate-failed %s\n",
                 env->ip, detail);
     }
-    if (ia64_debug_break_trace_enabled()) {
+    if (debug_break_trace) {
+        char status[48] = "ok";
+        char rendered[240];
+        uint64_t bugcheck_data = ia64_debug_bugcheck_data_address();
+        uint64_t t0 = ia64_read_gr(env, 2);
+        uint64_t t1 = ia64_read_gr(env, 3);
+        uint64_t t2 = ia64_read_gr(env, 9);
+        uint64_t t3 = ia64_read_gr(env, 10);
+        uint64_t a0 = ia64_read_gr(env, 32);
+        uint64_t a1 = ia64_read_gr(env, 33);
+        uint64_t value;
+        const char *service_name = ia64_debug_break_service_name(iim);
+
         fprintf(stderr,
                 "[ia64-debug-break] source=0x%016" PRIx64
                 " iim=0x%016" PRIx64 " b0=0x%016" PRIx64
                 " pfs=0x%016" PRIx64 " pr=0x%016" PRIx64
+                " r2=0x%016" PRIx64 " r3=0x%016" PRIx64
+                " r4=0x%016" PRIx64 " r5=0x%016" PRIx64
+                " r6=0x%016" PRIx64 " r7=0x%016" PRIx64
+                " r8=0x%016" PRIx64 " r9=0x%016" PRIx64
+                " r10=0x%016" PRIx64 " r11=0x%016" PRIx64
                 " r12=0x%016" PRIx64 " r13=0x%016" PRIx64
+                " r14=0x%016" PRIx64 " r15=0x%016" PRIx64
+                " r16=0x%016" PRIx64 " r17=0x%016" PRIx64
+                " r18=0x%016" PRIx64 " r19=0x%016" PRIx64
+                " r20=0x%016" PRIx64 " r21=0x%016" PRIx64
+                " r22=0x%016" PRIx64 " r23=0x%016" PRIx64
+                " r24=0x%016" PRIx64 " r25=0x%016" PRIx64
+                " r26=0x%016" PRIx64 " r27=0x%016" PRIx64
+                " r28=0x%016" PRIx64 " r29=0x%016" PRIx64
+                " r30=0x%016" PRIx64 " r31=0x%016" PRIx64
                 " r32=0x%016" PRIx64 " r33=0x%016" PRIx64
                 " r34=0x%016" PRIx64 " r35=0x%016" PRIx64
                 " r36=0x%016" PRIx64 " r37=0x%016" PRIx64
                 " r38=0x%016" PRIx64 " r39=0x%016" PRIx64
-                " r32nat=%u r33nat=%u r34nat=%u r35nat=%u\n",
+                " r32nat=%u r33nat=%u r34nat=%u r35nat=%u"
+                " cr.iip=0x%016" PRIx64 " cr.ifa=0x%016" PRIx64
+                " cr.isr=0x%016" PRIx64 "\n",
                 env->ip, iim, env->br[0], env->ar[IA64_AR_PFS], env->pr,
+                ia64_read_gr(env, 2), ia64_read_gr(env, 3),
+                ia64_read_gr(env, 4), ia64_read_gr(env, 5),
+                ia64_read_gr(env, 6), ia64_read_gr(env, 7),
+                ia64_read_gr(env, 8), ia64_read_gr(env, 9),
+                ia64_read_gr(env, 10), ia64_read_gr(env, 11),
                 ia64_read_gr(env, 12), ia64_read_gr(env, 13),
+                ia64_read_gr(env, 14), ia64_read_gr(env, 15),
+                ia64_read_gr(env, 16), ia64_read_gr(env, 17),
+                ia64_read_gr(env, 18), ia64_read_gr(env, 19),
+                ia64_read_gr(env, 20), ia64_read_gr(env, 21),
+                ia64_read_gr(env, 22), ia64_read_gr(env, 23),
+                ia64_read_gr(env, 24), ia64_read_gr(env, 25),
+                ia64_read_gr(env, 26), ia64_read_gr(env, 27),
+                ia64_read_gr(env, 28), ia64_read_gr(env, 29),
+                ia64_read_gr(env, 30), ia64_read_gr(env, 31),
                 ia64_read_gr(env, 32), ia64_read_gr(env, 33),
                 ia64_read_gr(env, 34), ia64_read_gr(env, 35),
                 ia64_read_gr(env, 36), ia64_read_gr(env, 37),
                 ia64_read_gr(env, 38), ia64_read_gr(env, 39),
                 ia64_read_gr_nat(env, 32), ia64_read_gr_nat(env, 33),
-                ia64_read_gr_nat(env, 34), ia64_read_gr_nat(env, 35));
+                ia64_read_gr_nat(env, 34), ia64_read_gr_nat(env, 35),
+                env->cr[IA64_CR_IIP], env->cr[IA64_CR_IFA],
+                env->cr[IA64_CR_ISR]);
+
+        if (service_name) {
+            ia64_trace_guest_bytes_escaped(env, t0, MIN(t1, UINT64_C(160)),
+                                           rendered, sizeof(rendered));
+            fprintf(stderr,
+                    "[ia64-debug-service] source=0x%016" PRIx64
+                    " service=%s t0=0x%016" PRIx64
+                    " t1=0x%016" PRIx64 " t2=0x%016" PRIx64
+                    " t3=0x%016" PRIx64 " text=%s\n",
+                    env->ip, service_name, t0, t1, t2, t3, rendered);
+        }
+
+        fprintf(stderr,
+                "[ia64-debug-break-memory] source=0x%016" PRIx64
+                " iim=0x%016" PRIx64 " a0=0x%016" PRIx64
+                " a1=0x%016" PRIx64,
+                env->ip, iim, a0, a1);
+        if (ia64_trace_guest_read_u64(env, a0, &value, status,
+                                      sizeof(status))) {
+            fprintf(stderr, " a0[0]=0x%016" PRIx64, value);
+        } else {
+            fprintf(stderr, " a0[0]=%s", status);
+        }
+        status[0] = '\0';
+        if (ia64_trace_guest_read_u64(env, a0 + 8, &value, status,
+                                      sizeof(status))) {
+            fprintf(stderr, " a0[8]=0x%016" PRIx64, value);
+        } else {
+            fprintf(stderr, " a0[8]=%s", status);
+        }
+        status[0] = '\0';
+        if (ia64_trace_guest_read_u64(env, a1, &value, status,
+                                      sizeof(status))) {
+            fprintf(stderr, " a1[0]=0x%016" PRIx64, value);
+        } else {
+            fprintf(stderr, " a1[0]=%s", status);
+        }
+        status[0] = '\0';
+        if (ia64_trace_guest_read_u64(env, a1 + 8, &value, status,
+                                      sizeof(status))) {
+            fprintf(stderr, " a1[8]=0x%016" PRIx64, value);
+        } else {
+            fprintf(stderr, " a1[8]=%s", status);
+        }
+        fputc('\n', stderr);
+
+        if (bugcheck_data != 0) {
+            fprintf(stderr,
+                    "[ia64-bugcheck-data] base=0x%016" PRIx64,
+                    bugcheck_data);
+            for (unsigned i = 0; i < 5; i++) {
+                status[0] = '\0';
+                if (ia64_trace_guest_read_u64(
+                        env, bugcheck_data + i * sizeof(value), &value,
+                        status, sizeof(status))) {
+                    fprintf(stderr, " p%u=0x%016" PRIx64, i, value);
+                } else {
+                    fprintf(stderr, " p%u=%s", i, status);
+                }
+            }
+            fputc('\n', stderr);
+        }
     }
     fflush(stderr);
 }
