@@ -46,9 +46,11 @@
 #define IA64_ISR_X_BIT 32
 #define IA64_ISR_W_BIT 33
 #define IA64_ISR_R_BIT 34
+#define IA64_ISR_SP_BIT 36
 #define IA64_ISR_NI_BIT 39
 #define IA64_ISR_EI_SHIFT 41
 #define IA64_ISR_EI_MASK UINT64_C(0x0000060000000000)
+#define IA64_ISR_ED_BIT 43
 
 /*
  * AR.ITC advances at a fixed declared rate backed by the QEMU virtual clock,
@@ -385,6 +387,17 @@ typedef struct CPUArchState {
     IA64MemorySkeletonState memory;
     IA64ExceptionRecord exception;
     IA64AlatState alat;
+
+    /*
+     * Transient interpreter breadcrumb for data faults.  It lets interruption
+     * delivery report ISR.sp/ISR.ed for speculative loads without refetching
+     * guest instruction bytes after a SoftMMU exit.
+     */
+    bool current_slot_valid;
+    uint8_t current_slot_ri;
+    uint8_t current_slot_type;
+    uint64_t current_slot_ip;
+    uint64_t current_slot_raw;
 
     /*
      * ar[IA64_AR_ITC] caches the clock-backed ITC value and is refreshed by

@@ -39,7 +39,7 @@
 #define ACPI_XSDT_LENGTH (ACPI_TABLE_HEADER_LENGTH + \
                           ACPI_RSDT_ENTRY_COUNT * 8)
 #define ACPI_FADT_LENGTH 244
-#define ACPI_MADT_LOCAL_SAPIC_LENGTH 16
+#define ACPI_MADT_LOCAL_SAPIC_LENGTH 12
 #define ACPI_MADT_IO_SAPIC_LENGTH 16
 #define ACPI_MADT_LENGTH \
     (ACPI_TABLE_HEADER_LENGTH + 8 + ACPI_MADT_LOCAL_SAPIC_LENGTH + \
@@ -1168,7 +1168,6 @@ static GArray *build_acpi_madt_table(void)
     lsapic[3] = 0;
     lsapic[4] = 0;
     wr32(lsapic + 8, 1);
-    wr32(lsapic + 12, 0);
 
     iosapic[0] = 6; /* ACPI_MADT_TYPE_IO_SAPIC */
     iosapic[1] = ACPI_MADT_IO_SAPIC_LENGTH;

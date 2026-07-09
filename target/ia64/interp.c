@@ -990,6 +990,11 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         IA64IntegerExtendInstruction int_ext;
 
         ia64_env_set_ri(env, slot);
+        env->current_slot_valid = true;
+        env->current_slot_ip = env->ip;
+        env->current_slot_ri = slot;
+        env->current_slot_type = type;
+        env->current_slot_raw = raw;
         IA64_PERF_INC(IA64_PERF_INTERP_SLOT_ITERATION);
         if (ia64_perf_enabled()) {
             ia64_perf_count_slot_type(type);

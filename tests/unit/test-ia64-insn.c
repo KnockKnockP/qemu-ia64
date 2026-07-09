@@ -2873,6 +2873,45 @@ static void test_f_unit_misc_packed_data_family(void)
     g_assert_cmphex(env.fr[10].raw[1], ==, 0x1003e);
 }
 
+static void test_f_unit_misc_minmax_family(void)
+{
+    const uint64_t windows_fmax_f10_f1_f10_raw =
+        f_misc_slot_raw(0x15, 10, 1, 10);
+    CPUIA64State env;
+    IA64FloatReg expected_f10;
+
+    g_assert_cmphex(windows_fmax_f10_f1_f10_raw, ==,
+                    UINT64_C(0x000a8a02280));
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    ia64_write_fr_from_double_bits(&env, 8, UINT64_C(0x4008000000000000));
+    ia64_write_fr_from_double_bits(&env, 9, UINT64_C(0xc010000000000000));
+    ia64_write_fr_from_double_bits(&env, 10, UINT64_C(0x4000000000000000));
+
+    g_assert_true(ia64_slot_is_f_misc(IA64_SLOT_TYPE_F,
+                                      f_misc_slot_raw(0x14, 11, 8, 10)));
+    g_assert_true(ia64_exec_f_misc(&env, f_misc_slot_raw(0x14, 11, 8, 10)));
+    g_assert_cmphex(env.fr[11].raw[0], ==, env.fr[10].raw[0]);
+    g_assert_cmphex(env.fr[11].raw[1], ==, env.fr[10].raw[1]);
+
+    g_assert_true(ia64_exec_f_misc(&env, f_misc_slot_raw(0x15, 12, 8, 10)));
+    g_assert_cmphex(env.fr[12].raw[0], ==, env.fr[8].raw[0]);
+    g_assert_cmphex(env.fr[12].raw[1], ==, env.fr[8].raw[1]);
+
+    g_assert_true(ia64_exec_f_misc(&env, f_misc_slot_raw(0x16, 13, 8, 9)));
+    g_assert_cmphex(env.fr[13].raw[0], ==, env.fr[8].raw[0]);
+    g_assert_cmphex(env.fr[13].raw[1], ==, env.fr[8].raw[1]);
+
+    g_assert_true(ia64_exec_f_misc(&env, f_misc_slot_raw(0x17, 14, 8, 9)));
+    g_assert_cmphex(env.fr[14].raw[0], ==, env.fr[9].raw[0]);
+    g_assert_cmphex(env.fr[14].raw[1], ==, env.fr[9].raw[1]);
+
+    expected_f10 = env.fr[10];
+    g_assert_true(ia64_exec_f_misc(&env, windows_fmax_f10_f1_f10_raw));
+    g_assert_cmphex(env.fr[10].raw[0], ==, expected_f10.raw[0]);
+    g_assert_cmphex(env.fr[10].raw[1], ==, expected_f10.raw[1]);
+}
+
 static void test_f_unit_misc_noop(void)
 {
     const uint64_t elilo_nop_f_raw = 0x00008000000ULL;
@@ -4278,6 +4317,8 @@ int main(int argc, char **argv)
                     test_f_unit_misc_fsxt_r_frontier);
     g_test_add_func("/ia64-insn/f-unit-misc-packed-data-family",
                     test_f_unit_misc_packed_data_family);
+    g_test_add_func("/ia64-insn/f-unit-misc-minmax-family",
+                    test_f_unit_misc_minmax_family);
     g_test_add_func("/ia64-insn/f-unit-misc-noop",
                     test_f_unit_misc_noop);
     g_test_add_func("/ia64-insn/ldst-immediate-decode",

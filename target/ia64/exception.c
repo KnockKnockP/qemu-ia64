@@ -72,7 +72,60 @@ static uint64_t ia64_psr_for_interruption_delivery(CPUIA64State *env)
     return psr;
 }
 
-static uint64_t ia64_interruption_isr(uint64_t psr,
+static bool ia64_current_slot_matches(CPUIA64State *env, uint64_t psr)
+{
+    return env && env->current_slot_valid &&
+           env->current_slot_ip == env->ip &&
+           env->current_slot_ri == ia64_psr_ri(psr);
+}
+
+static bool ia64_memory_class_is_speculative(uint8_t memory_class)
+{
+    return memory_class == 1 || memory_class == 3;
+}
+
+static bool ia64_current_slot_is_speculative_load(CPUIA64State *env,
+                                                  uint64_t psr)
+{
+    IA64LdstImmediate ldst;
+    IA64FloatingMemoryInstruction fldst;
+
+    if (!ia64_current_slot_matches(env, psr) ||
+        env->current_slot_type != IA64_SLOT_TYPE_M) {
+        return false;
+    }
+    if (ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
+                                   env->current_slot_raw, &ldst)) {
+        return ldst.kind == IA64_LDST_IMM_LOAD &&
+               ia64_memory_class_is_speculative(ldst.memory_class);
+    }
+    if (ia64_decode_floating_memory(IA64_SLOT_TYPE_M,
+                                    env->current_slot_raw, &fldst)) {
+        return (fldst.kind == IA64_FLOAT_MEM_LOAD ||
+                fldst.kind == IA64_FLOAT_MEM_LOAD_PAIR) &&
+               ia64_memory_class_is_speculative(fldst.memory_class);
+    }
+    return false;
+}
+
+static bool ia64_current_code_page_exception_deferral(CPUIA64State *env)
+{
+    IA64TranslateResult result;
+    uint64_t psr;
+    int mmu_idx;
+
+    if (!env) {
+        return false;
+    }
+
+    psr = ia64_env_psr(env);
+    mmu_idx = ia64_tcg_mmu_index_for_psr(psr, true);
+    return ia64_translate_address_no_detail(env, env->ip, MMU_INST_FETCH,
+                                            mmu_idx, true, &result) &&
+           result.exception_deferral;
+}
+
+static uint64_t ia64_interruption_isr(CPUIA64State *env, uint64_t psr,
                                       MMUAccessType access_type)
 {
     uint64_t isr = ((uint64_t)ia64_psr_ri(psr) << IA64_ISR_EI_SHIFT) &
@@ -88,6 +141,12 @@ static uint64_t ia64_interruption_isr(uint64_t psr,
     case MMU_DATA_LOAD:
     default:
         isr |= UINT64_C(1) << IA64_ISR_R_BIT;
+        if (ia64_current_slot_is_speculative_load(env, psr)) {
+            isr |= UINT64_C(1) << IA64_ISR_SP_BIT;
+            if (ia64_current_code_page_exception_deferral(env)) {
+                isr |= UINT64_C(1) << IA64_ISR_ED_BIT;
+            }
+        }
         break;
     }
     if ((psr & IA64_PSR_IC_BIT) == 0) {
@@ -274,7 +333,7 @@ static void ia64_record_exception_common(CPUIA64State *env,
     env->cr[IA64_CR_IIP] = env->ip;
     env->cr[IA64_CR_IFA] = address;
     env->cr[IA64_CR_IIPA] = address;
-    env->cr[IA64_CR_ISR] = ia64_interruption_isr(ia64_env_psr(env),
+    env->cr[IA64_CR_ISR] = ia64_interruption_isr(env, ia64_env_psr(env),
                                                  access_type) |
                            env->exception.isr_code;
 }
@@ -375,7 +434,7 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     env->cr[IA64_CR_IIP] = access_type == MMU_INST_FETCH ?
                            (address & ~0xfULL) : env->ip;
     env->cr[IA64_CR_IFA] = address;
-    env->cr[IA64_CR_ISR] = ia64_interruption_isr(ia64_env_psr(env),
+    env->cr[IA64_CR_ISR] = ia64_interruption_isr(env, ia64_env_psr(env),
                                                  access_type) |
                            env->exception.isr_code;
     if (kind == IA64_EXCEPTION_INSTRUCTION_TLB_MISS ||

@@ -36,6 +36,15 @@ static uint64_t test_rr(uint32_t rid, uint8_t page_size, bool vhpt)
            (vhpt ? 1 : 0);
 }
 
+static uint64_t test_ldst_load(uint8_t memory_class, uint8_t width_code,
+                               uint8_t target, uint8_t base)
+{
+    uint8_t x6 = (memory_class << 2) | width_code;
+
+    return (UINT64_C(4) << 37) | ((uint64_t)x6 << 30) |
+           ((uint64_t)base << 20) | ((uint64_t)target << 6);
+}
+
 static void test_identity_debug_memory_path(void)
 {
     CPUIA64State env;
@@ -103,6 +112,86 @@ static void test_instruction_translation_reports_exception_deferral(void)
     g_assert_true(ia64_translate_address(&env, 0x1000, MMU_DATA_LOAD,
                                          0, true, &result));
     g_assert_false(result.exception_deferral);
+}
+
+static void test_speculative_load_exception_records_isr_sp_ed(void)
+{
+    CPUIA64State env;
+    vaddr ip = 0x4000;
+    vaddr miss = 0x6000;
+    uint64_t psr = ia64_psr_with_ri(IA64_PSR_IC_BIT |
+                                    IA64_TB_PSR_IT_BIT |
+                                    IA64_TB_PSR_DT_BIT, 0);
+    uint64_t itir = test_rr(0x22, 12, false);
+    uint64_t code_pte_ed = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                           (7ULL << 9) | (1ULL << 52);
+    uint64_t code_pte_no_ed = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                              (7ULL << 9);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = psr;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.rr[0] = test_rr(0x22, 12, false);
+    g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
+                                           code_pte_ed, itir));
+    env.current_slot_valid = true;
+    env.current_slot_ip = ip;
+    env.current_slot_ri = ia64_psr_ri(psr);
+    env.current_slot_type = IA64_SLOT_TYPE_M;
+    env.current_slot_raw = test_ldst_load(1, 3, 21, 20);
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_TLB_MISS, miss,
+                           MMU_DATA_LOAD, "speculative-load");
+
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_R_BIT);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_SP_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_SP_BIT);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_ED_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_ED_BIT);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = psr;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.rr[0] = test_rr(0x22, 12, false);
+    g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
+                                           code_pte_no_ed, itir));
+    env.current_slot_valid = true;
+    env.current_slot_ip = ip;
+    env.current_slot_ri = ia64_psr_ri(psr);
+    env.current_slot_type = IA64_SLOT_TYPE_M;
+    env.current_slot_raw = test_ldst_load(1, 3, 21, 20);
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_TLB_MISS, miss,
+                           MMU_DATA_LOAD, "speculative-load");
+
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_SP_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_SP_BIT);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_ED_BIT),
+                    ==, 0);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = psr;
+    env.cr[IA64_CR_IVA] = 0x100000;
+    env.rr[0] = test_rr(0x22, 12, false);
+    g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
+                                           code_pte_ed, itir));
+    env.current_slot_valid = true;
+    env.current_slot_ip = ip;
+    env.current_slot_ri = ia64_psr_ri(psr);
+    env.current_slot_type = IA64_SLOT_TYPE_M;
+    env.current_slot_raw = test_ldst_load(0, 3, 21, 20);
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_TLB_MISS, miss,
+                           MMU_DATA_LOAD, "normal-load");
+
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_SP_BIT),
+                    ==, 0);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_ED_BIT),
+                    ==, 0);
 }
 
 static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
@@ -1032,6 +1121,8 @@ int main(int argc, char **argv)
                     test_physical_region_alias_path);
     g_test_add_func("/ia64-memory/instruction-exception-deferral",
                     test_instruction_translation_reports_exception_deferral);
+    g_test_add_func("/ia64-exception/speculative-load-isr-sp-ed",
+                    test_speculative_load_exception_records_isr_sp_ed);
     g_test_add_func("/ia64-memory/tcg-tb-flags-mmu-index-cpl",
                     test_tcg_tb_flags_and_mmu_indexes_include_cpl);
     g_test_add_func("/ia64-memory/translated-miss",

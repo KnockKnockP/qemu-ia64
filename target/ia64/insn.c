@@ -5353,6 +5353,7 @@ bool ia64_slot_is_f_misc(IA64SlotType type, uint64_t raw)
 
     return x6 == 0x01 ||
            (x6 >= 0x10 && x6 <= 0x12) ||
+           (x6 >= 0x14 && x6 <= 0x17) ||
            (x6 >= 0x18 && x6 <= 0x1c) ||
            x6 == 0x28 ||
            (x6 >= 0x2c && x6 <= 0x2f) ||
@@ -5360,9 +5361,39 @@ bool ia64_slot_is_f_misc(IA64SlotType type, uint64_t raw)
            (x6 >= 0x39 && x6 <= 0x3d);
 }
 
+static const IA64FloatReg *ia64_f_minmax_select(const IA64FloatReg *source2,
+                                                const IA64FloatReg *source3,
+                                                uint8_t x6,
+                                                float_status *status)
+{
+    bool maximum = x6 == 0x15 || x6 == 0x17;
+    bool absolute = x6 == 0x16 || x6 == 0x17;
+    floatx80 left;
+    floatx80 right;
+
+    if (ia64_fr_is_nan(source2) || ia64_fr_is_nan(source3)) {
+        return source3;
+    }
+
+    left = ia64_fr_to_floatx80(source2);
+    right = ia64_fr_to_floatx80(source3);
+    if (absolute) {
+        left = floatx80_abs(left);
+        right = floatx80_abs(right);
+    }
+
+    if (maximum) {
+        return floatx80_compare_quiet(right, left, status) ==
+               float_relation_less ? source2 : source3;
+    }
+    return floatx80_compare_quiet(left, right, status) ==
+           float_relation_less ? source2 : source3;
+}
+
 bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
 {
     uint8_t x6;
+    uint8_t sf;
     uint32_t f1;
     uint32_t f2;
     uint32_t f3;
@@ -5377,11 +5408,50 @@ bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
     }
 
     x6 = (raw >> 27) & 0x3f;
+    sf = (raw >> 34) & 0x3;
     f1 = (raw >> 6) & 0x7f;
     f2 = (raw >> 13) & 0x7f;
     f3 = (raw >> 20) & 0x7f;
 
     if (x6 == 0x01) {
+        return true;
+    }
+
+    if (x6 >= 0x14 && x6 <= 0x17) {
+        const IA64FloatReg *source2_reg;
+        const IA64FloatReg *source3_reg;
+        const IA64FloatReg *selected;
+        float_status status = { 0 };
+
+        if (f1 >= IA64_FR_COUNT || f1 < 2 ||
+            f2 >= IA64_FR_COUNT || f3 >= IA64_FR_COUNT) {
+            return true;
+        }
+
+        source2_reg = &env->fr[ia64_map_fr(env, f2)];
+        source3_reg = &env->fr[ia64_map_fr(env, f3)];
+        if (ia64_fr_is_natval(source2_reg) ||
+            ia64_fr_is_natval(source3_reg)) {
+            ia64_write_fr_natval(env, f1);
+            return true;
+        }
+
+        ia64_float_status_init_for_sf(env, &status, sf);
+        selected = ia64_f_minmax_select(source2_reg, source3_reg, x6,
+                                        &status);
+        env->fr[ia64_map_fr(env, f1)] = *selected;
+        ia64_note_fr_write(env, f1);
+        if (ia64_fpu_trace_enabled(env)) {
+            fprintf(stderr,
+                    "[ia64-fpu] minmax ip=0x%016" PRIx64
+                    " raw=0x%011" PRIx64 " x6=0x%02x f%u=f%u,f%u"
+                    " selected=f%u result=0x%016" PRIx64 ":%05" PRIx64
+                    "\n",
+                    env->ip, raw, x6, f1, f2, f3,
+                    selected == source2_reg ? f2 : f3,
+                    selected->raw[0], selected->raw[1]);
+            ia64_fpu_trace_fr("minmax.result", env, raw, f1);
+        }
         return true;
     }
 
