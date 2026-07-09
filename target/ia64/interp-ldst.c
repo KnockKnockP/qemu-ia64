@@ -630,28 +630,6 @@ static bool ia64_ldst_maybe_defer_control_speculative(
     return true;
 }
 
-static void ia64_ldst_apply_base_update(CPUIA64State *env,
-                                        const IA64LdstImmediate *decoded,
-                                        uint64_t address)
-{
-    uint64_t update;
-
-    if (!decoded->base_update) {
-        return;
-    }
-
-    if (decoded->update_from_register &&
-        ia64_read_gr_nat(env, decoded->update_source)) {
-        ia64_write_gr_nat(env, decoded->base, true);
-        return;
-    }
-
-    update = decoded->update_from_register
-        ? ia64_read_gr(env, decoded->update_source)
-        : (uint64_t)decoded->immediate;
-    ia64_write_gr(env, decoded->base, address + update);
-}
-
 static uint64_t ia64_ldst_unat_bit(uint64_t address)
 {
     return UINT64_C(1) << ia64_rse_nat_collection_bit(address);
@@ -799,15 +777,14 @@ static bool exec_ldst_immediate(CPUIA64State *env,
 
     switch (decoded->kind) {
     case IA64_LDST_IMM_LOAD:
+        address = ia64_read_gr(env, decoded->base);
         if (ia64_read_gr_nat(env, decoded->base)) {
             if (ia64_ldst_defer_nat_consumption(env, decoded)) {
-                env->gr[0] = 0;
-                return true;
+                break;
             }
             ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
                                                      "load base NaT");
         }
-        address = ia64_read_gr(env, decoded->base);
         if (decoded->target != 0) {
             uint64_t value;
 

@@ -880,6 +880,28 @@ void ia64_write_gr(CPUIA64State *env, uint32_t reg, uint64_t value)
     env->gr[0] = 0;
 }
 
+void ia64_ldst_apply_base_update(CPUIA64State *env,
+                                 const IA64LdstImmediate *decoded,
+                                 uint64_t address)
+{
+    uint64_t update;
+
+    if (!env || !decoded || !decoded->base_update) {
+        return;
+    }
+
+    if (decoded->update_from_register &&
+        ia64_read_gr_nat(env, decoded->update_source)) {
+        ia64_write_gr_nat(env, decoded->base, true);
+        return;
+    }
+
+    update = decoded->update_from_register
+        ? ia64_read_gr(env, decoded->update_source)
+        : (uint64_t)decoded->immediate;
+    ia64_write_gr(env, decoded->base, address + update);
+}
+
 static uint32_t ia64_map_pr(CPUIA64State *env, uint32_t predicate)
 {
     if (predicate < 16) {

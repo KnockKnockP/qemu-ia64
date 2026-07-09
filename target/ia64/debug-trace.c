@@ -1279,6 +1279,8 @@ void ia64_state_trace_bundle(CPUIA64State *env)
             " r72=0x%016" PRIx64 " r73=0x%016" PRIx64
             " r74=0x%016" PRIx64 " r75=0x%016" PRIx64
             " r76=0x%016" PRIx64
+            " r70nat=%d r71nat=%d r72nat=%d r73nat=%d"
+            " r74nat=%d r75nat=%d r76nat=%d"
             " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64
             " itc=0x%016" PRIx64 " itm=0x%016" PRIx64
             " itv=0x%016" PRIx64 " tpr=0x%016" PRIx64
@@ -1310,6 +1312,10 @@ void ia64_state_trace_bundle(CPUIA64State *env)
             ia64_read_gr(env, 72), ia64_read_gr(env, 73),
             ia64_read_gr(env, 74), ia64_read_gr(env, 75),
             ia64_read_gr(env, 76),
+            ia64_read_gr_nat(env, 70), ia64_read_gr_nat(env, 71),
+            ia64_read_gr_nat(env, 72), ia64_read_gr_nat(env, 73),
+            ia64_read_gr_nat(env, 74), ia64_read_gr_nat(env, 75),
+            ia64_read_gr_nat(env, 76),
             env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
             env->ar[IA64_AR_ITC], env->cr[IA64_CR_ITM],
             env->cr[IA64_CR_ITV], env->cr[IA64_CR_TPR],

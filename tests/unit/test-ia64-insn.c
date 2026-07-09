@@ -3139,6 +3139,34 @@ static void test_general_register_write_clears_nat(void)
     g_assert_false(ia64_read_gr_nat(&env, 0));
 }
 
+static void test_ldst_base_update_helper(void)
+{
+    CPUIA64State env;
+    IA64LdstImmediate decoded;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    memset(&decoded, 0, sizeof(decoded));
+    decoded.kind = IA64_LDST_IMM_LOAD;
+    decoded.base = 33;
+    decoded.base_update = true;
+    decoded.immediate = 8;
+
+    ia64_write_gr(&env, 33, 0x1000);
+    ia64_write_gr_nat(&env, 33, true);
+    ia64_ldst_apply_base_update(&env, &decoded, ia64_read_gr(&env, 33));
+    g_assert_cmphex(ia64_read_gr(&env, 33), ==, 0x1008);
+    g_assert_false(ia64_read_gr_nat(&env, 33));
+
+    ia64_write_gr(&env, 33, 0x2000);
+    ia64_write_gr(&env, 44, 0x30);
+    ia64_write_gr_nat(&env, 44, true);
+    decoded.update_from_register = true;
+    decoded.update_source = 44;
+    ia64_ldst_apply_base_update(&env, &decoded, ia64_read_gr(&env, 33));
+    g_assert_cmphex(ia64_read_gr(&env, 33), ==, 0x2000);
+    g_assert_true(ia64_read_gr_nat(&env, 33));
+}
+
 static void test_stacked_register_nat_uses_physical_slot(void)
 {
     CPUIA64State env;
@@ -4507,6 +4535,8 @@ int main(int argc, char **argv)
                     test_ldst_immediate_decode);
     g_test_add_func("/ia64-insn/gr-write-clears-nat",
                     test_general_register_write_clears_nat);
+    g_test_add_func("/ia64-insn/ldst-base-update-helper",
+                    test_ldst_base_update_helper);
     g_test_add_func("/ia64-insn/stacked-gr-nat-physical-slot",
                     test_stacked_register_nat_uses_physical_slot);
     g_test_add_func("/ia64-insn/stacked-gr-nat-high-slot-bitmap",
