@@ -453,6 +453,7 @@ struct ArchCPU {
      * architectural state, and must not migrate with a guest snapshot.
      */
     bool benchmark_active;
+    bool benchmark_requested;
     uint64_t benchmark_retired_bundles;
     uint64_t benchmark_elapsed_ns;
     uint64_t benchmark_host_cycles;

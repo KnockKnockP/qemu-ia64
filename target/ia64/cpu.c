@@ -513,11 +513,6 @@ static void ia64_cpu_set_benchmark_on_cpu(CPUState *cs,
     }
 
     if (active) {
-        cpu->benchmark_retired_bundles = 0;
-        cpu->benchmark_elapsed_ns = 0;
-        cpu->benchmark_host_cycles = 0;
-        cpu->benchmark_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        cpu->benchmark_start_host_cycles = cpu_get_host_ticks();
         cpu->benchmark_active = true;
         return;
     }
@@ -538,12 +533,29 @@ static bool ia64_cpu_get_benchmark_active(Object *obj, Error **errp)
 static void ia64_cpu_set_benchmark_active(Object *obj, bool active,
                                           Error **errp)
 {
+    IA64CPU *cpu = IA64_CPU(obj);
     CPUState *cs = CPU(obj);
 
     (void)errp;
+    if (active == cpu->benchmark_requested) {
+        return;
+    }
+    cpu->benchmark_requested = active;
+    if (active) {
+        cpu->benchmark_retired_bundles = 0;
+        cpu->benchmark_elapsed_ns = 0;
+        cpu->benchmark_host_cycles = 0;
+        cpu->benchmark_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        cpu->benchmark_start_host_cycles = cpu_get_host_ticks();
+    }
     if (cs->created) {
-        run_on_cpu(cs, ia64_cpu_set_benchmark_on_cpu,
-                   RUN_ON_CPU_HOST_INT(active));
+        /*
+         * Keep the main AioContext free while firmware storage helpers wait
+         * for I/O dispatched to that context.  The timestamp above includes
+         * the blocked interval; retirement starts at the next vCPU safe point.
+         */
+        async_run_on_cpu(cs, ia64_cpu_set_benchmark_on_cpu,
+                         RUN_ON_CPU_HOST_INT(active));
     } else {
         ia64_cpu_set_benchmark_on_cpu(cs, RUN_ON_CPU_HOST_INT(active));
     }

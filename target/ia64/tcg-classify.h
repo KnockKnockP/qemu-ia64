@@ -150,6 +150,7 @@ typedef struct IA64TcgFastSlot {
 
 typedef struct IA64TcgFastBundle {
     IA64TcgFastSlot slot[IA64_SLOT_COUNT];
+    uint8_t helper_mask;
     uint32_t slot_count;
     uint32_t op_counts;
     uint64_t source_nat_mask;
@@ -162,6 +163,8 @@ typedef struct IA64TcgFastBundle {
 
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast);
+bool ia64_tcg_build_partial_bundle(const IA64DecodedBundle *bundle,
+                                   IA64TcgFastBundle *partial);
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle);
 
 typedef enum IA64TcgFastLdstMode {
@@ -184,6 +187,7 @@ typedef enum IA64TcgFastDisable {
     IA64_TCG_FAST_DISABLE_MOVL = 1u << 7,
     IA64_TCG_FAST_DISABLE_MEMORY_CLASS = 1u << 8,
     IA64_TCG_FAST_DISABLE_FP = 1u << 9,
+    IA64_TCG_FAST_DISABLE_PARTIAL = 1u << 10,
 } IA64TcgFastDisable;
 
 uint32_t ia64_tcg_fast_disable_mask(void);

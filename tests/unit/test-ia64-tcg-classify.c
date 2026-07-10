@@ -914,6 +914,42 @@ static void test_fast_bundle_rejects_unsafe_ldst(void)
                     ==, IA64_TCG_FALLBACK_RUNTIME_GUARD);
 }
 
+static void test_partial_bundle_keeps_two_fast_slots(void)
+{
+    const uint64_t setf_sig_f8_r17_raw = 0x0c70802220aULL;
+    const uint64_t add_r1_r2_r3_raw =
+        (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
+    const uint64_t add_r3_r3_r4_raw =
+        (8ULL << 37) | (4ULL << 20) | (3ULL << 13) | (3ULL << 6);
+    const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, setf_sig_f8_r17_raw,
+                    add_r1_r2_r3_raw, IA64_INSN_NOP_RAW);
+    IA64TcgFastBundle partial;
+
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &partial));
+    g_assert_true(ia64_tcg_build_partial_bundle(&bundle, &partial));
+    g_assert_cmphex(partial.helper_mask, ==, 1u << 0);
+    g_assert_cmpuint(partial.slot_count, ==, 2);
+    g_assert_cmpint(partial.slot[1].op, ==, IA64_TCG_FAST_OP_ALU_ADD);
+    g_assert_cmpint(partial.slot[2].op, ==, IA64_TCG_FAST_OP_NOP);
+    g_assert_cmphex(partial.source_nat_mask,
+                    ==, (1ULL << 2) | (1ULL << 3));
+    g_assert_cmphex(partial.dest_mask, ==, 1ULL << 1);
+
+    bundle = make_bundle(0x08, add_r3_r3_r4_raw,
+                         ld8_r2_r3_raw, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_fast_bundle(&bundle, &partial));
+    g_assert_true(ia64_tcg_build_partial_bundle(&bundle, &partial));
+    g_assert_cmphex(partial.helper_mask, ==, 1u << 1);
+    g_assert_cmpuint(partial.slot_count, ==, 2);
+
+    bundle = make_bundle(0x00, IA64_INSN_NOP_RAW,
+                         add_r1_r2_r3_raw, IA64_INSN_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &partial));
+    g_assert_false(ia64_tcg_build_partial_bundle(&bundle, &partial));
+}
+
 static void test_fallback_plan_classifies_hot_helper_slots(void)
 {
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
@@ -1271,6 +1307,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_ldst_slot0);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-ldst-rejects-unsafe",
                     test_fast_bundle_rejects_unsafe_ldst);
+    g_test_add_func("/ia64-tcg-classify/partial-bundle-one-helper",
+                    test_partial_bundle_keeps_two_fast_slots);
     g_test_add_func("/ia64-tcg-classify/fallback-plan-hot-helper-slots",
                     test_fallback_plan_classifies_hot_helper_slots);
     g_test_add_func("/ia64-tcg-classify/fallback-plan-long-immediate",

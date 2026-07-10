@@ -47,6 +47,10 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_TCG_FAST_ADDL] = "tcg.fast.addl",
     [IA64_PERF_TCG_FAST_COMPARE] = "tcg.fast.compare",
     [IA64_PERF_TCG_FAST_INTEGER_MISC] = "tcg.fast.integer_misc",
+    [IA64_PERF_TCG_PARTIAL_CANDIDATE_BUNDLE] =
+        "tcg.partial.candidate_bundle",
+    [IA64_PERF_TCG_PARTIAL_FAST_SLOT] = "tcg.partial.fast_slot",
+    [IA64_PERF_TCG_PARTIAL_HELPER_SLOT] = "tcg.partial.helper_slot",
     [IA64_PERF_TCG_LDST_LOAD] = "tcg.ldst.load",
     [IA64_PERF_TCG_LDST_STORE] = "tcg.ldst.store",
     [IA64_PERF_TCG_LDST_FALLBACK] = "tcg.ldst.fallback",

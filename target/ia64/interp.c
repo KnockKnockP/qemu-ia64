@@ -1059,40 +1059,49 @@ static IA64PlannedSlotResult exec_predecoded_slot(
     }
 }
 
-static void ia64_exec_bundle_impl(CPUIA64State *env,
+static bool ia64_exec_bundle_impl(CPUIA64State *env,
                                   uint32_t tmpl,
                                   uint64_t slot0,
                                   uint64_t slot1,
                                   uint64_t slot2,
-                                  uint32_t fallback_plan)
+                                  uint32_t fallback_plan,
+                                  int selected_slot)
 {
     CPUState *cpu = env_cpu(env);
     IA64DecodedBundle decoded;
-    uint64_t next_ip = env->ip + IA64_BUNDLE_SIZE;
+    uint64_t bundle_ip = env->ip;
+    uint64_t next_ip = bundle_ip + IA64_BUNDLE_SIZE;
     unsigned start_slot = ia64_env_ri(env);
+    unsigned end_slot = IA64_SLOT_COUNT;
     unsigned next_ri = 0;
     uint32_t planned_slot_count = 0;
     uint32_t planned_bailout_count = 0;
     bool debug_hooks = ia64_debug_hooks_active();
+    bool partial = selected_slot >= 0 && selected_slot < IA64_SLOT_COUNT;
 
-    IA64_PERF_INC(IA64_PERF_HELPER_EXEC_BUNDLE);
-    IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    if (!partial) {
+        IA64_PERF_INC(IA64_PERF_HELPER_EXEC_BUNDLE);
+        IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
+    } else {
+        start_slot = selected_slot;
+        end_slot = selected_slot + 1;
+    }
 
     /*
-     * This target still interprets complete IA-64 bundles inside one C helper.
-     * Nested memory helpers therefore cannot hand QEMU a translated-code return
-     * address for cpu_io_recompile().  Allow helper-owned I/O directly until the
-     * translator grows per-instruction memory ops.
+     * The fallback path interprets either a complete IA-64 bundle or one
+     * selected slot inside a C helper.  Nested memory helpers therefore cannot
+     * hand QEMU a translated-code return address for cpu_io_recompile().  Allow
+     * helper-owned I/O directly until every memory operation is generated.
      */
     cpu->neg.can_do_io = true;
 
-    if (debug_hooks) {
+    if (debug_hooks && !partial) {
         ia64_trace_execve(env);
         ia64_trace_epc_syscall(env);
         ia64_trace_syscall_return(env);
         ia64_trace_uevent_netlink(env);
     }
-    if (ia64_firmware_linux_cmdline_append_pending()) {
+    if (!partial && ia64_firmware_linux_cmdline_append_pending()) {
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
@@ -1103,7 +1112,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
     decoded.info = ia64_template_info(decoded.tmpl);
     decoded.valid = decoded.info->valid;
 
-    if (ia64_perf_enabled()) {
+    if (!partial && ia64_perf_enabled()) {
         ia64_perf_count_tcg_fallback_reason(
             ia64_tcg_fallback_reason_for_bundle(&decoded, env->ip));
     }
@@ -1112,7 +1121,19 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         abort_unsupported_slot(env, &decoded, 0);
     }
 
-    if (debug_hooks) {
+    if (!partial && ia64_perf_enabled()) {
+        IA64TcgFastBundle candidate;
+
+        if (ia64_tcg_build_partial_bundle(&decoded, &candidate)) {
+            IA64_PERF_INC(IA64_PERF_TCG_PARTIAL_CANDIDATE_BUNDLE);
+            IA64_PERF_ADD(IA64_PERF_TCG_PARTIAL_FAST_SLOT,
+                          candidate.slot_count);
+            IA64_PERF_ADD(IA64_PERF_TCG_PARTIAL_HELPER_SLOT,
+                          ctpop8(candidate.helper_mask));
+        }
+    }
+
+    if (debug_hooks && !partial) {
         ia64_progress_trace_bundle(env);
         ia64_bundle_trace_decoded(env, &decoded, start_slot);
         ia64_state_trace_bundle(env);
@@ -1121,12 +1142,12 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
     {
         IA64CountedStoreLoop store_loop;
 
-        if (start_slot == 0 &&
+        if (!partial && start_slot == 0 &&
             ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
             IA64_PERF_INC(IA64_PERF_OP_STORE);
             ia64_finish_interpreted_bundle(env, next_ip, 0);
-            return;
+            return true;
         }
     }
 
@@ -1134,7 +1155,7 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
         start_slot = 0;
     }
 
-    for (int slot = start_slot; slot < IA64_SLOT_COUNT; slot++) {
+    for (int slot = start_slot; slot < end_slot; slot++) {
         IA64SlotType type = decoded.info->slot_type[slot];
         uint64_t raw = decoded.slot[slot];
         uint8_t qp = ia64_slot_predicate(raw);
@@ -1716,7 +1737,15 @@ static void ia64_exec_bundle_impl(CPUIA64State *env,
 
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_SLOT, planned_slot_count);
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT, planned_bailout_count);
+    if (partial) {
+        if (next_ip != bundle_ip + IA64_BUNDLE_SIZE || next_ri != 0) {
+            ia64_finish_interpreted_bundle(env, next_ip, next_ri);
+            return false;
+        }
+        return true;
+    }
     ia64_finish_interpreted_bundle(env, next_ip, next_ri);
+    return true;
 }
 
 void HELPER(exec_bundle)(CPUIA64State *env,
@@ -1726,7 +1755,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                          uint64_t slot2,
                          uint32_t fallback_plan)
 {
-    ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2, fallback_plan);
+    ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2, fallback_plan, -1);
 }
 
 uint32_t HELPER(exec_bundle_lookup_ptr)(CPUIA64State *env,
@@ -1736,6 +1765,20 @@ uint32_t HELPER(exec_bundle_lookup_ptr)(CPUIA64State *env,
                                         uint64_t slot2,
                                         uint32_t fallback_plan)
 {
-    ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2, fallback_plan);
+    ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2, fallback_plan, -1);
     return ia64_lookup_ptr_chain_ok(env);
+}
+
+uint32_t HELPER(exec_slot)(CPUIA64State *env,
+                           uint32_t tmpl,
+                           uint64_t slot0,
+                           uint64_t slot1,
+                           uint64_t slot2,
+                           uint32_t fallback_slot)
+{
+    uint32_t fallback_plan = fallback_slot & 0x00ffffffu;
+    uint32_t selected_slot = fallback_slot >> 24;
+
+    return ia64_exec_bundle_impl(env, tmpl, slot0, slot1, slot2,
+                                 fallback_plan, selected_slot) ? 0 : 1;
 }

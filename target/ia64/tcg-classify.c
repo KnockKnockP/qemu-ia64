@@ -335,6 +335,8 @@ uint32_t ia64_tcg_fast_disable_mask(void)
                     parsed |= IA64_TCG_FAST_DISABLE_MEMORY_CLASS;
                 } else if (g_ascii_strcasecmp(name, "fp") == 0) {
                     parsed |= IA64_TCG_FAST_DISABLE_FP;
+                } else if (g_ascii_strcasecmp(name, "partial") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_PARTIAL;
                 } else if (g_ascii_strcasecmp(name, "all") == 0) {
                     parsed |= IA64_TCG_FAST_DISABLE_BUNDLE |
                               IA64_TCG_FAST_DISABLE_BRANCH |
@@ -345,7 +347,8 @@ uint32_t ia64_tcg_fast_disable_mask(void)
                               IA64_TCG_FAST_DISABLE_PREDICATE |
                               IA64_TCG_FAST_DISABLE_MOVL |
                               IA64_TCG_FAST_DISABLE_MEMORY_CLASS |
-                              IA64_TCG_FAST_DISABLE_FP;
+                              IA64_TCG_FAST_DISABLE_FP |
+                              IA64_TCG_FAST_DISABLE_PARTIAL;
                 }
             }
             g_strfreev(parts);
@@ -1530,6 +1533,80 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
     }
 
     return fast->slot_count == IA64_SLOT_COUNT;
+}
+
+static void ia64_tcg_partial_add_fast_slot(IA64TcgFastBundle *partial,
+                                           const IA64TcgFastSlot *slot,
+                                           uint32_t op_counts)
+{
+    partial->slot[slot->slot_index] = *slot;
+    partial->slot_count++;
+    partial->op_counts += op_counts;
+    partial->source_nat_mask |= slot->source_nat_mask;
+    partial->source_nat_mask_hi |= slot->source_nat_mask_hi;
+    partial->dest_mask |= slot->dest_mask;
+    partial->dest_mask_hi |= slot->dest_mask_hi;
+    partial->finalize_mask |= slot->finalize_mask;
+    partial->finalize_mask_hi |= slot->finalize_mask_hi;
+}
+
+bool ia64_tcg_build_partial_bundle(const IA64DecodedBundle *bundle,
+                                   IA64TcgFastBundle *partial)
+{
+    uint64_t prior_dest_mask = 0;
+    uint64_t prior_dest_mask_hi = 0;
+    unsigned helper_count = 0;
+
+    if (!bundle || !partial || !bundle->valid ||
+        bundle->info->long_immediate ||
+        ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PARTIAL)) {
+        return false;
+    }
+
+    memset(partial, 0, sizeof(*partial));
+    for (int slot_index = 0; slot_index < IA64_SLOT_COUNT; slot_index++) {
+        IA64TcgFastBundle slot_counts = { 0 };
+        IA64TcgFastSlot slot;
+        IA64SlotType type = bundle->info->slot_type[slot_index];
+        bool fast;
+
+        /* alloc changes the mapping cached by later stacked-register slots. */
+        if (ia64_slot_is_m34_alloc(type, bundle->slot[slot_index])) {
+            return false;
+        }
+        fast = ia64_tcg_build_fast_slot(
+            type, bundle->slot[slot_index], slot_index, &slot, &slot_counts);
+
+        /*
+         * The ordinary bundle path reads every memory base before executing
+         * slot 0.  The partial path reads it at its actual slot, so route the
+         * dependent memory slot through the single-slot oracle and retain the
+         * producer as generated code.
+         */
+        if (fast && ia64_tcg_fast_slot_has_prior_base_dependency(
+                        &slot, prior_dest_mask, prior_dest_mask_hi)) {
+            fast = false;
+        }
+
+        if (!fast) {
+            partial->helper_mask |= 1u << slot_index;
+            helper_count++;
+            memset(&partial->slot[slot_index], 0,
+                   sizeof(partial->slot[slot_index]));
+            partial->slot[slot_index].slot_index = slot_index;
+        } else {
+            ia64_tcg_partial_add_fast_slot(partial, &slot,
+                                           slot_counts.op_counts);
+        }
+
+        if (fast) {
+            prior_dest_mask |= slot.dest_mask;
+            prior_dest_mask_hi |= slot.dest_mask_hi;
+        }
+    }
+
+    /* One decoded helper is cheaper than interpreting all three slots. */
+    return helper_count == 1 && partial->slot_count == IA64_SLOT_COUNT - 1;
 }
 
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle)

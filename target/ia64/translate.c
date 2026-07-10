@@ -1431,6 +1431,143 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     return true;
 }
 
+static void ia64_tr_emit_exec_slot(DisasContext *ctx,
+                                   const IA64DecodedBundle *bundle,
+                                   uint64_t pc, unsigned slot,
+                                   TCGLabel *flow_exit)
+{
+    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    uint32_t fallback_slot = fallback_plan | (slot << 24);
+    TCGv_i32 flow_changed = tcg_temp_new_i32();
+
+    /* A fault in this slot must not lose earlier retired bundles in the TB. */
+    ia64_tr_flush_fast_bundle_ticks(ctx);
+    ia64_tr_commit_ip(pc);
+    gen_helper_exec_slot(flow_changed, tcg_env,
+                         tcg_constant_i32(bundle->tmpl),
+                         tcg_constant_i64(bundle->slot[0]),
+                         tcg_constant_i64(bundle->slot[1]),
+                         tcg_constant_i64(bundle->slot[2]),
+                         tcg_constant_i32(fallback_slot));
+    tcg_gen_brcondi_i32(TCG_COND_NE, flow_changed, 0, flow_exit);
+}
+
+static bool ia64_tr_partial_slot_needs_guard(const IA64TcgFastSlot *slot)
+{
+    return slot->uses_stacked_gr || slot->source_nat_mask != 0 ||
+           slot->source_nat_mask_hi != 0;
+}
+
+static void ia64_tr_emit_partial_fast_slot(
+    DisasContext *ctx, const IA64DecodedBundle *bundle,
+    const IA64TcgFastSlot *slot, uint64_t pc, TCGv_i64 runtime_dest_mask,
+    TCGv_i64 runtime_dest_mask_hi, TCGLabel *flow_exit)
+{
+    TCGLabel *helper = NULL;
+    TCGLabel *done = NULL;
+    TCGv_i64 ldst_address = NULL;
+
+    if (ia64_tr_partial_slot_needs_guard(slot)) {
+        helper = gen_new_label();
+        done = gen_new_label();
+        if ((slot->source_nat_mask | slot->source_nat_mask_hi) != 0) {
+            ia64_tr_emit_fast_nat_guards(ctx, slot->source_nat_mask,
+                                         slot->source_nat_mask_hi, helper);
+        }
+        if (slot->uses_stacked_gr) {
+            TCGv_i32 sor = tcg_temp_new_i32();
+
+            ia64_tr_ensure_stacked_frame_base(ctx);
+            tcg_gen_ld_i32(sor, tcg_env, offsetof(CPUIA64State, rse.sor));
+            tcg_gen_brcondi_i32(TCG_COND_NE, sor, 0, helper);
+        }
+    }
+
+    if (slot->op == IA64_TCG_FAST_OP_LDST_LOAD ||
+        slot->op == IA64_TCG_FAST_OP_LDST_STORE) {
+        ldst_address = tcg_temp_new_i64();
+        ia64_tr_load_static_gr(ctx, ldst_address, slot->base);
+    }
+    ia64_tr_emit_fast_slot(ctx, slot, ldst_address, runtime_dest_mask,
+                           runtime_dest_mask_hi);
+
+    if (helper != NULL) {
+        tcg_gen_br(done);
+        gen_set_label(helper);
+        ia64_tr_emit_exec_slot(ctx, bundle, pc, slot->slot_index, flow_exit);
+        gen_set_label(done);
+    }
+}
+
+static bool ia64_tr_translate_partial_bundle(DisasContext *ctx,
+                                             const IA64DecodedBundle *bundle,
+                                             uint64_t pc)
+{
+    IA64TcgFastBundle partial;
+    TCGLabel *flow_exit;
+    TCGLabel *done;
+    TCGv_i64 runtime_dest_mask;
+    TCGv_i64 runtime_dest_mask_hi;
+    bool has_ldst;
+
+    /* Keep detailed tracing on the complete-bundle correctness oracle. */
+    if (!ia64_tr_use_zero_helper_path() ||
+        !ia64_tcg_build_partial_bundle(bundle, &partial) ||
+        ia64_tcg_tb_flags_ri(ctx->base.tb->flags) != 0) {
+        return false;
+    }
+
+    has_ldst = ia64_tr_fast_bundle_has_ldst(&partial);
+    if (has_ldst && !ia64_tcg_fast_ldst_memory_inline_enabled()) {
+        return false;
+    }
+
+    flow_exit = gen_new_label();
+    done = gen_new_label();
+    runtime_dest_mask = tcg_temp_new_i64();
+    runtime_dest_mask_hi = tcg_temp_new_i64();
+    tcg_gen_movi_i64(runtime_dest_mask, 0);
+    tcg_gen_movi_i64(runtime_dest_mask_hi, 0);
+    if (has_ldst) {
+        ia64_tr_emit_can_do_io();
+    }
+
+    ctx->inline_gr_nat_clear = true;
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if ((partial.helper_mask & (1u << slot)) != 0) {
+            ia64_tr_emit_exec_slot(ctx, bundle, pc, slot, flow_exit);
+        } else {
+            ia64_tr_emit_partial_fast_slot(
+                ctx, bundle, &partial.slot[slot], pc, runtime_dest_mask,
+                runtime_dest_mask_hi, flow_exit);
+        }
+    }
+    ctx->inline_gr_nat_clear = false;
+
+    ia64_tr_emit_gr_alat_invalidate(runtime_dest_mask,
+                                    runtime_dest_mask_hi, pc);
+    ia64_tr_note_fast_bundle(ctx);
+    {
+        TCGLabel *continue_exec = gen_new_label();
+        TCGv_i32 request = tcg_temp_new_i32();
+
+        /* Publish a precise post-bundle state before queued host work runs. */
+        tcg_gen_ld8u_i32(request, tcg_env,
+                         IA64_CPU_STATE_OFFSET(exit_request));
+        tcg_gen_brcondi_i32(TCG_COND_EQ, request, 0, continue_exec);
+        ia64_tr_commit_ip(pc + IA64_BUNDLE_SIZE);
+        ia64_tr_flush_fast_bundle_ticks(ctx);
+        tcg_gen_exit_tb(NULL, 0);
+        gen_set_label(continue_exec);
+    }
+    tcg_gen_br(done);
+
+    gen_set_label(flow_exit);
+    tcg_gen_exit_tb(NULL, 0);
+    gen_set_label(done);
+    return true;
+}
+
 static void ia64_tr_emit_main_loop_exit(DisasContext *ctx)
 {
     ia64_tr_flush_fast_bundle_ticks(ctx);
@@ -1752,7 +1889,8 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         return;
     }
     if (ia64_tcg_tb_boundary_ends_tb(boundary) ||
-        !ia64_tr_translate_fast_bundle(ctx, &bundle, pc)) {
+        (!ia64_tr_translate_fast_bundle(ctx, &bundle, pc) &&
+         !ia64_tr_translate_partial_bundle(ctx, &bundle, pc))) {
         if (!ia64_tcg_tb_boundary_ends_tb(boundary) &&
             ia64_tcg_bundle_has_ldst_immediate(&bundle)) {
             IA64_PERF_INC(IA64_PERF_TCG_LDST_FALLBACK);
