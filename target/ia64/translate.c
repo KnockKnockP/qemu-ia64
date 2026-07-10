@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "cpu.h"
 #include "bundle.h"
 #include "debug-trace.h"
@@ -27,10 +28,39 @@ typedef struct DisasContext {
     CPUIA64State *env;
     TCGv_i32 fast_bundle_ticks;
     TCGv_i32 stacked_frame_base;
+    TCGv_ptr stacked_gr_base;
+    TCGv_ptr stacked_nat_base;
+    TCGv_i64 static_gr[IA64_STATIC_GR_COUNT];
+    TCGv_i64 br[IA64_BR_COUNT];
+    TCGv_i64 ar[IA64_AR_COUNT];
+    TCGv_i64 pr;
+    TCGv_i64 gr_nat;
+    uint32_t static_gr_selected;
+    uint32_t static_gr_valid;
+    uint32_t static_gr_dirty;
+    uint8_t br_valid;
+    uint8_t br_dirty;
+    uint64_t ar_valid[2];
+    uint64_t ar_dirty[2];
+    uint8_t static_gr_selected_count;
     bool stacked_frame_base_loaded;
     bool fast_bundle_ticks_used;
     bool inline_gr_nat_clear;
+    bool state_cache_available;
+    bool state_cache_active;
+    bool pr_valid;
+    bool pr_dirty;
+    bool gr_nat_valid;
+    bool gr_nat_dirty;
 } DisasContext;
+
+typedef struct IA64TrStateCacheDirty {
+    uint32_t static_gr;
+    uint8_t br;
+    uint64_t ar[2];
+    bool pr;
+    bool gr_nat;
+} IA64TrStateCacheDirty;
 
 #define DISAS_EXIT DISAS_TARGET_0
 
@@ -43,6 +73,57 @@ typedef struct DisasContext {
      (intptr_t)offsetof(IA64CPU, env))
 
 static TCGv_i64 cpu_ip;
+
+static bool ia64_tr_use_zero_helper_path(void);
+
+static bool ia64_tr_state_cache_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE");
+
+        enabled = value == NULL ||
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
+static unsigned ia64_tr_state_cache_gr_limit(void)
+{
+    static int limit = -1;
+
+    if (limit < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE_GRS");
+        const char *end = NULL;
+        unsigned long parsed = 4;
+
+        limit = value != NULL &&
+                qemu_strtoul(value, &end, 0, &parsed) == 0 && *end == '\0'
+            ? MIN(parsed, IA64_STATIC_GR_COUNT - 1)
+            : 4;
+    }
+    return limit;
+}
+
+static unsigned ia64_tr_state_cache_min_bundles(void)
+{
+    static int minimum = -1;
+
+    if (minimum < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE_MIN_BUNDLES");
+        const char *end = NULL;
+        unsigned long parsed = 12;
+
+        minimum = value != NULL &&
+                  qemu_strtoul(value, &end, 0, &parsed) == 0 && *end == '\0'
+            ? MIN(parsed, (unsigned long)TCG_MAX_INSNS)
+            : 12;
+    }
+    return minimum;
+}
 
 void ia64_translate_init(void)
 {
@@ -61,9 +142,30 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->env = cpu_env(cs);
     ctx->fast_bundle_ticks = NULL;
     ctx->stacked_frame_base = NULL;
+    ctx->stacked_gr_base = NULL;
+    ctx->stacked_nat_base = NULL;
+    memset(ctx->static_gr, 0, sizeof(ctx->static_gr));
+    memset(ctx->br, 0, sizeof(ctx->br));
+    memset(ctx->ar, 0, sizeof(ctx->ar));
+    ctx->pr = NULL;
+    ctx->gr_nat = NULL;
+    ctx->static_gr_selected = 0;
+    ctx->static_gr_valid = 0;
+    ctx->static_gr_dirty = 0;
+    ctx->br_valid = 0;
+    ctx->br_dirty = 0;
+    memset(ctx->ar_valid, 0, sizeof(ctx->ar_valid));
+    memset(ctx->ar_dirty, 0, sizeof(ctx->ar_dirty));
+    ctx->static_gr_selected_count = 0;
     ctx->stacked_frame_base_loaded = false;
     ctx->fast_bundle_ticks_used = false;
     ctx->inline_gr_nat_clear = false;
+    ctx->state_cache_available = false;
+    ctx->state_cache_active = false;
+    ctx->pr_valid = false;
+    ctx->pr_dirty = false;
+    ctx->gr_nat_valid = false;
+    ctx->gr_nat_dirty = false;
 
     /*
      * Instruction fetch exceptions raised while translating a later bundle in
@@ -82,6 +184,15 @@ static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
     ctx->fast_bundle_ticks = tcg_temp_new_i32();
     tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0);
     ctx->stacked_frame_base = tcg_temp_new_i32();
+    ctx->stacked_gr_base = tcg_temp_new_ptr();
+    tcg_gen_addi_ptr(ctx->stacked_gr_base, tcg_env,
+                     offsetof(CPUIA64State, rse.stacked_gr));
+    ctx->stacked_nat_base = tcg_temp_new_ptr();
+    tcg_gen_addi_ptr(ctx->stacked_nat_base, tcg_env,
+                     offsetof(CPUIA64State, rse.stacked_nat));
+    ctx->state_cache_available = ia64_tr_use_zero_helper_path() &&
+                                 ia64_tr_state_cache_enabled();
+    ctx->state_cache_active = false;
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exec();
     }
@@ -113,6 +224,270 @@ static bool ia64_tr_use_zero_helper_path(void)
     return ia64_tr_zero_helper_enabled() && !ia64_perf_enabled() &&
            !ia64_debug_hooks_active() &&
            !ia64_firmware_linux_cmdline_append_pending();
+}
+
+static size_t ia64_tr_static_gr_offset(DisasContext *ctx, uint8_t reg)
+{
+    if (reg >= 16 && reg < IA64_STATIC_GR_COUNT &&
+        (ctx->base.tb->flags & IA64_TB_FLAG_BN) != 0) {
+        return offsetof(CPUIA64State, banked_gr) +
+               (reg - 16) * sizeof(uint64_t);
+    }
+    return offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t);
+}
+
+static bool ia64_tr_select_static_gr(DisasContext *ctx, uint8_t reg)
+{
+    uint32_t bit = UINT32_C(1) << reg;
+
+    if ((ctx->static_gr_selected & bit) != 0) {
+        return true;
+    }
+    if (ctx->static_gr_selected_count >= ia64_tr_state_cache_gr_limit()) {
+        return false;
+    }
+    ctx->static_gr_selected |= bit;
+    ctx->static_gr_selected_count++;
+    return true;
+}
+
+static TCGv_i64 ia64_tr_ensure_static_gr(DisasContext *ctx, uint8_t reg)
+{
+    uint32_t bit = UINT32_C(1) << reg;
+
+    g_assert(ctx->state_cache_active && reg > 0 &&
+             reg < IA64_STATIC_GR_COUNT);
+    if (!ia64_tr_select_static_gr(ctx, reg)) {
+        return NULL;
+    }
+    if (ctx->static_gr[reg] == NULL) {
+        ctx->static_gr[reg] = tcg_temp_new_i64();
+    }
+    if ((ctx->static_gr_valid & bit) == 0) {
+        tcg_gen_ld_i64(ctx->static_gr[reg], tcg_env,
+                       ia64_tr_static_gr_offset(ctx, reg));
+        ctx->static_gr_valid |= bit;
+    }
+    return ctx->static_gr[reg];
+}
+
+static TCGv_i64 ia64_tr_ensure_br(DisasContext *ctx, uint8_t reg)
+{
+    uint8_t bit = 1u << reg;
+
+    g_assert(ctx->state_cache_active && reg < IA64_BR_COUNT);
+    if (ctx->br[reg] == NULL) {
+        ctx->br[reg] = tcg_temp_new_i64();
+    }
+    if ((ctx->br_valid & bit) == 0) {
+        tcg_gen_ld_i64(ctx->br[reg], tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       reg * sizeof(uint64_t));
+        ctx->br_valid |= bit;
+    }
+    return ctx->br[reg];
+}
+
+static TCGv_i64 ia64_tr_ensure_ar(DisasContext *ctx, uint8_t reg)
+{
+    unsigned word = reg >> 6;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+
+    g_assert(ctx->state_cache_active && reg < IA64_AR_COUNT);
+    if (ctx->ar[reg] == NULL) {
+        ctx->ar[reg] = tcg_temp_new_i64();
+    }
+    if ((ctx->ar_valid[word] & bit) == 0) {
+        tcg_gen_ld_i64(ctx->ar[reg], tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       reg * sizeof(uint64_t));
+        ctx->ar_valid[word] |= bit;
+    }
+    return ctx->ar[reg];
+}
+
+static TCGv_i64 ia64_tr_ensure_pr(DisasContext *ctx)
+{
+    g_assert(ctx->state_cache_active);
+    if (ctx->pr == NULL) {
+        ctx->pr = tcg_temp_new_i64();
+    }
+    if (!ctx->pr_valid) {
+        tcg_gen_ld_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
+        ctx->pr_valid = true;
+    }
+    return ctx->pr;
+}
+
+static TCGv_i64 ia64_tr_ensure_gr_nat(DisasContext *ctx)
+{
+    g_assert(ctx->state_cache_active);
+    if (ctx->gr_nat == NULL) {
+        ctx->gr_nat = tcg_temp_new_i64();
+    }
+    if (!ctx->gr_nat_valid) {
+        tcg_gen_ld_i64(ctx->gr_nat, tcg_env,
+                       offsetof(CPUIA64State, nat.gr_nat));
+        ctx->gr_nat_valid = true;
+    }
+    return ctx->gr_nat;
+}
+
+/*
+ * Exit paths can branch in TCG control flow after translation-time cache
+ * metadata has been computed.  Keep dirty bits intact while emitting an exit
+ * writeback so every arm gets the same stores.  A barrier additionally drops
+ * the metadata before translation continues past a helper or fault boundary.
+ */
+static void ia64_tr_capture_state_cache_dirty(
+    DisasContext *ctx, IA64TrStateCacheDirty *dirty)
+{
+    dirty->static_gr = ctx->static_gr_dirty;
+    dirty->br = ctx->br_dirty;
+    dirty->ar[0] = ctx->ar_dirty[0];
+    dirty->ar[1] = ctx->ar_dirty[1];
+    dirty->pr = ctx->pr_dirty;
+    dirty->gr_nat = ctx->gr_nat_dirty;
+}
+
+static void ia64_tr_sync_state_cache_dirty(
+    DisasContext *ctx, const IA64TrStateCacheDirty *dirty)
+{
+    uint32_t gr = dirty->static_gr;
+    uint8_t br = dirty->br;
+
+    while (gr != 0) {
+        unsigned reg = ctz32(gr);
+
+        tcg_gen_st_i64(ctx->static_gr[reg], tcg_env,
+                       ia64_tr_static_gr_offset(ctx, reg));
+        gr &= gr - 1;
+    }
+    while (br != 0) {
+        unsigned reg = ctz32(br);
+
+        tcg_gen_st_i64(ctx->br[reg], tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       reg * sizeof(uint64_t));
+        br &= br - 1;
+    }
+    for (unsigned word = 0; word < ARRAY_SIZE(dirty->ar); word++) {
+        uint64_t ar = dirty->ar[word];
+
+        while (ar != 0) {
+            unsigned reg = word * 64 + ctz64(ar);
+
+            tcg_gen_st_i64(ctx->ar[reg], tcg_env,
+                           offsetof(CPUIA64State, ar) +
+                           reg * sizeof(uint64_t));
+            ar &= ar - 1;
+        }
+    }
+    if (dirty->pr) {
+        tcg_gen_st_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
+    if (dirty->gr_nat) {
+        tcg_gen_st_i64(ctx->gr_nat, tcg_env,
+                       offsetof(CPUIA64State, nat.gr_nat));
+    }
+}
+
+static void ia64_tr_sync_state_cache(DisasContext *ctx)
+{
+    IA64TrStateCacheDirty dirty;
+
+    ia64_tr_capture_state_cache_dirty(ctx, &dirty);
+    ia64_tr_sync_state_cache_dirty(ctx, &dirty);
+}
+
+static void ia64_tr_reload_state_cache(DisasContext *ctx)
+{
+    uint32_t gr = ctx->static_gr_valid;
+    uint8_t br = ctx->br_valid;
+
+    while (gr != 0) {
+        unsigned reg = ctz32(gr);
+
+        tcg_gen_ld_i64(ctx->static_gr[reg], tcg_env,
+                       ia64_tr_static_gr_offset(ctx, reg));
+        gr &= gr - 1;
+    }
+    while (br != 0) {
+        unsigned reg = ctz32(br);
+
+        tcg_gen_ld_i64(ctx->br[reg], tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       reg * sizeof(uint64_t));
+        br &= br - 1;
+    }
+    for (unsigned word = 0; word < ARRAY_SIZE(ctx->ar_valid); word++) {
+        uint64_t ar = ctx->ar_valid[word];
+
+        while (ar != 0) {
+            unsigned reg = word * 64 + ctz64(ar);
+
+            tcg_gen_ld_i64(ctx->ar[reg], tcg_env,
+                           offsetof(CPUIA64State, ar) +
+                           reg * sizeof(uint64_t));
+            ar &= ar - 1;
+        }
+    }
+    if (ctx->pr_valid) {
+        tcg_gen_ld_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
+    if (ctx->gr_nat_valid) {
+        tcg_gen_ld_i64(ctx->gr_nat, tcg_env,
+                       offsetof(CPUIA64State, nat.gr_nat));
+    }
+    if (ctx->stacked_frame_base_loaded) {
+        tcg_gen_ld_i32(ctx->stacked_frame_base, tcg_env,
+                       offsetof(CPUIA64State, rse.current_frame_base));
+    }
+}
+
+static void ia64_tr_invalidate_state_cache(DisasContext *ctx)
+{
+    ctx->static_gr_valid = 0;
+    ctx->static_gr_dirty = 0;
+    ctx->br_valid = 0;
+    ctx->br_dirty = 0;
+    memset(ctx->ar_valid, 0, sizeof(ctx->ar_valid));
+    memset(ctx->ar_dirty, 0, sizeof(ctx->ar_dirty));
+    ctx->pr_valid = false;
+    ctx->pr_dirty = false;
+    ctx->gr_nat_valid = false;
+    ctx->gr_nat_dirty = false;
+    ctx->stacked_frame_base_loaded = false;
+}
+
+static void ia64_tr_state_cache_barrier(DisasContext *ctx)
+{
+    ia64_tr_sync_state_cache(ctx);
+    ia64_tr_invalidate_state_cache(ctx);
+}
+
+static bool ia64_tr_suspend_state_cache(DisasContext *ctx)
+{
+    bool active = ctx->state_cache_active;
+
+    if (active) {
+        ia64_tr_state_cache_barrier(ctx);
+        ctx->state_cache_active = false;
+    }
+    return active;
+}
+
+static void ia64_tr_resume_state_cache(DisasContext *ctx, bool active)
+{
+    if (active) {
+        g_assert(ctx->static_gr_valid == 0 && ctx->static_gr_dirty == 0 &&
+                 ctx->br_valid == 0 && ctx->br_dirty == 0 &&
+                 ctx->ar_valid[0] == 0 && ctx->ar_valid[1] == 0 &&
+                 ctx->ar_dirty[0] == 0 && ctx->ar_dirty[1] == 0 &&
+                 !ctx->pr_valid && !ctx->pr_dirty &&
+                 !ctx->gr_nat_valid && !ctx->gr_nat_dirty);
+        ctx->state_cache_active = true;
+    }
 }
 
 static void ia64_tr_emit_benchmark_retire(TCGv_i32 bundle_count)
@@ -184,6 +559,7 @@ static void ia64_tr_emit_exec_bundle(DisasContext *ctx,
 {
     uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
 
+    ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
     gen_helper_exec_bundle(tcg_env,
@@ -202,6 +578,55 @@ static void ia64_tr_emit_exec_bundle_lookup_ptr(DisasContext *ctx,
     TCGLabel *main_loop_exit = gen_new_label();
     TCGv_i32 chain_ok = tcg_temp_new_i32();
 
+    ia64_tr_state_cache_barrier(ctx);
+    ia64_tr_flush_fast_bundle_ticks(ctx);
+    ia64_tr_prepare_helper_ip(pc);
+    gen_helper_exec_bundle_lookup_ptr(chain_ok, tcg_env,
+                                      tcg_constant_i32(bundle->tmpl),
+                                      tcg_constant_i64(bundle->slot[0]),
+                                      tcg_constant_i64(bundle->slot[1]),
+                                      tcg_constant_i64(bundle->slot[2]),
+                                      tcg_constant_i32(fallback_plan));
+    tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
+    tcg_gen_lookup_and_goto_ptr();
+
+    gen_set_label(main_loop_exit);
+    tcg_gen_exit_tb(NULL, 0);
+}
+
+static void ia64_tr_emit_exec_bundle_cached_fallback(
+    DisasContext *ctx, const IA64DecodedBundle *bundle, uint64_t pc,
+    const IA64TrStateCacheDirty *dirty_before)
+{
+    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+
+    /*
+     * The guard bypasses this bundle's fast writes, so publish only state
+     * dirtied by earlier bundles before invoking the correctness oracle.
+     */
+    ia64_tr_sync_state_cache_dirty(ctx, dirty_before);
+    ia64_tr_flush_fast_bundle_ticks(ctx);
+    ia64_tr_prepare_helper_ip(pc);
+    gen_helper_exec_bundle(tcg_env,
+                           tcg_constant_i32(bundle->tmpl),
+                           tcg_constant_i64(bundle->slot[0]),
+                           tcg_constant_i64(bundle->slot[1]),
+                           tcg_constant_i64(bundle->slot[2]),
+                           tcg_constant_i32(fallback_plan));
+
+    /* Make both runtime arms define every translation-time-valid cache temp. */
+    ia64_tr_reload_state_cache(ctx);
+}
+
+static void ia64_tr_emit_exec_bundle_lookup_ptr_cached_fallback(
+    DisasContext *ctx, const IA64DecodedBundle *bundle, uint64_t pc,
+    const IA64TrStateCacheDirty *dirty_before)
+{
+    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    TCGLabel *main_loop_exit = gen_new_label();
+    TCGv_i32 chain_ok = tcg_temp_new_i32();
+
+    ia64_tr_sync_state_cache_dirty(ctx, dirty_before);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
     gen_helper_exec_bundle_lookup_ptr(chain_ok, tcg_env,
@@ -219,6 +644,7 @@ static void ia64_tr_emit_exec_bundle_lookup_ptr(DisasContext *ctx,
 
 static void ia64_tr_emit_firmware_call_gate(DisasContext *ctx, uint64_t pc)
 {
+    ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
     gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc));
@@ -254,10 +680,8 @@ static void ia64_tr_stacked_gr_address(DisasContext *ctx, TCGv_ptr ptr,
 
     ia64_tr_stacked_gr_slot(ctx, slot, reg);
     tcg_gen_shli_i64(byte_offset, slot, 3);
-    tcg_gen_addi_i64(byte_offset, byte_offset,
-                     offsetof(CPUIA64State, rse.stacked_gr));
     tcg_gen_trunc_i64_ptr(ptr, byte_offset);
-    tcg_gen_add_ptr(ptr, tcg_env, ptr);
+    tcg_gen_add_ptr(ptr, ctx->stacked_gr_base, ptr);
 }
 
 static void ia64_tr_mark_stacked_gr_dirty(TCGv_i64 slot)
@@ -286,19 +710,16 @@ static void ia64_tr_stacked_nat_address(DisasContext *ctx, TCGv_ptr ptr,
     tcg_gen_shl_i64(bit, tcg_constant_i64(1), shift);
     tcg_gen_shri_i64(byte_offset, slot, 6);
     tcg_gen_shli_i64(byte_offset, byte_offset, 3);
-    tcg_gen_addi_i64(byte_offset, byte_offset,
-                     offsetof(CPUIA64State, rse.stacked_nat));
     tcg_gen_trunc_i64_ptr(ptr, byte_offset);
-    tcg_gen_add_ptr(ptr, tcg_env, ptr);
+    tcg_gen_add_ptr(ptr, ctx->stacked_nat_base, ptr);
 }
 
 static void ia64_tr_clear_gr_nat(DisasContext *ctx, uint8_t reg)
 {
-    TCGv_i64 nat = tcg_temp_new_i64();
-
     if (ia64_tr_gr_is_stacked(reg)) {
         TCGv_ptr ptr = tcg_temp_new_ptr();
         TCGv_i64 bit = tcg_temp_new_i64();
+        TCGv_i64 nat = tcg_temp_new_i64();
 
         ia64_tr_stacked_nat_address(ctx, ptr, bit, reg);
         tcg_gen_ld_i64(nat, ptr, 0);
@@ -307,9 +728,18 @@ static void ia64_tr_clear_gr_nat(DisasContext *ctx, uint8_t reg)
         return;
     }
 
-    tcg_gen_ld_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
-    tcg_gen_andi_i64(nat, nat, ~(UINT64_C(1) << reg));
-    tcg_gen_st_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
+    if (ctx->state_cache_active) {
+        TCGv_i64 nat = ia64_tr_ensure_gr_nat(ctx);
+
+        tcg_gen_andi_i64(nat, nat, ~(UINT64_C(1) << reg));
+        ctx->gr_nat_dirty = true;
+    } else {
+        TCGv_i64 nat = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_andi_i64(nat, nat, ~(UINT64_C(1) << reg));
+        tcg_gen_st_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
+    }
 }
 
 static void ia64_tr_load_static_gr(DisasContext *ctx, TCGv_i64 dest,
@@ -329,18 +759,16 @@ static void ia64_tr_load_static_gr(DisasContext *ctx, TCGv_i64 dest,
         return;
     }
 
-    if (reg >= 16 && reg < 32) {
-        size_t offset = (ctx->base.tb->flags & IA64_TB_FLAG_BN) != 0
-            ? offsetof(CPUIA64State, banked_gr) +
-              (reg - 16) * sizeof(uint64_t)
-            : offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t);
+    if (ctx->state_cache_active) {
+        TCGv_i64 cached = ia64_tr_ensure_static_gr(ctx, reg);
 
-        tcg_gen_ld_i64(dest, tcg_env, offset);
-        return;
+        if (cached != NULL) {
+            tcg_gen_mov_i64(dest, cached);
+            return;
+        }
     }
 
-    tcg_gen_ld_i64(dest, tcg_env,
-                   offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
+    tcg_gen_ld_i64(dest, tcg_env, ia64_tr_static_gr_offset(ctx, reg));
 }
 
 static void ia64_tr_store_static_gr(DisasContext *ctx, uint8_t reg,
@@ -363,21 +791,22 @@ static void ia64_tr_store_static_gr(DisasContext *ctx, uint8_t reg,
         return;
     }
 
-    if (reg >= 16 && reg < 32) {
-        size_t offset = (ctx->base.tb->flags & IA64_TB_FLAG_BN) != 0
-            ? offsetof(CPUIA64State, banked_gr) +
-              (reg - 16) * sizeof(uint64_t)
-            : offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t);
+    if (ctx->state_cache_active && ia64_tr_select_static_gr(ctx, reg)) {
+        uint32_t bit = UINT32_C(1) << reg;
 
-        tcg_gen_st_i64(value, tcg_env, offset);
+        if (ctx->static_gr[reg] == NULL) {
+            ctx->static_gr[reg] = tcg_temp_new_i64();
+        }
+        tcg_gen_mov_i64(ctx->static_gr[reg], value);
+        ctx->static_gr_valid |= bit;
+        ctx->static_gr_dirty |= bit;
         if (ctx->inline_gr_nat_clear) {
             ia64_tr_clear_gr_nat(ctx, reg);
         }
         return;
     }
 
-    tcg_gen_st_i64(value, tcg_env,
-                   offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t));
+    tcg_gen_st_i64(value, tcg_env, ia64_tr_static_gr_offset(ctx, reg));
     if (ctx->inline_gr_nat_clear) {
         ia64_tr_clear_gr_nat(ctx, reg);
     }
@@ -441,99 +870,131 @@ static void ia64_tr_predicate_bit(TCGv_i64 bit, uint8_t predicate)
     tcg_gen_shl_i64(bit, tcg_constant_i64(1), mapped);
 }
 
-static void ia64_tr_load_predicate(TCGv_i64 value, uint8_t predicate)
+static void ia64_tr_load_predicate(DisasContext *ctx, TCGv_i64 value,
+                                   uint8_t predicate)
 {
     TCGv_i64 pr = tcg_temp_new_i64();
     TCGv_i64 bit = tcg_temp_new_i64();
 
     ia64_tr_predicate_bit(bit, predicate);
-    tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    if (ctx->state_cache_active) {
+        tcg_gen_mov_i64(pr, ia64_tr_ensure_pr(ctx));
+    } else {
+        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
     tcg_gen_and_i64(value, pr, bit);
 }
 
-static void ia64_tr_write_pr_const(uint8_t predicate, bool value)
+static void ia64_tr_write_pr_const(DisasContext *ctx, uint8_t predicate,
+                                   bool value)
 {
     TCGv_i64 pr;
     TCGv_i64 bit;
 
     if (predicate == 0) {
-        pr = tcg_temp_new_i64();
-        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        pr = ctx->state_cache_active ? ia64_tr_ensure_pr(ctx) :
+                                      tcg_temp_new_i64();
+        if (!ctx->state_cache_active) {
+            tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        }
         tcg_gen_ori_i64(pr, pr, 1);
-        tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        if (ctx->state_cache_active) {
+            ctx->pr_dirty = true;
+        } else {
+            tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        }
         return;
     }
 
-    pr = tcg_temp_new_i64();
+    pr = ctx->state_cache_active ? ia64_tr_ensure_pr(ctx) :
+                                  tcg_temp_new_i64();
     bit = tcg_temp_new_i64();
     ia64_tr_predicate_bit(bit, predicate);
-    tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    if (!ctx->state_cache_active) {
+        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
     if (value) {
         tcg_gen_or_i64(pr, pr, bit);
     } else {
         tcg_gen_andc_i64(pr, pr, bit);
     }
     tcg_gen_ori_i64(pr, pr, 1);
-    tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    if (ctx->state_cache_active) {
+        ctx->pr_dirty = true;
+    } else {
+        tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
 }
 
-static void ia64_tr_write_pr_bool(uint8_t predicate, TCGv_i64 value)
+static void ia64_tr_write_pr_bool(DisasContext *ctx, uint8_t predicate,
+                                  TCGv_i64 value)
 {
     TCGv_i64 pr;
     TCGv_i64 bit;
     TCGv_i64 selected;
 
     if (predicate == 0) {
-        ia64_tr_write_pr_const(predicate, true);
+        ia64_tr_write_pr_const(ctx, predicate, true);
         return;
     }
 
-    pr = tcg_temp_new_i64();
+    pr = ctx->state_cache_active ? ia64_tr_ensure_pr(ctx) :
+                                  tcg_temp_new_i64();
     bit = tcg_temp_new_i64();
     selected = tcg_temp_new_i64();
     ia64_tr_predicate_bit(bit, predicate);
-    tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    if (!ctx->state_cache_active) {
+        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
     tcg_gen_andc_i64(pr, pr, bit);
     tcg_gen_neg_i64(selected, value);
     tcg_gen_and_i64(selected, selected, bit);
     tcg_gen_or_i64(pr, pr, selected);
     tcg_gen_ori_i64(pr, pr, 1);
-    tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    if (ctx->state_cache_active) {
+        ctx->pr_dirty = true;
+    } else {
+        tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+    }
 }
 
-static void ia64_tr_emit_predicate_pair_write(const IA64TcgFastSlot *slot,
+static void ia64_tr_emit_predicate_pair_write(DisasContext *ctx,
+                                              const IA64TcgFastSlot *slot,
                                               TCGv_i64 result)
 {
     TCGv_i64 inverted;
     TCGLabel *done;
 
+    if (ctx->state_cache_active) {
+        ia64_tr_ensure_pr(ctx);
+    }
     switch (slot->predicate_write_kind) {
     case IA64_PRED_WRITE_UNCONDITIONAL:
     case IA64_PRED_WRITE_NORMAL:
-        ia64_tr_write_pr_bool(slot->predicate1, result);
+        ia64_tr_write_pr_bool(ctx, slot->predicate1, result);
         inverted = tcg_temp_new_i64();
         tcg_gen_xori_i64(inverted, result, 1);
-        ia64_tr_write_pr_bool(slot->predicate2, inverted);
+        ia64_tr_write_pr_bool(ctx, slot->predicate2, inverted);
         break;
     case IA64_PRED_WRITE_AND:
         done = gen_new_label();
         tcg_gen_brcondi_i64(TCG_COND_NE, result, 0, done);
-        ia64_tr_write_pr_const(slot->predicate1, false);
-        ia64_tr_write_pr_const(slot->predicate2, false);
+        ia64_tr_write_pr_const(ctx, slot->predicate1, false);
+        ia64_tr_write_pr_const(ctx, slot->predicate2, false);
         gen_set_label(done);
         break;
     case IA64_PRED_WRITE_OR:
         done = gen_new_label();
         tcg_gen_brcondi_i64(TCG_COND_EQ, result, 0, done);
-        ia64_tr_write_pr_const(slot->predicate1, true);
-        ia64_tr_write_pr_const(slot->predicate2, true);
+        ia64_tr_write_pr_const(ctx, slot->predicate1, true);
+        ia64_tr_write_pr_const(ctx, slot->predicate2, true);
         gen_set_label(done);
         break;
     case IA64_PRED_WRITE_OR_ANDCM:
         done = gen_new_label();
         tcg_gen_brcondi_i64(TCG_COND_EQ, result, 0, done);
-        ia64_tr_write_pr_const(slot->predicate1, true);
-        ia64_tr_write_pr_const(slot->predicate2, false);
+        ia64_tr_write_pr_const(ctx, slot->predicate1, true);
+        ia64_tr_write_pr_const(ctx, slot->predicate2, false);
         gen_set_label(done);
         break;
     default:
@@ -568,9 +1029,12 @@ static void ia64_tr_read_static_gr_nat(DisasContext *ctx, TCGv_i64 dest,
         return;
     }
 
-    tcg_gen_ld_i64(dest, tcg_env,
-                   offsetof(CPUIA64State, nat.gr_nat) +
-                   (reg / 64) * sizeof(uint64_t));
+    if (ctx->state_cache_active) {
+        tcg_gen_mov_i64(dest, ia64_tr_ensure_gr_nat(ctx));
+    } else {
+        tcg_gen_ld_i64(dest, tcg_env,
+                       offsetof(CPUIA64State, nat.gr_nat));
+    }
     tcg_gen_shri_i64(dest, dest, reg % 64);
     tcg_gen_andi_i64(dest, dest, 1);
 }
@@ -596,12 +1060,23 @@ static void ia64_tr_write_gr_nat(DisasContext *ctx, uint8_t reg,
     }
 
     tcg_gen_movi_i64(bit, UINT64_C(1) << reg);
-    tcg_gen_ld_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
+    if (ctx->state_cache_active) {
+        tcg_gen_mov_i64(nat, ia64_tr_ensure_gr_nat(ctx));
+    } else {
+        tcg_gen_ld_i64(nat, tcg_env,
+                       offsetof(CPUIA64State, nat.gr_nat));
+    }
     tcg_gen_andc_i64(nat, nat, bit);
     tcg_gen_neg_i64(selected, value);
     tcg_gen_and_i64(selected, selected, bit);
     tcg_gen_or_i64(nat, nat, selected);
-    tcg_gen_st_i64(nat, tcg_env, offsetof(CPUIA64State, nat.gr_nat));
+    if (ctx->state_cache_active) {
+        tcg_gen_mov_i64(ctx->gr_nat, nat);
+        ctx->gr_nat_dirty = true;
+    } else {
+        tcg_gen_st_i64(nat, tcg_env,
+                       offsetof(CPUIA64State, nat.gr_nat));
+    }
 }
 
 static void ia64_tr_emit_fill_nat(DisasContext *ctx,
@@ -708,7 +1183,7 @@ static void ia64_tr_emit_predicate_test(DisasContext *ctx,
     if (slot->predicate_test_relation == IA64_PRED_TEST_ZERO) {
         tcg_gen_xori_i64(result, result, 1);
     }
-    ia64_tr_emit_predicate_pair_write(slot, result);
+    ia64_tr_emit_predicate_pair_write(ctx, slot, result);
 }
 
 static void ia64_tr_emit_variable_shift(DisasContext *ctx,
@@ -830,8 +1305,110 @@ static void ia64_tr_emit_ldst_base_update(DisasContext *ctx,
     ia64_tr_store_static_gr(ctx, slot->base, updated);
 }
 
+static void ia64_tr_load_br(DisasContext *ctx, TCGv_i64 value, uint8_t reg)
+{
+    if (ctx->state_cache_active) {
+        tcg_gen_mov_i64(value, ia64_tr_ensure_br(ctx, reg));
+    } else {
+        tcg_gen_ld_i64(value, tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       reg * sizeof(uint64_t));
+    }
+}
+
+static void ia64_tr_store_br(DisasContext *ctx, uint8_t reg, TCGv_i64 value)
+{
+    if (ctx->state_cache_active) {
+        uint8_t bit = 1u << reg;
+
+        if (ctx->br[reg] == NULL) {
+            ctx->br[reg] = tcg_temp_new_i64();
+        }
+        tcg_gen_mov_i64(ctx->br[reg], value);
+        ctx->br_valid |= bit;
+        ctx->br_dirty |= bit;
+    } else {
+        tcg_gen_st_i64(value, tcg_env,
+                       offsetof(CPUIA64State, br) +
+                       reg * sizeof(uint64_t));
+    }
+}
+
+static void ia64_tr_load_ar(DisasContext *ctx, TCGv_i64 value, uint8_t reg)
+{
+    if (ctx->state_cache_active) {
+        tcg_gen_mov_i64(value, ia64_tr_ensure_ar(ctx, reg));
+    } else {
+        tcg_gen_ld_i64(value, tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       reg * sizeof(uint64_t));
+    }
+}
+
+static void ia64_tr_store_ar(DisasContext *ctx, uint8_t reg, TCGv_i64 value)
+{
+    if (ctx->state_cache_active) {
+        unsigned word = reg >> 6;
+        uint64_t bit = UINT64_C(1) << (reg & 63);
+
+        if (ctx->ar[reg] == NULL) {
+            ctx->ar[reg] = tcg_temp_new_i64();
+        }
+        tcg_gen_mov_i64(ctx->ar[reg], value);
+        ctx->ar_valid[word] |= bit;
+        ctx->ar_dirty[word] |= bit;
+    } else {
+        tcg_gen_st_i64(value, tcg_env,
+                       offsetof(CPUIA64State, ar) +
+                       reg * sizeof(uint64_t));
+    }
+}
+
+static void ia64_tr_prime_predicated_slot_state(
+    DisasContext *ctx, const IA64TcgFastSlot *slot)
+{
+    uint64_t gr_mask;
+    uint64_t nat_mask;
+
+    if (!ctx->state_cache_active || slot->qualifying_predicate == 0) {
+        return;
+    }
+
+    /* Loads must execute before the predicate branch on both runtime arms. */
+    ia64_tr_ensure_pr(ctx);
+    gr_mask = (slot->source_nat_mask | slot->dest_mask) & UINT32_MAX &
+              ~UINT64_C(1);
+    while (gr_mask != 0) {
+        unsigned reg = ctz64(gr_mask);
+
+        ia64_tr_ensure_static_gr(ctx, reg);
+        gr_mask &= gr_mask - 1;
+    }
+
+    nat_mask = slot->source_nat_mask & UINT32_MAX & ~UINT64_C(1);
+    if (ctx->inline_gr_nat_clear) {
+        nat_mask |= slot->dest_mask & UINT32_MAX & ~UINT64_C(1);
+    }
+    if (nat_mask != 0) {
+        ia64_tr_ensure_gr_nat(ctx);
+    }
+
+    switch (slot->op) {
+    case IA64_TCG_FAST_OP_MOV_FROM_BR:
+    case IA64_TCG_FAST_OP_MOV_TO_BR:
+        ia64_tr_ensure_br(ctx, slot->system_reg);
+        break;
+    case IA64_TCG_FAST_OP_MOV_FROM_AR:
+    case IA64_TCG_FAST_OP_MOV_TO_AR:
+        ia64_tr_ensure_ar(ctx, slot->system_reg);
+        break;
+    default:
+        break;
+    }
+}
+
 static TCGLabel *ia64_tr_emit_fast_slot_predicate_guard(
-    const IA64TcgFastSlot *slot)
+    DisasContext *ctx, const IA64TcgFastSlot *slot)
 {
     TCGLabel *skip;
     TCGv_i64 pr;
@@ -842,7 +1419,7 @@ static TCGLabel *ia64_tr_emit_fast_slot_predicate_guard(
 
     skip = gen_new_label();
     pr = tcg_temp_new_i64();
-    ia64_tr_load_predicate(pr, slot->qualifying_predicate);
+    ia64_tr_load_predicate(ctx, pr, slot->qualifying_predicate);
     tcg_gen_brcondi_i64(TCG_COND_EQ, pr, 0, skip);
     return skip;
 }
@@ -947,7 +1524,8 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         return;
     }
 
-    skip = ia64_tr_emit_fast_slot_predicate_guard(slot);
+    ia64_tr_prime_predicated_slot_state(ctx, slot);
+    skip = ia64_tr_emit_fast_slot_predicate_guard(ctx, slot);
     result = tcg_temp_new_i64();
     source2 = tcg_temp_new_i64();
     source3 = tcg_temp_new_i64();
@@ -1034,7 +1612,7 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         }
         tcg_gen_setcond_i64(ia64_tr_compare_cond(slot->compare_relation),
                             result, source2, source3);
-        ia64_tr_emit_predicate_pair_write(slot, result);
+        ia64_tr_emit_predicate_pair_write(ctx, slot, result);
         ia64_tr_finish_fast_slot_predicate_guard(skip);
         return;
     case IA64_TCG_FAST_OP_EXTRACT:
@@ -1078,27 +1656,19 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         ia64_tr_emit_variable_shift(ctx, slot, result, source2, source3);
         break;
     case IA64_TCG_FAST_OP_MOV_FROM_BR:
-        tcg_gen_ld_i64(result, tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       slot->system_reg * sizeof(uint64_t));
+        ia64_tr_load_br(ctx, result, slot->system_reg);
         break;
     case IA64_TCG_FAST_OP_MOV_TO_BR:
         ia64_tr_load_static_gr(ctx, source2, slot->source2);
-        tcg_gen_st_i64(source2, tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       slot->system_reg * sizeof(uint64_t));
+        ia64_tr_store_br(ctx, slot->system_reg, source2);
         ia64_tr_finish_fast_slot_predicate_guard(skip);
         return;
     case IA64_TCG_FAST_OP_MOV_FROM_AR:
-        tcg_gen_ld_i64(result, tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       slot->system_reg * sizeof(uint64_t));
+        ia64_tr_load_ar(ctx, result, slot->system_reg);
         break;
     case IA64_TCG_FAST_OP_MOV_TO_AR:
         ia64_tr_load_fast_source2(ctx, source2, slot);
-        tcg_gen_st_i64(source2, tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       slot->system_reg * sizeof(uint64_t));
+        ia64_tr_store_ar(ctx, slot->system_reg, source2);
         ia64_tr_finish_fast_slot_predicate_guard(skip);
         return;
     case IA64_TCG_FAST_OP_ALLOC:
@@ -1243,6 +1813,21 @@ static bool ia64_tr_fast_bundle_needs_runtime_fallback(
            fast->source_nat_mask != 0 || fast->source_nat_mask_hi != 0;
 }
 
+static bool ia64_tr_fast_bundle_requires_state_barrier(
+    const IA64TcgFastBundle *fast)
+{
+    if (ia64_tr_fast_bundle_has_ldst(fast) ||
+        ia64_tr_fast_bundle_has_required_helper(fast)) {
+        return true;
+    }
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        if (fast->slot[slot].op == IA64_TCG_FAST_OP_ALLOC) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ia64_tr_emit_fast_nat_guards(DisasContext *ctx,
                                          uint64_t source_mask,
                                          uint64_t source_mask_hi,
@@ -1253,8 +1838,12 @@ static void ia64_tr_emit_fast_nat_guards(DisasContext *ctx,
     if (static_mask != 0) {
         TCGv_i64 nat = tcg_temp_new_i64();
 
-        tcg_gen_ld_i64(nat, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        if (ctx->state_cache_active) {
+            tcg_gen_mov_i64(nat, ia64_tr_ensure_gr_nat(ctx));
+        } else {
+            tcg_gen_ld_i64(nat, tcg_env,
+                           offsetof(CPUIA64State, nat.gr_nat));
+        }
         tcg_gen_andi_i64(nat, nat, static_mask);
         tcg_gen_brcondi_i64(TCG_COND_NE, nat, 0, fallback);
     }
@@ -1344,12 +1933,15 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
                                           uint64_t pc)
 {
     IA64TcgFastBundle fast;
+    IA64TrStateCacheDirty dirty_before = { 0 };
     TCGLabel *fallback;
     TCGLabel *done;
     TCGv_i64 runtime_dest_mask;
     TCGv_i64 runtime_dest_mask_hi;
     TCGv_i64 ldst_address[IA64_SLOT_COUNT] = { NULL, };
     bool has_ldst;
+    bool cached_fallback;
+    bool cache_suspended;
     bool needs_fallback;
     bool zero_helper;
 
@@ -1369,6 +1961,16 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
     }
     zero_helper = ia64_tr_use_zero_helper_path();
     needs_fallback = ia64_tr_fast_bundle_needs_runtime_fallback(&fast);
+    if (ctx->state_cache_active) {
+        ia64_tr_capture_state_cache_dirty(ctx, &dirty_before);
+    }
+    cache_suspended = ctx->state_cache_active &&
+                      ia64_tr_fast_bundle_requires_state_barrier(&fast);
+    cached_fallback = ctx->state_cache_active && needs_fallback &&
+                      !cache_suspended;
+    if (cache_suspended) {
+        ia64_tr_suspend_state_cache(ctx);
+    }
     fallback = needs_fallback ? gen_new_label() : NULL;
     done = needs_fallback ? gen_new_label() : NULL;
     runtime_dest_mask = tcg_temp_new_i64();
@@ -1425,9 +2027,15 @@ static bool ia64_tr_translate_fast_bundle(DisasContext *ctx,
         if (has_ldst && ia64_perf_enabled()) {
             gen_helper_perf_tcg_ldst_fallback();
         }
-        ia64_tr_emit_exec_bundle(ctx, bundle, pc);
+        if (cached_fallback) {
+            ia64_tr_emit_exec_bundle_cached_fallback(
+                ctx, bundle, pc, &dirty_before);
+        } else {
+            ia64_tr_emit_exec_bundle(ctx, bundle, pc);
+        }
         gen_set_label(done);
     }
+    ia64_tr_resume_state_cache(ctx, cache_suspended);
     return true;
 }
 
@@ -1441,6 +2049,7 @@ static void ia64_tr_emit_exec_slot(DisasContext *ctx,
     TCGv_i32 flow_changed = tcg_temp_new_i32();
 
     /* A fault in this slot must not lose earlier retired bundles in the TB. */
+    ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_commit_ip(pc);
     gen_helper_exec_slot(flow_changed, tcg_env,
@@ -1508,6 +2117,7 @@ static bool ia64_tr_translate_partial_bundle(DisasContext *ctx,
     TCGLabel *done;
     TCGv_i64 runtime_dest_mask;
     TCGv_i64 runtime_dest_mask_hi;
+    bool cache_suspended;
     bool has_ldst;
 
     /* Keep detailed tracing on the complete-bundle correctness oracle. */
@@ -1522,6 +2132,10 @@ static bool ia64_tr_translate_partial_bundle(DisasContext *ctx,
         return false;
     }
 
+    cache_suspended = ctx->state_cache_active;
+    if (cache_suspended) {
+        ia64_tr_suspend_state_cache(ctx);
+    }
     flow_exit = gen_new_label();
     done = gen_new_label();
     runtime_dest_mask = tcg_temp_new_i64();
@@ -1565,11 +2179,13 @@ static bool ia64_tr_translate_partial_bundle(DisasContext *ctx,
     gen_set_label(flow_exit);
     tcg_gen_exit_tb(NULL, 0);
     gen_set_label(done);
+    ia64_tr_resume_state_cache(ctx, cache_suspended);
     return true;
 }
 
 static void ia64_tr_emit_main_loop_exit(DisasContext *ctx)
 {
+    ia64_tr_sync_state_cache(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exit_main_loop();
@@ -1598,6 +2214,7 @@ static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
     if (translator_use_goto_tb(&ctx->base, target)) {
         TCGLabel *main_loop_exit = gen_new_label();
 
+        ia64_tr_sync_state_cache(ctx);
         if (ia64_tr_use_zero_helper_path()) {
             ia64_tr_commit_ip(target);
         } else {
@@ -1628,6 +2245,7 @@ static void ia64_tr_emit_inline_direct_branch_exit(
 {
     TCGLabel *main_loop_exit = gen_new_label();
 
+    ia64_tr_sync_state_cache(ctx);
     ia64_tr_commit_ip(target);
     ia64_tr_emit_benchmark_retire(ctx->fast_bundle_ticks);
     ia64_tr_emit_exit_request_guard(main_loop_exit);
@@ -1731,12 +2349,15 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
                                             uint64_t pc)
 {
     IA64TcgDirectBranch branch;
+    IA64TrStateCacheDirty dirty_before = { 0 };
     TCGLabel *fallback;
     TCGLabel *not_taken = NULL;
     TCGv_i64 ldst_address[IA64_SLOT_COUNT] = { NULL, };
     TCGv_i64 runtime_dest_mask;
     TCGv_i64 runtime_dest_mask_hi;
     TCGv_i64 tmp;
+    bool cached_fallback;
+    bool cache_suspended;
     bool has_ldst;
     bool zero_helper;
 
@@ -1766,6 +2387,17 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     zero_helper = ia64_tr_use_zero_helper_path() &&
                   (branch.kind == IA64_TCG_DIRECT_BRANCH_COND ||
                    branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP);
+    if (ctx->state_cache_active) {
+        ia64_tr_capture_state_cache_dirty(ctx, &dirty_before);
+    }
+    cache_suspended = ctx->state_cache_active &&
+                      (!zero_helper ||
+                       ia64_tr_fast_bundle_requires_state_barrier(
+                           &branch.prefix));
+    cached_fallback = ctx->state_cache_active && !cache_suspended;
+    if (cache_suspended) {
+        ia64_tr_suspend_state_cache(ctx);
+    }
     fallback = gen_new_label();
     runtime_dest_mask = zero_helper ? tcg_temp_new_i64() : NULL;
     runtime_dest_mask_hi = zero_helper ? tcg_temp_new_i64() : NULL;
@@ -1800,17 +2432,13 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     }
     if (branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP) {
         not_taken = gen_new_label();
-        tcg_gen_ld_i64(tmp, tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       IA64_AR_LC * sizeof(uint64_t));
+        ia64_tr_load_ar(ctx, tmp, IA64_AR_LC);
         tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, not_taken);
         tcg_gen_subi_i64(tmp, tmp, 1);
-        tcg_gen_st_i64(tmp, tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       IA64_AR_LC * sizeof(uint64_t));
+        ia64_tr_store_ar(ctx, IA64_AR_LC, tmp);
     } else if (branch.conditional) {
         not_taken = gen_new_label();
-        ia64_tr_load_predicate(tmp, branch.predicate);
+        ia64_tr_load_predicate(ctx, tmp, branch.predicate);
         tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, not_taken);
     }
 
@@ -1841,7 +2469,13 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     if (has_ldst && ia64_perf_enabled()) {
         gen_helper_perf_tcg_ldst_fallback();
     }
-    ia64_tr_emit_exec_bundle_lookup_ptr(ctx, bundle, pc);
+    if (cached_fallback) {
+        ia64_tr_emit_exec_bundle_lookup_ptr_cached_fallback(
+            ctx, bundle, pc, &dirty_before);
+    } else {
+        ia64_tr_emit_exec_bundle_lookup_ptr(ctx, bundle, pc);
+    }
+    ia64_tr_resume_state_cache(ctx, cache_suspended);
     return true;
 }
 
@@ -1855,6 +2489,10 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     uint64_t lo;
     uint64_t hi;
 
+    if (ctx->state_cache_available && !ctx->state_cache_active &&
+        ctx->base.num_insns >= ia64_tr_state_cache_min_bundles()) {
+        ctx->state_cache_active = true;
+    }
     lo = translator_ldq_end(ctx->env, &ctx->base, pc, MO_LE);
     hi = translator_ldq_end(ctx->env, &ctx->base, pc + 8, MO_LE);
     ia64_decode_bundle_words(lo, hi, &bundle);
