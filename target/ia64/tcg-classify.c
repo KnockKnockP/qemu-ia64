@@ -1627,8 +1627,508 @@ bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle)
     return false;
 }
 
-static IA64TcgFallbackPlanOp ia64_tcg_fallback_plan_for_slot(
-    IA64SlotType type, uint64_t raw)
+typedef struct IA64TcgFallbackBitStream {
+    uint64_t value;
+    unsigned shift;
+} IA64TcgFallbackBitStream;
+
+static void ia64_tcg_fallback_put(IA64TcgFallbackBitStream *stream,
+                                  uint64_t value, unsigned bits)
+{
+    g_assert(stream->shift + bits <= IA64_TCG_FALLBACK_DESC_OP_SHIFT);
+    g_assert(bits == 64 || (value & ~MAKE_64BIT_MASK(0, bits)) == 0);
+    stream->value |= value << stream->shift;
+    stream->shift += bits;
+}
+
+static uint64_t ia64_tcg_fallback_get(IA64TcgFallbackBitStream *stream,
+                                      unsigned bits)
+{
+    uint64_t value;
+
+    value = extract64(stream->value, stream->shift, bits);
+    stream->shift += bits;
+    return value;
+}
+
+static int64_t ia64_tcg_fallback_sign_extend(uint64_t value, unsigned bits)
+{
+    return (int64_t)(value << (64 - bits)) >> (64 - bits);
+}
+
+static uint8_t ia64_tcg_fallback_width_code(uint8_t width)
+{
+    switch (width) {
+    case 1:
+        return 0;
+    case 2:
+        return 1;
+    case 4:
+        return 2;
+    case 8:
+        return 3;
+    case 10:
+        return 4;
+    case 16:
+        return 5;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static uint8_t ia64_tcg_fallback_width_from_code(uint8_t code)
+{
+    static const uint8_t widths[] = { 1, 2, 4, 8, 10, 16 };
+
+    return code < ARRAY_SIZE(widths) ? widths[code] : 0;
+}
+
+static uint64_t ia64_tcg_fallback_pack_desc(
+    const IA64TcgFallbackDecodedSlot *decoded)
+{
+    IA64TcgFallbackBitStream stream = { 0 };
+
+    ia64_tcg_fallback_put(&stream, decoded->predicate, 6);
+    switch (decoded->op) {
+    case IA64_TCG_FALLBACK_PLAN_EXTRACT:
+        ia64_tcg_fallback_put(&stream, decoded->u.extract.target, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.extract.source3, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.extract.position, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.extract.length, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.extract.sign_extend, 1);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_DEPOSIT:
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.target, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.source2, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.source3, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.position, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.length, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.deposit_zero, 1);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.deposit.source_immediate, 1);
+        ia64_tcg_fallback_put(&stream, decoded->u.deposit.immediate & 0xff, 8);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_INTEGER_EXTEND:
+        ia64_tcg_fallback_put(&stream, decoded->u.integer_extend.kind, 2);
+        ia64_tcg_fallback_put(&stream, decoded->u.integer_extend.target, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.integer_extend.source3, 7);
+        ia64_tcg_fallback_put(
+            &stream,
+            ia64_tcg_fallback_width_code(decoded->u.integer_extend.width),
+            2);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY:
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_memory.kind, 2);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_memory.format, 3);
+        ia64_tcg_fallback_put(
+            &stream,
+            ia64_tcg_fallback_width_code(decoded->u.floating_memory.width),
+            3);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_memory.freg, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_memory.freg2, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_memory.base, 7);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_memory.update_source, 7);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_memory.memory_class, 4);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_memory.base_update, 1);
+        ia64_tcg_fallback_put(
+            &stream, decoded->u.floating_memory.update_from_register, 1);
+        ia64_tcg_fallback_put(
+            &stream, (uint64_t)decoded->u.floating_memory.immediate & 0x1ff,
+            9);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_COMPARE:
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_compare.relation, 2);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_compare.write_kind, 3);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_compare.status_field, 2);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_compare.p1, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_compare.p2, 6);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_compare.source2, 7);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_compare.source3, 7);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS:
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_class.write_kind, 3);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_class.p1, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_class.p2, 6);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.floating_class.source2, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.floating_class.mask, 9);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE:
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.kind, 2);
+        ia64_tcg_fallback_put(
+            &stream, ia64_tcg_fallback_width_code(decoded->u.ldst.width), 2);
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.target, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.source, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.base, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.update_source, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.memory_class, 4);
+        ia64_tcg_fallback_put(&stream, decoded->u.ldst.base_update, 1);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.ldst.update_from_register, 1);
+        ia64_tcg_fallback_put(
+            &stream, (uint64_t)decoded->u.ldst.immediate & 0x1ff, 9);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_COMPARE:
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.relation, 4);
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.write_kind, 3);
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.width == 4, 1);
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.p1, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.p2, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.source2, 7);
+        ia64_tcg_fallback_put(&stream, decoded->u.compare.source3, 7);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.compare.source_immediate, 1);
+        ia64_tcg_fallback_put(
+            &stream, (uint64_t)decoded->u.compare.immediate & 0xff, 8);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_PREDICATE_TEST:
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.predicate_test.kind, 2);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.predicate_test.relation, 1);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.predicate_test.write_kind, 3);
+        ia64_tcg_fallback_put(&stream, decoded->u.predicate_test.p1, 6);
+        ia64_tcg_fallback_put(&stream, decoded->u.predicate_test.p2, 6);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.predicate_test.source3, 7);
+        ia64_tcg_fallback_put(&stream,
+                              decoded->u.predicate_test.immediate, 6);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE:
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE:
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT:
+        ia64_tcg_fallback_put(&stream, decoded->u.branch.type, 3);
+        ia64_tcg_fallback_put(&stream, decoded->u.branch.branch_reg, 3);
+        ia64_tcg_fallback_put(&stream, decoded->u.branch.target_reg, 3);
+        ia64_tcg_fallback_put(&stream, decoded->u.branch.major, 4);
+        ia64_tcg_fallback_put(&stream, decoded->u.branch.x6, 6);
+        ia64_tcg_fallback_put(
+            &stream, (uint64_t)decoded->u.branch.displacement & 0x1ffffff,
+            25);
+        break;
+    default:
+        break;
+    }
+
+    g_assert(decoded->op < IA64_TCG_FALLBACK_PLAN_COUNT);
+    return stream.value |
+           ((uint64_t)decoded->op << IA64_TCG_FALLBACK_DESC_OP_SHIFT);
+}
+
+static IA64TcgFallbackBitStream ia64_tcg_fallback_payload(uint64_t desc)
+{
+    IA64TcgFallbackBitStream stream = {
+        .value = desc & IA64_TCG_FALLBACK_DESC_PAYLOAD_MASK,
+        .shift = 6,
+    };
+
+    return stream;
+}
+
+void ia64_tcg_fallback_unpack_extract(uint64_t desc,
+                                      IA64ExtractInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->target = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source3 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->position = ia64_tcg_fallback_get(&stream, 6);
+    decoded->length = ia64_tcg_fallback_get(&stream, 7);
+    decoded->sign_extend = ia64_tcg_fallback_get(&stream, 1);
+}
+
+void ia64_tcg_fallback_unpack_deposit(uint64_t desc,
+                                      IA64DepositInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->target = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source2 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source3 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->position = ia64_tcg_fallback_get(&stream, 6);
+    decoded->length = ia64_tcg_fallback_get(&stream, 7);
+    decoded->deposit_zero = ia64_tcg_fallback_get(&stream, 1);
+    decoded->source_immediate = ia64_tcg_fallback_get(&stream, 1);
+    decoded->immediate = (uint64_t)ia64_tcg_fallback_sign_extend(
+        ia64_tcg_fallback_get(&stream, 8), 8);
+}
+
+void ia64_tcg_fallback_unpack_integer_extend(
+    uint64_t desc, IA64IntegerExtendInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->kind = ia64_tcg_fallback_get(&stream, 2);
+    decoded->target = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source3 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->width = ia64_tcg_fallback_width_from_code(
+        ia64_tcg_fallback_get(&stream, 2));
+}
+
+void ia64_tcg_fallback_unpack_floating_memory(
+    uint64_t desc, IA64FloatingMemoryInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->kind = ia64_tcg_fallback_get(&stream, 2);
+    decoded->format = ia64_tcg_fallback_get(&stream, 3);
+    decoded->width = ia64_tcg_fallback_width_from_code(
+        ia64_tcg_fallback_get(&stream, 3));
+    decoded->freg = ia64_tcg_fallback_get(&stream, 7);
+    decoded->freg2 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->base = ia64_tcg_fallback_get(&stream, 7);
+    decoded->update_source = ia64_tcg_fallback_get(&stream, 7);
+    decoded->memory_class = ia64_tcg_fallback_get(&stream, 4);
+    decoded->base_update = ia64_tcg_fallback_get(&stream, 1);
+    decoded->update_from_register = ia64_tcg_fallback_get(&stream, 1);
+    decoded->immediate = ia64_tcg_fallback_sign_extend(
+        ia64_tcg_fallback_get(&stream, 9), 9);
+}
+
+void ia64_tcg_fallback_unpack_floating_compare(
+    uint64_t desc, IA64FloatingCompareInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->relation = ia64_tcg_fallback_get(&stream, 2);
+    decoded->write_kind = ia64_tcg_fallback_get(&stream, 3);
+    decoded->status_field = ia64_tcg_fallback_get(&stream, 2);
+    decoded->p1 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->p2 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->source2 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source3 = ia64_tcg_fallback_get(&stream, 7);
+}
+
+void ia64_tcg_fallback_unpack_floating_class(
+    uint64_t desc, IA64FloatingClassInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->write_kind = ia64_tcg_fallback_get(&stream, 3);
+    decoded->p1 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->p2 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->source2 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->mask = ia64_tcg_fallback_get(&stream, 9);
+}
+
+void ia64_tcg_fallback_unpack_ldst(uint64_t desc,
+                                   IA64LdstImmediate *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->kind = ia64_tcg_fallback_get(&stream, 2);
+    decoded->width = ia64_tcg_fallback_width_from_code(
+        ia64_tcg_fallback_get(&stream, 2));
+    decoded->target = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source = ia64_tcg_fallback_get(&stream, 7);
+    decoded->base = ia64_tcg_fallback_get(&stream, 7);
+    decoded->update_source = ia64_tcg_fallback_get(&stream, 7);
+    decoded->memory_class = ia64_tcg_fallback_get(&stream, 4);
+    decoded->base_update = ia64_tcg_fallback_get(&stream, 1);
+    decoded->update_from_register = ia64_tcg_fallback_get(&stream, 1);
+    decoded->immediate = ia64_tcg_fallback_sign_extend(
+        ia64_tcg_fallback_get(&stream, 9), 9);
+}
+
+void ia64_tcg_fallback_unpack_compare(uint64_t desc,
+                                      IA64CompareInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->relation = ia64_tcg_fallback_get(&stream, 4);
+    decoded->write_kind = ia64_tcg_fallback_get(&stream, 3);
+    decoded->width = ia64_tcg_fallback_get(&stream, 1) ? 4 : 8;
+    decoded->p1 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->p2 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->source2 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source3 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->source_immediate = ia64_tcg_fallback_get(&stream, 1);
+    decoded->immediate = ia64_tcg_fallback_sign_extend(
+        ia64_tcg_fallback_get(&stream, 8), 8);
+}
+
+void ia64_tcg_fallback_unpack_predicate_test(
+    uint64_t desc, IA64PredicateTestInstruction *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->kind = ia64_tcg_fallback_get(&stream, 2);
+    decoded->relation = ia64_tcg_fallback_get(&stream, 1);
+    decoded->write_kind = ia64_tcg_fallback_get(&stream, 3);
+    decoded->p1 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->p2 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->source3 = ia64_tcg_fallback_get(&stream, 7);
+    decoded->immediate = ia64_tcg_fallback_get(&stream, 6);
+}
+
+void ia64_tcg_fallback_unpack_branch(uint64_t desc,
+                                     IA64TcgFallbackBranch *decoded)
+{
+    IA64TcgFallbackBitStream stream = ia64_tcg_fallback_payload(desc);
+
+    decoded->type = ia64_tcg_fallback_get(&stream, 3);
+    decoded->branch_reg = ia64_tcg_fallback_get(&stream, 3);
+    decoded->target_reg = ia64_tcg_fallback_get(&stream, 3);
+    decoded->major = ia64_tcg_fallback_get(&stream, 4);
+    decoded->x6 = ia64_tcg_fallback_get(&stream, 6);
+    decoded->displacement = ia64_tcg_fallback_sign_extend(
+        ia64_tcg_fallback_get(&stream, 25), 25);
+}
+
+bool ia64_tcg_fallback_unpack_desc(uint64_t desc,
+                                   IA64TcgFallbackDecodedSlot *decoded)
+{
+    IA64TcgFallbackBitStream stream = {
+        .value = desc & IA64_TCG_FALLBACK_DESC_PAYLOAD_MASK,
+    };
+
+    if (!decoded || ia64_tcg_fallback_desc_op(desc) >=
+                        IA64_TCG_FALLBACK_PLAN_COUNT) {
+        return false;
+    }
+    decoded->op = ia64_tcg_fallback_desc_op(desc);
+    decoded->predicate = ia64_tcg_fallback_get(&stream, 6);
+    switch (decoded->op) {
+    case IA64_TCG_FALLBACK_PLAN_EXTRACT:
+        decoded->u.extract.target = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.extract.source3 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.extract.position = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.extract.length = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.extract.sign_extend = ia64_tcg_fallback_get(&stream, 1);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_DEPOSIT:
+        decoded->u.deposit.target = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.deposit.source2 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.deposit.source3 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.deposit.position = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.deposit.length = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.deposit.deposit_zero = ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.deposit.source_immediate =
+            ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.deposit.immediate = (uint64_t)ia64_tcg_fallback_sign_extend(
+            ia64_tcg_fallback_get(&stream, 8), 8);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_INTEGER_EXTEND:
+        decoded->u.integer_extend.kind = ia64_tcg_fallback_get(&stream, 2);
+        decoded->u.integer_extend.target = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.integer_extend.source3 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.integer_extend.width = ia64_tcg_fallback_width_from_code(
+            ia64_tcg_fallback_get(&stream, 2));
+        break;
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY:
+        decoded->u.floating_memory.kind = ia64_tcg_fallback_get(&stream, 2);
+        decoded->u.floating_memory.format =
+            ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.floating_memory.width = ia64_tcg_fallback_width_from_code(
+            ia64_tcg_fallback_get(&stream, 3));
+        decoded->u.floating_memory.freg = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.floating_memory.freg2 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.floating_memory.base = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.floating_memory.update_source =
+            ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.floating_memory.memory_class =
+            ia64_tcg_fallback_get(&stream, 4);
+        decoded->u.floating_memory.base_update =
+            ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.floating_memory.update_from_register =
+            ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.floating_memory.immediate = ia64_tcg_fallback_sign_extend(
+            ia64_tcg_fallback_get(&stream, 9), 9);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_COMPARE:
+        decoded->u.floating_compare.relation =
+            ia64_tcg_fallback_get(&stream, 2);
+        decoded->u.floating_compare.write_kind =
+            ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.floating_compare.status_field =
+            ia64_tcg_fallback_get(&stream, 2);
+        decoded->u.floating_compare.p1 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.floating_compare.p2 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.floating_compare.source2 =
+            ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.floating_compare.source3 =
+            ia64_tcg_fallback_get(&stream, 7);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS:
+        decoded->u.floating_class.write_kind =
+            ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.floating_class.p1 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.floating_class.p2 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.floating_class.source2 =
+            ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.floating_class.mask = ia64_tcg_fallback_get(&stream, 9);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE:
+        decoded->u.ldst.kind = ia64_tcg_fallback_get(&stream, 2);
+        decoded->u.ldst.width = ia64_tcg_fallback_width_from_code(
+            ia64_tcg_fallback_get(&stream, 2));
+        decoded->u.ldst.target = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.ldst.source = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.ldst.base = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.ldst.update_source = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.ldst.memory_class = ia64_tcg_fallback_get(&stream, 4);
+        decoded->u.ldst.base_update = ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.ldst.update_from_register =
+            ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.ldst.immediate = ia64_tcg_fallback_sign_extend(
+            ia64_tcg_fallback_get(&stream, 9), 9);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_COMPARE:
+        decoded->u.compare.relation = ia64_tcg_fallback_get(&stream, 4);
+        decoded->u.compare.write_kind = ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.compare.width = ia64_tcg_fallback_get(&stream, 1) ? 4 : 8;
+        decoded->u.compare.p1 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.compare.p2 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.compare.source2 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.compare.source3 = ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.compare.source_immediate =
+            ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.compare.immediate = ia64_tcg_fallback_sign_extend(
+            ia64_tcg_fallback_get(&stream, 8), 8);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_PREDICATE_TEST:
+        decoded->u.predicate_test.kind =
+            ia64_tcg_fallback_get(&stream, 2);
+        decoded->u.predicate_test.relation =
+            ia64_tcg_fallback_get(&stream, 1);
+        decoded->u.predicate_test.write_kind =
+            ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.predicate_test.p1 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.predicate_test.p2 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.predicate_test.source3 =
+            ia64_tcg_fallback_get(&stream, 7);
+        decoded->u.predicate_test.immediate =
+            ia64_tcg_fallback_get(&stream, 6);
+        break;
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE:
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE:
+    case IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT:
+        decoded->u.branch.type = ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.branch.branch_reg = ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.branch.target_reg = ia64_tcg_fallback_get(&stream, 3);
+        decoded->u.branch.major = ia64_tcg_fallback_get(&stream, 4);
+        decoded->u.branch.x6 = ia64_tcg_fallback_get(&stream, 6);
+        decoded->u.branch.displacement = ia64_tcg_fallback_sign_extend(
+            ia64_tcg_fallback_get(&stream, 25), 25);
+        break;
+    default:
+        break;
+    }
+    return true;
+}
+
+static uint64_t ia64_tcg_fallback_plan_for_slot(IA64SlotType type,
+                                                 uint64_t raw)
 {
     IA64LdstImmediate ldst;
     IA64FloatingMemoryInstruction fldst;
@@ -1639,120 +2139,173 @@ static IA64TcgFallbackPlanOp ia64_tcg_fallback_plan_for_slot(
     IA64ExtractInstruction extract;
     IA64DepositInstruction deposit;
     IA64IntegerExtendInstruction int_ext;
+    IA64TcgFallbackDecodedSlot decoded = {
+        .op = IA64_TCG_FALLBACK_PLAN_GENERIC,
+        .predicate = ia64_slot_predicate(raw),
+    };
 
     /*
      * Smoke/NOP slots are already the first cheap checks in the helper ladder.
      * Leave them generic so the plan only targets slots that skip real work.
      */
     if (ia64_slot_is_m34_alloc(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ALLOC;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ALLOC;
+        goto done;
     }
     if (ia64_slot_is_i_mov_from_branch(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_MOV_FROM_BRANCH;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_MOV_FROM_BRANCH;
+        goto done;
     }
     if (ia64_slot_is_i_mov_to_branch(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_MOV_TO_BRANCH;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_MOV_TO_BRANCH;
+        goto done;
     }
     if (ia64_slot_is_mov_to_application(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION;
+        goto done;
     }
     if (ia64_slot_is_mov_from_application(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_MOV_FROM_APPLICATION;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_MOV_FROM_APPLICATION;
+        goto done;
     }
     if (ia64_slot_is_mov_to_application_immediate(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION_IMM;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_MOV_TO_APPLICATION_IMM;
+        goto done;
     }
     if (ia64_decode_extract(type, raw, &extract)) {
-        return IA64_TCG_FALLBACK_PLAN_EXTRACT;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_EXTRACT;
+        decoded.u.extract = extract;
+        goto done;
     }
     if (ia64_decode_deposit(type, raw, &deposit)) {
-        return IA64_TCG_FALLBACK_PLAN_DEPOSIT;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_DEPOSIT;
+        decoded.u.deposit = deposit;
+        goto done;
     }
     if (ia64_decode_integer_extend(type, raw, &int_ext)) {
-        return IA64_TCG_FALLBACK_PLAN_INTEGER_EXTEND;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_INTEGER_EXTEND;
+        decoded.u.integer_extend = int_ext;
+        goto done;
     }
     if (ia64_decode_floating_memory(type, raw, &fldst)) {
-        return IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_FLOATING_MEMORY;
+        decoded.u.floating_memory = fldst;
+        goto done;
     }
     if (ia64_decode_floating_compare(type, raw, &fcmp)) {
-        return IA64_TCG_FALLBACK_PLAN_FLOATING_COMPARE;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_FLOATING_COMPARE;
+        decoded.u.floating_compare = fcmp;
+        goto done;
     }
     if (ia64_decode_floating_class(type, raw, &fclass)) {
-        return IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS;
+        decoded.u.floating_class = fclass;
+        goto done;
     }
     if (ia64_decode_ldst_immediate(type, raw, &ldst)) {
-        return IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE;
+        decoded.u.ldst = ldst;
+        goto done;
     }
     if (ia64_decode_compare(type, raw, &cmp)) {
-        return IA64_TCG_FALLBACK_PLAN_COMPARE;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_COMPARE;
+        decoded.u.compare = cmp;
+        goto done;
     }
     if (ia64_decode_predicate_test(type, raw, &pred_test)) {
-        return IA64_TCG_FALLBACK_PLAN_PREDICATE_TEST;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_PREDICATE_TEST;
+        decoded.u.predicate_test = pred_test;
+        goto done;
     }
     if (ia64_slot_is_alu_add(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ALU_ADD;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ALU_ADD;
+        goto done;
     }
     if (ia64_slot_is_alu_sub(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ALU_SUB;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ALU_SUB;
+        goto done;
     }
     if (ia64_slot_is_alu_logic(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ALU_LOGIC;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ALU_LOGIC;
+        goto done;
     }
     if (ia64_slot_is_alu_addp4(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ALU_ADDP4;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ALU_ADDP4;
+        goto done;
     }
     if (ia64_slot_is_alu_shladd(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ALU_SHLADD;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ALU_SHLADD;
+        goto done;
     }
     if (ia64_slot_is_i_packed_i2(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_I_PACKED_I2;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_I_PACKED_I2;
+        goto done;
     }
     if (ia64_slot_is_i_mux(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_I_MUX;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_I_MUX;
+        goto done;
     }
     if (ia64_slot_is_i_bit_count(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_I_BIT_COUNT;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_I_BIT_COUNT;
+        goto done;
     }
     if (ia64_slot_is_i_variable_shift(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_I_VARIABLE_SHIFT;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_I_VARIABLE_SHIFT;
+        goto done;
     }
     if (ia64_slot_is_addl(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_ADDL;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_ADDL;
+        goto done;
     }
     if (ia64_slot_is_b_branch_relative(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE;
+        decoded.u.branch.type = (raw >> 6) & 0x7;
+        decoded.u.branch.displacement = ia64_branch_displacement(raw);
+        goto done;
     }
     if (ia64_slot_is_b_call_relative(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE;
+        decoded.u.branch.branch_reg = (raw >> 6) & 0x7;
+        decoded.u.branch.displacement = ia64_branch_displacement(raw);
+        goto done;
     }
     if (ia64_slot_is_b_indirect_branch(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT;
+        decoded.u.branch.major = ia64_slot_major_opcode(raw);
+        decoded.u.branch.x6 = (raw >> 27) & 0x3f;
+        decoded.u.branch.branch_reg = (raw >> 6) & 0x7;
+        decoded.u.branch.target_reg = (raw >> 13) & 0x7;
+        goto done;
     }
     if (ia64_slot_is_b_predict_or_nop(type, raw)) {
-        return IA64_TCG_FALLBACK_PLAN_BRANCH_PREDICT_OR_NOP;
+        decoded.op = IA64_TCG_FALLBACK_PLAN_BRANCH_PREDICT_OR_NOP;
     }
 
-    return IA64_TCG_FALLBACK_PLAN_GENERIC;
+done:
+    return ia64_tcg_fallback_pack_desc(&decoded);
 }
 
-uint32_t ia64_tcg_fallback_plan_for_bundle(const IA64DecodedBundle *bundle)
+IA64TcgFallbackPlan ia64_tcg_fallback_plan_for_bundle(
+    const IA64DecodedBundle *bundle)
 {
-    uint32_t plan = 0;
+    IA64TcgFallbackPlan plan = { 0 };
 
     if (!bundle || !bundle->valid) {
         return plan;
     }
 
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
-        IA64TcgFallbackPlanOp op;
-
         if (bundle->info->long_immediate && slot >= 1) {
-            op = IA64_TCG_FALLBACK_PLAN_GENERIC;
+            IA64TcgFallbackDecodedSlot decoded = {
+                .op = IA64_TCG_FALLBACK_PLAN_GENERIC,
+                .predicate = ia64_slot_predicate(bundle->slot[slot]),
+            };
+
+            plan.slot[slot] = ia64_tcg_fallback_pack_desc(&decoded);
         } else {
-            op = ia64_tcg_fallback_plan_for_slot(
+            plan.slot[slot] = ia64_tcg_fallback_plan_for_slot(
                 bundle->info->slot_type[slot], bundle->slot[slot]);
         }
-        plan |= (uint32_t)op << (slot * IA64_TCG_FALLBACK_PLAN_SLOT_BITS);
     }
 
     return plan;

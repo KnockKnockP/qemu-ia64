@@ -2,7 +2,7 @@
 #ifndef IA64_TCG_CLASSIFY_H
 #define IA64_TCG_CLASSIFY_H
 
-#include "bundle.h"
+#include "insn.h"
 
 typedef enum IA64TcgTbBoundary {
     IA64_TCG_TB_BOUNDARY_NONE,
@@ -224,20 +224,137 @@ typedef enum IA64TcgFallbackPlanOp {
     IA64_TCG_FALLBACK_PLAN_BRANCH_CALL_RELATIVE,
     IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT,
     IA64_TCG_FALLBACK_PLAN_BRANCH_PREDICT_OR_NOP,
+    IA64_TCG_FALLBACK_PLAN_COUNT,
 } IA64TcgFallbackPlanOp;
 
-#define IA64_TCG_FALLBACK_PLAN_SLOT_BITS 8
-#define IA64_TCG_FALLBACK_PLAN_SLOT_MASK 0xffu
+typedef struct IA64TcgFallbackBranch {
+    int64_t displacement;
+    uint8_t type;
+    uint8_t branch_reg;
+    uint8_t target_reg;
+    uint8_t major;
+    uint8_t x6;
+} IA64TcgFallbackBranch;
 
-static inline IA64TcgFallbackPlanOp ia64_tcg_fallback_plan_slot(
-    uint32_t plan, unsigned slot)
+typedef struct IA64TcgFallbackDecodedSlot {
+    IA64TcgFallbackPlanOp op;
+    uint8_t predicate;
+    union {
+        IA64LdstImmediate ldst;
+        IA64FloatingMemoryInstruction floating_memory;
+        IA64FloatingCompareInstruction floating_compare;
+        IA64FloatingClassInstruction floating_class;
+        IA64CompareInstruction compare;
+        IA64PredicateTestInstruction predicate_test;
+        IA64ExtractInstruction extract;
+        IA64DepositInstruction deposit;
+        IA64IntegerExtendInstruction integer_extend;
+        IA64TcgFallbackBranch branch;
+    } u;
+} IA64TcgFallbackDecodedSlot;
+
+typedef struct IA64TcgFallbackPlan {
+    uint64_t slot[IA64_SLOT_COUNT];
+} IA64TcgFallbackPlan;
+
+/*
+ * Keep the helper at env plus five scalar arguments.  Descriptor 0 occupies
+ * the spare upper bits of the raw-slot carriers plus desc01 bit 0;
+ * descriptor 1 occupies desc01 bits 1-63; descriptor 2 occupies desc2.
+ * Template and selected-slot metadata use header bits 41-47.
+ */
+typedef struct IA64TcgFallbackArgs {
+    uint64_t header;
+    uint64_t slot1;
+    uint64_t slot2;
+    uint64_t desc01;
+    uint64_t desc2;
+} IA64TcgFallbackArgs;
+
+#define IA64_TCG_FALLBACK_DESC_OP_SHIFT 58
+#define IA64_TCG_FALLBACK_DESC_PAYLOAD_MASK \
+    ((UINT64_C(1) << IA64_TCG_FALLBACK_DESC_OP_SHIFT) - 1)
+
+#define IA64_TCG_FALLBACK_HEADER_TMPL_SHIFT 41
+#define IA64_TCG_FALLBACK_HEADER_SELECTED_SHIFT 46
+#define IA64_TCG_FALLBACK_FULL_BUNDLE 3
+
+static inline IA64TcgFallbackPlanOp ia64_tcg_fallback_desc_op(uint64_t desc)
 {
-    return (IA64TcgFallbackPlanOp)
-        ((plan >> (slot * IA64_TCG_FALLBACK_PLAN_SLOT_BITS)) &
-         IA64_TCG_FALLBACK_PLAN_SLOT_MASK);
+    return (desc >> IA64_TCG_FALLBACK_DESC_OP_SHIFT) & 0x1f;
 }
 
-uint32_t ia64_tcg_fallback_plan_for_bundle(const IA64DecodedBundle *bundle);
+static inline uint8_t ia64_tcg_fallback_desc_predicate(uint64_t desc)
+{
+    return desc & 0x3f;
+}
+
+static inline IA64TcgFallbackArgs ia64_tcg_fallback_args(
+    const IA64DecodedBundle *bundle, const IA64TcgFallbackPlan *plan,
+    unsigned selected_slot)
+{
+    IA64TcgFallbackArgs args = {
+        .header =
+            bundle->slot[0] |
+            ((uint64_t)bundle->tmpl <<
+             IA64_TCG_FALLBACK_HEADER_TMPL_SHIFT) |
+            ((uint64_t)selected_slot <<
+             IA64_TCG_FALLBACK_HEADER_SELECTED_SHIFT) |
+            ((plan->slot[0] & UINT64_C(0xffff)) << 48),
+        .slot1 = bundle->slot[1] |
+                 (((plan->slot[0] >> 16) & UINT64_C(0x7fffff)) << 41),
+        .slot2 = bundle->slot[2] |
+                 (((plan->slot[0] >> 39) & UINT64_C(0x7fffff)) << 41),
+        .desc01 = (plan->slot[0] >> 62) | (plan->slot[1] << 1),
+        .desc2 = plan->slot[2],
+    };
+
+    return args;
+}
+
+static inline uint64_t ia64_tcg_fallback_arg_desc(
+    uint64_t header, uint64_t slot1, uint64_t slot2,
+    uint64_t desc01, uint64_t desc2, unsigned slot)
+{
+    switch (slot) {
+    case 0:
+        return ((header >> 48) & UINT64_C(0xffff)) |
+               (((slot1 >> 41) & UINT64_C(0x7fffff)) << 16) |
+               (((slot2 >> 41) & UINT64_C(0x7fffff)) << 39) |
+               ((desc01 & 1) << 62);
+    case 1:
+        return desc01 >> 1;
+    case 2:
+        return desc2 & INT64_MAX;
+    default:
+        return 0;
+    }
+}
+
+bool ia64_tcg_fallback_unpack_desc(uint64_t desc,
+                                   IA64TcgFallbackDecodedSlot *decoded);
+void ia64_tcg_fallback_unpack_extract(uint64_t desc,
+                                      IA64ExtractInstruction *decoded);
+void ia64_tcg_fallback_unpack_deposit(uint64_t desc,
+                                      IA64DepositInstruction *decoded);
+void ia64_tcg_fallback_unpack_integer_extend(
+    uint64_t desc, IA64IntegerExtendInstruction *decoded);
+void ia64_tcg_fallback_unpack_floating_memory(
+    uint64_t desc, IA64FloatingMemoryInstruction *decoded);
+void ia64_tcg_fallback_unpack_floating_compare(
+    uint64_t desc, IA64FloatingCompareInstruction *decoded);
+void ia64_tcg_fallback_unpack_floating_class(
+    uint64_t desc, IA64FloatingClassInstruction *decoded);
+void ia64_tcg_fallback_unpack_ldst(uint64_t desc,
+                                   IA64LdstImmediate *decoded);
+void ia64_tcg_fallback_unpack_compare(uint64_t desc,
+                                      IA64CompareInstruction *decoded);
+void ia64_tcg_fallback_unpack_predicate_test(
+    uint64_t desc, IA64PredicateTestInstruction *decoded);
+void ia64_tcg_fallback_unpack_branch(uint64_t desc,
+                                     IA64TcgFallbackBranch *decoded);
+IA64TcgFallbackPlan ia64_tcg_fallback_plan_for_bundle(
+    const IA64DecodedBundle *bundle);
 
 typedef enum IA64TcgDirectBranchKind {
     IA64_TCG_DIRECT_BRANCH_COND,

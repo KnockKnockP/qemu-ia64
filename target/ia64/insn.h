@@ -536,6 +536,14 @@ bool ia64_slot_is_b_call_relative(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_b_indirect_branch(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_b_predict_or_nop(IA64SlotType type, uint64_t raw);
 int64_t ia64_branch_displacement(uint64_t raw);
+bool ia64_exec_b_branch_relative_decoded(CPUIA64State *env,
+                                         uint8_t branch_type,
+                                         uint8_t predicate,
+                                         int64_t displacement,
+                                         uint64_t raw,
+                                         uint64_t bundle_ip,
+                                         uint64_t *target_ip,
+                                         bool *taken_out);
 bool ia64_exec_b_branch_relative(CPUIA64State *env,
                                  uint64_t raw,
                                  uint64_t bundle_ip,
@@ -543,10 +551,22 @@ bool ia64_exec_b_branch_relative(CPUIA64State *env,
                                  bool *taken_out);
 void ia64_branch_call_effects(CPUIA64State *env, uint32_t b1,
                               uint64_t bundle_ip);
+bool ia64_exec_b_call_relative_decoded(CPUIA64State *env,
+                                       uint32_t branch_reg,
+                                       int64_t displacement,
+                                       uint64_t bundle_ip,
+                                       uint64_t *target_ip);
 bool ia64_exec_b_call_relative(CPUIA64State *env,
                                uint64_t raw,
                                uint64_t bundle_ip,
                                uint64_t *target_ip);
+bool ia64_exec_b_indirect_branch_decoded(CPUIA64State *env,
+                                         uint8_t major,
+                                         uint8_t x6,
+                                         uint32_t branch_reg,
+                                         uint32_t target_reg,
+                                         uint64_t bundle_ip,
+                                         uint64_t *target_ip);
 bool ia64_exec_b_indirect_branch(CPUIA64State *env,
                                  uint64_t raw,
                                  uint64_t bundle_ip,

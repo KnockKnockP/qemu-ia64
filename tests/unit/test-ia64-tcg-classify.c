@@ -960,27 +960,53 @@ static void test_fallback_plan_classifies_hot_helper_slots(void)
         make_fclass_raw(0x1c0, 6, 7, 8, false, 0);
     IA64DecodedBundle bundle;
     IA64TcgFastBundle fast;
-    uint32_t plan;
+    IA64TcgFallbackPlan plan;
+    IA64TcgFallbackDecodedSlot decoded;
+    IA64TcgFallbackArgs args;
 
     bundle = make_bundle(0x00, ld8_r2_r3_raw,
                          add_r1_r2_r3_raw, IA64_INSN_NOP_RAW);
     plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[0]), ==,
                     IA64_TCG_FALLBACK_PLAN_LDST_IMMEDIATE);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[1]), ==,
                     IA64_TCG_FALLBACK_PLAN_ALU_ADD);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[2]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
+    args = ia64_tcg_fallback_args(&bundle, &plan,
+                                  IA64_TCG_FALLBACK_FULL_BUNDLE);
+    g_assert_cmphex(args.header & IA64_SLOT_MASK, ==, bundle.slot[0]);
+    g_assert_cmphex(args.slot1 & IA64_SLOT_MASK, ==, bundle.slot[1]);
+    g_assert_cmphex(args.slot2 & IA64_SLOT_MASK, ==, bundle.slot[2]);
+    for (unsigned slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        g_assert_cmphex(ia64_tcg_fallback_arg_desc(
+                            args.header, args.slot1, args.slot2,
+                            args.desc01, args.desc2, slot),
+                        ==, plan.slot[slot]);
+    }
+    g_assert_true(ia64_tcg_fallback_unpack_desc(plan.slot[0], &decoded));
+    g_assert_cmpuint(decoded.predicate, ==, 0);
+    g_assert_cmpint(decoded.u.ldst.kind, ==, IA64_LDST_IMM_LOAD);
+    g_assert_cmpuint(decoded.u.ldst.width, ==, 8);
+    g_assert_cmpuint(decoded.u.ldst.target, ==, 2);
+    g_assert_cmpuint(decoded.u.ldst.base, ==, 3);
 
     bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
                          IA64_INSN_NOP_RAW, br_cond_raw);
     plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[0]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[1]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[2]), ==,
                     IA64_TCG_FALLBACK_PLAN_BRANCH_RELATIVE);
+    g_assert_true(ia64_tcg_fallback_unpack_desc(plan.slot[2], &decoded));
+    g_assert_cmpuint(decoded.predicate, ==,
+                     ia64_slot_predicate(br_cond_raw));
+    g_assert_cmpuint(decoded.u.branch.type, ==,
+                     (br_cond_raw >> 6) & 0x7);
+    g_assert_cmpint(decoded.u.branch.displacement, ==,
+                    ia64_branch_displacement(br_cond_raw));
 
     bundle = make_bundle(0x0d, IA64_INSN_NOP_RAW,
                          fclass_p6_p7_f8_0x1c0_raw,
@@ -990,12 +1016,17 @@ static void test_fallback_plan_classifies_hot_helper_slots(void)
     g_assert_cmpuint(fast.slot[1].slot_type, ==, IA64_SLOT_TYPE_F);
     g_assert_cmphex(fast.slot[1].raw, ==, fclass_p6_p7_f8_0x1c0_raw);
     plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[0]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[1]), ==,
                     IA64_TCG_FALLBACK_PLAN_FLOATING_CLASS);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[2]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
+    g_assert_true(ia64_tcg_fallback_unpack_desc(plan.slot[1], &decoded));
+    g_assert_cmpuint(decoded.u.floating_class.p1, ==, 6);
+    g_assert_cmpuint(decoded.u.floating_class.p2, ==, 7);
+    g_assert_cmpuint(decoded.u.floating_class.source2, ==, 8);
+    g_assert_cmphex(decoded.u.floating_class.mask, ==, 0x1c0);
 }
 
 static void test_fallback_plan_keeps_long_immediate_tail_generic(void)
@@ -1005,14 +1036,14 @@ static void test_fallback_plan_keeps_long_immediate_tail_generic(void)
     IA64DecodedBundle bundle =
         make_bundle(0x04, IA64_INSN_NOP_RAW, 0, 0);
     IA64TcgFastBundle fast;
-    uint32_t plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
+    IA64TcgFallbackPlan plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
 
     g_assert_true(bundle.info->long_immediate);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 0), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[0]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 1), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[1]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
-    g_assert_cmpint(ia64_tcg_fallback_plan_slot(plan, 2), ==,
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[2]), ==,
                     IA64_TCG_FALLBACK_PLAN_GENERIC);
 
     bundle = make_bundle(0x04, IA64_INSN_NOP_RAW, l_raw, x_raw);

@@ -557,36 +557,44 @@ static void ia64_tr_emit_exec_bundle(DisasContext *ctx,
                                      const IA64DecodedBundle *bundle,
                                      uint64_t pc)
 {
-    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackPlan fallback_plan =
+        ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackArgs fallback_args = ia64_tcg_fallback_args(
+        bundle, &fallback_plan, IA64_TCG_FALLBACK_FULL_BUNDLE);
 
     ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
-    gen_helper_exec_bundle(tcg_env,
-                           tcg_constant_i32(bundle->tmpl),
-                           tcg_constant_i64(bundle->slot[0]),
-                           tcg_constant_i64(bundle->slot[1]),
-                           tcg_constant_i64(bundle->slot[2]),
-                           tcg_constant_i32(fallback_plan));
+    gen_helper_exec_bundle(
+        tcg_env,
+        tcg_constant_i64(fallback_args.header),
+        tcg_constant_i64(fallback_args.slot1),
+        tcg_constant_i64(fallback_args.slot2),
+        tcg_constant_i64(fallback_args.desc01),
+        tcg_constant_i64(fallback_args.desc2));
 }
 
 static void ia64_tr_emit_exec_bundle_lookup_ptr(DisasContext *ctx,
                                                 const IA64DecodedBundle *bundle,
                                                 uint64_t pc)
 {
-    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackPlan fallback_plan =
+        ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackArgs fallback_args = ia64_tcg_fallback_args(
+        bundle, &fallback_plan, IA64_TCG_FALLBACK_FULL_BUNDLE);
     TCGLabel *main_loop_exit = gen_new_label();
     TCGv_i32 chain_ok = tcg_temp_new_i32();
 
     ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
-    gen_helper_exec_bundle_lookup_ptr(chain_ok, tcg_env,
-                                      tcg_constant_i32(bundle->tmpl),
-                                      tcg_constant_i64(bundle->slot[0]),
-                                      tcg_constant_i64(bundle->slot[1]),
-                                      tcg_constant_i64(bundle->slot[2]),
-                                      tcg_constant_i32(fallback_plan));
+    gen_helper_exec_bundle_lookup_ptr(
+        chain_ok, tcg_env,
+        tcg_constant_i64(fallback_args.header),
+        tcg_constant_i64(fallback_args.slot1),
+        tcg_constant_i64(fallback_args.slot2),
+        tcg_constant_i64(fallback_args.desc01),
+        tcg_constant_i64(fallback_args.desc2));
     tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
     tcg_gen_lookup_and_goto_ptr();
 
@@ -598,7 +606,10 @@ static void ia64_tr_emit_exec_bundle_cached_fallback(
     DisasContext *ctx, const IA64DecodedBundle *bundle, uint64_t pc,
     const IA64TrStateCacheDirty *dirty_before)
 {
-    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackPlan fallback_plan =
+        ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackArgs fallback_args = ia64_tcg_fallback_args(
+        bundle, &fallback_plan, IA64_TCG_FALLBACK_FULL_BUNDLE);
 
     /*
      * The guard bypasses this bundle's fast writes, so publish only state
@@ -607,12 +618,13 @@ static void ia64_tr_emit_exec_bundle_cached_fallback(
     ia64_tr_sync_state_cache_dirty(ctx, dirty_before);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
-    gen_helper_exec_bundle(tcg_env,
-                           tcg_constant_i32(bundle->tmpl),
-                           tcg_constant_i64(bundle->slot[0]),
-                           tcg_constant_i64(bundle->slot[1]),
-                           tcg_constant_i64(bundle->slot[2]),
-                           tcg_constant_i32(fallback_plan));
+    gen_helper_exec_bundle(
+        tcg_env,
+        tcg_constant_i64(fallback_args.header),
+        tcg_constant_i64(fallback_args.slot1),
+        tcg_constant_i64(fallback_args.slot2),
+        tcg_constant_i64(fallback_args.desc01),
+        tcg_constant_i64(fallback_args.desc2));
 
     /* Make both runtime arms define every translation-time-valid cache temp. */
     ia64_tr_reload_state_cache(ctx);
@@ -622,19 +634,23 @@ static void ia64_tr_emit_exec_bundle_lookup_ptr_cached_fallback(
     DisasContext *ctx, const IA64DecodedBundle *bundle, uint64_t pc,
     const IA64TrStateCacheDirty *dirty_before)
 {
-    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackPlan fallback_plan =
+        ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackArgs fallback_args = ia64_tcg_fallback_args(
+        bundle, &fallback_plan, IA64_TCG_FALLBACK_FULL_BUNDLE);
     TCGLabel *main_loop_exit = gen_new_label();
     TCGv_i32 chain_ok = tcg_temp_new_i32();
 
     ia64_tr_sync_state_cache_dirty(ctx, dirty_before);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
-    gen_helper_exec_bundle_lookup_ptr(chain_ok, tcg_env,
-                                      tcg_constant_i32(bundle->tmpl),
-                                      tcg_constant_i64(bundle->slot[0]),
-                                      tcg_constant_i64(bundle->slot[1]),
-                                      tcg_constant_i64(bundle->slot[2]),
-                                      tcg_constant_i32(fallback_plan));
+    gen_helper_exec_bundle_lookup_ptr(
+        chain_ok, tcg_env,
+        tcg_constant_i64(fallback_args.header),
+        tcg_constant_i64(fallback_args.slot1),
+        tcg_constant_i64(fallback_args.slot2),
+        tcg_constant_i64(fallback_args.desc01),
+        tcg_constant_i64(fallback_args.desc2));
     tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
     tcg_gen_lookup_and_goto_ptr();
 
@@ -2044,20 +2060,23 @@ static void ia64_tr_emit_exec_slot(DisasContext *ctx,
                                    uint64_t pc, unsigned slot,
                                    TCGLabel *flow_exit)
 {
-    uint32_t fallback_plan = ia64_tcg_fallback_plan_for_bundle(bundle);
-    uint32_t fallback_slot = fallback_plan | (slot << 24);
+    IA64TcgFallbackPlan fallback_plan =
+        ia64_tcg_fallback_plan_for_bundle(bundle);
+    IA64TcgFallbackArgs fallback_args =
+        ia64_tcg_fallback_args(bundle, &fallback_plan, slot);
     TCGv_i32 flow_changed = tcg_temp_new_i32();
 
     /* A fault in this slot must not lose earlier retired bundles in the TB. */
     ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_commit_ip(pc);
-    gen_helper_exec_slot(flow_changed, tcg_env,
-                         tcg_constant_i32(bundle->tmpl),
-                         tcg_constant_i64(bundle->slot[0]),
-                         tcg_constant_i64(bundle->slot[1]),
-                         tcg_constant_i64(bundle->slot[2]),
-                         tcg_constant_i32(fallback_slot));
+    gen_helper_exec_slot(
+        flow_changed, tcg_env,
+        tcg_constant_i64(fallback_args.header),
+        tcg_constant_i64(fallback_args.slot1),
+        tcg_constant_i64(fallback_args.slot2),
+        tcg_constant_i64(fallback_args.desc01),
+        tcg_constant_i64(fallback_args.desc2));
     tcg_gen_brcondi_i32(TCG_COND_NE, flow_changed, 0, flow_exit);
 }
 

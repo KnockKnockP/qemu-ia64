@@ -7066,34 +7066,30 @@ static void ia64_clear_register_rename_bases(CPUIA64State *env,
     ia64_update_cfm_rename_bases(env);
 }
 
-bool ia64_exec_b_branch_relative(CPUIA64State *env,
-                                 uint64_t raw,
-                                 uint64_t bundle_ip,
-                                 uint64_t *target_ip,
-                                 bool *taken_out)
+bool ia64_exec_b_branch_relative_decoded(CPUIA64State *env,
+                                         uint8_t btype,
+                                         uint8_t predicate,
+                                         int64_t displacement,
+                                         uint64_t raw,
+                                         uint64_t bundle_ip,
+                                         uint64_t *target_ip,
+                                         bool *taken_out)
 {
-    uint8_t btype;
-    int64_t displacement;
     bool taken = true;
 
     if (taken_out) {
         *taken_out = false;
     }
 
-    if (!env || !target_ip ||
-        !ia64_slot_is_b_branch_relative(IA64_SLOT_TYPE_B, raw)) {
+    if (!env || !target_ip || btype > 7 || predicate >= IA64_PR_COUNT) {
         return false;
     }
-
-    btype = (raw >> 6) & 0x7;
-    displacement = ia64_branch_displacement(raw);
 
     switch (btype) {
     case 2:
     case 3:
     {
-        uint8_t qp = raw & 0x3f;
-        bool qualifying_predicate = ia64_read_pr(env, qp);
+        bool qualifying_predicate = ia64_read_pr(env, predicate);
         uint64_t epilog_count = ia64_read_ar(env, IA64_AR_EC);
         bool continue_loop;
 
@@ -7169,6 +7165,20 @@ bool ia64_exec_b_branch_relative(CPUIA64State *env,
                 env->rse.rrb_gr, env->rse.rrb_fr, env->rse.rrb_pr);
     }
     return true;
+}
+
+bool ia64_exec_b_branch_relative(CPUIA64State *env,
+                                 uint64_t raw,
+                                 uint64_t bundle_ip,
+                                 uint64_t *target_ip,
+                                 bool *taken_out)
+{
+    if (!ia64_slot_is_b_branch_relative(IA64_SLOT_TYPE_B, raw)) {
+        return false;
+    }
+    return ia64_exec_b_branch_relative_decoded(
+        env, (raw >> 6) & 0x7, ia64_slot_predicate(raw),
+        ia64_branch_displacement(raw), raw, bundle_ip, target_ip, taken_out);
 }
 
 static uint32_t ia64_cfm_sof(uint64_t cfm)
@@ -7248,43 +7258,46 @@ void ia64_branch_call_effects(CPUIA64State *env, uint32_t b1,
     ia64_enter_call_frame(env);
 }
 
+bool ia64_exec_b_call_relative_decoded(CPUIA64State *env,
+                                       uint32_t b1,
+                                       int64_t displacement,
+                                       uint64_t bundle_ip,
+                                       uint64_t *target_ip)
+{
+    if (!env || !target_ip || b1 >= IA64_BR_COUNT) {
+        return false;
+    }
+
+    ia64_branch_call_effects(env, b1, bundle_ip);
+    *target_ip = bundle_ip + displacement;
+    return true;
+}
+
 bool ia64_exec_b_call_relative(CPUIA64State *env,
                                uint64_t raw,
                                uint64_t bundle_ip,
                                uint64_t *target_ip)
 {
-    uint32_t b1;
-
-    if (!env || !target_ip ||
-        !ia64_slot_is_b_call_relative(IA64_SLOT_TYPE_B, raw)) {
+    if (!ia64_slot_is_b_call_relative(IA64_SLOT_TYPE_B, raw)) {
         return false;
     }
-
-    b1 = (raw >> 6) & 0x7;
-    ia64_branch_call_effects(env, b1, bundle_ip);
-    *target_ip = bundle_ip + ia64_branch_displacement(raw);
-    return true;
+    return ia64_exec_b_call_relative_decoded(
+        env, (raw >> 6) & 0x7, ia64_branch_displacement(raw), bundle_ip,
+        target_ip);
 }
 
-bool ia64_exec_b_indirect_branch(CPUIA64State *env,
-                                 uint64_t raw,
-                                 uint64_t bundle_ip,
-                                 uint64_t *target_ip)
+bool ia64_exec_b_indirect_branch_decoded(CPUIA64State *env,
+                                         uint8_t major,
+                                         uint8_t x6,
+                                         uint32_t b1,
+                                         uint32_t b2,
+                                         uint64_t bundle_ip,
+                                         uint64_t *target_ip)
 {
-    uint8_t major;
-    uint8_t x6;
-    uint32_t b1;
-    uint32_t b2;
-
-    if (!env || !target_ip ||
-        !ia64_slot_is_b_indirect_branch(IA64_SLOT_TYPE_B, raw)) {
+    if (!env || !target_ip || b1 >= IA64_BR_COUNT || b2 >= IA64_BR_COUNT) {
         return false;
     }
 
-    major = ia64_slot_major_opcode(raw);
-    x6 = (raw >> 27) & 0x3f;
-    b1 = (raw >> 6) & 0x7;
-    b2 = (raw >> 13) & 0x7;
     if (major == 0x0) {
         switch (x6) {
         case 0x02: /* cover */
@@ -7348,6 +7361,19 @@ bool ia64_exec_b_indirect_branch(CPUIA64State *env,
         ia64_restore_frame_from_pfs(env);
     }
     return true;
+}
+
+bool ia64_exec_b_indirect_branch(CPUIA64State *env,
+                                 uint64_t raw,
+                                 uint64_t bundle_ip,
+                                 uint64_t *target_ip)
+{
+    if (!ia64_slot_is_b_indirect_branch(IA64_SLOT_TYPE_B, raw)) {
+        return false;
+    }
+    return ia64_exec_b_indirect_branch_decoded(
+        env, ia64_slot_major_opcode(raw), (raw >> 27) & 0x3f,
+        (raw >> 6) & 0x7, (raw >> 13) & 0x7, bundle_ip, target_ip);
 }
 
 static void ia64_insn_set_message(IA64InsnReport *report,
