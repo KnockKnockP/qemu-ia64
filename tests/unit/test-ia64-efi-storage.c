@@ -30,6 +30,9 @@
 typedef struct MemoryIso {
     uint8_t bytes[ISO_SECTORS * ISO_SECTOR_SIZE];
     size_t size;
+    unsigned reads;
+    unsigned pvd_reads;
+    unsigned sector_zero_reads;
 } MemoryIso;
 
 static void store_le16(uint8_t *p, uint16_t value)
@@ -523,6 +526,13 @@ static int memory_iso_read(void *opaque, uint64_t offset, uint32_t bytes,
         return -EINVAL;
     }
 
+    iso->reads++;
+    if (offset == PVD_SECTOR * ISO_SECTOR_SIZE) {
+        iso->pvd_reads++;
+    }
+    if (offset == 0) {
+        iso->sector_zero_reads++;
+    }
     memcpy(buffer, iso->bytes + offset, bytes);
     return 0;
 }
@@ -812,6 +822,46 @@ static void test_media_open_path_reports_fat_directory(void)
     g_assert_nonnull(strstr(source, "fat@0x0"));
 }
 
+static void test_storage_cache_reuses_iso_and_fat_metadata(void)
+{
+    MemoryIso iso;
+    VibtaniumEfiBlockDevice dev;
+    VibtaniumEfiStorageReport report;
+    VibtaniumEfiFile file;
+    g_autofree uint8_t *data = NULL;
+    size_t size = 0;
+    bool is_directory = false;
+    char source[256];
+    Error *err = NULL;
+    unsigned sector_zero_reads;
+
+    make_iso(&iso);
+    init_device(&dev, &iso);
+    vibtanium_efi_storage_cache_enable(&dev);
+    g_assert_true(vibtanium_efi_iso9660_find_path(
+        &dev, "/EFI", &file, &report, &err));
+    g_assert_true(vibtanium_efi_iso9660_find_path(
+        &dev, "/EFI/BOOT", &file, &report, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(iso.pvd_reads, ==, 1);
+    vibtanium_efi_storage_cache_cleanup(&dev);
+
+    make_raw_fat_disk(&iso);
+    init_disk_device(&dev, &iso);
+    vibtanium_efi_storage_cache_enable(&dev);
+    g_assert_true(vibtanium_efi_media_open_path(
+        &dev, "/EFI", &is_directory, &data, &size, source,
+        sizeof(source), &report, &err));
+    g_clear_pointer(&data, g_free);
+    sector_zero_reads = iso.sector_zero_reads;
+    g_assert_true(vibtanium_efi_media_open_path(
+        &dev, "/EFI/BOOT", &is_directory, &data, &size, source,
+        sizeof(source), &report, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(iso.sector_zero_reads, ==, sector_zero_reads);
+    vibtanium_efi_storage_cache_cleanup(&dev);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -838,6 +888,8 @@ int main(int argc, char **argv)
                     test_disk_read_path_uses_gpt_esp);
     g_test_add_func("/ia64-efi-storage/media-open-path-reports-fat-directory",
                     test_media_open_path_reports_fat_directory);
+    g_test_add_func("/ia64-efi-storage/cache-reuses-mounted-metadata",
+                    test_storage_cache_reuses_iso_and_fat_metadata);
 
     return g_test_run();
 }

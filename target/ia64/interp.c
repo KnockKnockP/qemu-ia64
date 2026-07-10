@@ -226,6 +226,8 @@ static void ia64_finish_tcg_ticks(CPUIA64State *env, uint32_t bundle_count)
         return;
     }
 
+    ia64_benchmark_retire(env, bundle_count);
+
     /*
      * AR.ITC follows the QEMU virtual clock and the CR.ITM deadline timer
      * raises CPU_INTERRUPT_HARD from the main loop, so retired bundles no

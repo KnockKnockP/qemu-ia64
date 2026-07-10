@@ -502,8 +502,78 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->tcg_ops = ia64_tcg_ops_for_process();
 }
 
+static void ia64_cpu_set_benchmark_on_cpu(CPUState *cs,
+                                          run_on_cpu_data data)
+{
+    IA64CPU *cpu = IA64_CPU(cs);
+    bool active = data.host_int != 0;
+
+    if (active == cpu->benchmark_active) {
+        return;
+    }
+
+    if (active) {
+        cpu->benchmark_retired_bundles = 0;
+        cpu->benchmark_elapsed_ns = 0;
+        cpu->benchmark_host_cycles = 0;
+        cpu->benchmark_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        cpu->benchmark_start_host_cycles = cpu_get_host_ticks();
+        cpu->benchmark_active = true;
+        return;
+    }
+
+    cpu->benchmark_active = false;
+    cpu->benchmark_elapsed_ns =
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - cpu->benchmark_start_ns;
+    cpu->benchmark_host_cycles =
+        cpu_get_host_ticks() - cpu->benchmark_start_host_cycles;
+}
+
+static bool ia64_cpu_get_benchmark_active(Object *obj, Error **errp)
+{
+    (void)errp;
+    return IA64_CPU(obj)->benchmark_active;
+}
+
+static void ia64_cpu_set_benchmark_active(Object *obj, bool active,
+                                          Error **errp)
+{
+    CPUState *cs = CPU(obj);
+
+    (void)errp;
+    if (cs->created) {
+        run_on_cpu(cs, ia64_cpu_set_benchmark_on_cpu,
+                   RUN_ON_CPU_HOST_INT(active));
+    } else {
+        ia64_cpu_set_benchmark_on_cpu(cs, RUN_ON_CPU_HOST_INT(active));
+    }
+}
+
 static void ia64_cpu_initfn(Object *obj)
 {
+    IA64CPU *cpu = IA64_CPU(obj);
+
+    object_property_add_bool(obj, "x-benchmark-active",
+                             ia64_cpu_get_benchmark_active,
+                             ia64_cpu_set_benchmark_active);
+    object_property_set_description(
+        obj, "x-benchmark-active",
+        "start/stop and reset the IA-64 retired-bundle benchmark");
+    object_property_add_uint64_ptr(
+        obj, "x-benchmark-retired-bundles",
+        &cpu->benchmark_retired_bundles, OBJ_PROP_FLAG_READ);
+    object_property_set_description(obj, "x-benchmark-retired-bundles",
+                                    "retired bundles in the last benchmark");
+    object_property_add_uint64_ptr(
+        obj, "x-benchmark-elapsed-ns", &cpu->benchmark_elapsed_ns,
+        OBJ_PROP_FLAG_READ);
+    object_property_set_description(obj, "x-benchmark-elapsed-ns",
+                                    "host monotonic nanoseconds benchmarked");
+    object_property_add_uint64_ptr(
+        obj, "x-benchmark-host-cycles", &cpu->benchmark_host_cycles,
+        OBJ_PROP_FLAG_READ);
+    object_property_set_description(obj, "x-benchmark-host-cycles",
+                                    "host cycle-counter ticks benchmarked");
 }
 
 static void itanium2_cpu_initfn(Object *obj)

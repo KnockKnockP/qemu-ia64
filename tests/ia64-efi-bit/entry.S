@@ -24,6 +24,8 @@ _start:
         mov     out1 = in1 ;;
         br.call.sptk.many b0 = efi_main ;;
 
+        br.call.sptk.many b0 = ia64_benchmark_loop ;;
+
 .Lspin:
         br.sptk.many .Lspin ;;
 

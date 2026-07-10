@@ -155,6 +155,8 @@ typedef struct VibtaniumEfiImage {
     uint32_t entry_rva;
     uint32_t size_of_image;
     uint32_t section_alignment;
+    uint32_t relocation_rva;
+    uint32_t relocation_size;
     uint16_t number_of_sections;
     uint8_t *load_options;
     size_t load_options_size;
@@ -194,6 +196,9 @@ bool vibtanium_efi_image_from_file(const char *path,
                                    uint64_t load_base,
                                    VibtaniumEfiImage *image,
                                    Error **errp);
+bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
+                                  uint64_t load_base,
+                                  Error **errp);
 bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value);
 uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
                                                    uint64_t memory_type);
@@ -203,6 +208,7 @@ void vibtanium_efi_image_destroy(VibtaniumEfiImage *image);
 bool vibtanium_efi_cpu_is_pristine_for_handoff(const CPUIA64State *env);
 bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
                                const VibtaniumEfiImage *image);
+void vibtanium_efi_loader_benchmark_start(void);
 uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiImage *image,
                                            const struct VibtaniumEfiBlockDevice *boot_media,

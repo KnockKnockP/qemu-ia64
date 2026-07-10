@@ -696,6 +696,8 @@ bool vibtanium_efi_image_from_buffer(const char *path,
     image->entry_rva = entry_rva;
     image->size_of_image = size_of_image;
     image->section_alignment = section_alignment;
+    image->relocation_rva = reloc_rva;
+    image->relocation_size = reloc_size;
     image->number_of_sections = sections;
     g_strlcpy(image->source_path, path ? path : "<buffer>",
               sizeof(image->source_path));
@@ -710,6 +712,52 @@ bool vibtanium_efi_image_from_buffer(const char *path,
                image->entry, image->global_pointer, image->size_of_image,
                image->number_of_sections);
 
+    return true;
+}
+
+bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
+                                  uint64_t load_base,
+                                  Error **errp)
+{
+    uint64_t delta;
+
+    g_return_val_if_fail(image != NULL, false);
+    if (!image->data || image->size == 0) {
+        error_setg(errp, "cannot relocate an empty EFI image");
+        return false;
+    }
+    if (load_base == image->load_base) {
+        return true;
+    }
+    if (UINT64_MAX - load_base < image->size) {
+        error_setg(errp, "EFI image load address overflows");
+        return false;
+    }
+    if (image->relocation_rva == 0 || image->relocation_size == 0) {
+        error_setg(errp,
+                   "EFI image cannot move from fixed base 0x%016" PRIx64,
+                   image->load_base);
+        return false;
+    }
+
+    delta = load_base - image->load_base;
+    if (!apply_base_relocations(image->data, image->size, delta,
+                                image->relocation_rva,
+                                image->relocation_size, errp)) {
+        return false;
+    }
+
+    image->load_base = load_base;
+    image->entry_descriptor = load_base + image->entry_rva;
+    image->entry = rd64(image->data + image->entry_rva);
+    image->global_pointer = rd64(image->data + image->entry_rva + 8);
+    g_snprintf(image->message, sizeof(image->message),
+               "loaded IA-64 EFI image path=%s load=0x%016" PRIx64
+               " descriptor=0x%016" PRIx64 " entry=0x%016" PRIx64
+               " gp=0x%016" PRIx64 " size=0x%x sections=%u",
+               image->source_path, image->load_base, image->entry_descriptor,
+               image->entry, image->global_pointer, image->size_of_image,
+               image->number_of_sections);
     return true;
 }
 
@@ -1600,6 +1648,7 @@ bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
     ia64_firmware_identity_tlb_set(env, true);
+    vibtanium_efi_loader_benchmark_start();
     return true;
 }
 

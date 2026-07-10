@@ -3,12 +3,14 @@
 #include "qemu/osdep.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/getpc.h"
+#include "exec/target_page.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-storage.h"
 #include "hw/ia64/efi-vars.h"
 #include "hw/ia64/vibtanium.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "system/address-spaces.h"
 #include "system/memory.h"
 #include "system/rtc.h"
 #include "system/system.h"
@@ -48,6 +50,7 @@ enum {
 #define EFI_MAX_VAR_NAME_CHARS 1024
 #define EFI_MAX_VARIABLE_DATA_SIZE (1024 * 1024)
 #define EFI_MAX_FILE_READ_BYTES (128 * 1024 * 1024)
+#define EFI_TRANSFER_BOUNCE_SIZE (1024 * 1024)
 #define EFI_PAGE_SIZE UINT64_C(4096)
 #define EFI_MEMORY_DESCRIPTOR_SIZE UINT64_C(40)
 #define EFI_MEMORY_DESCRIPTOR_VERSION 1
@@ -114,6 +117,35 @@ typedef struct EfiGuestFile {
     size_t size;
     uint64_t position;
 } EfiGuestFile;
+
+typedef struct EfiLoaderBenchmark {
+    bool enabled;
+    bool started;
+    bool registered;
+    int64_t start_us;
+    uint64_t guest_read_bytes;
+    uint64_t guest_write_bytes;
+    uint64_t guest_fill_bytes;
+    uint64_t guest_move_bytes;
+    uint64_t ram_chunks;
+    uint64_t precise_bytes;
+    uint64_t file_read_bytes;
+    uint64_t block_read_bytes;
+    uint64_t load_image_bytes;
+    uint64_t media_cache_hits;
+    uint64_t media_cache_misses;
+    uint64_t media_negative_hits;
+    uint64_t image_parses;
+} EfiLoaderBenchmark;
+
+typedef struct EfiMediaCacheEntry {
+    uint64_t status;
+    bool is_directory;
+    uint8_t *data;
+    size_t size;
+    char source[384];
+    VibtaniumEfiStorageReport report;
+} EfiMediaCacheEntry;
 
 typedef struct EfiGuestEvent {
     bool in_use;
@@ -338,6 +370,98 @@ static EfiStartedImageFrame efi_started_images[EFI_MAX_STARTED_IMAGES];
 static unsigned efi_started_image_depth;
 static bool efi_pending_exit_image;
 static uint64_t efi_pending_exit_status;
+static EfiLoaderBenchmark efi_loader_benchmark;
+static uint8_t *efi_transfer_bounce;
+static size_t efi_transfer_bounce_capacity;
+static GHashTable *efi_media_files;
+
+static void efi_media_cache_entry_free(gpointer opaque)
+{
+    EfiMediaCacheEntry *entry = opaque;
+
+    if (entry) {
+        g_free(entry->data);
+        g_free(entry);
+    }
+}
+
+static void efi_loader_benchmark_dump(void)
+{
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
+    int64_t elapsed_us;
+
+    if (!bench->enabled || !bench->started) {
+        return;
+    }
+
+    elapsed_us = g_get_monotonic_time() - bench->start_us;
+    fprintf(stderr, "[ia64-efi-perf] enabled=1\n");
+    fprintf(stderr, "[ia64-efi-perf] elapsed_us=%" PRId64 "\n",
+            elapsed_us);
+#define EFI_BENCH_PRINT(field, name) \
+    fprintf(stderr, "[ia64-efi-perf] " name "=%" PRIu64 "\n", \
+            bench->field)
+    EFI_BENCH_PRINT(guest_read_bytes, "guest.read_bytes");
+    EFI_BENCH_PRINT(guest_write_bytes, "guest.write_bytes");
+    EFI_BENCH_PRINT(guest_fill_bytes, "guest.fill_bytes");
+    EFI_BENCH_PRINT(guest_move_bytes, "guest.move_bytes");
+    EFI_BENCH_PRINT(ram_chunks, "guest.ram_chunks");
+    EFI_BENCH_PRINT(precise_bytes, "guest.precise_bytes");
+    EFI_BENCH_PRINT(file_read_bytes, "file.read_bytes");
+    EFI_BENCH_PRINT(block_read_bytes, "block.read_bytes");
+    EFI_BENCH_PRINT(load_image_bytes, "load_image.bytes");
+    EFI_BENCH_PRINT(media_cache_hits, "media.cache_hits");
+    EFI_BENCH_PRINT(media_cache_misses, "media.cache_misses");
+    EFI_BENCH_PRINT(media_negative_hits, "media.negative_hits");
+    EFI_BENCH_PRINT(image_parses, "load_image.parse_count");
+#undef EFI_BENCH_PRINT
+}
+
+static bool efi_loader_benchmark_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = g_getenv("VIBTANIUM_EFI_PERF");
+
+        cached = value != NULL && *value != '\0';
+    }
+    return cached != 0;
+}
+
+void vibtanium_efi_loader_benchmark_start(void)
+{
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
+    bool registered = bench->registered;
+
+    if (!efi_loader_benchmark_enabled()) {
+        return;
+    }
+
+    memset(bench, 0, sizeof(*bench));
+    bench->enabled = true;
+    bench->started = true;
+    bench->registered = registered;
+    bench->start_us = g_get_monotonic_time();
+    if (!bench->registered) {
+        atexit(efi_loader_benchmark_dump);
+        bench->registered = true;
+    }
+}
+
+static uint8_t *efi_transfer_bounce_get(size_t requested)
+{
+    size_t wanted = MIN(requested, (size_t)EFI_TRANSFER_BOUNCE_SIZE);
+
+    if (wanted == 0) {
+        wanted = 1;
+    }
+    if (efi_transfer_bounce_capacity < wanted) {
+        efi_transfer_bounce = g_realloc(efi_transfer_bounce, wanted);
+        efi_transfer_bounce_capacity = wanted;
+    }
+    return efi_transfer_bounce;
+}
 
 #define EFI_INPUT_QUEUE_LENGTH 32
 
@@ -813,23 +937,181 @@ static uint8_t efi_guest_ldb(CPUIA64State *env, uint64_t address)
     return cpu_ldub_data_ra(env, address, GETPC());
 }
 
-static void efi_guest_read_bytes(CPUIA64State *env, uint64_t address,
-                                 void *buffer, size_t size)
+static bool efi_guest_ram_chunk(CPUIA64State *env, uint64_t address,
+                                size_t remaining, bool write,
+                                hwaddr *paddr, size_t *size)
 {
-    uint8_t *bytes = buffer;
+    CPUState *cs = env_cpu(env);
+    IA64TranslateResult result;
+    MemoryRegion *mr;
+    hwaddr xlat;
+    hwaddr len;
+    size_t page_left;
+    int mmu_idx;
 
-    for (size_t i = 0; i < size; i++) {
-        bytes[i] = efi_guest_ldb(env, address + i);
+    if (!QTAILQ_EMPTY(&cs->watchpoints)) {
+        return false;
+    }
+
+    mmu_idx = ia64_tcg_mmu_index_for_psr(env->psr, false);
+    if (!ia64_translate_address_no_detail(
+            env, address, write ? MMU_DATA_STORE : MMU_DATA_LOAD,
+            mmu_idx, false, &result)) {
+        return false;
+    }
+
+    page_left = TARGET_PAGE_SIZE - (address & ~TARGET_PAGE_MASK);
+    len = MIN(remaining, page_left);
+    xlat = result.paddr;
+    mr = address_space_translate(&address_space_memory, result.paddr,
+                                 &xlat, &len, write,
+                                 MEMTXATTRS_UNSPECIFIED);
+    if (!memory_region_is_ram(mr) || len == 0) {
+        return false;
+    }
+
+    *paddr = result.paddr;
+    *size = len;
+    return true;
+}
+
+static void efi_guest_read_bulk(CPUIA64State *env, uint64_t address,
+                                void *buffer, size_t size)
+{
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
+    uint8_t *bytes = buffer;
+    size_t done = 0;
+
+    if (bench->enabled) {
+        bench->guest_read_bytes += size;
+    }
+
+    while (done < size) {
+        hwaddr paddr;
+        size_t chunk;
+
+        if (efi_guest_ram_chunk(env, address + done, size - done, false,
+                                &paddr, &chunk) &&
+            address_space_read(&address_space_memory, paddr,
+                               MEMTXATTRS_UNSPECIFIED, bytes + done,
+                               chunk) == MEMTX_OK) {
+            if (bench->enabled) {
+                bench->ram_chunks++;
+            }
+            done += chunk;
+            continue;
+        }
+
+        bytes[done] = efi_guest_ldb(env, address + done);
+        if (bench->enabled) {
+            bench->precise_bytes++;
+        }
+        done++;
     }
 }
 
-static void efi_guest_write_bytes(CPUIA64State *env, uint64_t address,
-                                  const void *buffer, size_t size)
+static void efi_guest_write_bulk(CPUIA64State *env, uint64_t address,
+                                 const void *buffer, size_t size)
 {
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
     const uint8_t *bytes = buffer;
+    size_t done = 0;
 
-    for (size_t i = 0; i < size; i++) {
-        efi_guest_stb(env, address + i, bytes[i]);
+    if (bench->enabled) {
+        bench->guest_write_bytes += size;
+    }
+
+    while (done < size) {
+        hwaddr paddr;
+        size_t chunk;
+
+        if (efi_guest_ram_chunk(env, address + done, size - done, true,
+                                &paddr, &chunk) &&
+            address_space_write(&address_space_memory, paddr,
+                                MEMTXATTRS_UNSPECIFIED, bytes + done,
+                                chunk) == MEMTX_OK) {
+            if (bench->enabled) {
+                bench->ram_chunks++;
+            }
+            done += chunk;
+            continue;
+        }
+
+        efi_guest_stb(env, address + done, bytes[done]);
+        if (bench->enabled) {
+            bench->precise_bytes++;
+        }
+        done++;
+    }
+}
+
+static void efi_guest_fill_bulk(CPUIA64State *env, uint64_t address,
+                                uint8_t value, size_t size)
+{
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
+    size_t done = 0;
+
+    if (bench->enabled) {
+        bench->guest_fill_bytes += size;
+    }
+
+    while (done < size) {
+        hwaddr paddr;
+        size_t chunk;
+
+        if (efi_guest_ram_chunk(env, address + done, size - done, true,
+                                &paddr, &chunk) &&
+            address_space_set(&address_space_memory, paddr, value, chunk,
+                              MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
+            if (bench->enabled) {
+                bench->ram_chunks++;
+            }
+            done += chunk;
+            continue;
+        }
+
+        efi_guest_stb(env, address + done, value);
+        if (bench->enabled) {
+            bench->precise_bytes++;
+        }
+        done++;
+    }
+}
+
+static void efi_guest_move_bulk(CPUIA64State *env, uint64_t destination,
+                                uint64_t source, size_t size)
+{
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
+    uint8_t *bounce = efi_transfer_bounce_get(size);
+    size_t capacity = MIN(size, efi_transfer_bounce_capacity);
+
+    if (bench->enabled) {
+        bench->guest_move_bytes += size;
+    }
+    if (size == 0 || destination == source) {
+        return;
+    }
+
+    if (destination < source || destination - source >= size) {
+        size_t done = 0;
+
+        while (done < size) {
+            size_t chunk = MIN(capacity, size - done);
+
+            efi_guest_read_bulk(env, source + done, bounce, chunk);
+            efi_guest_write_bulk(env, destination + done, bounce, chunk);
+            done += chunk;
+        }
+        return;
+    }
+
+    while (size != 0) {
+        size_t chunk = MIN(capacity, size);
+        size_t offset = size - chunk;
+
+        efi_guest_read_bulk(env, source + offset, bounce, chunk);
+        efi_guest_write_bulk(env, destination + offset, bounce, chunk);
+        size = offset;
     }
 }
 
@@ -841,7 +1123,7 @@ static bool efi_guid_bytes_equal(const uint8_t a[16], const uint8_t b[16])
 static void efi_guest_read_guid(CPUIA64State *env, uint64_t address,
                                 uint8_t guid[16])
 {
-    efi_guest_read_bytes(env, address, guid, 16);
+    efi_guest_read_bulk(env, address, guid, 16);
 }
 
 static void efi_format_guid(const uint8_t guid[16], char out[37])
@@ -984,7 +1266,7 @@ static void efi_guest_write_guid(CPUIA64State *env, uint64_t address,
     if (!efi_parse_guid(guid, bytes)) {
         memset(bytes, 0, sizeof(bytes));
     }
-    efi_guest_write_bytes(env, address, bytes, sizeof(bytes));
+    efi_guest_write_bulk(env, address, bytes, sizeof(bytes));
 }
 
 static uint32_t efi_crc32(const uint8_t *data, size_t size)
@@ -1603,9 +1885,9 @@ void vibtanium_efi_register_boot_media(
     const VibtaniumEfiBlockDevice *boot_media)
 {
     for (unsigned i = 0; i < EFI_MAX_FILE_HANDLES; i++) {
-        g_clear_pointer(&efi_guest_files[i].data, g_free);
         memset(&efi_guest_files[i], 0, sizeof(efi_guest_files[i]));
     }
+    g_clear_pointer(&efi_media_files, g_hash_table_unref);
     memset(efi_installed_protocols, 0, sizeof(efi_installed_protocols));
     memset(efi_guest_events, 0, sizeof(efi_guest_events));
     memset(efi_page_allocations, 0, sizeof(efi_page_allocations));
@@ -1628,6 +1910,7 @@ void vibtanium_efi_register_boot_media(
     efi_high_monotonic_count = 0;
     efi_conin_reset();
 
+    vibtanium_efi_storage_cache_cleanup(&efi_boot_media);
     g_clear_pointer(&efi_boot_media_name, g_free);
     memset(&efi_boot_media, 0, sizeof(efi_boot_media));
     efi_boot_media_valid = false;
@@ -1640,6 +1923,11 @@ void vibtanium_efi_register_boot_media(
     efi_boot_media_name = g_strdup(boot_media->name);
     efi_boot_media.name = efi_boot_media_name;
     efi_boot_media_valid = boot_media->read != NULL;
+    if (efi_boot_media_valid) {
+        vibtanium_efi_storage_cache_enable(&efi_boot_media);
+        efi_media_files = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, efi_media_cache_entry_free);
+    }
 }
 
 static uint64_t efi_preinstalled_interface(uint64_t handle,
@@ -1946,7 +2234,7 @@ static uint64_t efi_calculate_crc32(CPUIA64State *env)
     }
 
     bytes = g_malloc(size ? size : 1);
-    efi_guest_read_bytes(env, data, bytes, size);
+    efi_guest_read_bulk(env, data, bytes, size);
     efi_guest_stl(env, crc_ptr, efi_crc32(bytes, size));
     return VIBTANIUM_EFI_SUCCESS;
 }
@@ -1956,15 +2244,11 @@ static uint64_t efi_copy_mem(CPUIA64State *env)
     uint64_t destination = ia64_read_gr(env, 32);
     uint64_t source = ia64_read_gr(env, 33);
     uint64_t length = ia64_read_gr(env, 34);
-    g_autofree uint8_t *bytes = NULL;
-
     if (length > EFI_MAX_FILE_READ_BYTES) {
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 
-    bytes = g_malloc(length ? length : 1);
-    efi_guest_read_bytes(env, source, bytes, length);
-    efi_guest_write_bytes(env, destination, bytes, length);
+    efi_guest_move_bulk(env, destination, source, length);
     return VIBTANIUM_EFI_SUCCESS;
 }
 
@@ -1978,9 +2262,7 @@ static uint64_t efi_set_mem(CPUIA64State *env)
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 
-    for (uint64_t i = 0; i < size; i++) {
-        efi_guest_stb(env, buffer + i, value);
-    }
+    efi_guest_fill_bulk(env, buffer, value, size);
     return VIBTANIUM_EFI_SUCCESS;
 }
 
@@ -2031,7 +2313,6 @@ static EfiGuestFile *efi_create_file_node(CPUIA64State *env, const char *path,
     uint64_t address = efi_pool_alloc_raw(8 + 10 * sizeof(uint64_t));
 
     if (address == 0) {
-        g_free(data);
         return NULL;
     }
 
@@ -2053,7 +2334,6 @@ static EfiGuestFile *efi_create_file_node(CPUIA64State *env, const char *path,
         return file;
     }
 
-    g_free(data);
     return NULL;
 }
 
@@ -2072,6 +2352,48 @@ static uint64_t efi_storage_status_to_efi(VibtaniumEfiStorageStatus status)
     default:
         return VIBTANIUM_EFI_NOT_FOUND;
     }
+}
+
+static EfiMediaCacheEntry *efi_media_cache_open(const char *storage_path)
+{
+    EfiLoaderBenchmark *bench = &efi_loader_benchmark;
+    EfiMediaCacheEntry *entry;
+    g_autofree char *key = g_ascii_strdown(storage_path, -1);
+    Error *local_err = NULL;
+
+    if (!efi_media_files) {
+        return NULL;
+    }
+
+    entry = g_hash_table_lookup(efi_media_files, key);
+    if (entry) {
+        if (bench->enabled) {
+            bench->media_cache_hits++;
+            if (entry->status != VIBTANIUM_EFI_SUCCESS) {
+                bench->media_negative_hits++;
+            }
+        }
+        return entry;
+    }
+
+    if (bench->enabled) {
+        bench->media_cache_misses++;
+    }
+    entry = g_new0(EfiMediaCacheEntry, 1);
+    entry->report.status = VIBTANIUM_EFI_STORAGE_NOT_FOUND;
+    g_strlcpy(entry->report.message, "path has not been opened",
+              sizeof(entry->report.message));
+    if (vibtanium_efi_media_open_path(
+            &efi_boot_media, storage_path, &entry->is_directory,
+            &entry->data, &entry->size, entry->source,
+            sizeof(entry->source), &entry->report, &local_err)) {
+        entry->status = VIBTANIUM_EFI_SUCCESS;
+    } else {
+        entry->status = efi_storage_status_to_efi(entry->report.status);
+    }
+    error_free(local_err);
+    g_hash_table_insert(efi_media_files, g_steal_pointer(&key), entry);
+    return entry;
 }
 
 static void efi_read_utf16_path(CPUIA64State *env, uint64_t address,
@@ -2246,9 +2568,7 @@ static void efi_write_loaded_image_protocol(CPUIA64State *env,
                                             uint64_t parent_handle,
                                             uint64_t file_path)
 {
-    for (unsigned i = 0; i < 96; i++) {
-        efi_guest_stb(env, address + i, 0);
-    }
+    efi_guest_fill_bulk(env, address, 0, 96);
 
     efi_guest_stl(env, address, 0x1000);
     efi_guest_stq(env, address + 8, parent_handle);
@@ -2288,7 +2608,7 @@ static uint64_t efi_load_image_read_source(CPUIA64State *env,
             return VIBTANIUM_EFI_INVALID_PARAMETER;
         }
         *file_data = g_malloc(source_size);
-        efi_guest_read_bytes(env, source_buffer, *file_data, source_size);
+        efi_guest_read_bulk(env, source_buffer, *file_data, source_size);
         *file_size = source_size;
         g_strlcpy(source, "<source-buffer>", source_size_chars);
         return VIBTANIUM_EFI_SUCCESS;
@@ -2301,29 +2621,31 @@ static uint64_t efi_load_image_read_source(CPUIA64State *env,
 
     {
         char storage_path[EFI_MAX_PATH_CHARS + 2];
-        VibtaniumEfiStorageReport report = {
-            .status = VIBTANIUM_EFI_STORAGE_NOT_FOUND,
-            .message = "path has not been opened",
-        };
-        Error *local_err = NULL;
+        EfiMediaCacheEntry *cached;
 
         g_snprintf(storage_path, sizeof(storage_path), "/%s", path);
-        if (!vibtanium_efi_media_read_path(&efi_boot_media, storage_path,
-                                           file_data, file_size, source,
-                                           source_size_chars, &report,
-                                           &local_err)) {
-            uint64_t status = efi_storage_status_to_efi(report.status);
+        cached = efi_media_cache_open(storage_path);
+        if (!cached || cached->status != VIBTANIUM_EFI_SUCCESS ||
+            cached->is_directory) {
+            uint64_t status = cached ? cached->status
+                                     : VIBTANIUM_EFI_NOT_FOUND;
+            const VibtaniumEfiStorageReport *report =
+                cached ? &cached->report : NULL;
 
             if (efi_trace_enabled()) {
                 fprintf(stderr,
                         "[efi-load-image] path='%s' status=%s reason=%s\n",
                         storage_path,
-                        vibtanium_efi_storage_status_name(report.status),
-                        report.message);
+                        report ? vibtanium_efi_storage_status_name(
+                                     report->status) : "not-found",
+                        report ? report->message : "media cache unavailable");
             }
-            error_free(local_err);
-            return status;
+            return cached && cached->is_directory
+                ? VIBTANIUM_EFI_LOAD_ERROR : status;
         }
+        *file_data = g_memdup2(cached->data, cached->size);
+        *file_size = cached->size;
+        g_strlcpy(source, cached->source, source_size_chars);
     }
 
     return VIBTANIUM_EFI_SUCCESS;
@@ -2340,7 +2662,6 @@ static uint64_t efi_load_image(CPUIA64State *env)
     size_t file_size = 0;
     char source[384];
     char path[EFI_MAX_PATH_CHARS];
-    VibtaniumEfiImage probe;
     VibtaniumEfiImage loaded;
     EfiChildImage *child;
     Error *local_err = NULL;
@@ -2348,7 +2669,6 @@ static uint64_t efi_load_image(CPUIA64State *env)
     uint64_t pages;
     uint64_t load_base;
 
-    memset(&probe, 0, sizeof(probe));
     memset(&loaded, 0, sizeof(loaded));
     source[0] = '\0';
     path[0] = '\0';
@@ -2366,25 +2686,11 @@ static uint64_t efi_load_image(CPUIA64State *env)
         return status;
     }
 
+    if (efi_loader_benchmark.enabled) {
+        efi_loader_benchmark.image_parses++;
+    }
     if (!vibtanium_efi_image_from_buffer(source, file_data, file_size, 0,
-                                         &probe, &local_err)) {
-        if (efi_trace_enabled()) {
-            fprintf(stderr, "[efi-load-image] %s\n",
-                    error_get_pretty(local_err));
-        }
-        error_free(local_err);
-        return VIBTANIUM_EFI_LOAD_ERROR;
-    }
-
-    pages = QEMU_ALIGN_UP(probe.size, EFI_PAGE_SIZE) / EFI_PAGE_SIZE;
-    vibtanium_efi_image_destroy(&probe);
-    if (!efi_find_free_pages(pages, efi_ram_top() - 1, &load_base)) {
-        return VIBTANIUM_EFI_OUT_OF_RESOURCES;
-    }
-
-    local_err = NULL;
-    if (!vibtanium_efi_image_from_buffer(source, file_data, file_size,
-                                         load_base, &loaded, &local_err)) {
+                                         &loaded, &local_err)) {
         if (efi_trace_enabled()) {
             fprintf(stderr, "[efi-load-image] %s\n",
                     error_get_pretty(local_err));
@@ -2394,6 +2700,25 @@ static uint64_t efi_load_image(CPUIA64State *env)
     }
 
     pages = QEMU_ALIGN_UP(loaded.size, EFI_PAGE_SIZE) / EFI_PAGE_SIZE;
+    if (loaded.relocation_rva == 0 || loaded.relocation_size == 0) {
+        load_base = loaded.load_base;
+    } else {
+        if (!efi_find_free_pages(pages, efi_ram_top() - 1, &load_base)) {
+            vibtanium_efi_image_destroy(&loaded);
+            return VIBTANIUM_EFI_OUT_OF_RESOURCES;
+        }
+        local_err = NULL;
+        if (!vibtanium_efi_image_relocate(&loaded, load_base, &local_err)) {
+            if (efi_trace_enabled()) {
+                fprintf(stderr, "[efi-load-image] %s\n",
+                        error_get_pretty(local_err));
+            }
+            error_free(local_err);
+            vibtanium_efi_image_destroy(&loaded);
+            return VIBTANIUM_EFI_LOAD_ERROR;
+        }
+    }
+
     if (!efi_page_range_available(loaded.load_base, pages)) {
         vibtanium_efi_image_destroy(&loaded);
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
@@ -2425,7 +2750,10 @@ static uint64_t efi_load_image(CPUIA64State *env)
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
     }
 
-    efi_guest_write_bytes(env, loaded.load_base, loaded.data, loaded.size);
+    efi_guest_write_bulk(env, loaded.load_base, loaded.data, loaded.size);
+    if (efi_loader_benchmark.enabled) {
+        efi_loader_benchmark.load_image_bytes += loaded.size;
+    }
     child->pages = pages;
     child->file_path = device_path;
     child->image = loaded;
@@ -2654,15 +2982,7 @@ static uint64_t efi_file_open(CPUIA64State *env)
     char name[EFI_MAX_PATH_CHARS];
     char path[EFI_MAX_PATH_CHARS];
     char storage_path[EFI_MAX_PATH_CHARS + 2];
-    Error *local_err = NULL;
-    VibtaniumEfiStorageReport report = {
-        .status = VIBTANIUM_EFI_STORAGE_NOT_FOUND,
-        .message = "path has not been opened",
-    };
-    g_autofree char *source = g_malloc0(384);
-    uint8_t *data = NULL;
-    size_t size = 0;
-    bool is_directory = false;
+    EfiMediaCacheEntry *cached;
     EfiGuestFile *file;
 
     if (!parent || new_handle_out == 0 || name_ptr == 0) {
@@ -2692,24 +3012,27 @@ static uint64_t efi_file_open(CPUIA64State *env)
         return VIBTANIUM_EFI_NOT_FOUND;
     }
 
-    if (!vibtanium_efi_media_open_path(&efi_boot_media, storage_path,
-                                       &is_directory, &data, &size, source,
-                                       384, &report, &local_err)) {
-        uint64_t status = efi_storage_status_to_efi(report.status);
+    cached = efi_media_cache_open(storage_path);
+    if (!cached || cached->status != VIBTANIUM_EFI_SUCCESS) {
+        uint64_t status = cached ? cached->status : VIBTANIUM_EFI_NOT_FOUND;
+        const VibtaniumEfiStorageReport *report =
+            cached ? &cached->report : NULL;
 
         trace_ia64_efi_file_open_result(
-            env->ip, storage_path, vibtanium_efi_storage_status_name(report.status),
-            0, 0, report.message);
+            env->ip, storage_path,
+            report ? vibtanium_efi_storage_status_name(report->status)
+                   : "not-found",
+            0, 0, report ? report->message : "media cache unavailable");
         if (efi_trace_enabled()) {
             fprintf(stderr, "[efi-file] open path='%s' status=%s\n",
                     storage_path,
-                    vibtanium_efi_storage_status_name(report.status));
+                    report ? vibtanium_efi_storage_status_name(report->status)
+                           : "not-found");
         }
-        error_free(local_err);
         return status;
     }
 
-    if (is_directory) {
+    if (cached->is_directory) {
         file = efi_create_file_node(env, path, true, NULL, 0);
         if (!file) {
             return VIBTANIUM_EFI_OUT_OF_RESOURCES;
@@ -2718,7 +3041,7 @@ static uint64_t efi_file_open(CPUIA64State *env)
         efi_guest_stq(env, new_handle_out, file->address);
         trace_ia64_efi_file_open_result(env->ip, storage_path,
                                         "success-directory",
-                                        file->address, 0, source);
+                                        file->address, 0, cached->source);
         if (efi_trace_enabled()) {
             fprintf(stderr, "[efi-file] open dir='%s' handle=0x%016"
                     PRIx64 "\n",
@@ -2730,10 +3053,10 @@ static uint64_t efi_file_open(CPUIA64State *env)
     if (efi_trace_enabled()) {
         fprintf(stderr, "[efi-file] open path='%s' size=0x%" PRIx64
                 " source=%s\n",
-                storage_path, (uint64_t)size, source);
+                storage_path, (uint64_t)cached->size, cached->source);
     }
 
-    file = efi_create_file_node(env, path, false, data, size);
+    file = efi_create_file_node(env, path, false, cached->data, cached->size);
     if (!file) {
         efi_guest_stq(env, new_handle_out, 0);
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
@@ -2741,7 +3064,8 @@ static uint64_t efi_file_open(CPUIA64State *env)
 
     efi_guest_stq(env, new_handle_out, file->address);
     trace_ia64_efi_file_open_result(env->ip, storage_path, "success",
-                                    file->address, size, source);
+                                    file->address, cached->size,
+                                    cached->source);
     return VIBTANIUM_EFI_SUCCESS;
 }
 
@@ -2750,7 +3074,6 @@ static uint64_t efi_file_close(CPUIA64State *env)
     EfiGuestFile *file = efi_find_file(ia64_read_gr(env, 32));
 
     if (file) {
-        g_clear_pointer(&file->data, g_free);
         memset(file, 0, sizeof(*file));
     }
     return VIBTANIUM_EFI_SUCCESS;
@@ -2782,8 +3105,11 @@ static uint64_t efi_file_read(CPUIA64State *env)
         if (buffer == 0) {
             return VIBTANIUM_EFI_INVALID_PARAMETER;
         }
-        efi_guest_write_bytes(env, buffer, file->data + file->position,
-                              actual);
+        efi_guest_write_bulk(env, buffer, file->data + file->position,
+                             actual);
+        if (efi_loader_benchmark.enabled) {
+            efi_loader_benchmark.file_read_bytes += actual;
+        }
         file->position += actual;
     }
     if (efi_trace_enabled()) {
@@ -2864,9 +3190,7 @@ static uint64_t efi_file_get_info(CPUIA64State *env)
         return VIBTANIUM_EFI_BUFFER_TOO_SMALL;
     }
 
-    for (uint64_t i = 0; i < required; i++) {
-        efi_guest_stb(env, buffer + i, 0);
-    }
+    efi_guest_fill_bulk(env, buffer, 0, required);
     efi_guest_stq(env, buffer, required);
     efi_guest_stq(env, buffer + 8, file->size);
     efi_guest_stq(env, buffer + 16, file->size);
@@ -2935,9 +3259,9 @@ static uint64_t efi_dispatch_block_io(CPUIA64State *env, unsigned index)
         uint64_t buffer_size = ia64_read_gr(env, 35);
         uint64_t buffer = ia64_read_gr(env, 36);
         uint64_t offset = lba * block_size;
-        Error *local_err = NULL;
-        g_autofree uint8_t *data = NULL;
-        int ret;
+        uint8_t *data;
+        size_t capacity;
+        uint64_t done = 0;
 
         if (media_id != 1 || buffer_size > EFI_MAX_FILE_READ_BYTES ||
             (buffer_size != 0 && buffer == 0) ||
@@ -2945,15 +3269,27 @@ static uint64_t efi_dispatch_block_io(CPUIA64State *env, unsigned index)
             (lba != 0 && offset / lba != block_size)) {
             return VIBTANIUM_EFI_INVALID_PARAMETER;
         }
-        data = g_malloc(buffer_size ? buffer_size : 1);
-        ret = efi_boot_media.read(efi_boot_media.opaque, offset, buffer_size,
-                                  data, &local_err);
-        if (ret < 0) {
-            error_free(local_err);
-            return VIBTANIUM_EFI_DEVICE_ERROR;
+        data = efi_transfer_bounce_get(buffer_size);
+        capacity = MIN((size_t)buffer_size, efi_transfer_bounce_capacity);
+        if (block_size != 0 && capacity > block_size) {
+            capacity -= capacity % block_size;
         }
-        if (buffer_size != 0) {
-            efi_guest_write_bytes(env, buffer, data, buffer_size);
+        while (done < buffer_size) {
+            Error *local_err = NULL;
+            uint32_t chunk = MIN((uint64_t)capacity, buffer_size - done);
+            int ret;
+
+            ret = efi_boot_media.read(efi_boot_media.opaque, offset + done,
+                                      chunk, data, &local_err);
+            if (ret < 0) {
+                error_free(local_err);
+                return VIBTANIUM_EFI_DEVICE_ERROR;
+            }
+            efi_guest_write_bulk(env, buffer + done, data, chunk);
+            done += chunk;
+        }
+        if (efi_loader_benchmark.enabled) {
+            efi_loader_benchmark.block_read_bytes += buffer_size;
         }
         return VIBTANIUM_EFI_SUCCESS;
     }
@@ -3556,7 +3892,7 @@ static uint64_t efi_runtime_get_variable(CPUIA64State *env)
         efi_guest_stl(env, attributes_ptr, attributes);
     }
     if (data_size != 0) {
-        efi_guest_write_bytes(env, data_ptr, data, data_size);
+        efi_guest_write_bulk(env, data_ptr, data, data_size);
     }
     return VIBTANIUM_EFI_SUCCESS;
 }
@@ -3635,7 +3971,7 @@ static uint64_t efi_runtime_set_variable(CPUIA64State *env)
 
     if (data_size != 0) {
         data = g_malloc(data_size);
-        efi_guest_read_bytes(env, data_ptr, data, data_size);
+        efi_guest_read_bulk(env, data_ptr, data, data_size);
     }
 
     status = vibtanium_efi_vars_set(guid, name, raw_attributes, data,

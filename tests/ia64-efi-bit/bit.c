@@ -306,12 +306,17 @@ static uint64_t handle_buffer[8];
 static uint64_t event_buffer[4];
 static uint8_t copy_src[64];
 static uint8_t copy_dst[64];
+static uint8_t bulk_buffer[12288] __attribute__((aligned(4096)));
 static uint8_t block_buffer[4096];
 static uint8_t file_buffer[256];
 static uint8_t file_info_buffer[256];
 static uint32_t blt_pixels[16];
 static uint32_t blt_readback[16];
 static uint64_t custom_protocol_payload = 0xfeedfacecafebeefUL;
+/* Volatile is intentional: keep the benchmark's architectural RAM traffic. */
+static volatile uint64_t benchmark_words[256];
+/* Volatile is intentional: make the final benchmark store observable. */
+static volatile uint64_t benchmark_sink;
 
 static const EfiGuid loaded_image_guid = {
     0x5b1b31a1U, 0x9562U, 0x11d2U,
@@ -813,6 +818,24 @@ static bool test_utility_services(void)
                       sizeof(copy_dst), 0xa6) == EFI_SUCCESS &&
                 copy_dst[0] == 0xa6 &&
                 copy_dst[sizeof(copy_dst) - 1] == 0xa6);
+
+    for (unsigned i = 0; i < sizeof(bulk_buffer); i++) {
+        bulk_buffer[i] = i % 251;
+    }
+    ok &= check("efi CopyMem overlapping page-spanning move",
+                call3(bs->fn[BS_COPY_MEM], (uint64_t)(bulk_buffer + 37),
+                      (uint64_t)bulk_buffer, 6000) == EFI_SUCCESS);
+    for (unsigned i = 0; i < 6000; i++) {
+        if (bulk_buffer[37 + i] != i % 251) {
+            ok &= check("efi CopyMem overlap contents", false);
+            break;
+        }
+    }
+    ok &= check("efi SetMem page-spanning fill",
+                call3(bs->fn[BS_SET_MEM], (uint64_t)(bulk_buffer + 2000),
+                      7000, 0x5a) == EFI_SUCCESS &&
+                bulk_buffer[2000] == 0x5a &&
+                bulk_buffer[8999] == 0x5a);
     return ok;
 }
 
@@ -1193,6 +1216,33 @@ static bool test_media_services(void)
     ok &= test_block_io(block);
     ok &= test_file_protocol(simplefs);
     return ok;
+}
+
+/*
+ * Stable post-BIT workload for the host-bracketed retired-bundle benchmark.
+ * It deliberately mixes dependent integer work with ordinary RAM loads and
+ * stores, and never calls firmware after the ALL PASS marker.
+ */
+void ia64_benchmark_loop(void)
+{
+    uint64_t carry = 0x9e3779b97f4a7c15UL;
+
+    for (unsigned i = 0; i < 256; i++) {
+        benchmark_words[i] = carry ^ i;
+    }
+
+    for (;;) {
+        for (unsigned i = 0; i < 256; i++) {
+            uint64_t value = benchmark_words[i];
+
+            value += carry + i;
+            value ^= value << 13;
+            value ^= value >> 7;
+            benchmark_words[i] = value;
+            carry += value ^ (carry >> 11);
+        }
+        benchmark_sink = carry;
+    }
 }
 
 void efi_main(uint64_t image_handle, EfiSystemTable *system_table)

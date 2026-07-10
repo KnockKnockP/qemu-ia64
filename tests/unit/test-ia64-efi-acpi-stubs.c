@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/bios-linker-loader.h"
+#include "hw/ia64/efi.h"
 #include "hw/core/boards.h"
 #include "system/memory.h"
 
@@ -73,4 +74,8 @@ uint64_t address_space_ldq_le(AddressSpace *as, hwaddr addr,
                               MemTxAttrs attrs, MemTxResult *result)
 {
     g_assert_not_reached();
+}
+
+void vibtanium_efi_loader_benchmark_start(void)
+{
 }

@@ -825,6 +825,32 @@ static void test_relocates_ia64_movl_imm64(void)
     vibtanium_efi_image_destroy(&image);
 }
 
+static void test_relocates_parsed_image_without_reparse(void)
+{
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    VibtaniumEfiImage image;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64, 0, true);
+    g_assert_true(vibtanium_efi_image_from_buffer("synthetic-reloc.efi", pe,
+                                                 sizeof(pe), 0,
+                                                 &image, &err));
+    g_assert_null(err);
+    g_assert_cmphex(image.entry, ==, SYNTHETIC_TEXT_RVA);
+
+    g_assert_true(vibtanium_efi_image_relocate(
+        &image, VIBTANIUM_EFI_APP_BASE, &err));
+    g_assert_null(err);
+    g_assert_cmphex(image.entry_descriptor, ==,
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_DESCRIPTOR_RVA);
+    g_assert_cmphex(image.entry, ==,
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+    g_assert_cmphex(image.global_pointer, ==,
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
 static void test_loads_fixed_ia64_pe_at_preferred_base(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
@@ -947,6 +973,8 @@ int main(int argc, char **argv)
                     test_relocates_ia64_entry_descriptor);
     g_test_add_func("/ia64-efi-app/relocate-ia64-movl-imm64",
                     test_relocates_ia64_movl_imm64);
+    g_test_add_func("/ia64-efi-app/relocate-parsed-image",
+                    test_relocates_parsed_image_without_reparse);
     g_test_add_func("/ia64-efi-app/load-fixed-at-preferred-base",
                     test_loads_fixed_ia64_pe_at_preferred_base);
     g_test_add_func("/ia64-efi-app/decode-sign-extended-uint32-args",

@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "qemu/aio.h"
 #include "qemu/error-report.h"
+#include "qemu/thread.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/char/serial-mm.h"
@@ -316,6 +318,15 @@ typedef struct VibtaniumBlockReadOpaque {
     BlockBackend *blk;
 } VibtaniumBlockReadOpaque;
 
+typedef struct VibtaniumBlockReadRequest {
+    BlockBackend *blk;
+    uint64_t offset;
+    uint32_t bytes;
+    void *buffer;
+    QemuEvent complete;
+    int ret;
+} VibtaniumBlockReadRequest;
+
 typedef struct VibtaniumCachedBlockReadOpaque {
     uint8_t *data;
     uint64_t size;
@@ -385,6 +396,15 @@ static const char *vibtanium_efi_reserved_overlap(
     return NULL;
 }
 
+static void vibtanium_block_pread_on_aio_context(void *opaque)
+{
+    VibtaniumBlockReadRequest *request = opaque;
+
+    request->ret = blk_pread(request->blk, request->offset,
+                             request->bytes, request->buffer, 0);
+    qemu_event_set(&request->complete);
+}
+
 static int vibtanium_block_pread(void *opaque,
                                  uint64_t offset,
                                  uint32_t bytes,
@@ -394,7 +414,25 @@ static int vibtanium_block_pread(void *opaque,
     VibtaniumBlockReadOpaque *read_opaque = opaque;
     int ret;
 
-    ret = blk_pread(read_opaque->blk, offset, bytes, buffer, 0);
+    if (qemu_get_current_aio_context() ==
+        blk_get_aio_context(read_opaque->blk)) {
+        ret = blk_pread(read_opaque->blk, offset, bytes, buffer, 0);
+    } else {
+        VibtaniumBlockReadRequest request = {
+            .blk = read_opaque->blk,
+            .offset = offset,
+            .bytes = bytes,
+            .buffer = buffer,
+        };
+
+        qemu_event_init(&request.complete, false);
+        aio_bh_schedule_oneshot(
+            blk_get_aio_context(read_opaque->blk),
+            vibtanium_block_pread_on_aio_context, &request);
+        qemu_event_wait(&request.complete);
+        qemu_event_destroy(&request.complete);
+        ret = request.ret;
+    }
     if (ret < 0) {
         error_setg(errp, "block read failed: %s", strerror(-ret));
         return ret;
@@ -449,6 +487,7 @@ void vibtanium_blk_media_device_cleanup(VibtaniumEfiBlockDevice *dev)
         return;
     }
 
+    vibtanium_efi_storage_cache_cleanup(dev);
     g_free(dev->opaque);
     dev->opaque = NULL;
 }
@@ -485,6 +524,28 @@ static bool vibtanium_cache_boot_media(const VibtaniumEfiBlockDevice *src,
     if (!src || !src->read || src->size == 0) {
         error_setg(errp, "cannot cache unavailable EFI boot media");
         return false;
+    }
+
+    /*
+     * A machine BlockBackend outlives firmware execution.  Retain a fresh
+     * callback wrapper instead of eagerly copying an entire ISO or multi-GiB
+     * disk.  The EFI storage layer now caches mounted metadata and immutable
+     * file contents, while QEMU's block layer handles ordinary read caching.
+     */
+    if (src->read == vibtanium_block_pread) {
+        VibtaniumBlockReadOpaque *source_opaque = src->opaque;
+        VibtaniumBlockReadOpaque *retained;
+
+        if (!source_opaque || !source_opaque->blk) {
+            error_setg(errp, "cannot retain unavailable EFI block backend");
+            return false;
+        }
+        retained = g_new0(VibtaniumBlockReadOpaque, 1);
+        retained->blk = source_opaque->blk;
+        *cached = *src;
+        cached->opaque = retained;
+        cached->cache = NULL;
+        return true;
     }
 
     opaque = g_new0(VibtaniumCachedBlockReadOpaque, 1);
@@ -813,7 +874,7 @@ bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
         return false;
     }
 
-    warn_report("vibtanium EFI media cache name=%s bytes=%" PRIu64,
+    warn_report("vibtanium EFI retained media name=%s bytes=%" PRIu64,
                 cached_dev.name ? cached_dev.name : "<unnamed>",
                 cached_dev.size);
 

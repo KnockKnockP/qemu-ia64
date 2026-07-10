@@ -446,6 +446,18 @@ struct ArchCPU {
 
     CPUIA64State env;
     IA64CPUModel model;
+
+    /*
+     * Transient, explicitly bracketed throughput benchmark state.  This is
+     * intentionally outside CPUIA64State: it is host instrumentation, not
+     * architectural state, and must not migrate with a guest snapshot.
+     */
+    bool benchmark_active;
+    uint64_t benchmark_retired_bundles;
+    uint64_t benchmark_elapsed_ns;
+    uint64_t benchmark_host_cycles;
+    int64_t benchmark_start_ns;
+    int64_t benchmark_start_host_cycles;
 };
 
 static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)

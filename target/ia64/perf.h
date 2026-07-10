@@ -283,6 +283,21 @@ static inline bool ia64_perf_enabled(void)
     return ia64_perf_enabled_cached != 0;
 }
 
+/*
+ * Low-overhead absolute throughput accounting.  The active flag is changed
+ * on the vCPU thread through the CPU QOM property, and retirement is batched
+ * by the existing once-per-fast-run/taken-exit path.
+ */
+static inline void ia64_benchmark_retire(CPUIA64State *env,
+                                         uint32_t bundle_count)
+{
+    IA64CPU *cpu = env_archcpu(env);
+
+    if (unlikely(cpu->benchmark_active)) {
+        cpu->benchmark_retired_bundles += bundle_count;
+    }
+}
+
 #define IA64_PERF_INC(counter) \
     do { \
         if (ia64_perf_enabled()) { \

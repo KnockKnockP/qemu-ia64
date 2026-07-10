@@ -12,6 +12,8 @@ typedef int (*VibtaniumEfiBlockReadFunc)(void *opaque,
                                          void *buffer,
                                          Error **errp);
 
+typedef struct VibtaniumEfiStorageCache VibtaniumEfiStorageCache;
+
 typedef enum VibtaniumEfiStorageStatus {
     VIBTANIUM_EFI_STORAGE_OK,
     VIBTANIUM_EFI_STORAGE_READ_ERROR,
@@ -30,6 +32,7 @@ typedef struct VibtaniumEfiBlockDevice {
     bool cdrom;
     VibtaniumEfiBlockReadFunc read;
     void *opaque;
+    VibtaniumEfiStorageCache *cache;
 } VibtaniumEfiBlockDevice;
 
 typedef struct VibtaniumEfiFile {
@@ -47,6 +50,8 @@ typedef struct VibtaniumEfiStorageReport {
 
 const char *vibtanium_efi_storage_status_name(
     VibtaniumEfiStorageStatus status);
+void vibtanium_efi_storage_cache_enable(VibtaniumEfiBlockDevice *dev);
+void vibtanium_efi_storage_cache_cleanup(VibtaniumEfiBlockDevice *dev);
 
 bool vibtanium_efi_iso9660_find_path(VibtaniumEfiBlockDevice *dev,
                                      const char *path,
