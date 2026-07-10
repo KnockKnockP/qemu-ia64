@@ -35,7 +35,9 @@ bool ia64_debug_hooks_active(void)
                   ia64_debug_env_enabled("VIBTANIUM_UEVENT_TRACE") ||
                   ia64_debug_env_enabled("VIBTANIUM_IA64_PROGRESS") ||
                   ia64_debug_env_enabled("VIBTANIUM_BUNDLE_TRACE_IP") ||
-                  ia64_debug_env_enabled("VIBTANIUM_STATE_TRACE_IP");
+                  ia64_debug_env_enabled("VIBTANIUM_STATE_TRACE_IP") ||
+                  ia64_debug_env_enabled("VIBTANIUM_GR_NAT_TRACE") ||
+                  ia64_debug_env_enabled("VIBTANIUM_RSE_NAT_TRACE");
     }
     return enabled != 0;
 }

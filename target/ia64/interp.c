@@ -336,6 +336,11 @@ uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask)
     return 0;
 }
 
+void HELPER(fast_gr_alat_invalidate)(CPUIA64State *env, uint64_t dest_mask)
+{
+    ia64_alat_invalidate_gr_mask(env, dest_mask);
+}
+
 #include "interp-ldst.c"
 
 #include "rse.c"
