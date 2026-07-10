@@ -90,6 +90,8 @@ typedef enum IA64TcgFastOp {
     IA64_TCG_FAST_OP_MOV_FROM_AR,
     IA64_TCG_FAST_OP_MOV_TO_AR,
     IA64_TCG_FAST_OP_ALLOC,
+    IA64_TCG_FAST_OP_MOVL,
+    IA64_TCG_FAST_OP_FP_SLOT,
 } IA64TcgFastOp;
 
 typedef enum IA64TcgFastLogicOp {
@@ -113,7 +115,10 @@ typedef struct IA64TcgFastSlot {
     uint8_t source3;
     uint8_t qualifying_predicate;
     uint8_t base;
+    uint8_t update_source;
     uint8_t width;
+    uint8_t memory_class;
+    uint8_t slot_type;
     uint8_t slot_index;
     uint8_t predicate1;
     uint8_t predicate2;
@@ -128,13 +133,19 @@ typedef struct IA64TcgFastSlot {
     uint8_t system_reg;
     bool source2_immediate;
     bool base_update;
+    bool update_from_register;
     bool sign_extend;
     bool deposit_zero;
     bool addp4;
     bool uses_stacked_gr;
     int64_t immediate;
+    uint64_t raw;
     uint64_t source_nat_mask;
+    uint64_t source_nat_mask_hi;
     uint64_t dest_mask;
+    uint64_t dest_mask_hi;
+    uint64_t finalize_mask;
+    uint64_t finalize_mask_hi;
 } IA64TcgFastSlot;
 
 typedef struct IA64TcgFastBundle {
@@ -142,7 +153,11 @@ typedef struct IA64TcgFastBundle {
     uint32_t slot_count;
     uint32_t op_counts;
     uint64_t source_nat_mask;
+    uint64_t source_nat_mask_hi;
     uint64_t dest_mask;
+    uint64_t dest_mask_hi;
+    uint64_t finalize_mask;
+    uint64_t finalize_mask_hi;
 } IA64TcgFastBundle;
 
 bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
@@ -164,6 +179,11 @@ typedef enum IA64TcgFastDisable {
     IA64_TCG_FAST_DISABLE_INDIRECT = 1u << 2,
     IA64_TCG_FAST_DISABLE_MOVSYS = 1u << 3,
     IA64_TCG_FAST_DISABLE_ALLOC = 1u << 4,
+    IA64_TCG_FAST_DISABLE_UPPER_GR = 1u << 5,
+    IA64_TCG_FAST_DISABLE_PREDICATE = 1u << 6,
+    IA64_TCG_FAST_DISABLE_MOVL = 1u << 7,
+    IA64_TCG_FAST_DISABLE_MEMORY_CLASS = 1u << 8,
+    IA64_TCG_FAST_DISABLE_FP = 1u << 9,
 } IA64TcgFastDisable;
 
 uint32_t ia64_tcg_fast_disable_mask(void);

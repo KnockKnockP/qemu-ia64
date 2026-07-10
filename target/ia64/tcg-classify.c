@@ -9,7 +9,7 @@
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
-#define IA64_TCG_FAST_GR_LIMIT 64
+#define IA64_TCG_FAST_GR_LIMIT IA64_GR_COUNT
 #define IA64_TCG_TARGET_PAGE_MASK (~((UINT64_C(1) << TARGET_PAGE_BITS) - 1))
 
 bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
@@ -166,7 +166,9 @@ static int64_t ia64_tcg_sign_extend(uint64_t value, unsigned bits)
 
 static bool ia64_tcg_fast_static_gr(uint32_t reg)
 {
-    return reg < IA64_TCG_FAST_GR_LIMIT;
+    return reg < IA64_TCG_FAST_GR_LIMIT &&
+           (reg < 64 ||
+            !ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_UPPER_GR));
 }
 
 static void ia64_tcg_fast_note_gr(IA64TcgFastSlot *slot, uint32_t reg)
@@ -183,7 +185,11 @@ static bool ia64_tcg_fast_add_source(IA64TcgFastSlot *slot, uint32_t reg)
     }
     ia64_tcg_fast_note_gr(slot, reg);
     if (reg != 0) {
-        slot->source_nat_mask |= 1ULL << reg;
+        if (reg < 64) {
+            slot->source_nat_mask |= 1ULL << reg;
+        } else {
+            slot->source_nat_mask_hi |= 1ULL << (reg - 64);
+        }
     }
     return true;
 }
@@ -196,7 +202,13 @@ static bool ia64_tcg_fast_set_target(IA64TcgFastSlot *slot, uint32_t reg)
     ia64_tcg_fast_note_gr(slot, reg);
     slot->target = reg;
     if (reg != 0) {
-        slot->dest_mask = 1ULL << reg;
+        if (reg < 64) {
+            slot->dest_mask = 1ULL << reg;
+            slot->finalize_mask = 1ULL << reg;
+        } else {
+            slot->dest_mask_hi = 1ULL << (reg - 64);
+            slot->finalize_mask_hi = 1ULL << (reg - 64);
+        }
     }
     return true;
 }
@@ -253,22 +265,25 @@ static bool ia64_tcg_fast_ar_is_plain(uint32_t reg)
 
 static bool ia64_tcg_fast_ldst_store_class(uint8_t memory_class)
 {
-    return memory_class == 0x0c || memory_class == 0x0d;
+    return memory_class == 0x0c || memory_class == 0x0d ||
+           memory_class == 0x0e;
 }
 
 static bool ia64_tcg_fast_ldst_load_class(uint8_t memory_class)
 {
     switch (memory_class) {
     case 0:
+    case 1:
+    case 2:
+    case 3:
     case 4:
     case 5:
+    case 6:
+    case 8:
+    case 9:
+    case 0x0a:
         return true;
     default:
-        /*
-         * Control-speculative loads (classes 1/3), advanced loads (2/3), and
-         * fill/check loads (6/8/9/A) need NaT/ALAT handling around the target
-         * write, so leave them on the interpreter path for now.
-         */
         return false;
     }
 }
@@ -284,10 +299,9 @@ uint32_t ia64_tcg_fast_disable_mask(void)
     /*
      * VIBTANIUM_TCG_FAST_DISABLE selectively routes fast-path features back
      * to the interpreter helpers, for isolating miscompares to a lowering
-     * feature without rebuilding.  Comma-separated: "bundle" (fast ALU
-     * bundles), "branch" (all direct-branch lowering, including the indirect
-     * kind), "indirect" (indirect-branch kind only), "movsys" (mov to/from
-     * BR/AR fast ops), "alloc" (alloc fast op), or "all".
+     * feature without rebuilding.  The value is a comma-separated list of
+     * feature names; see the parser below for the supported names.  "all"
+     * disables every fast-path feature.
      */
     static int mask = -1;
 
@@ -311,12 +325,27 @@ uint32_t ia64_tcg_fast_disable_mask(void)
                     parsed |= IA64_TCG_FAST_DISABLE_MOVSYS;
                 } else if (g_ascii_strcasecmp(name, "alloc") == 0) {
                     parsed |= IA64_TCG_FAST_DISABLE_ALLOC;
+                } else if (g_ascii_strcasecmp(name, "upper-gr") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_UPPER_GR;
+                } else if (g_ascii_strcasecmp(name, "predicate") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_PREDICATE;
+                } else if (g_ascii_strcasecmp(name, "movl") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_MOVL;
+                } else if (g_ascii_strcasecmp(name, "memory-class") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_MEMORY_CLASS;
+                } else if (g_ascii_strcasecmp(name, "fp") == 0) {
+                    parsed |= IA64_TCG_FAST_DISABLE_FP;
                 } else if (g_ascii_strcasecmp(name, "all") == 0) {
                     parsed |= IA64_TCG_FAST_DISABLE_BUNDLE |
                               IA64_TCG_FAST_DISABLE_BRANCH |
                               IA64_TCG_FAST_DISABLE_INDIRECT |
                               IA64_TCG_FAST_DISABLE_MOVSYS |
-                              IA64_TCG_FAST_DISABLE_ALLOC;
+                              IA64_TCG_FAST_DISABLE_ALLOC |
+                              IA64_TCG_FAST_DISABLE_UPPER_GR |
+                              IA64_TCG_FAST_DISABLE_PREDICATE |
+                              IA64_TCG_FAST_DISABLE_MOVL |
+                              IA64_TCG_FAST_DISABLE_MEMORY_CLASS |
+                              IA64_TCG_FAST_DISABLE_FP;
                 }
             }
             g_strfreev(parts);
@@ -376,10 +405,11 @@ static IA64TcgFallbackReason ia64_tcg_fast_ldst_fallback_reason(
     if (ia64_tcg_ldst_trace_enabled()) {
         return IA64_TCG_FALLBACK_FAST_LDST_TRACE;
     }
-    if (ldst->update_from_register) {
-        return IA64_TCG_FALLBACK_FAST_LDST_REGISTER_UPDATE;
-    }
     if (!ia64_tcg_fast_static_gr(ldst->base)) {
+        return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+    }
+    if (ldst->update_from_register &&
+        !ia64_tcg_fast_static_gr(ldst->update_source)) {
         return IA64_TCG_FALLBACK_FAST_STATIC_GR;
     }
 
@@ -418,9 +448,25 @@ static bool ia64_tcg_fast_set_base_update(IA64TcgFastSlot *slot,
     }
     ia64_tcg_fast_note_gr(slot, reg);
     if (reg != 0) {
-        slot->dest_mask |= 1ULL << reg;
+        if (reg < 64) {
+            slot->dest_mask |= 1ULL << reg;
+            slot->finalize_mask |= 1ULL << reg;
+        } else {
+            slot->dest_mask_hi |= 1ULL << (reg - 64);
+            slot->finalize_mask_hi |= 1ULL << (reg - 64);
+        }
     }
     return true;
+}
+
+static void ia64_tcg_fast_preserve_target_state(IA64TcgFastSlot *slot,
+                                                 uint32_t reg)
+{
+    if (reg < 64) {
+        slot->finalize_mask &= ~(UINT64_C(1) << reg);
+    } else {
+        slot->finalize_mask_hi &= ~(UINT64_C(1) << (reg - 64));
+    }
 }
 
 static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
@@ -431,8 +477,18 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
     if (ia64_tcg_ldst_trace_enabled()) {
         return false;
     }
-    if (ldst->update_from_register ||
-        !ia64_tcg_fast_add_source(slot, ldst->base)) {
+    if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_MEMORY_CLASS) &&
+        !((ldst->kind == IA64_LDST_IMM_LOAD &&
+           (ldst->memory_class == 0 || ldst->memory_class == 4 ||
+            ldst->memory_class == 5)) ||
+          (ldst->kind == IA64_LDST_IMM_STORE &&
+           (ldst->memory_class == 0x0c || ldst->memory_class == 0x0d)) ||
+          ldst->kind == IA64_LDST_IMM_PREFETCH)) {
+        return false;
+    }
+    if (!ia64_tcg_fast_add_source(slot, ldst->base) ||
+        (ldst->update_from_register &&
+         !ia64_tcg_fast_add_source(slot, ldst->update_source))) {
         return false;
     }
 
@@ -444,10 +500,19 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
             return false;
         }
         slot->op = IA64_TCG_FAST_OP_LDST_LOAD;
+        if (ldst->memory_class != 0 && ldst->memory_class != 4 &&
+            ldst->memory_class != 5) {
+            ia64_tcg_fast_preserve_target_state(slot, ldst->target);
+        }
         ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_LDST_LOAD_SHIFT);
         break;
     case IA64_LDST_IMM_STORE:
         if (!ia64_tcg_fast_ldst_store_class(ldst->memory_class) ||
+            !ia64_tcg_fast_static_gr(ldst->source)) {
+            return false;
+        }
+        ia64_tcg_fast_note_gr(slot, ldst->source);
+        if (ldst->memory_class != 0x0e &&
             !ia64_tcg_fast_add_source(slot, ldst->source)) {
             return false;
         }
@@ -468,8 +533,11 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
     }
 
     slot->base = ldst->base;
+    slot->update_source = ldst->update_source;
     slot->width = ldst->width;
+    slot->memory_class = ldst->memory_class;
     slot->base_update = ldst->base_update;
+    slot->update_from_register = ldst->update_from_register;
     slot->immediate = ldst->immediate;
     slot->slot_index = slot_index;
     return true;
@@ -492,12 +560,16 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     IA64ExtractInstruction extract;
     IA64DepositInstruction deposit;
     IA64IntegerExtendInstruction int_ext;
+    IA64FloatingMemoryInstruction fldst;
+    IA64FloatingCompareInstruction fcmp;
+    IA64FloatingClassInstruction fclass;
     uint8_t qp;
 
     memset(slot, 0, sizeof(*slot));
     slot->slot_index = slot_index;
     qp = ia64_slot_predicate(raw);
-    if (qp >= 16) {
+    if (qp >= 16 &&
+        ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) {
         return false;
     }
     slot->qualifying_predicate = qp;
@@ -765,7 +837,9 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     }
 
     if (ia64_decode_compare(type, raw, &cmp)) {
-        if (cmp.p1 == cmp.p2 || cmp.p1 >= 16 || cmp.p2 >= 16 ||
+        if (cmp.p1 == cmp.p2 ||
+            ((cmp.p1 >= 16 || cmp.p2 >= 16) &&
+             ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) ||
             (qp != 0 && cmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) ||
             !ia64_tcg_fast_add_source(slot, cmp.source3) ||
             (!cmp.source_immediate &&
@@ -789,7 +863,8 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
 
     if (ia64_decode_predicate_test(type, raw, &pred_test)) {
         if (pred_test.p1 == pred_test.p2 ||
-            pred_test.p1 >= 16 || pred_test.p2 >= 16 ||
+            ((pred_test.p1 >= 16 || pred_test.p2 >= 16) &&
+             ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) ||
             pred_test.immediate >= 64 ||
             (qp != 0 &&
              pred_test.write_kind == IA64_PRED_WRITE_UNCONDITIONAL) ||
@@ -913,6 +988,66 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
         return true;
     }
 
+    if (ia64_decode_floating_memory(type, raw, &fldst)) {
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_FP)) {
+            return false;
+        }
+        if (!ia64_tcg_fast_add_source(slot, fldst.base) ||
+            (fldst.update_from_register &&
+             !ia64_tcg_fast_add_source(slot, fldst.update_source)) ||
+            (fldst.base_update &&
+             !ia64_tcg_fast_set_base_update(slot, fldst.base))) {
+            return false;
+        }
+        if (fldst.base_update) {
+            ia64_tcg_fast_preserve_target_state(slot, fldst.base);
+        }
+        slot->op = IA64_TCG_FAST_OP_FP_SLOT;
+        slot->slot_type = type;
+        slot->raw = raw;
+        slot->base = fldst.base;
+        return true;
+    }
+
+    if (ia64_decode_floating_compare(type, raw, &fcmp)) {
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_FP) ||
+            fcmp.p1 == fcmp.p2 ||
+            (qp != 0 &&
+             fcmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_FP_SLOT;
+        slot->slot_type = type;
+        slot->raw = raw;
+        return true;
+    }
+
+    if (ia64_decode_floating_class(type, raw, &fclass)) {
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_FP) ||
+            fclass.p1 == fclass.p2 ||
+            (qp != 0 &&
+             fclass.write_kind == IA64_PRED_WRITE_UNCONDITIONAL)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_FP_SLOT;
+        slot->slot_type = type;
+        slot->raw = raw;
+        return true;
+    }
+
+    if (ia64_slot_is_f_reciprocal_approx(type, raw) ||
+        ia64_slot_is_f_misc(type, raw) ||
+        ia64_slot_is_f_multiply_add(type, raw) ||
+        ia64_slot_is_f_select_or_xma(type, raw)) {
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_FP)) {
+            return false;
+        }
+        slot->op = IA64_TCG_FAST_OP_FP_SLOT;
+        slot->slot_type = type;
+        slot->raw = raw;
+        return true;
+    }
+
     if (ia64_decode_ldst_immediate(type, raw, &ldst) &&
         ia64_tcg_build_fast_ldst_slot(&ldst, slot_index, slot, fast)) {
         return true;
@@ -933,11 +1068,10 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     IA64ExtractInstruction extract;
     IA64DepositInstruction deposit;
     IA64IntegerExtendInstruction int_ext;
+    IA64FloatingMemoryInstruction fldst;
+    IA64FloatingCompareInstruction fcmp;
+    IA64FloatingClassInstruction fclass;
     uint8_t qp = ia64_slot_predicate(raw);
-
-    if (qp >= 16) {
-        return IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT;
-    }
 
     if (ia64_insn_slot_supported(type, raw) ||
         ia64_slot_is_i_nop(type, raw)) {
@@ -1080,7 +1214,7 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     }
 
     if (ia64_decode_compare(type, raw, &cmp)) {
-        if (cmp.p1 == cmp.p2 || cmp.p1 >= 16 || cmp.p2 >= 16) {
+        if (cmp.p1 == cmp.p2) {
             return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
         }
         if (qp != 0 &&
@@ -1096,9 +1230,7 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     }
 
     if (ia64_decode_predicate_test(type, raw, &pred_test)) {
-        if (pred_test.p1 == pred_test.p2 ||
-            pred_test.p1 >= 16 || pred_test.p2 >= 16 ||
-            pred_test.immediate >= 64) {
+        if (pred_test.p1 == pred_test.p2 || pred_test.immediate >= 64) {
             return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
         }
         if (qp != 0 &&
@@ -1172,6 +1304,42 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
         return IA64_TCG_FALLBACK_NONE;
     }
 
+    if (ia64_decode_floating_memory(type, raw, &fldst)) {
+        if (!ia64_tcg_fast_static_gr(fldst.base) ||
+            (fldst.update_from_register &&
+             !ia64_tcg_fast_static_gr(fldst.update_source))) {
+            return IA64_TCG_FALLBACK_FAST_STATIC_GR;
+        }
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_floating_compare(type, raw, &fcmp)) {
+        if (fcmp.p1 == fcmp.p2) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        return qp != 0 &&
+               fcmp.write_kind == IA64_PRED_WRITE_UNCONDITIONAL
+            ? IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT
+            : IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_decode_floating_class(type, raw, &fclass)) {
+        if (fclass.p1 == fclass.p2) {
+            return IA64_TCG_FALLBACK_FAST_UNSUPPORTED_SLOT;
+        }
+        return qp != 0 &&
+               fclass.write_kind == IA64_PRED_WRITE_UNCONDITIONAL
+            ? IA64_TCG_FALLBACK_FAST_PREDICATED_SLOT
+            : IA64_TCG_FALLBACK_NONE;
+    }
+
+    if (ia64_slot_is_f_reciprocal_approx(type, raw) ||
+        ia64_slot_is_f_misc(type, raw) ||
+        ia64_slot_is_f_multiply_add(type, raw) ||
+        ia64_slot_is_f_select_or_xma(type, raw)) {
+        return IA64_TCG_FALLBACK_NONE;
+    }
+
     if (ia64_decode_ldst_immediate(type, raw, &ldst)) {
         return ia64_tcg_fast_ldst_fallback_reason(&ldst, slot_index);
     }
@@ -1186,10 +1354,15 @@ static bool ia64_tcg_fast_slot_is_ldst(const IA64TcgFastSlot *slot)
 }
 
 static bool ia64_tcg_fast_slot_has_prior_base_dependency(
-    const IA64TcgFastSlot *slot, uint64_t prior_dest_mask)
+    const IA64TcgFastSlot *slot, uint64_t prior_dest_mask,
+    uint64_t prior_dest_mask_hi)
 {
-    return ia64_tcg_fast_slot_is_ldst(slot) && slot->base != 0 &&
-           (prior_dest_mask & (1ULL << slot->base)) != 0;
+    if (!ia64_tcg_fast_slot_is_ldst(slot) || slot->base == 0) {
+        return false;
+    }
+    return slot->base < 64
+        ? (prior_dest_mask & (1ULL << slot->base)) != 0
+        : (prior_dest_mask_hi & (1ULL << (slot->base - 64))) != 0;
 }
 
 static bool ia64_tcg_bundle_has_ldst_base_dependency(
@@ -1198,6 +1371,7 @@ static bool ia64_tcg_bundle_has_ldst_base_dependency(
     IA64TcgFastBundle scratch;
     IA64TcgFastSlot slot;
     uint64_t prior_dest_mask = 0;
+    uint64_t prior_dest_mask_hi = 0;
 
     memset(&scratch, 0, sizeof(scratch));
     for (int i = 0; i < IA64_SLOT_COUNT; i++) {
@@ -1206,10 +1380,12 @@ static bool ia64_tcg_bundle_has_ldst_base_dependency(
             return false;
         }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&slot,
-                                                         prior_dest_mask)) {
+                                                         prior_dest_mask,
+                                                         prior_dest_mask_hi)) {
             return true;
         }
         prior_dest_mask |= slot.dest_mask;
+        prior_dest_mask_hi |= slot.dest_mask_hi;
     }
 
     return false;
@@ -1229,6 +1405,7 @@ IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
 {
     IA64TcgTbBoundary boundary;
     IA64TcgFallbackReason reason;
+    IA64TcgFastBundle fast;
     bool has_ldst_memory_access = false;
 
     if (!bundle || !bundle->valid) {
@@ -1242,7 +1419,9 @@ IA64TcgFallbackReason ia64_tcg_fallback_reason_for_bundle(
     }
 
     if (bundle->info->long_immediate) {
-        return IA64_TCG_FALLBACK_FAST_LONG_IMMEDIATE;
+        return ia64_tcg_build_fast_bundle(bundle, &fast)
+            ? IA64_TCG_FALLBACK_RUNTIME_GUARD
+            : IA64_TCG_FALLBACK_FAST_LONG_IMMEDIATE;
     }
 
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
@@ -1272,12 +1451,61 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast)
 {
     uint64_t prior_dest_mask = 0;
+    uint64_t prior_dest_mask_hi = 0;
 
-    if (!bundle || !fast || !bundle->valid || bundle->info->long_immediate) {
+    if (!bundle || !fast || !bundle->valid) {
         return false;
     }
 
     memset(fast, 0, sizeof(*fast));
+    if (bundle->info->long_immediate) {
+        IA64TcgFastSlot *lx = &fast->slot[1];
+        uint64_t l_raw = bundle->slot[1];
+        uint64_t x_raw = bundle->slot[2];
+
+        if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_MOVL) ||
+            !ia64_tcg_build_fast_slot(bundle->info->slot_type[0],
+                                      bundle->slot[0], 0,
+                                      &fast->slot[0], fast)) {
+            return false;
+        }
+        fast->slot_count++;
+        fast->source_nat_mask = fast->slot[0].source_nat_mask;
+        fast->source_nat_mask_hi = fast->slot[0].source_nat_mask_hi;
+        fast->dest_mask = fast->slot[0].dest_mask;
+        fast->dest_mask_hi = fast->slot[0].dest_mask_hi;
+        fast->finalize_mask = fast->slot[0].finalize_mask;
+        fast->finalize_mask_hi = fast->slot[0].finalize_mask_hi;
+
+        memset(lx, 0, sizeof(*lx));
+        lx->slot_index = 1;
+        lx->qualifying_predicate = ia64_slot_predicate(x_raw);
+        if (ia64_slot_pair_is_lx_movl(l_raw, x_raw)) {
+            if (!ia64_tcg_fast_set_target(lx, (x_raw >> 6) & 0x7f)) {
+                return false;
+            }
+            lx->op = IA64_TCG_FAST_OP_MOVL;
+            lx->immediate = (int64_t)ia64_lx_movl_imm64(l_raw, x_raw);
+            ia64_tcg_fast_count_op(
+                fast, IA64_PERF_FAST_COUNT_INTEGER_MISC_SHIFT);
+        } else if (ia64_slot_pair_is_lx_nop_or_hint(l_raw, x_raw)) {
+            lx->op = IA64_TCG_FAST_OP_NOP;
+            ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_NOP_SHIFT);
+        } else {
+            return false;
+        }
+        fast->slot_count++;
+        fast->dest_mask |= lx->dest_mask;
+        fast->dest_mask_hi |= lx->dest_mask_hi;
+        fast->finalize_mask |= lx->finalize_mask;
+        fast->finalize_mask_hi |= lx->finalize_mask_hi;
+
+        fast->slot[2].op = IA64_TCG_FAST_OP_NOP;
+        fast->slot[2].slot_index = 2;
+        fast->slot_count++;
+        return true;
+    }
+
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
                                       bundle->slot[slot],
@@ -1286,13 +1514,19 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
             return false;
         }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&fast->slot[slot],
-                                                         prior_dest_mask)) {
+                                                         prior_dest_mask,
+                                                         prior_dest_mask_hi)) {
             return false;
         }
         fast->slot_count++;
         fast->source_nat_mask |= fast->slot[slot].source_nat_mask;
+        fast->source_nat_mask_hi |= fast->slot[slot].source_nat_mask_hi;
         fast->dest_mask |= fast->slot[slot].dest_mask;
+        fast->dest_mask_hi |= fast->slot[slot].dest_mask_hi;
+        fast->finalize_mask |= fast->slot[slot].finalize_mask;
+        fast->finalize_mask_hi |= fast->slot[slot].finalize_mask_hi;
         prior_dest_mask |= fast->slot[slot].dest_mask;
+        prior_dest_mask_hi |= fast->slot[slot].dest_mask_hi;
     }
 
     return fast->slot_count == IA64_SLOT_COUNT;
@@ -1456,6 +1690,7 @@ static bool ia64_tcg_build_direct_branch_prefix(
     const IA64DecodedBundle *bundle, IA64TcgFastBundle *prefix)
 {
     uint64_t prior_dest_mask = 0;
+    uint64_t prior_dest_mask_hi = 0;
 
     /*
      * Prefix slots run in program order before the branch condition is
@@ -1473,13 +1708,19 @@ static bool ia64_tcg_build_direct_branch_prefix(
             return false;
         }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&prefix->slot[slot],
-                                                         prior_dest_mask)) {
+                                                         prior_dest_mask,
+                                                         prior_dest_mask_hi)) {
             return false;
         }
         prefix->slot_count++;
         prefix->source_nat_mask |= prefix->slot[slot].source_nat_mask;
+        prefix->source_nat_mask_hi |= prefix->slot[slot].source_nat_mask_hi;
         prefix->dest_mask |= prefix->slot[slot].dest_mask;
+        prefix->dest_mask_hi |= prefix->slot[slot].dest_mask_hi;
+        prefix->finalize_mask |= prefix->slot[slot].finalize_mask;
+        prefix->finalize_mask_hi |= prefix->slot[slot].finalize_mask_hi;
         prior_dest_mask |= prefix->slot[slot].dest_mask;
+        prior_dest_mask_hi |= prefix->slot[slot].dest_mask_hi;
     }
 
     return true;
@@ -1548,19 +1789,20 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
      * Keep branch lowering auditably small: only bundles with a final simple
      * relative branch, counted-loop branch, call, plain indirect branch, or
      * return and two safe fast-prefix slots can use direct TCG control flow.
-     * rfi, cover/clrrrb/bsw/epc forms, modulo-scheduled loop branches, and
-     * rotating predicate reads stay on the helper path.
+     * rfi, cover/clrrrb/bsw/epc forms and modulo-scheduled loop branches stay
+     * on the helper path; rotating predicate reads are mapped at runtime.
      */
     raw = bundle->slot[2];
     predicate = ia64_slot_predicate(raw);
+    if (predicate >= 16 &&
+        ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) {
+        return false;
+    }
     if (ia64_slot_is_b_branch_relative(bundle->info->slot_type[2], raw)) {
         btype = (raw >> 6) & 0x7;
         switch (btype) {
         case 0:
         case 1:
-            if (predicate >= 16) {
-                return false;
-            }
             kind = IA64_TCG_DIRECT_BRANCH_COND;
             break;
         case 5:
@@ -1574,9 +1816,6 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
         }
     } else if (ia64_slot_is_b_call_relative(bundle->info->slot_type[2],
                                             raw)) {
-        if (predicate >= 16) {
-            return false;
-        }
         kind = IA64_TCG_DIRECT_BRANCH_CALL;
         call_branch_reg = (raw >> 6) & 0x7;
     } else if (ia64_slot_is_b_indirect_branch(bundle->info->slot_type[2],
@@ -1585,7 +1824,6 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
         uint8_t x6 = (raw >> 27) & 0x3f;
 
         if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_INDIRECT) ||
-            predicate >= 16 ||
             !(major == 0x1 ||
               (major == 0x0 && (x6 == 0x20 || x6 == 0x21)))) {
             return false;

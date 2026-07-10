@@ -296,10 +296,12 @@ static uint32_t ia64_lookup_ptr_chain_ok(CPUIA64State *env)
     return chain_ok ? 1 : 0;
 }
 
-static void ia64_alat_invalidate_gr_mask(CPUIA64State *env, uint64_t dest_mask)
+static void ia64_alat_invalidate_gr_mask(CPUIA64State *env,
+                                         uint64_t dest_mask,
+                                         uint64_t dest_mask_hi)
 {
     dest_mask &= ~1ULL;
-    if (dest_mask == 0 || env->alat.valid_mask == 0) {
+    if ((dest_mask | dest_mask_hi) == 0 || env->alat.valid_mask == 0) {
         return;
     }
 
@@ -309,9 +311,16 @@ static void ia64_alat_invalidate_gr_mask(CPUIA64State *env, uint64_t dest_mask)
         ia64_alat_invalidate_gr(env, reg);
         dest_mask &= dest_mask - 1;
     }
+    while (dest_mask_hi && env->alat.valid_mask != 0) {
+        unsigned reg = 64 + ctz64(dest_mask_hi);
+
+        ia64_alat_invalidate_gr(env, reg);
+        dest_mask_hi &= dest_mask_hi - 1;
+    }
 }
 
-static void ia64_gr_nat_clear_mask(CPUIA64State *env, uint64_t dest_mask)
+static void ia64_gr_nat_clear_mask(CPUIA64State *env, uint64_t dest_mask,
+                                   uint64_t dest_mask_hi)
 {
     dest_mask &= ~1ULL;
     while (dest_mask != 0) {
@@ -320,9 +329,16 @@ static void ia64_gr_nat_clear_mask(CPUIA64State *env, uint64_t dest_mask)
         ia64_write_gr_nat(env, reg, false);
         dest_mask &= dest_mask - 1;
     }
+    while (dest_mask_hi != 0) {
+        unsigned reg = 64 + ctz64(dest_mask_hi);
+
+        ia64_write_gr_nat(env, reg, false);
+        dest_mask_hi &= dest_mask_hi - 1;
+    }
 }
 
-uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask)
+uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask,
+                                 uint64_t source_mask_hi)
 {
     source_mask &= ~1ULL;
     while (source_mask != 0) {
@@ -333,19 +349,127 @@ uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask)
         }
         source_mask &= source_mask - 1;
     }
+    while (source_mask_hi != 0) {
+        unsigned reg = 64 + ctz64(source_mask_hi);
+
+        if (ia64_read_gr_nat(env, reg)) {
+            return 1;
+        }
+        source_mask_hi &= source_mask_hi - 1;
+    }
     return 0;
 }
 
-void HELPER(fast_gr_alat_invalidate)(CPUIA64State *env, uint64_t dest_mask)
+void HELPER(fast_gr_alat_invalidate)(CPUIA64State *env, uint64_t dest_mask,
+                                     uint64_t dest_mask_hi)
 {
-    ia64_alat_invalidate_gr_mask(env, dest_mask);
+    ia64_alat_invalidate_gr_mask(env, dest_mask, dest_mask_hi);
+}
+
+void HELPER(fast_gr_finish_hi)(CPUIA64State *env, uint64_t dest_mask_hi)
+{
+    ia64_alat_invalidate_gr_mask(env, 0, dest_mask_hi);
+    ia64_gr_nat_clear_mask(env, 0, dest_mask_hi);
 }
 
 #include "interp-ldst.c"
 
+uint32_t HELPER(fast_ldst_prepare)(CPUIA64State *env, uint64_t address,
+                                    uint32_t target, uint32_t width,
+                                    uint32_t memory_class)
+{
+    if (memory_class == 8 || memory_class == 9 || memory_class == 0x0a) {
+        uint64_t resolved;
+        bool physical;
+        bool clear = memory_class != 9;
+
+        ia64_alat_resolve_address(env, address, MMU_DATA_LOAD,
+                                  &resolved, &physical);
+        if (ia64_alat_check_gr(env, target, resolved, width,
+                               physical, clear)) {
+            return 1;
+        }
+    }
+    if ((memory_class == 1 || memory_class == 3) &&
+        ia64_control_speculative_load_defer(env, memory_class, false,
+                                            address, NULL)) {
+        ia64_write_gr_nat(env, target, true);
+        ia64_alat_invalidate_gr(env, target);
+        return 1;
+    }
+    return 0;
+}
+
+void HELPER(fast_ldst_complete)(CPUIA64State *env, uint64_t address,
+                                uint32_t target, uint32_t width,
+                                uint32_t memory_class)
+{
+    ia64_write_gr_nat(env, target, false);
+    ia64_alat_invalidate_gr(env, target);
+    if (memory_class == 2 || memory_class == 3 || memory_class == 9) {
+        ia64_alat_record_load(env, target, address, width);
+    }
+}
+
 #include "rse.c"
 
 #include "fpu.c"
+
+void HELPER(fast_fp_slot)(CPUIA64State *env, uint32_t type_raw,
+                          uint64_t raw, uint32_t slot)
+{
+    IA64SlotType type = type_raw;
+    IA64FloatingMemoryInstruction fldst;
+    IA64FloatingCompareInstruction fcmp;
+    IA64FloatingClassInstruction fclass;
+    bool fp_high;
+    bool executed = false;
+    bool memory = false;
+
+    ia64_env_set_ri(env, slot);
+    env->current_slot_valid = true;
+    env->current_slot_ip = env->ip;
+    env->current_slot_ri = slot;
+    env->current_slot_type = type;
+    env->current_slot_raw = raw;
+    if (ia64_slot_raises_disabled_fp(env, type, raw, &fp_high)) {
+        uint64_t handler_ip;
+
+        ia64_deliver_disabled_fp_interruption(env, fp_high, &handler_ip);
+        cpu_loop_exit(env_cpu(env));
+    }
+
+    if (ia64_slot_is_f_reciprocal_approx(type, raw)) {
+        executed = ia64_exec_f_reciprocal_approx(env, raw);
+    }
+    if (!executed && ia64_slot_is_f_misc(type, raw)) {
+        executed = ia64_exec_f_misc(env, raw);
+    }
+    if (!executed && ia64_slot_is_f_multiply_add(type, raw)) {
+        executed = ia64_exec_f_multiply_add(env, raw);
+    }
+    if (!executed && ia64_slot_is_f_select_or_xma(type, raw)) {
+        executed = ia64_exec_f_select_or_xma(env, raw);
+    }
+    if (!executed && ia64_decode_floating_compare(type, raw, &fcmp)) {
+        executed = ia64_exec_floating_compare_qualified(env, &fcmp, true);
+    }
+    if (!executed && ia64_decode_floating_class(type, raw, &fclass)) {
+        executed = ia64_exec_floating_class_qualified(env, &fclass, true);
+    }
+    if (!executed && ia64_decode_floating_memory(type, raw, &fldst)) {
+        executed = exec_floating_memory(env, &fldst);
+        memory = true;
+    }
+
+    if (!executed) {
+        cpu_abort(env_cpu(env),
+                  "IA-64 fast FP slot decode mismatch at IP=0x%016" PRIx64
+                  " slot=%u type=%u raw=0x%011" PRIx64 "\n",
+                  env->ip, slot, type_raw, raw);
+    }
+    IA64_PERF_INC(memory ? IA64_PERF_OP_FLOAT_MEMORY : IA64_PERF_OP_FLOAT);
+}
 
 static bool exec_counted_store_loop(CPUIA64State *env,
                                     const IA64CountedStoreLoop *loop,
@@ -482,10 +606,10 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
 }
 
 void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
-                                uint64_t dest_mask)
+                                uint64_t dest_mask, uint64_t dest_mask_hi)
 {
-    ia64_alat_invalidate_gr_mask(env, dest_mask);
-    ia64_gr_nat_clear_mask(env, dest_mask);
+    ia64_alat_invalidate_gr_mask(env, dest_mask, dest_mask_hi);
+    ia64_gr_nat_clear_mask(env, dest_mask, dest_mask_hi);
     env->gr[0] = 0;
     ia64_finish_bundle(env, next_ip, 0);
 }
@@ -583,8 +707,8 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
-    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
-    ia64_gr_nat_clear_mask(env, prefix_dest_mask);
+    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask, 0);
+    ia64_gr_nat_clear_mask(env, prefix_dest_mask, 0);
     if (is_call) {
         /* env->ip still holds the call bundle; the return IP derives from it. */
         ia64_branch_call_effects(env, call_branch_reg, env->ip);
@@ -631,8 +755,8 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
         ia64_firmware_maybe_apply_linux_cmdline_append(env);
     }
 
-    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask);
-    ia64_gr_nat_clear_mask(env, prefix_dest_mask);
+    ia64_alat_invalidate_gr_mask(env, prefix_dest_mask, 0);
+    ia64_gr_nat_clear_mask(env, prefix_dest_mask, 0);
 
     /*
      * The return-frame fill below can touch the backing store and fault;
