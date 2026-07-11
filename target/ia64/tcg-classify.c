@@ -2388,6 +2388,90 @@ static bool ia64_tcg_build_direct_branch_prefix(
     return true;
 }
 
+bool ia64_tcg_build_speculation_check(const IA64DecodedBundle *bundle,
+                                      uint64_t pc,
+                                      IA64TcgSpecCheck *check)
+{
+    uint64_t prior_dest_mask = 0;
+    uint64_t prior_dest_mask_hi = 0;
+    int check_slot = -1;
+
+    if (!bundle || !check || !bundle->valid || bundle->info->long_immediate) {
+        return false;
+    }
+
+    memset(check, 0, sizeof(*check));
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        IA64SlotType type = bundle->info->slot_type[slot];
+        uint64_t raw = bundle->slot[slot];
+
+        if (ia64_slot_is_check_speculative(type, raw) ||
+            ia64_slot_is_m_check_advanced(type, raw)) {
+            if (check_slot >= 0) {
+                return false;
+            }
+            check_slot = slot;
+        }
+    }
+    if (check_slot < 0) {
+        return false;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        IA64TcgFastBundle slot_counts = { 0 };
+        IA64TcgFastSlot fast_slot;
+
+        if (slot == check_slot) {
+            continue;
+        }
+        if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
+                                      bundle->slot[slot], slot, &fast_slot,
+                                      &slot_counts) ||
+            fast_slot.op == IA64_TCG_FAST_OP_ALLOC ||
+            fast_slot.op == IA64_TCG_FAST_OP_FP_SLOT ||
+            ia64_tcg_fast_slot_has_prior_base_dependency(
+                &fast_slot, prior_dest_mask, prior_dest_mask_hi)) {
+            return false;
+        }
+        ia64_tcg_partial_add_fast_slot(&check->surrounding, &fast_slot,
+                                       slot_counts.op_counts);
+        prior_dest_mask |= fast_slot.dest_mask;
+        prior_dest_mask_hi |= fast_slot.dest_mask_hi;
+    }
+
+    check->raw = bundle->slot[check_slot];
+    check->slot = check_slot;
+    check->predicate = ia64_slot_predicate(check->raw);
+    check->fallthrough_ip = pc + IA64_BUNDLE_SIZE;
+    if (ia64_slot_is_check_speculative(
+            bundle->info->slot_type[check_slot], check->raw)) {
+        uint8_t x3 = (check->raw >> 33) & 0x7;
+
+        check->source = (check->raw >> 13) & 0x7f;
+        check->kind = bundle->info->slot_type[check_slot] == IA64_SLOT_TYPE_M &&
+                              x3 == 3
+                          ? IA64_TCG_SPEC_CHECK_FR_NATVAL
+                          : IA64_TCG_SPEC_CHECK_GR_NAT;
+        /* Rotating FR mapping is kept on the complete-bundle oracle. */
+        if (check->kind == IA64_TCG_SPEC_CHECK_FR_NATVAL &&
+            check->source >= 32) {
+            return false;
+        }
+        check->target_ip =
+            pc + ia64_check_speculative_displacement(check->raw);
+    } else {
+        uint8_t x3 = (check->raw >> 33) & 0x7;
+
+        check->source = (check->raw >> 6) & 0x7f;
+        check->clear = (x3 & 1) != 0;
+        check->kind = x3 >= 6 ? IA64_TCG_SPEC_CHECK_FR_ALAT
+                              : IA64_TCG_SPEC_CHECK_GR_ALAT;
+        check->target_ip = pc + ia64_branch_displacement(check->raw);
+    }
+
+    return check->target_ip != 0;
+}
+
 static uint8_t ia64_tcg_fast_bundle_nop_count(const IA64TcgFastBundle *fast)
 {
     unsigned count = ia64_perf_fast_count(fast->op_counts,

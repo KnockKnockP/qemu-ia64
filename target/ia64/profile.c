@@ -52,6 +52,7 @@ static const char * const ia64_profile_counter_names[] = {
     [IA64_PROFILE_BRANCH_INLINE_INDIRECT] = "branch.inline.indirect",
     [IA64_PROFILE_BRANCH_RSE_HELPER] = "branch.rse_helper",
     [IA64_PROFILE_BRANCH_REGION_FOLDED] = "branch.region.folded",
+    [IA64_PROFILE_SPEC_CHECK_INLINE] = "spec_check.inline",
     [IA64_PROFILE_EXIT_DIRECT_CHAIN] = "tb.exit.direct_chain",
     [IA64_PROFILE_EXIT_LOOKUP_PTR] = "tb.exit.lookup_ptr",
     [IA64_PROFILE_EXIT_MAIN_LOOP] = "tb.exit.main_loop",

@@ -275,6 +275,50 @@ static void test_state_changing_slots_end_tb(void)
     assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
 }
 
+static void test_speculation_check_plan(void)
+{
+    const uint64_t chk_s_m_r22_raw = 0x0220002c140ULL;
+    const uint64_t chk_s_f8_raw =
+        (1ULL << 37) | (3ULL << 33) | (8ULL << 13) | (5ULL << 6);
+    const uint64_t chk_s_f40_raw =
+        (1ULL << 37) | (3ULL << 33) | (40ULL << 13) | (5ULL << 6);
+    const uint64_t chk_a_clr_r10_raw = 0x00a00018280ULL;
+    IA64DecodedBundle bundle;
+    IA64TcgSpecCheck check;
+
+    bundle = make_bundle(0x00, chk_s_m_r22_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_true(ia64_tcg_build_speculation_check(&bundle, 0x1000,
+                                                  &check));
+    g_assert_cmpint(check.kind, ==, IA64_TCG_SPEC_CHECK_GR_NAT);
+    g_assert_cmpuint(check.slot, ==, 0);
+    g_assert_cmpuint(check.source, ==, 22);
+    g_assert_cmphex(check.target_ip, ==, 0x1050);
+    g_assert_cmphex(check.fallthrough_ip, ==, 0x1010);
+    g_assert_cmpuint(check.surrounding.slot_count, ==, 2);
+
+    bundle = make_bundle(0x00, chk_s_f8_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_true(ia64_tcg_build_speculation_check(&bundle, 0x2000,
+                                                  &check));
+    g_assert_cmpint(check.kind, ==, IA64_TCG_SPEC_CHECK_FR_NATVAL);
+    g_assert_cmpuint(check.source, ==, 8);
+
+    bundle = make_bundle(0x00, chk_s_f40_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_false(ia64_tcg_build_speculation_check(&bundle, 0x2000,
+                                                   &check));
+
+    bundle = make_bundle(0x00, chk_a_clr_r10_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    g_assert_true(ia64_tcg_build_speculation_check(&bundle, 0x100eb30,
+                                                  &check));
+    g_assert_cmpint(check.kind, ==, IA64_TCG_SPEC_CHECK_GR_ALAT);
+    g_assert_cmpuint(check.source, ==, 10);
+    g_assert_true(check.clear);
+    g_assert_cmphex(check.target_ip, ==, 0x100ebf0);
+}
+
 static void test_fast_bundle_accepts_hot_integer_subset(void)
 {
     const uint64_t addl_r8_0_r0_raw = 0x12000000200ULL;
@@ -1374,6 +1418,8 @@ int main(int argc, char **argv)
                     test_break_and_branch_end_tb);
     g_test_add_func("/ia64-tcg-classify/state-changing-slots",
                     test_state_changing_slots_end_tb);
+    g_test_add_func("/ia64-tcg-classify/speculation-check-plan",
+                    test_speculation_check_plan);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-hot-integer-subset",
                     test_fast_bundle_accepts_hot_integer_subset);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-nop-add-immediate",

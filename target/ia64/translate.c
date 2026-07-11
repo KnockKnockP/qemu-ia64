@@ -397,6 +397,21 @@ static bool ia64_tr_inline_call_enabled(void)
     return enabled;
 }
 
+static bool ia64_tr_spec_check_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_SPEC_CHECK");
+
+        enabled = value == NULL ||
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
 static size_t ia64_tr_static_gr_offset(DisasContext *ctx, uint8_t reg)
 {
     if (reg >= 16 && reg < IA64_STATIC_GR_COUNT &&
@@ -2518,6 +2533,211 @@ static void ia64_tr_emit_inline_indirect_branch_exit(DisasContext *ctx,
     tcg_gen_exit_tb(NULL, 0);
 }
 
+static void ia64_tr_emit_chk_a_gr(const IA64TcgSpecCheck *check,
+                                  TCGLabel *recovery,
+                                  TCGLabel *fallthrough)
+{
+    TCGLabel *hit[IA64_ALAT_COUNT] = { NULL, };
+    TCGLabel *common_hit = check->clear ? NULL : gen_new_label();
+    TCGv_i32 valid_mask = tcg_temp_new_i32();
+
+    tcg_gen_ld_i32(valid_mask, tcg_env,
+                   offsetof(CPUIA64State, alat.valid_mask));
+    tcg_gen_brcondi_i32(TCG_COND_EQ, valid_mask, 0, recovery);
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        TCGLabel *next = gen_new_label();
+        TCGv_i32 valid = tcg_temp_new_i32();
+        TCGv_i32 target = tcg_temp_new_i32();
+        intptr_t entry = offsetof(CPUIA64State, alat.entries) +
+                         i * sizeof(IA64AlatEntry);
+
+        tcg_gen_andi_i32(valid, valid_mask, 1u << i);
+        tcg_gen_brcondi_i32(TCG_COND_EQ, valid, 0, next);
+        tcg_gen_ld8u_i32(target, tcg_env,
+                         entry + offsetof(IA64AlatEntry, target));
+        if (check->clear) {
+            hit[i] = gen_new_label();
+            tcg_gen_brcondi_i32(TCG_COND_EQ, target, check->source, hit[i]);
+        } else {
+            tcg_gen_brcondi_i32(TCG_COND_EQ, target, check->source,
+                                common_hit);
+        }
+        gen_set_label(next);
+    }
+    tcg_gen_br(recovery);
+
+    if (!check->clear) {
+        gen_set_label(common_hit);
+        tcg_gen_br(fallthrough);
+        return;
+    }
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        TCGv_i32 remaining = tcg_temp_new_i32();
+        intptr_t entry = offsetof(CPUIA64State, alat.entries) +
+                         i * sizeof(IA64AlatEntry);
+
+        gen_set_label(hit[i]);
+        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                        entry + offsetof(IA64AlatEntry, valid));
+        tcg_gen_andi_i32(remaining, valid_mask, ~(1u << i));
+        tcg_gen_st_i32(remaining, tcg_env,
+                       offsetof(CPUIA64State, alat.valid_mask));
+        tcg_gen_br(fallthrough);
+    }
+}
+
+static bool ia64_tr_translate_speculation_check(
+    DisasContext *ctx, const IA64DecodedBundle *bundle, uint64_t pc)
+{
+    IA64TcgSpecCheck check;
+    TCGLabel *fallback = NULL;
+    TCGLabel *done = NULL;
+    TCGLabel *fallthrough = gen_new_label();
+    TCGLabel *recovery = gen_new_label();
+    TCGv_i64 ldst_address[IA64_SLOT_COUNT] = { NULL, };
+    TCGv_i64 runtime_dest_mask = tcg_temp_new_i64();
+    TCGv_i64 runtime_dest_mask_hi = tcg_temp_new_i64();
+    bool cache_suspended;
+    bool has_ldst;
+    bool needs_fallback;
+
+    if (!ia64_tr_spec_check_enabled() || !ia64_tr_use_zero_helper_path() ||
+        ia64_tcg_tb_flags_ri(ctx->base.tb->flags) != 0 ||
+        !ia64_tcg_build_speculation_check(bundle, pc, &check)) {
+        return false;
+    }
+    has_ldst = ia64_tr_fast_bundle_has_ldst(&check.surrounding);
+    if (has_ldst && !ia64_tcg_fast_ldst_memory_inline_enabled()) {
+        return false;
+    }
+
+    ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_ZERO_HELPER, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_SPEC_CHECK_INLINE, 1);
+    cache_suspended = ctx->state_cache_active;
+    if (cache_suspended) {
+        ia64_tr_suspend_state_cache(ctx);
+    }
+    needs_fallback = ia64_tr_fast_bundle_needs_runtime_fallback(
+                         &check.surrounding) ||
+                     (check.kind == IA64_TCG_SPEC_CHECK_GR_NAT &&
+                      check.source >= IA64_STATIC_GR_COUNT);
+    if (needs_fallback) {
+        fallback = gen_new_label();
+        done = gen_new_label();
+        ia64_tr_emit_fast_bundle_guards(ctx, &check.surrounding, fallback,
+                                        ldst_address, true);
+        if (check.kind == IA64_TCG_SPEC_CHECK_GR_NAT &&
+            check.source >= IA64_STATIC_GR_COUNT) {
+            TCGv_i32 sor = tcg_temp_new_i32();
+
+            tcg_gen_ld_i32(sor, tcg_env, offsetof(CPUIA64State, rse.sor));
+            tcg_gen_brcondi_i32(TCG_COND_NE, sor, 0, fallback);
+        }
+    } else if (has_ldst) {
+        for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+            IA64TcgFastOp op = check.surrounding.slot[slot].op;
+
+            if (slot != check.slot &&
+                (op == IA64_TCG_FAST_OP_LDST_LOAD ||
+                 op == IA64_TCG_FAST_OP_LDST_STORE)) {
+                ldst_address[slot] = tcg_temp_new_i64();
+                ia64_tr_load_static_gr(
+                    ctx, ldst_address[slot],
+                    check.surrounding.slot[slot].base);
+            }
+        }
+    }
+
+    tcg_gen_movi_i64(runtime_dest_mask, 0);
+    tcg_gen_movi_i64(runtime_dest_mask_hi, 0);
+    if (has_ldst) {
+        ia64_tr_emit_can_do_io();
+    }
+    if (ia64_tr_fast_bundle_has_required_helper(&check.surrounding)) {
+        ia64_tr_commit_ip(pc);
+    }
+    ctx->inline_gr_nat_clear = true;
+    for (int slot = 0; slot < check.slot; slot++) {
+        ia64_tr_emit_fast_slot(ctx, &check.surrounding.slot[slot],
+                               ldst_address[slot], runtime_dest_mask,
+                               runtime_dest_mask_hi);
+    }
+    ia64_tr_emit_gr_alat_invalidate(runtime_dest_mask,
+                                    runtime_dest_mask_hi, pc);
+    tcg_gen_movi_i64(runtime_dest_mask, 0);
+    tcg_gen_movi_i64(runtime_dest_mask_hi, 0);
+
+    if (check.predicate != 0) {
+        TCGv_i64 predicate = tcg_temp_new_i64();
+
+        ia64_tr_load_predicate(ctx, predicate, check.predicate);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, predicate, 0, fallthrough);
+    }
+    switch (check.kind) {
+    case IA64_TCG_SPEC_CHECK_GR_NAT:
+    {
+        TCGv_i64 nat = tcg_temp_new_i64();
+
+        ia64_tr_read_static_gr_nat(ctx, nat, check.source);
+        tcg_gen_brcondi_i64(TCG_COND_NE, nat, 0, recovery);
+        tcg_gen_br(fallthrough);
+        break;
+    }
+    case IA64_TCG_SPEC_CHECK_FR_NATVAL:
+    {
+        TCGLabel *not_natval = gen_new_label();
+        TCGv_i64 significand = tcg_temp_new_i64();
+        TCGv_i64 exponent = tcg_temp_new_i64();
+        intptr_t fr = offsetof(CPUIA64State, fr) +
+                      check.source * sizeof(IA64FloatReg);
+
+        tcg_gen_ld_i64(significand, tcg_env,
+                       fr + offsetof(IA64FloatReg, raw[0]));
+        tcg_gen_brcondi_i64(TCG_COND_NE, significand, 0, not_natval);
+        tcg_gen_ld_i64(exponent, tcg_env,
+                       fr + offsetof(IA64FloatReg, raw[1]));
+        tcg_gen_andi_i64(exponent, exponent, 0x3ffff);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, exponent, 0x1fffe, recovery);
+        gen_set_label(not_natval);
+        tcg_gen_br(fallthrough);
+        break;
+    }
+    case IA64_TCG_SPEC_CHECK_GR_ALAT:
+        ia64_tr_emit_chk_a_gr(&check, recovery, fallthrough);
+        break;
+    case IA64_TCG_SPEC_CHECK_FR_ALAT:
+        /* The modeled FR ALAT is intentionally empty. */
+        tcg_gen_br(recovery);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    gen_set_label(recovery);
+    ia64_tr_note_fast_bundle(ctx);
+    ia64_tr_emit_inline_direct_branch_exit(ctx, check.target_ip, 0, false);
+
+    gen_set_label(fallthrough);
+    for (int slot = check.slot + 1; slot < IA64_SLOT_COUNT; slot++) {
+        ia64_tr_emit_fast_slot(ctx, &check.surrounding.slot[slot],
+                               ldst_address[slot], runtime_dest_mask,
+                               runtime_dest_mask_hi);
+    }
+    ctx->inline_gr_nat_clear = false;
+    ia64_tr_emit_gr_alat_invalidate(runtime_dest_mask,
+                                    runtime_dest_mask_hi, pc);
+    ia64_tr_note_fast_bundle(ctx);
+
+    if (needs_fallback) {
+        tcg_gen_br(done);
+        gen_set_label(fallback);
+        ia64_tr_emit_exec_bundle_lookup_ptr(ctx, bundle, pc);
+        gen_set_label(done);
+    }
+    ia64_tr_resume_state_cache(ctx, cache_suspended);
+    return true;
+}
+
 /*
  * Enter the common zero-local IA-64 call frame without crossing into C.
  * Calls with a nonzero local partition take the compact correctness side exit
@@ -2978,6 +3198,10 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         trace_ia64_tcg_tb_boundary(pc, ia64_tcg_tb_boundary_name(boundary));
         IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
         ctx->base.is_jmp = DISAS_EXIT;
+        return;
+    }
+    if (boundary == IA64_TCG_TB_BOUNDARY_SPECULATION_CHECK &&
+        ia64_tr_translate_speculation_check(ctx, &bundle, pc)) {
         return;
     }
     if (boundary == IA64_TCG_TB_BOUNDARY_BRANCH) {

@@ -357,6 +357,29 @@ void ia64_tcg_fallback_unpack_branch(uint64_t desc,
 IA64TcgFallbackPlan ia64_tcg_fallback_plan_for_bundle(
     const IA64DecodedBundle *bundle);
 
+typedef enum IA64TcgSpecCheckKind {
+    IA64_TCG_SPEC_CHECK_GR_NAT,
+    IA64_TCG_SPEC_CHECK_FR_NATVAL,
+    IA64_TCG_SPEC_CHECK_GR_ALAT,
+    IA64_TCG_SPEC_CHECK_FR_ALAT,
+} IA64TcgSpecCheckKind;
+
+typedef struct IA64TcgSpecCheck {
+    IA64TcgFastBundle surrounding;
+    uint64_t target_ip;
+    uint64_t fallthrough_ip;
+    uint64_t raw;
+    IA64TcgSpecCheckKind kind;
+    uint8_t slot;
+    uint8_t predicate;
+    uint8_t source;
+    bool clear;
+} IA64TcgSpecCheck;
+
+bool ia64_tcg_build_speculation_check(const IA64DecodedBundle *bundle,
+                                      uint64_t pc,
+                                      IA64TcgSpecCheck *check);
+
 typedef enum IA64TcgDirectBranchKind {
     IA64_TCG_DIRECT_BRANCH_COND,
     IA64_TCG_DIRECT_BRANCH_CLOOP,
