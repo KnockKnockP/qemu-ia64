@@ -30,14 +30,60 @@
      IA64_PSR_PK_BIT | IA64_PSR_DT_BIT | IA64_PSR_RT_BIT | \
      IA64_PSR_MC_BIT | IA64_PSR_IT_BIT)
 
-static bool ia64_exception_trace_enabled(void)
+static bool ia64_exception_trace_enabled(uint64_t source_ip)
 {
-    static int enabled = -1;
+    static int initialized;
+    static bool enabled;
+    static bool filtered;
+    static uint64_t filter_ip;
 
-    if (enabled < 0) {
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_EXCEPTION_TRACE_IP");
+
         enabled = g_getenv("VIBTANIUM_EXCEPTION_TRACE") != NULL;
+        if (value != NULL && *value != '\0') {
+            char *endptr = NULL;
+
+            filter_ip = g_ascii_strtoull(value, &endptr, 0);
+            filtered = endptr != value && *endptr == '\0';
+            enabled = true;
+        }
+        initialized = 1;
     }
-    return enabled != 0;
+    return enabled && (!filtered || source_ip == filter_ip);
+}
+
+static void ia64_exception_trace_registers(CPUIA64State *env,
+                                           uint64_t source_ip)
+{
+    fprintf(stderr,
+            "[ia64-exception-state] ip=0x%016" PRIx64
+            " cfm=0x%016" PRIx64 " pr=0x%016" PRIx64
+            " slot-valid=%u slot-ip=0x%016" PRIx64
+            " slot-ri=%u slot-type=%u slot-raw=0x%011" PRIx64
+            " bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64
+            " unat=0x%016" PRIx64 " rnat=0x%016" PRIx64 "\n",
+            source_ip, env->cfm, env->pr, env->current_slot_valid,
+            env->current_slot_ip, env->current_slot_ri,
+            env->current_slot_type, env->current_slot_raw,
+            env->ar[IA64_AR_BSP], env->ar[IA64_AR_BSPSTORE],
+            env->ar[IA64_AR_UNAT], env->ar[IA64_AR_RNAT]);
+    for (unsigned base = 0; base < IA64_GR_COUNT; base += 8) {
+        fprintf(stderr, "[ia64-exception-gr] ip=0x%016" PRIx64,
+                source_ip);
+        for (unsigned reg = base; reg < MIN(base + 8, IA64_GR_COUNT); reg++) {
+            fprintf(stderr, " r%u=0x%016" PRIx64 "%s", reg,
+                    ia64_read_gr(env, reg),
+                    ia64_read_gr_nat(env, reg) ? "(nat)" : "");
+        }
+        fputc('\n', stderr);
+    }
+    fprintf(stderr, "[ia64-exception-br] ip=0x%016" PRIx64,
+            source_ip);
+    for (unsigned reg = 0; reg < IA64_BR_COUNT; reg++) {
+        fprintf(stderr, " b%u=0x%016" PRIx64, reg, env->br[reg]);
+    }
+    fputc('\n', stderr);
 }
 
 static bool ia64_user_exception_trace_enabled(void)
@@ -400,8 +446,11 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     data_nested_tlb = collection_disabled &&
                       (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
                        kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS);
-    trace_enabled = ia64_exception_trace_enabled();
+    trace_enabled = ia64_exception_trace_enabled(source_ip);
     user_trace_enabled = ia64_user_exception_trace_enabled();
+    if (trace_enabled) {
+        ia64_exception_trace_registers(env, source_ip);
+    }
 
     if (data_nested_tlb) {
         kind = IA64_EXCEPTION_DATA_NESTED_TLB;
