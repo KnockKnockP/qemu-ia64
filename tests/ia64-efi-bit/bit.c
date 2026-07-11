@@ -29,6 +29,7 @@ typedef int bool;
 #define EFI_WRITE_PROTECTED EFI_ERROR(8)
 #define EFI_NOT_FOUND EFI_ERROR(14)
 #define EFI_ACCESS_DENIED EFI_ERROR(15)
+#define EFI_NO_MAPPING EFI_ERROR(17)
 
 #define EFI_LOADER_CODE 1UL
 #define EFI_LOADER_DATA 2UL
@@ -42,6 +43,8 @@ typedef int bool;
 #define EFI_VARIABLE_NON_VOLATILE 1UL
 #define EFI_VARIABLE_BOOTSERVICE_ACCESS 2UL
 #define EFI_VARIABLE_RUNTIME_ACCESS 4UL
+#define EFI_MEMORY_RUNTIME 0x8000000000000000UL
+#define EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE 0x60000202UL
 
 #define VIBTANIUM_EFI_APP_BASE 0x01000000UL
 #define VIBTANIUM_EFI_LOADED_IMAGE 0x00071000UL
@@ -166,6 +169,15 @@ typedef struct EfiConfigurationTable {
     EfiGuid vendor_guid;
     void *vendor_table;
 } EfiConfigurationTable;
+
+typedef struct EfiMemoryDescriptor {
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t physical_start;
+    uint64_t virtual_start;
+    uint64_t number_of_pages;
+    uint64_t attribute;
+} EfiMemoryDescriptor;
 
 typedef struct EfiSystemTable {
     EfiTableHeader hdr;
@@ -317,6 +329,8 @@ static uint64_t custom_protocol_payload = 0xfeedfacecafebeefUL;
 static volatile uint64_t benchmark_words[256];
 /* Volatile is intentional: make the final benchmark store observable. */
 static volatile uint64_t benchmark_sink;
+static volatile uint64_t virtual_address_change_context;
+static volatile uint64_t virtual_address_change_seen;
 
 static const EfiGuid loaded_image_guid = {
     0x5b1b31a1U, 0x9562U, 0x11d2U,
@@ -377,6 +391,14 @@ static EfiGuid next_var_guid;
 static uint64_t call1(void *fn, uint64_t a0)
 {
     return ((EfiCall1)fn)(a0);
+}
+
+static void virtual_address_change_notify(uint64_t event, void *context)
+{
+    (void)event;
+    if (context == (void *)&virtual_address_change_context) {
+        virtual_address_change_seen++;
+    }
 }
 
 static uint64_t call2(void *fn, uint64_t a0, uint64_t a1)
@@ -841,7 +863,15 @@ static bool test_utility_services(void)
 
 static bool test_runtime_services(void)
 {
+    EfiBootServices *bs = g_st->boot_services;
     EfiRuntimeServices *rt = g_st->runtime_services;
+    EfiMemoryDescriptor virtual_map = {
+        .type = 6,
+        .physical_start = 0,
+        .virtual_start = 0xe000000000000000UL,
+        .number_of_pages = 0x1000,
+        .attribute = EFI_MEMORY_RUNTIME,
+    };
     EfiTime time;
     EfiTimeCapabilities caps;
     uint8_t enabled = 9;
@@ -854,6 +884,7 @@ static bool test_runtime_services(void)
     uint32_t mono1 = 0;
     uint32_t mono2 = 0;
     uint64_t pointer = (uint64_t)g_st;
+    uint64_t event = 0;
     bool ok = true;
 
     bytes_set(&time, 0, sizeof(time));
@@ -912,16 +943,32 @@ static bool test_runtime_services(void)
                 call1(rt->fn[RT_GET_NEXT_HIGH_MONOTONIC_COUNT],
                       (uint64_t)&mono2) == EFI_SUCCESS &&
                 mono2 == mono1 + 1);
-    ok &= check("efi RuntimeServices ConvertPointer",
+    ok &= check("efi RuntimeServices ConvertPointer rejects unmapped",
                 call2(rt->fn[RT_CONVERT_POINTER], 0, (uint64_t)&pointer) ==
-                    EFI_SUCCESS &&
-                pointer == (0xe000000000000000UL | (uint64_t)g_st));
+                    EFI_NOT_FOUND && pointer == (uint64_t)g_st);
     ok &= check_status("efi RuntimeServices SetVirtualAddressMap invalid",
                        call4(rt->fn[RT_SET_VIRTUAL_ADDRESS_MAP], 0, 40, 2, 0),
                        EFI_INVALID_PARAMETER);
-    ok &= check_status("efi RuntimeServices SetVirtualAddressMap empty",
+    ok &= check_status("efi RuntimeServices SetVirtualAddressMap no mapping",
                        call4(rt->fn[RT_SET_VIRTUAL_ADDRESS_MAP], 0, 40, 1, 0),
-                       EFI_SUCCESS);
+                       EFI_NO_MAPPING);
+    virtual_address_change_context = 0x5a5aa5a5UL;
+    virtual_address_change_seen = 0;
+    ok &= check("efi RuntimeServices physical virtual-map notification",
+                call5(bs->fn[BS_CREATE_EVENT],
+                      EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE, 16,
+                      (uint64_t)virtual_address_change_notify,
+                      (uint64_t)&virtual_address_change_context,
+                      (uint64_t)&event) == EFI_SUCCESS && event != 0 &&
+                call4(rt->fn[RT_SET_VIRTUAL_ADDRESS_MAP],
+                      sizeof(virtual_map), sizeof(virtual_map), 1,
+                      (uint64_t)&virtual_map) == EFI_SUCCESS &&
+                virtual_address_change_seen == 1);
+    pointer = (uint64_t)g_st;
+    ok &= check("efi RuntimeServices ConvertPointer mapped",
+                call2(rt->fn[RT_CONVERT_POINTER], 0, (uint64_t)&pointer) ==
+                    EFI_SUCCESS &&
+                pointer == (0xe000000000000000UL | (uint64_t)g_st));
     ok &= check_status("efi RuntimeServices ResetSystem no-op",
                        call4(rt->fn[RT_RESET_SYSTEM], 0, 0, 0, 0),
                        EFI_SUCCESS);
