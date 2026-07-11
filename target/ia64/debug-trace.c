@@ -767,6 +767,30 @@ static bool ia64_debug_break_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool ia64_debug_break_trace_matches(uint64_t iim)
+{
+    static int initialized;
+    static bool filtered;
+    static uint64_t filter_iim;
+
+    if (!ia64_debug_break_trace_enabled()) {
+        return false;
+    }
+    if (!initialized) {
+        const char *value = g_getenv("VIBTANIUM_DEBUG_BREAK_IIM");
+
+        if (value != NULL && *value != '\0') {
+            char *endptr = NULL;
+
+            filter_iim = g_ascii_strtoull(value, &endptr, 0);
+            filtered = endptr != value;
+        }
+        initialized = 1;
+    }
+
+    return !filtered || iim == filter_iim;
+}
+
 static const char *ia64_debug_break_service_name(uint64_t iim)
 {
     switch (iim) {
@@ -932,17 +956,20 @@ void ia64_progress_trace_break_slot(CPUIA64State *env,
     IA64TranslateResult inst_result = {0};
     uint8_t live_bytes[IA64_BUNDLE_SIZE];
     bool have_live_bytes = false;
-    bool debug_break_trace = ia64_debug_break_trace_enabled();
+    bool progress_trace = ia64_progress_trace_enabled();
+    bool debug_break_trace = ia64_debug_break_trace_matches(iim);
     MemTxResult memtx = MEMTX_ERROR;
 
-    if (!ia64_progress_trace_enabled()) {
+    if (!progress_trace && !debug_break_trace) {
         return;
     }
 
-    break_slot_count++;
-    if (!debug_break_trace && break_slot_count > 16 &&
-        (break_slot_count & UINT64_C(0xffff)) != 0) {
-        return;
+    if (!debug_break_trace) {
+        break_slot_count++;
+        if (break_slot_count > 16 &&
+            (break_slot_count & UINT64_C(0xffff)) != 0) {
+            return;
+        }
     }
 
     if (ia64_translate_address(

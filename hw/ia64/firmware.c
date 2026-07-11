@@ -17,6 +17,7 @@
 #define IA64_FIRMWARE_STATUS_SUCCESS UINT64_C(0)
 #define IA64_FIRMWARE_STATUS_UNIMPLEMENTED UINT64_C(0xffffffffffffffff)
 #define IA64_FIRMWARE_STATUS_INVALID_ARGUMENT UINT64_C(0xfffffffffffffffe)
+#define IA64_FIRMWARE_STATUS_NO_INFORMATION UINT64_C(0xfffffffffffffffb)
 #define IA64_FIRMWARE_STATUS_REQUIRES_MEMORY UINT64_C(0xfffffffffffffff7)
 /*
  * Platform base frequency reported by SAL_FREQ_BASE and PAL_FREQ_BASE.  With
@@ -36,6 +37,8 @@
 #define IA64_MAXIMUM_PERF_MON_REGISTER_COUNT UINT64_C(256)
 #define IA64_MINIMUM_PHYSICAL_STACKED_REGISTERS UINT64_C(96)
 #define IA64_MINIMUM_TRANSLATION_REGISTER_COUNT UINT64_C(8)
+#define IA64_SAL_STATE_INFO_TYPE_COUNT UINT64_C(4)
+#define IA64_SAL_STATE_INFO_MAX_SIZE UINT64_C(128)
 
 static PCIBus *firmware_pci_bus;
 
@@ -165,6 +168,8 @@ static const char *firmware_status_name(uint64_t status)
         return "unimplemented";
     case IA64_FIRMWARE_STATUS_INVALID_ARGUMENT:
         return "invalid-argument";
+    case IA64_FIRMWARE_STATUS_NO_INFORMATION:
+        return "no-information";
     case IA64_FIRMWARE_STATUS_REQUIRES_MEMORY:
         return "requires-memory";
     default:
@@ -631,21 +636,63 @@ static IA64FirmwareResult sal_pci_config_write(uint64_t sal_addr,
     return firmware_success(0, 0, 0);
 }
 
+static bool sal_state_info_type_valid(uint64_t type)
+{
+    /* MCA, INIT, CMC, and CPE are the four architected information types. */
+    return type < IA64_SAL_STATE_INFO_TYPE_COUNT;
+}
+
+static IA64FirmwareResult sal_get_state_info(uint64_t type)
+{
+    if (!sal_state_info_type_valid(type)) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+
+    /* Vibtanium does not currently retain platform error records. */
+    return firmware_status(IA64_FIRMWARE_STATUS_NO_INFORMATION);
+}
+
+static IA64FirmwareResult sal_get_state_info_size(uint64_t type)
+{
+    if (!sal_state_info_type_valid(type)) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+
+    /*
+     * Report storage for a complete generic SAL error-record header plus
+     * implementation-defined payload.  Consumers round this maximum up to
+     * their allocation granularity before asking SAL_GET_STATE_INFO.
+     */
+    return firmware_success(IA64_SAL_STATE_INFO_MAX_SIZE, 0, 0);
+}
+
+static IA64FirmwareResult sal_clear_state_info(uint64_t type)
+{
+    if (!sal_state_info_type_valid(type)) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+
+    /* Clearing an already-empty record store is an idempotent success. */
+    return firmware_success(0, 0, 0);
+}
+
 static IA64FirmwareResult dispatch_sal(uint64_t function_id, uint64_t arg0,
                                        uint64_t arg1, uint64_t arg2,
                                        uint64_t arg3)
 {
     switch (function_id) {
     case IA64_SAL_GET_STATE_INFO:
+        return sal_get_state_info(arg0);
+    case IA64_SAL_GET_STATE_INFO_SIZE:
+        return sal_get_state_info_size(arg0);
     case IA64_SAL_CLEAR_STATE_INFO:
+        return sal_clear_state_info(arg0);
     case IA64_SAL_CACHE_FLUSH:
     case IA64_SAL_CACHE_INIT:
     case IA64_SAL_SET_VECTORS:
     case IA64_SAL_MACHINE_CHECK_RENDEZVOUS:
     case IA64_SAL_MACHINE_CHECK_SET_PARAMETERS:
     case IA64_SAL_REGISTER_PHYSICAL_ADDRESS:
-        return firmware_success(0, 0, 0);
-    case IA64_SAL_GET_STATE_INFO_SIZE:
         return firmware_success(0, 0, 0);
     case IA64_SAL_VERSION_PROC:
         return firmware_success(UINT64_C(0x0000000200000009), 0, 0);
