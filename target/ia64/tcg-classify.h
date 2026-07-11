@@ -165,6 +165,7 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
                                 IA64TcgFastBundle *fast);
 bool ia64_tcg_build_partial_bundle(const IA64DecodedBundle *bundle,
                                    IA64TcgFastBundle *partial);
+uint8_t ia64_tcg_unsupported_slot_mask(const IA64DecodedBundle *bundle);
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle);
 
 typedef enum IA64TcgFastLdstMode {
@@ -377,9 +378,24 @@ typedef struct IA64TcgDirectBranch {
     bool conditional;
 } IA64TcgDirectBranch;
 
+typedef enum IA64TcgBranchReject {
+    IA64_TCG_BRANCH_REJECT_NONE,
+    IA64_TCG_BRANCH_REJECT_NOT_SLOT2,
+    IA64_TCG_BRANCH_REJECT_UNSUPPORTED_TYPE,
+    IA64_TCG_BRANCH_REJECT_PREFIX_UNSUPPORTED,
+    IA64_TCG_BRANCH_REJECT_PREFIX_LDST_DEPENDENCY,
+    IA64_TCG_BRANCH_REJECT_CROSS_PAGE,
+    IA64_TCG_BRANCH_REJECT_ROTATING_PREDICATE,
+    IA64_TCG_BRANCH_REJECT_INDIRECT_UNSUPPORTED,
+    IA64_TCG_BRANCH_REJECT_MULTIPLE_BRANCH,
+    IA64_TCG_BRANCH_REJECT_COUNT,
+} IA64TcgBranchReject;
+
 bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
                                   uint64_t pc,
                                   IA64TcgDirectBranch *branch);
+IA64TcgBranchReject ia64_tcg_direct_branch_rejection(
+    const IA64DecodedBundle *bundle, uint64_t pc, int *prefix_slot);
 bool ia64_tcg_bundle_has_direct_branch(const IA64DecodedBundle *bundle);
 bool ia64_tcg_bundle_has_indirect_branch(const IA64DecodedBundle *bundle);
 

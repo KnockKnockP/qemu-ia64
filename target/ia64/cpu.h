@@ -5,6 +5,7 @@
 #include "cpu-qom.h"
 #include "exec/cpu-common.h"
 #include "exec/cpu-interrupt.h"
+#include "profile.h"
 
 #define IA64_GR_COUNT 128
 #define IA64_STATIC_GR_COUNT 32
@@ -44,6 +45,8 @@
 #define IA64_TB_FLAG_BN (1u << 4)
 #define IA64_TB_FLAG_RI_SHIFT 5
 #define IA64_TB_FLAG_RI_MASK (3u << IA64_TB_FLAG_RI_SHIFT)
+#define IA64_TB_FLAG_BENCHMARK (1u << 7)
+#define IA64_TB_FLAG_PROFILE (1u << 8)
 #define IA64_ISR_X_BIT 32
 #define IA64_ISR_W_BIT 33
 #define IA64_ISR_R_BIT 34
@@ -459,6 +462,7 @@ struct ArchCPU {
     uint64_t benchmark_host_cycles;
     int64_t benchmark_start_ns;
     int64_t benchmark_start_host_cycles;
+    IA64ProductionProfile production_profile;
 };
 
 static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)

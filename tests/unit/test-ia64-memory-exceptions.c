@@ -246,6 +246,16 @@ static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
     g_assert_cmphex(banked_ri2_flags & IA64_TB_FLAG_BN, ==,
                     IA64_TB_FLAG_BN);
     g_assert_cmpuint(ia64_tcg_tb_flags_ri(banked_ri2_flags), ==, 2);
+    g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_BENCHMARK, ==, 0);
+    g_assert_cmpuint(
+        ia64_tcg_tb_flags_cpl(cpl3_flags | IA64_TB_FLAG_BENCHMARK), ==, 3);
+    g_assert_cmpuint(
+        ia64_tcg_tb_flags_ri(banked_ri2_flags | IA64_TB_FLAG_BENCHMARK), ==,
+        2);
+    g_assert_cmpuint(
+        ia64_tcg_tb_flags_cpl(cpl3_flags | IA64_TB_FLAG_PROFILE), ==, 3);
+    g_assert_cmpuint(
+        ia64_tcg_tb_flags_ri(banked_ri2_flags | IA64_TB_FLAG_PROFILE), ==, 2);
     g_assert_cmphex(cpl0_flags, !=, cpl3_flags);
 
     g_assert_cmpint(ia64_tcg_mmu_index_for_psr(0, false), ==,

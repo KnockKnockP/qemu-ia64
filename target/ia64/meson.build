@@ -11,6 +11,7 @@ ia64_ss.add(files(
   'machine.c',
   'mem.c',
   'perf.c',
+  'profile.c',
   'tcg-classify.c',
   'translate.c',
 ))

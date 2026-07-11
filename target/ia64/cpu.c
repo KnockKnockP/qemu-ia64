@@ -13,6 +13,7 @@
 #include "accel/tcg/cpu-loop.h"
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
+#include "exec/tb-flush.h"
 #include "exec/translation-block.h"
 #include "exec/target_page.h"
 #include "gdbstub/helpers.h"
@@ -60,10 +61,18 @@ static void ia64_restore_state_to_opc(CPUState *cs,
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = IA64_CPU(cs);
+    uint32_t flags = ia64_tcg_tb_flags_from_psr(ia64_env_psr(&cpu->env));
+
+    if (cpu->benchmark_active) {
+        flags |= IA64_TB_FLAG_BENCHMARK;
+    }
+    if (cpu->production_profile.collecting) {
+        flags |= IA64_TB_FLAG_PROFILE;
+    }
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
-        .flags = ia64_tcg_tb_flags_from_psr(ia64_env_psr(&cpu->env)),
+        .flags = flags,
     };
 }
 
@@ -513,7 +522,13 @@ static void ia64_cpu_set_benchmark_on_cpu(CPUState *cs,
     }
 
     if (active) {
+        cpu->benchmark_retired_bundles = 0;
+        cpu->benchmark_elapsed_ns = 0;
+        cpu->benchmark_host_cycles = 0;
         cpu->benchmark_active = true;
+        tb_flush__exclusive_or_serial();
+        cpu->benchmark_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        cpu->benchmark_start_host_cycles = cpu_get_host_ticks();
         return;
     }
 
@@ -522,6 +537,7 @@ static void ia64_cpu_set_benchmark_on_cpu(CPUState *cs,
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - cpu->benchmark_start_ns;
     cpu->benchmark_host_cycles =
         cpu_get_host_ticks() - cpu->benchmark_start_host_cycles;
+    tb_flush__exclusive_or_serial();
 }
 
 static bool ia64_cpu_get_benchmark_active(Object *obj, Error **errp)
@@ -541,29 +557,52 @@ static void ia64_cpu_set_benchmark_active(Object *obj, bool active,
         return;
     }
     cpu->benchmark_requested = active;
-    if (active) {
-        cpu->benchmark_retired_bundles = 0;
-        cpu->benchmark_elapsed_ns = 0;
-        cpu->benchmark_host_cycles = 0;
-        cpu->benchmark_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        cpu->benchmark_start_host_cycles = cpu_get_host_ticks();
-    }
     if (cs->created) {
         /*
          * Keep the main AioContext free while firmware storage helpers wait
-         * for I/O dispatched to that context.  The timestamp above includes
-         * the blocked interval; retirement starts at the next vCPU safe point.
+         * for I/O dispatched to that context.  The exclusive callback flushes
+         * and switches translation mode at the same vCPU safe point where it
+         * records the benchmark timestamps.
          */
-        async_run_on_cpu(cs, ia64_cpu_set_benchmark_on_cpu,
-                         RUN_ON_CPU_HOST_INT(active));
+        async_safe_run_on_cpu(cs, ia64_cpu_set_benchmark_on_cpu,
+                              RUN_ON_CPU_HOST_INT(active));
     } else {
         ia64_cpu_set_benchmark_on_cpu(cs, RUN_ON_CPU_HOST_INT(active));
     }
 }
 
+static bool ia64_cpu_get_production_profile_active(Object *obj,
+                                                   Error **errp)
+{
+    (void)errp;
+    return ia64_profile_get_active(IA64_CPU(obj));
+}
+
+static void ia64_cpu_set_production_profile_active(Object *obj, bool active,
+                                                   Error **errp)
+{
+    IA64CPU *cpu = IA64_CPU(obj);
+
+    (void)errp;
+    if (cpu->production_profile.requested == active) {
+        return;
+    }
+    cpu->production_profile.requested = active;
+    ia64_profile_set_active(cpu, active);
+}
+
 static void ia64_cpu_initfn(Object *obj)
 {
     IA64CPU *cpu = IA64_CPU(obj);
+
+    ia64_profile_register_cpu(cpu);
+
+    object_property_add_bool(obj, "x-production-profile-active",
+                             ia64_cpu_get_production_profile_active,
+                             ia64_cpu_set_production_profile_active);
+    object_property_set_description(
+        obj, "x-production-profile-active",
+        "start/stop and reset IA-64 production-shape sampling");
 
     object_property_add_bool(obj, "x-benchmark-active",
                              ia64_cpu_get_benchmark_active,

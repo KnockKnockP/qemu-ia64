@@ -1609,6 +1609,26 @@ bool ia64_tcg_build_partial_bundle(const IA64DecodedBundle *bundle,
     return helper_count == 1 && partial->slot_count == IA64_SLOT_COUNT - 1;
 }
 
+uint8_t ia64_tcg_unsupported_slot_mask(const IA64DecodedBundle *bundle)
+{
+    IA64TcgFastBundle scratch = { 0 };
+    uint8_t mask = 0;
+
+    if (!bundle || !bundle->valid || bundle->info->long_immediate) {
+        return 0;
+    }
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        IA64TcgFastSlot decoded;
+
+        if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
+                                      bundle->slot[slot], slot,
+                                      &decoded, &scratch)) {
+            mask |= 1u << slot;
+        }
+    }
+    return mask;
+}
+
 bool ia64_tcg_bundle_has_ldst_immediate(const IA64DecodedBundle *bundle)
 {
     IA64LdstImmediate ldst;
@@ -2317,7 +2337,8 @@ static bool ia64_tcg_same_page(uint64_t left, uint64_t right)
 }
 
 static bool ia64_tcg_build_direct_branch_prefix(
-    const IA64DecodedBundle *bundle, IA64TcgFastBundle *prefix)
+    const IA64DecodedBundle *bundle, IA64TcgFastBundle *prefix,
+    IA64TcgBranchReject *reject, int *prefix_slot)
 {
     uint64_t prior_dest_mask = 0;
     uint64_t prior_dest_mask_hi = 0;
@@ -2335,11 +2356,15 @@ static bool ia64_tcg_build_direct_branch_prefix(
                                       bundle->slot[slot],
                                       slot,
                                       &prefix->slot[slot], prefix)) {
+            *reject = IA64_TCG_BRANCH_REJECT_PREFIX_UNSUPPORTED;
+            *prefix_slot = slot;
             return false;
         }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&prefix->slot[slot],
                                                          prior_dest_mask,
                                                          prior_dest_mask_hi)) {
+            *reject = IA64_TCG_BRANCH_REJECT_PREFIX_LDST_DEPENDENCY;
+            *prefix_slot = slot;
             return false;
         }
         prefix->slot_count++;
@@ -2399,9 +2424,10 @@ bool ia64_tcg_bundle_has_indirect_branch(const IA64DecodedBundle *bundle)
     return false;
 }
 
-bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
-                                  uint64_t pc,
-                                  IA64TcgDirectBranch *branch)
+static bool ia64_tcg_build_direct_branch_internal(
+    const IA64DecodedBundle *bundle, uint64_t pc,
+    IA64TcgDirectBranch *branch, IA64TcgBranchReject *reject,
+    int *prefix_slot)
 {
     uint64_t raw;
     uint64_t target;
@@ -2411,7 +2437,38 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     IA64TcgDirectBranchKind kind;
     uint8_t call_branch_reg = 0;
 
+    unsigned branch_count = 0;
+
+    *reject = IA64_TCG_BRANCH_REJECT_UNSUPPORTED_TYPE;
+    *prefix_slot = -1;
     if (!bundle || !branch || !bundle->valid || bundle->info->long_immediate) {
+        return false;
+    }
+
+    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        IA64SlotType type = bundle->info->slot_type[slot];
+        uint64_t candidate = bundle->slot[slot];
+
+        if (ia64_slot_is_b_branch_relative(type, candidate) ||
+            ia64_slot_is_b_call_relative(type, candidate) ||
+            ia64_slot_is_b_indirect_branch(type, candidate)) {
+            branch_count++;
+            if (slot != 2) {
+                *reject = IA64_TCG_BRANCH_REJECT_NOT_SLOT2;
+            }
+        }
+    }
+    if (branch_count > 1) {
+        *reject = IA64_TCG_BRANCH_REJECT_MULTIPLE_BRANCH;
+        return false;
+    }
+    if (branch_count == 1 &&
+        !(ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
+                                         bundle->slot[2]) ||
+          ia64_slot_is_b_call_relative(bundle->info->slot_type[2],
+                                       bundle->slot[2]) ||
+          ia64_slot_is_b_indirect_branch(bundle->info->slot_type[2],
+                                         bundle->slot[2]))) {
         return false;
     }
 
@@ -2426,6 +2483,7 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     predicate = ia64_slot_predicate(raw);
     if (predicate >= 16 &&
         ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) {
+        *reject = IA64_TCG_BRANCH_REJECT_ROTATING_PREDICATE;
         return false;
     }
     if (ia64_slot_is_b_branch_relative(bundle->info->slot_type[2], raw)) {
@@ -2456,6 +2514,7 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
         if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_INDIRECT) ||
             !(major == 0x1 ||
               (major == 0x0 && (x6 == 0x20 || x6 == 0x21)))) {
+            *reject = IA64_TCG_BRANCH_REJECT_INDIRECT_UNSUPPORTED;
             return false;
         }
         kind = IA64_TCG_DIRECT_BRANCH_INDIRECT;
@@ -2472,6 +2531,7 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
      * same-page target.
      */
     if (!ia64_tcg_same_page(pc, fallthrough)) {
+        *reject = IA64_TCG_BRANCH_REJECT_CROSS_PAGE;
         return false;
     }
     if (kind == IA64_TCG_DIRECT_BRANCH_INDIRECT) {
@@ -2483,12 +2543,14 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
         }
         if (kind != IA64_TCG_DIRECT_BRANCH_CALL &&
             !ia64_tcg_same_page(pc, target)) {
+            *reject = IA64_TCG_BRANCH_REJECT_CROSS_PAGE;
             return false;
         }
     }
 
     memset(branch, 0, sizeof(*branch));
-    if (!ia64_tcg_build_direct_branch_prefix(bundle, &branch->prefix)) {
+    if (!ia64_tcg_build_direct_branch_prefix(bundle, &branch->prefix,
+                                              reject, prefix_slot)) {
         return false;
     }
     branch->target_ip = target;
@@ -2501,7 +2563,34 @@ bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
     branch->call_branch_reg = call_branch_reg;
     branch->conditional = kind == IA64_TCG_DIRECT_BRANCH_CLOOP ||
                           predicate != 0;
+    *reject = IA64_TCG_BRANCH_REJECT_NONE;
     return true;
+}
+
+bool ia64_tcg_build_direct_branch(const IA64DecodedBundle *bundle,
+                                  uint64_t pc,
+                                  IA64TcgDirectBranch *branch)
+{
+    IA64TcgBranchReject reject;
+    int prefix_slot;
+
+    return ia64_tcg_build_direct_branch_internal(bundle, pc, branch,
+                                                  &reject, &prefix_slot);
+}
+
+IA64TcgBranchReject ia64_tcg_direct_branch_rejection(
+    const IA64DecodedBundle *bundle, uint64_t pc, int *prefix_slot)
+{
+    IA64TcgDirectBranch branch;
+    IA64TcgBranchReject reject;
+    int local_prefix_slot;
+
+    if (!prefix_slot) {
+        prefix_slot = &local_prefix_slot;
+    }
+    ia64_tcg_build_direct_branch_internal(bundle, pc, &branch, &reject,
+                                          prefix_slot);
+    return reject;
 }
 
 static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,

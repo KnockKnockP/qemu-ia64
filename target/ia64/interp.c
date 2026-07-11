@@ -54,6 +54,7 @@ void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip)
 {
     CPUState *cpu = env_cpu(env);
 
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_FIRMWARE);
     IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
     IA64_PERF_INC(IA64_PERF_TCG_FIRMWARE_CALL_GATE_FAST);
 
@@ -340,6 +341,7 @@ static void ia64_gr_nat_clear_mask(CPUIA64State *env, uint64_t dest_mask,
 uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask,
                                  uint64_t source_mask_hi)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_NAT_ALAT);
     source_mask &= ~1ULL;
     while (source_mask != 0) {
         unsigned reg = ctz64(source_mask);
@@ -363,11 +365,13 @@ uint32_t HELPER(fast_gr_nat_any)(CPUIA64State *env, uint64_t source_mask,
 void HELPER(fast_gr_alat_invalidate)(CPUIA64State *env, uint64_t dest_mask,
                                      uint64_t dest_mask_hi)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_NAT_ALAT);
     ia64_alat_invalidate_gr_mask(env, dest_mask, dest_mask_hi);
 }
 
 void HELPER(fast_gr_finish_hi)(CPUIA64State *env, uint64_t dest_mask_hi)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_NAT_ALAT);
     ia64_alat_invalidate_gr_mask(env, 0, dest_mask_hi);
     ia64_gr_nat_clear_mask(env, 0, dest_mask_hi);
 }
@@ -378,6 +382,7 @@ uint32_t HELPER(fast_ldst_prepare)(CPUIA64State *env, uint64_t address,
                                     uint32_t target, uint32_t width,
                                     uint32_t memory_class)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_SPECIAL_LDST);
     if (memory_class == 8 || memory_class == 9 || memory_class == 0x0a) {
         uint64_t resolved;
         bool physical;
@@ -404,6 +409,7 @@ void HELPER(fast_ldst_complete)(CPUIA64State *env, uint64_t address,
                                 uint32_t target, uint32_t width,
                                 uint32_t memory_class)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_SPECIAL_LDST);
     ia64_write_gr_nat(env, target, false);
     ia64_alat_invalidate_gr(env, target);
     if (memory_class == 2 || memory_class == 3 || memory_class == 9) {
@@ -418,6 +424,7 @@ void HELPER(fast_ldst_complete)(CPUIA64State *env, uint64_t address,
 void HELPER(fast_fp_slot)(CPUIA64State *env, uint32_t type_raw,
                           uint64_t raw, uint32_t slot)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_FP_SLOT);
     IA64SlotType type = type_raw;
     IA64FloatingMemoryInstruction fldst;
     IA64FloatingCompareInstruction fcmp;
@@ -659,12 +666,14 @@ void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
 
 void HELPER(finish_fast_tb)(CPUIA64State *env, uint32_t bundle_count)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_OTHER);
     ia64_finish_tcg_ticks(env, bundle_count);
 }
 
 uint64_t HELPER(fast_ldst_load)(CPUIA64State *env, uint64_t address,
                                 uint32_t width, uint32_t slot)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_SPECIAL_LDST);
     /*
      * Translated fast bundles carry one insn_start per bundle, so publish the
      * executing slot the same way the interpreter loop does: a fault below
@@ -677,6 +686,7 @@ uint64_t HELPER(fast_ldst_load)(CPUIA64State *env, uint64_t address,
 void HELPER(fast_ldst_store)(CPUIA64State *env, uint64_t address,
                              uint64_t value, uint32_t width, uint32_t slot)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_SPECIAL_LDST);
     ia64_env_set_ri(env, slot);
     ia64_ldst_write(env, address, width, value);
 }
@@ -684,6 +694,7 @@ void HELPER(fast_ldst_store)(CPUIA64State *env, uint64_t address,
 void HELPER(fast_ldst_alat_store)(CPUIA64State *env, uint64_t address,
                                   uint32_t width)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_NAT_ALAT);
     /* Direct qemu_st lowering calls this only while ALAT entries are valid. */
     ia64_alat_invalidate_store(env, address, width);
 }
@@ -730,6 +741,7 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
     bool chain_ok;
     bool debug_hooks = ia64_debug_hooks_active();
 
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_BRANCH);
     IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
     IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_TRANSLATED);
     ia64_count_fast_tcg_ops(prefix_slot_count, prefix_op_counts, false);
@@ -781,6 +793,7 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
     uint64_t next_ip = 0;
     bool debug_hooks = ia64_debug_hooks_active();
 
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_BRANCH);
     IA64_PERF_INC(IA64_PERF_BUNDLE_EXECUTED);
     ia64_count_fast_tcg_ops(prefix_slot_count, prefix_op_counts, false);
     IA64_PERF_INC(br_call ? IA64_PERF_OP_BRANCH_CALL :
@@ -834,6 +847,7 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
 
 void HELPER(fast_alloc)(CPUIA64State *env, uint64_t raw)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE);
     IA64_PERF_INC(IA64_PERF_OP_ALLOC);
     ia64_exec_alloc_with_spill(env, raw);
 }
@@ -1843,6 +1857,7 @@ void HELPER(exec_bundle)(CPUIA64State *env,
                          uint64_t desc01,
                          uint64_t desc2)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_FULL_BUNDLE);
     ia64_exec_bundle_impl(env, header, slot1, slot2, desc01, desc2);
 }
 
@@ -1853,6 +1868,7 @@ uint32_t HELPER(exec_bundle_lookup_ptr)(CPUIA64State *env,
                                         uint64_t desc01,
                                         uint64_t desc2)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_FULL_BUNDLE);
     ia64_exec_bundle_impl(env, header, slot1, slot2, desc01, desc2);
     return ia64_lookup_ptr_chain_ok(env);
 }
@@ -1864,6 +1880,7 @@ uint32_t HELPER(exec_slot)(CPUIA64State *env,
                            uint64_t desc01,
                            uint64_t desc2)
 {
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_PARTIAL_SLOT);
     return ia64_exec_bundle_impl(env, header, slot1, slot2,
                                  desc01, desc2) ? 0 : 1;
 }

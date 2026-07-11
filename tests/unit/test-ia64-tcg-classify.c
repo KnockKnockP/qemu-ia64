@@ -950,6 +950,18 @@ static void test_partial_bundle_keeps_two_fast_slots(void)
     g_assert_false(ia64_tcg_build_partial_bundle(&bundle, &partial));
 }
 
+static void test_unsupported_slot_mask_tracks_helper_slot(void)
+{
+    const uint64_t setf_sig_f8_r17_raw = 0x0c70802220aULL;
+    const uint64_t add_r1_r2_r3_raw =
+        (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
+    IA64DecodedBundle bundle =
+        make_bundle(0x00, setf_sig_f8_r17_raw,
+                    add_r1_r2_r3_raw, IA64_INSN_NOP_RAW);
+
+    g_assert_cmphex(ia64_tcg_unsupported_slot_mask(&bundle), ==, 1u << 0);
+}
+
 static void test_fallback_plan_classifies_hot_helper_slots(void)
 {
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
@@ -1231,6 +1243,37 @@ static void test_direct_branch_rejects_page_crossing(void)
 
     g_assert_false(ia64_tcg_build_direct_branch(&bundle, pc, &branch));
     g_assert_true(ia64_tcg_bundle_has_direct_branch(&bundle));
+    g_assert_cmpint(ia64_tcg_direct_branch_rejection(&bundle, pc, NULL),
+                    ==, IA64_TCG_BRANCH_REJECT_CROSS_PAGE);
+}
+
+static void test_direct_branch_rejection_reasons(void)
+{
+    const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
+    const uint64_t add_r3_r3_r4_raw =
+        (8ULL << 37) | (4ULL << 20) | (3ULL << 13) | (3ULL << 6);
+    const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
+    IA64DecodedBundle bundle;
+    int prefix_slot = -1;
+
+    bundle = make_bundle(0x16, br_cond_raw, IA64_INSN_NOP_RAW,
+                         IA64_INSN_NOP_RAW);
+    g_assert_cmpint(ia64_tcg_direct_branch_rejection(
+                        &bundle, 0x2000, &prefix_slot),
+                    ==, IA64_TCG_BRANCH_REJECT_NOT_SLOT2);
+
+    bundle = make_bundle(0x16, br_cond_raw, IA64_INSN_NOP_RAW,
+                         br_cond_raw);
+    g_assert_cmpint(ia64_tcg_direct_branch_rejection(
+                        &bundle, 0x2000, &prefix_slot),
+                    ==, IA64_TCG_BRANCH_REJECT_MULTIPLE_BRANCH);
+
+    bundle = make_bundle(0x18, add_r3_r3_r4_raw,
+                         ld8_r2_r3_raw, br_cond_raw);
+    g_assert_cmpint(ia64_tcg_direct_branch_rejection(
+                        &bundle, 0x2000, &prefix_slot),
+                    ==, IA64_TCG_BRANCH_REJECT_PREFIX_LDST_DEPENDENCY);
+    g_assert_cmpint(prefix_slot, ==, 1);
 }
 
 static void test_fallback_reason_classifies_helper_sources(void)
@@ -1340,6 +1383,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_rejects_unsafe_ldst);
     g_test_add_func("/ia64-tcg-classify/partial-bundle-one-helper",
                     test_partial_bundle_keeps_two_fast_slots);
+    g_test_add_func("/ia64-tcg-classify/unsupported-slot-mask",
+                    test_unsupported_slot_mask_tracks_helper_slot);
     g_test_add_func("/ia64-tcg-classify/fallback-plan-hot-helper-slots",
                     test_fallback_plan_classifies_hot_helper_slots);
     g_test_add_func("/ia64-tcg-classify/fallback-plan-long-immediate",
@@ -1358,6 +1403,8 @@ int main(int argc, char **argv)
                     test_direct_branch_rejects_unsafe_forms);
     g_test_add_func("/ia64-tcg-classify/direct-branch-rejects-page-crossing",
                     test_direct_branch_rejects_page_crossing);
+    g_test_add_func("/ia64-tcg-classify/direct-branch-rejection-reasons",
+                    test_direct_branch_rejection_reasons);
     g_test_add_func("/ia64-tcg-classify/fallback-reason-classifies-helper-sources",
                     test_fallback_reason_classifies_helper_sources);
 
