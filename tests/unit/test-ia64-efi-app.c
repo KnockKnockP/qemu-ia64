@@ -420,6 +420,7 @@ static void test_builds_guest_firmware_tables(void)
         0x7f, 0xff, 0x04, 0x00,
     };
     size_t blob_size = 0;
+    uint8_t sal_gate[VIBTANIUM_EFI_GATE_SIZE];
     uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
                                                       &boot_media, NULL);
     uint64_t boot_services;
@@ -683,15 +684,16 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(load_le64(sal_entry + 16), ==, VIBTANIUM_EFI_SAL_PROC);
     g_assert_cmphex(load_le64(sal_entry + 24), ==, VIBTANIUM_EFI_SAL_GP);
     g_assert_cmphex(firmware_ptr(blob, VIBTANIUM_EFI_PAL_PROC)[0], !=, 0);
-    g_assert_cmphex(firmware_ptr(blob, VIBTANIUM_EFI_SAL_PROC)[0], !=, 0);
+    vibtanium_efi_build_branch_gate(sal_gate);
+    g_assert_cmphex(sal_gate[0], !=, 0);
     g_assert_cmpint(memcmp(firmware_ptr(blob, VIBTANIUM_EFI_PAL_PROC),
-                           firmware_ptr(blob, VIBTANIUM_EFI_SAL_PROC), 16),
+                           sal_gate, sizeof(sal_gate)),
                     ==, 0);
     g_assert_cmpint(memcmp(firmware_ptr(blob, VIBTANIUM_EFI_PAL_PROC),
                            firmware_ptr(blob, handle_protocol_gate), 16),
                     !=, 0);
-    g_assert_cmphex(load_le64(firmware_ptr(blob, VIBTANIUM_EFI_SAL_GP)),
-                    ==, 0);
+    g_assert_cmphex(VIBTANIUM_EFI_SAL_GP, ==,
+                    VIBTANIUM_EFI_SAL_PROC + 0x1000);
     g_assert_cmphex(firmware_ptr(blob,
                                  VIBTANIUM_EFI_START_IMAGE_RETURN_GATE)[0],
                     !=, 0);
@@ -928,6 +930,33 @@ static void test_pal_code_has_efi_memory_descriptor(void)
                     VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE);
 }
 
+static void assert_runtime_code_memory_descriptor(uint64_t code_address)
+{
+    uint32_t type = 0;
+    uint64_t address = 0;
+    uint64_t pages = 0;
+    uint64_t attributes = 0;
+
+    vibtanium_efi_runtime_code_memory_descriptor(
+        code_address, &type, &address, &pages, &attributes);
+
+    g_assert_cmpuint(type, ==, VIBTANIUM_EFI_RUNTIME_SERVICES_CODE);
+    g_assert_cmphex(address, ==, code_address);
+    g_assert_cmphex(address & 0xfff, ==, 0);
+    g_assert_cmphex(pages, ==, 1);
+    g_assert_cmphex(attributes, ==,
+                    VIBTANIUM_EFI_MEMORY_WB |
+                    VIBTANIUM_EFI_MEMORY_RUNTIME);
+}
+
+static void test_firmware_code_has_efi_memory_descriptors(void)
+{
+    assert_runtime_code_memory_descriptor(VIBTANIUM_EFI_CALL_GATE_BASE);
+    assert_runtime_code_memory_descriptor(VIBTANIUM_EFI_SAL_PROC);
+    g_assert_cmphex(VIBTANIUM_EFI_SAL_GP & ~UINT64_C(0xfff), !=,
+                    VIBTANIUM_EFI_SAL_PROC);
+}
+
 static void test_timer_deadline_wraps(void)
 {
     g_assert_true(vibtanium_efi_timer_due(100, 100));
@@ -1003,6 +1032,8 @@ int main(int argc, char **argv)
                     test_exact_loader_pages_are_reserved);
     g_test_add_func("/ia64-efi-app/pal-code-has-efi-memory-descriptor",
                     test_pal_code_has_efi_memory_descriptor);
+    g_test_add_func("/ia64-efi-app/firmware-code-has-efi-memory-descriptors",
+                    test_firmware_code_has_efi_memory_descriptors);
     g_test_add_func("/ia64-efi-app/timer-deadline-wraps",
                     test_timer_deadline_wraps);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",

@@ -222,6 +222,7 @@ typedef enum EfiMemoryMapRecordKind {
     EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
     EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
     EFI_MEMORY_MAP_RECORD_LOADER_IF_NEEDED,
+    EFI_MEMORY_MAP_RECORD_RUNTIME_CODE,
     EFI_MEMORY_MAP_RECORD_PAL_CODE,
 } EfiMemoryMapRecordKind;
 
@@ -236,7 +237,23 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
         .range = {
             .type = EFI_RUNTIME_SERVICES_DATA,
             .address = EFI_RUNTIME_GRANULE_BASE,
-            .pages = (VIBTANIUM_EFI_PAL_PROC - EFI_RUNTIME_GRANULE_BASE) /
+            .pages = (VIBTANIUM_EFI_CALL_GATE_BASE -
+                      EFI_RUNTIME_GRANULE_BASE) /
+                     EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_CODE,
+        .range.address = VIBTANIUM_EFI_CALL_GATE_BASE,
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
+        .range = {
+            .type = EFI_RUNTIME_SERVICES_DATA,
+            .address = VIBTANIUM_EFI_CALL_GATE_BASE + EFI_PAGE_SIZE,
+            .pages = (VIBTANIUM_EFI_PAL_PROC -
+                      (VIBTANIUM_EFI_CALL_GATE_BASE + EFI_PAGE_SIZE)) /
                      EFI_PAGE_SIZE,
             .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
         },
@@ -269,9 +286,24 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
         .range = {
             .type = EFI_RUNTIME_SERVICES_DATA,
             .address = VIBTANIUM_VGA_LEGACY_BASE + VIBTANIUM_VGA_LEGACY_SIZE,
-            .pages = (EFI_RUNTIME_GRANULE_SIZE -
+            .pages = (VIBTANIUM_EFI_SAL_PROC -
                       (VIBTANIUM_VGA_LEGACY_BASE +
                        VIBTANIUM_VGA_LEGACY_SIZE)) / EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_CODE,
+        .range.address = VIBTANIUM_EFI_SAL_PROC,
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
+        .range = {
+            .type = EFI_RUNTIME_SERVICES_DATA,
+            .address = VIBTANIUM_EFI_SAL_PROC + EFI_PAGE_SIZE,
+            .pages = (EFI_RUNTIME_GRANULE_SIZE -
+                      (VIBTANIUM_EFI_SAL_PROC + EFI_PAGE_SIZE)) /
+                     EFI_PAGE_SIZE,
             .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
         },
     },
@@ -1800,6 +1832,17 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
                                                    &loader_image);
             }
             break;
+        case EFI_MEMORY_MAP_RECORD_RUNTIME_CODE: {
+            EfiMemoryRange runtime_code;
+
+            vibtanium_efi_runtime_code_memory_descriptor(
+                record->range.address, &runtime_code.type,
+                &runtime_code.address, &runtime_code.pages,
+                &runtime_code.attributes);
+            index = efi_emit_memory_descriptor(env, map, index,
+                                               &runtime_code);
+            break;
+        }
         case EFI_MEMORY_MAP_RECORD_PAL_CODE: {
             EfiMemoryRange pal_code;
 

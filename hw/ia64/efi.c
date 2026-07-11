@@ -344,10 +344,23 @@ static void write_return_gate(uint8_t *blob, size_t size, uint64_t address)
 
 static void write_branch_gate(uint8_t *blob, size_t size, uint64_t address)
 {
+    uint8_t *gate = blob_ptr(blob, size, address, IA64_BUNDLE_SIZE);
+
+    vibtanium_efi_build_branch_gate(gate);
+}
+
+void vibtanium_efi_build_branch_gate(
+    uint8_t gate[VIBTANIUM_EFI_GATE_SIZE])
+{
     const uint64_t nop = 1ULL << 27;
     const uint64_t br_b0 = 0x20ULL << 27;
+    unsigned __int128 raw = 0x11 |
+        ((unsigned __int128)nop << 5) |
+        ((unsigned __int128)nop << 46) |
+        ((unsigned __int128)br_b0 << 87);
 
-    write_ia64_bundle(blob, size, address, 0x11, nop, nop, br_b0);
+    QEMU_BUILD_BUG_ON(VIBTANIUM_EFI_GATE_SIZE != IA64_BUNDLE_SIZE);
+    ia64_bundle_raw_to_bytes(gate, raw);
 }
 
 static uint64_t service_descriptor_address(unsigned service_index)
@@ -824,6 +837,20 @@ void vibtanium_efi_pal_code_memory_descriptor(uint32_t *type,
     *attributes = VIBTANIUM_EFI_MEMORY_WB;
 }
 
+void vibtanium_efi_runtime_code_memory_descriptor(uint64_t code_address,
+                                                  uint32_t *type,
+                                                  uint64_t *address,
+                                                  uint64_t *pages,
+                                                  uint64_t *attributes)
+{
+    g_assert((code_address & 0xfff) == 0);
+
+    *type = VIBTANIUM_EFI_RUNTIME_SERVICES_CODE;
+    *address = code_address;
+    *pages = 1;
+    *attributes = VIBTANIUM_EFI_MEMORY_WB | VIBTANIUM_EFI_MEMORY_RUNTIME;
+}
+
 bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline)
 {
     return (int64_t)(now - deadline) >= 0;
@@ -979,8 +1006,6 @@ static void write_sal_system_table(uint8_t *blob, size_t size,
      * br.cond calling convention, which does not allocate a stacked frame.
      */
     write_branch_gate(blob, size, VIBTANIUM_EFI_PAL_PROC);
-    write_branch_gate(blob, size, VIBTANIUM_EFI_SAL_PROC);
-    blob_wr64(blob, size, VIBTANIUM_EFI_SAL_GP, 0);
 }
 
 static void write_hcdp_table(uint8_t *blob, size_t size,

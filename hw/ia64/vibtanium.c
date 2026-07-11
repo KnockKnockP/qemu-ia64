@@ -370,6 +370,11 @@ static const char *vibtanium_efi_reserved_overlap(
             VIBTANIUM_EFI_BLOB_SIZE,
         },
         {
+            "EFI SAL code and data",
+            VIBTANIUM_EFI_SAL_PROC,
+            0x2000,
+        },
+        {
             "EFI stack",
             VIBTANIUM_EFI_STACK_BASE,
             VIBTANIUM_EFI_STACK_SIZE,
@@ -614,6 +619,8 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                                        const VibtaniumEfiBlockDevice *boot_media)
 {
     g_autofree uint8_t *firmware_blob = NULL;
+    uint8_t sal_gate[VIBTANIUM_EFI_GATE_SIZE];
+    uint64_t sal_gp_data = 0;
     size_t firmware_blob_size = 0;
     const char *linux_append = machine->kernel_cmdline;
     const char *overlap;
@@ -664,6 +671,13 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-tables",
                                VIBTANIUM_EFI_BLOB_BASE, firmware_blob,
                                firmware_blob_size, VIBTANIUM_EFI_BLOB_SIZE);
+    vibtanium_efi_build_branch_gate(sal_gate);
+    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.sal-code",
+                               VIBTANIUM_EFI_SAL_PROC, sal_gate,
+                               sizeof(sal_gate), 0x1000);
+    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.sal-data",
+                               VIBTANIUM_EFI_SAL_GP, &sal_gp_data,
+                               sizeof(sal_gp_data), 0x1000);
     vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-app",
                                image->load_base,
                                image->data, image->size, image->size);
