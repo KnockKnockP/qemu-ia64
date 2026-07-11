@@ -697,6 +697,9 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(firmware_ptr(blob,
                                  VIBTANIUM_EFI_START_IMAGE_RETURN_GATE)[0],
                     !=, 0);
+    g_assert_cmphex(firmware_ptr(blob,
+                                 VIBTANIUM_EFI_EVENT_NOTIFY_RETURN_GATE)[0],
+                    !=, 0);
 
     g_assert_cmphex(load_le32(firmware_ptr(blob, VIBTANIUM_EFI_HCDP_TABLE)),
                     ==, 0);
@@ -797,6 +800,33 @@ static void test_relocates_ia64_entry_descriptor(void)
                     VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
     g_assert_cmphex(image.global_pointer, ==,
                     VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
+static void test_runtime_driver_uses_runtime_memory(void)
+{
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    uint8_t *optional;
+    VibtaniumEfiImage image;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64,
+                           VIBTANIUM_EFI_APP_BASE, false);
+    optional = pe + SYNTHETIC_PE_OFFSET + 4 + 20;
+    store_le16(optional + 68, VIBTANIUM_EFI_SUBSYSTEM_RUNTIME_DRIVER);
+
+    g_assert_true(vibtanium_efi_image_from_buffer(
+        "runtime-driver.efi", pe, sizeof(pe), VIBTANIUM_EFI_APP_BASE,
+        &image, &err));
+    g_assert_null(err);
+    g_assert_cmpuint(image.subsystem, ==,
+                     VIBTANIUM_EFI_SUBSYSTEM_RUNTIME_DRIVER);
+    g_assert_cmpuint(vibtanium_efi_loaded_image_memory_type(&image), ==,
+                     VIBTANIUM_EFI_RUNTIME_SERVICES_CODE);
+    image.subsystem = 10;
+    g_assert_cmpuint(vibtanium_efi_loaded_image_memory_type(&image), ==,
+                     VIBTANIUM_EFI_RESERVED_MEMORY_TYPE);
 
     vibtanium_efi_image_destroy(&image);
 }
@@ -1008,6 +1038,8 @@ int main(int argc, char **argv)
 
     g_test_add_func("/ia64-efi-app/load-synthetic-ia64-pe",
                     test_loads_synthetic_ia64_pe);
+    g_test_add_func("/ia64-efi-app/runtime-driver-uses-runtime-memory",
+                    test_runtime_driver_uses_runtime_memory);
     g_test_add_func("/ia64-efi-app/reject-non-ia64-pe",
                     test_rejects_non_ia64_pe);
     g_test_add_func("/ia64-efi-app/prepare-cpu-entry-abi",

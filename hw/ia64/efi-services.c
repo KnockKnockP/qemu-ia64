@@ -46,6 +46,7 @@ enum {
 #define EFI_MAX_PAGE_ALLOCATIONS 64
 #define EFI_MAX_LOADED_IMAGES 8
 #define EFI_MAX_STARTED_IMAGES 8
+#define EFI_MAX_VIRTUAL_MAP_ENTRIES 128
 #define EFI_MAX_PATH_CHARS 512
 #define EFI_MAX_VAR_NAME_CHARS 1024
 #define EFI_MAX_VARIABLE_DATA_SIZE (1024 * 1024)
@@ -100,6 +101,7 @@ enum {
 #define EFI_TIMER_CANCEL   0
 #define EFI_TIMER_PERIODIC 1
 #define EFI_TIMER_RELATIVE 2
+#define EFI_EVENT_SIGNAL_VIRTUAL_ADDRESS_CHANGE UINT32_C(0x60000202)
 
 typedef struct EfiInstalledProtocol {
     bool in_use;
@@ -151,6 +153,8 @@ typedef struct EfiGuestEvent {
     bool in_use;
     uint64_t handle;
     uint32_t type;
+    uint64_t notify_function;
+    uint64_t notify_context;
     bool signaled;
     bool timer_active;
     bool timer_periodic;
@@ -210,12 +214,28 @@ typedef struct EfiStartedImageFrame {
     char path[EFI_MAX_PATH_CHARS];
 } EfiStartedImageFrame;
 
+typedef struct EfiEventNotifyFrame {
+    bool active;
+    EfiCpuFrame cpu;
+    uint64_t parent_return_ip;
+    uint64_t status;
+    unsigned service_index;
+    unsigned next_event_index;
+} EfiEventNotifyFrame;
+
 typedef struct EfiMemoryRange {
     uint32_t type;
     uint64_t address;
     uint64_t pages;
     uint64_t attributes;
 } EfiMemoryRange;
+
+typedef struct EfiVirtualMapEntry {
+    uint64_t physical;
+    uint64_t virtual_address;
+    uint64_t pages;
+    uint64_t attributes;
+} EfiVirtualMapEntry;
 
 typedef enum EfiMemoryMapRecordKind {
     EFI_MEMORY_MAP_RECORD_DIRECT,
@@ -417,10 +437,24 @@ static EfiStartedImageFrame efi_started_images[EFI_MAX_STARTED_IMAGES];
 static unsigned efi_started_image_depth;
 static bool efi_pending_exit_image;
 static uint64_t efi_pending_exit_status;
+static EfiGuestEvent *efi_pending_notify_event;
+static EfiEventNotifyFrame efi_event_notify_frame;
+static uint64_t efi_virtual_map_size;
+static uint64_t efi_virtual_descriptor_size;
+static uint64_t efi_virtual_map;
+static EfiVirtualMapEntry
+    efi_virtual_map_entries[EFI_MAX_VIRTUAL_MAP_ENTRIES];
+static unsigned efi_virtual_map_entry_count;
 static EfiLoaderBenchmark efi_loader_benchmark;
 static uint8_t *efi_transfer_bounce;
 static size_t efi_transfer_bounce_capacity;
 static GHashTable *efi_media_files;
+
+static uint64_t efi_runtime_virtual_address(CPUIA64State *env,
+                                            uint64_t memory_map_size,
+                                            uint64_t descriptor_size,
+                                            uint64_t memory_map,
+                                            uint64_t physical);
 
 static void efi_media_cache_entry_free(gpointer opaque)
 {
@@ -684,6 +718,16 @@ static bool efi_gate_is_start_image_return(uint64_t gate_ip)
 
     return ia64_region_offset(gate_ip) ==
            VIBTANIUM_EFI_START_IMAGE_RETURN_GATE;
+}
+
+static bool efi_gate_is_event_notify_return(uint64_t gate_ip)
+{
+    if (!efi_gate_address_is_valid_alias(gate_ip)) {
+        return false;
+    }
+
+    return ia64_region_offset(gate_ip) ==
+           VIBTANIUM_EFI_EVENT_NOTIFY_RETURN_GATE;
 }
 
 static bool efi_trace_enabled(void)
@@ -1737,7 +1781,10 @@ static unsigned efi_emit_split_conventional(CPUIA64State *env, uint64_t map,
                 .address = MAX(alloc->address, cursor),
                 .pages = (alloc_end - MAX(alloc->address, cursor)) /
                          EFI_PAGE_SIZE,
-                .attributes = EFI_MEMORY_WB,
+                .attributes = EFI_MEMORY_WB |
+                    ((alloc->type == EFI_RUNTIME_SERVICES_CODE ||
+                      alloc->type == EFI_RUNTIME_SERVICES_DATA)
+                         ? EFI_MEMORY_RUNTIME : 0),
             };
             index = efi_emit_memory_descriptor(env, map, index, &allocation);
             cursor = alloc_end;
@@ -1968,6 +2015,13 @@ void vibtanium_efi_register_boot_media(
     efi_started_image_depth = 0;
     efi_pending_exit_image = false;
     efi_pending_exit_status = VIBTANIUM_EFI_SUCCESS;
+    efi_pending_notify_event = NULL;
+    memset(&efi_event_notify_frame, 0, sizeof(efi_event_notify_frame));
+    efi_virtual_map_size = 0;
+    efi_virtual_descriptor_size = 0;
+    efi_virtual_map = 0;
+    memset(efi_virtual_map_entries, 0, sizeof(efi_virtual_map_entries));
+    efi_virtual_map_entry_count = 0;
     efi_pool_next = VIBTANIUM_EFI_POOL_BASE;
     efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
     efi_memory_map_key = 1;
@@ -2806,13 +2860,13 @@ static uint64_t efi_load_image(CPUIA64State *env)
     }
 
     /*
-     * Keep firmware-owned LoadImage pages out of the OS free list.  The
-     * loaded-image protocol still reports normal loader code/data types, but
-     * some IA-64 loaders do not mirror late EFI image allocations into their
-     * handoff memory descriptors before ExitBootServices.
+     * Keep firmware-owned LoadImage pages out of the OS free list.  Runtime
+     * drivers must additionally remain in the EFI virtual map so their
+     * virtual-address-change notification can convert resident interfaces.
      */
     if (!efi_record_page_allocation(loaded.load_base, pages,
-                                    EFI_RESERVED_MEMORY_TYPE)) {
+                                    vibtanium_efi_loaded_image_memory_type(
+                                        &loaded))) {
         vibtanium_efi_image_destroy(&loaded);
         memset(child, 0, sizeof(*child));
         return VIBTANIUM_EFI_OUT_OF_RESOURCES;
@@ -2967,6 +3021,124 @@ static bool efi_enter_child_image(CPUIA64State *env, EfiChildImage *child)
     env->ar[IA64_AR_PFS] = 0;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
     ia64_firmware_identity_tlb_set(env, true);
+    return true;
+}
+
+static EfiGuestEvent *efi_next_virtual_address_change_event(
+    unsigned *next_index)
+{
+    unsigned start = next_index ? *next_index : 0;
+
+    for (unsigned i = start; i < EFI_MAX_EVENTS; i++) {
+        EfiGuestEvent *event = &efi_guest_events[i];
+
+        if (event->in_use && event->notify_function != 0 &&
+            event->type == EFI_EVENT_SIGNAL_VIRTUAL_ADDRESS_CHANGE) {
+            if (next_index) {
+                *next_index = i + 1;
+            }
+            return event;
+        }
+    }
+
+    return NULL;
+}
+
+static bool efi_launch_event_notify(CPUIA64State *env,
+                                    EfiGuestEvent *event)
+{
+    uint64_t entry;
+    uint64_t global_pointer;
+    uint64_t notify_context;
+
+    if (!event || event->notify_function == 0) {
+        return false;
+    }
+
+    entry = efi_guest_ldq(env, event->notify_function);
+    global_pointer = efi_guest_ldq(env, event->notify_function + 8);
+    if (entry == 0) {
+        warn_report("vibtanium EFI event 0x%016" PRIx64
+                    " has a zero notify entry", event->handle);
+        return false;
+    }
+
+    entry = efi_runtime_virtual_address(
+        env, efi_virtual_map_size, efi_virtual_descriptor_size,
+        efi_virtual_map, entry);
+    global_pointer = efi_runtime_virtual_address(
+        env, efi_virtual_map_size, efi_virtual_descriptor_size,
+        efi_virtual_map, global_pointer);
+    notify_context = event->notify_context == 0 ? 0 :
+        efi_runtime_virtual_address(
+            env, efi_virtual_map_size, efi_virtual_descriptor_size,
+            efi_virtual_map, event->notify_context);
+
+    ia64_set_cfm(env, ia64_make_cfm(2, 0, 0));
+    ia64_write_gr(env, 32, event->handle);
+    ia64_write_gr(env, 33, notify_context);
+    ia64_branch_call_effects(
+        env, 0, VIBTANIUM_EFI_EVENT_NOTIFY_RETURN_GATE - IA64_BUNDLE_SIZE);
+    ia64_write_gr(env, 1, global_pointer);
+    env->pr = 1;
+    ia64_env_set_psr(env, ia64_env_psr(env) | IA64_PSR_BN_BIT |
+                          IA64_TB_PSR_DT_BIT | IA64_TB_PSR_IT_BIT);
+    env->ip = entry;
+    env->cr[IA64_CR_IIP] = entry;
+    return true;
+}
+
+static bool efi_enter_event_notify(CPUIA64State *env,
+                                   EfiGuestEvent *event,
+                                   unsigned service_index,
+                                   uint64_t status)
+{
+    EfiEventNotifyFrame *frame = &efi_event_notify_frame;
+
+    if (frame->active || !event) {
+        return false;
+    }
+
+    memset(frame, 0, sizeof(*frame));
+    frame->active = true;
+    efi_save_cpu_frame(&frame->cpu, env);
+    frame->parent_return_ip = env->br[0];
+    frame->status = status;
+    frame->service_index = service_index;
+    frame->next_event_index = (unsigned)(event - efi_guest_events) + 1;
+    if (!efi_launch_event_notify(env, event)) {
+        memset(frame, 0, sizeof(*frame));
+        return false;
+    }
+    return true;
+}
+
+static bool efi_return_from_event_notify(CPUIA64State *env)
+{
+    EfiEventNotifyFrame *frame = &efi_event_notify_frame;
+    EfiGuestEvent *next;
+    uint64_t parent_return_ip;
+    uint64_t status;
+    unsigned service_index;
+
+    if (!frame->active) {
+        warn_report("vibtanium EFI event notify return with no active event");
+        return false;
+    }
+
+    efi_restore_cpu_frame(env, &frame->cpu);
+    next = efi_next_virtual_address_change_event(&frame->next_event_index);
+    if (next) {
+        return efi_launch_event_notify(env, next);
+    }
+
+    parent_return_ip = frame->parent_return_ip;
+    status = frame->status;
+    service_index = frame->service_index;
+    memset(frame, 0, sizeof(*frame));
+    ia64_write_gr(env, 8, status);
+    efi_trace_service(env, service_index, status);
+    ia64_return_from_call_frame(env, parent_return_ip);
     return true;
 }
 
@@ -3397,6 +3569,8 @@ static EfiGuestEvent *efi_find_event(uint64_t handle)
 static uint64_t efi_create_event(CPUIA64State *env)
 {
     uint64_t raw_type = ia64_read_gr(env, 32);
+    uint64_t notify_function = ia64_read_gr(env, 34);
+    uint64_t notify_context = ia64_read_gr(env, 35);
     uint64_t event_out = ia64_read_gr(env, 36);
     uint32_t type;
 
@@ -3416,6 +3590,8 @@ static uint64_t efi_create_event(CPUIA64State *env)
         event->in_use = true;
         event->handle = efi_next_event_handle++;
         event->type = type;
+        event->notify_function = notify_function;
+        event->notify_context = notify_context;
         efi_guest_stq(env, event_out, event->handle);
         return VIBTANIUM_EFI_SUCCESS;
     }
@@ -3767,12 +3943,50 @@ static bool efi_runtime_range_contains(uint64_t base, uint64_t pages,
     return address >= base && address < end;
 }
 
+static void efi_runtime_cache_virtual_map(CPUIA64State *env,
+                                          uint64_t memory_map_size,
+                                          uint64_t descriptor_size,
+                                          uint64_t memory_map)
+{
+    efi_virtual_map_entry_count = 0;
+    memset(efi_virtual_map_entries, 0, sizeof(efi_virtual_map_entries));
+    if (memory_map == 0 || descriptor_size < EFI_MEMORY_DESCRIPTOR_SIZE ||
+        memory_map_size < EFI_MEMORY_DESCRIPTOR_SIZE) {
+        return;
+    }
+
+    for (uint64_t offset = 0;
+         offset <= memory_map_size - EFI_MEMORY_DESCRIPTOR_SIZE &&
+         efi_virtual_map_entry_count < EFI_MAX_VIRTUAL_MAP_ENTRIES;
+         offset += descriptor_size) {
+        uint64_t descriptor = memory_map + offset;
+        EfiVirtualMapEntry *entry =
+            &efi_virtual_map_entries[efi_virtual_map_entry_count++];
+
+        entry->physical = efi_guest_ldq(env, descriptor + 8);
+        entry->virtual_address = efi_guest_ldq(env, descriptor + 16);
+        entry->pages = efi_guest_ldq(env, descriptor + 24);
+        entry->attributes = efi_guest_ldq(env, descriptor + 32);
+    }
+}
+
 static uint64_t efi_runtime_virtual_address(CPUIA64State *env,
                                             uint64_t memory_map_size,
                                             uint64_t descriptor_size,
                                             uint64_t memory_map,
                                             uint64_t physical)
 {
+    for (unsigned i = 0; i < efi_virtual_map_entry_count; i++) {
+        const EfiVirtualMapEntry *entry = &efi_virtual_map_entries[i];
+
+        if ((entry->attributes & EFI_MEMORY_RUNTIME) != 0 &&
+            entry->virtual_address != 0 &&
+            efi_runtime_range_contains(entry->physical, entry->pages,
+                                       physical)) {
+            return entry->virtual_address + (physical - entry->physical);
+        }
+    }
+
     if (memory_map != 0 && descriptor_size >= EFI_MEMORY_DESCRIPTOR_SIZE &&
         memory_map_size >= EFI_MEMORY_DESCRIPTOR_SIZE) {
         uint64_t limit = memory_map_size - EFI_MEMORY_DESCRIPTOR_SIZE;
@@ -3860,8 +4074,19 @@ static uint64_t efi_runtime_set_virtual_address_map(CPUIA64State *env)
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
 
+    efi_virtual_map_size = memory_map_size;
+    efi_virtual_descriptor_size = descriptor_size;
+    efi_virtual_map = memory_map;
+    efi_runtime_cache_virtual_map(env, memory_map_size, descriptor_size,
+                                  memory_map);
     efi_runtime_convert_service_descriptors(env, memory_map_size,
                                             descriptor_size, memory_map);
+    {
+        unsigned next_index = 0;
+
+        efi_pending_notify_event =
+            efi_next_virtual_address_change_event(&next_index);
+    }
     return VIBTANIUM_EFI_SUCCESS;
 }
 
@@ -3877,7 +4102,10 @@ static uint64_t efi_runtime_convert_pointer(CPUIA64State *env)
     physical = efi_guest_ldq(env, pointer);
     if (physical != 0) {
         efi_guest_stq(env, pointer,
-                      IA64_KERNEL_PAGE_OFFSET + ia64_region_offset(physical));
+                      efi_runtime_virtual_address(
+                          env, efi_virtual_map_size,
+                          efi_virtual_descriptor_size, efi_virtual_map,
+                          physical));
     }
     return VIBTANIUM_EFI_SUCCESS;
 }
@@ -4408,11 +4636,15 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         return efi_return_from_child_image(env, ia64_read_gr(env, 8),
                                            "return");
     }
+    if (efi_gate_is_event_notify_return(gate_ip)) {
+        return efi_return_from_event_notify(env);
+    }
     if (!efi_gate_service_index(gate_ip, &service_index)) {
         return vibtanium_firmware_dispatch_gate(env, gate_ip);
     }
 
     efi_pending_start_image = NULL;
+    efi_pending_notify_event = NULL;
     efi_pending_exit_image = false;
     IA64_PERF_INC(IA64_PERF_FIRMWARE_EFI);
     if (service_index < EFI_RUNTIME_SERVICE_BASE) {
@@ -4472,6 +4704,16 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
             return efi_enter_child_image(env, child);
         }
         result = VIBTANIUM_EFI_OUT_OF_RESOURCES;
+    }
+
+    if (result == VIBTANIUM_EFI_SUCCESS && efi_pending_notify_event) {
+        EfiGuestEvent *event = efi_pending_notify_event;
+
+        efi_pending_notify_event = NULL;
+        if (efi_enter_event_notify(env, event, service_index, result)) {
+            return true;
+        }
+        result = VIBTANIUM_EFI_DEVICE_ERROR;
     }
 
     ia64_write_gr(env, 8, result);

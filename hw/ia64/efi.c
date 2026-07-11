@@ -512,6 +512,7 @@ bool vibtanium_efi_image_from_buffer(const char *path,
     uint32_t data_directory_offset;
     uint32_t reloc_rva = 0;
     uint32_t reloc_size = 0;
+    uint16_t subsystem;
     uint64_t preferred_image_base;
     uint64_t requested_load_base;
     uint64_t entry_descriptor;
@@ -575,7 +576,7 @@ bool vibtanium_efi_image_from_buffer(const char *path,
                    optional_magic);
         return false;
     }
-    if (optional_size < 64) {
+    if (optional_size < 70) {
         error_setg(errp, "EFI image optional header is too small");
         return false;
     }
@@ -587,6 +588,7 @@ bool vibtanium_efi_image_from_buffer(const char *path,
     section_alignment = rd32(optional + 32);
     size_of_image = rd32(optional + 56);
     size_of_headers = rd32(optional + 60);
+    subsystem = rd16(optional + 68);
     data_directory_offset = optional_magic == PE32P_MAGIC ?
                             PE32P_DATA_DIRECTORY_OFFSET :
                             PE32_DATA_DIRECTORY_OFFSET;
@@ -711,6 +713,7 @@ bool vibtanium_efi_image_from_buffer(const char *path,
     image->section_alignment = section_alignment;
     image->relocation_rva = reloc_rva;
     image->relocation_size = reloc_size;
+    image->subsystem = subsystem;
     image->number_of_sections = sections;
     g_strlcpy(image->source_path, path ? path : "<buffer>",
               sizeof(image->source_path));
@@ -824,6 +827,17 @@ uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
     }
 
     return (uint32_t)memory_type;
+}
+
+uint32_t vibtanium_efi_loaded_image_memory_type(
+    const VibtaniumEfiImage *image)
+{
+    if (image &&
+        image->subsystem == VIBTANIUM_EFI_SUBSYSTEM_RUNTIME_DRIVER) {
+        return VIBTANIUM_EFI_RUNTIME_SERVICES_CODE;
+    }
+
+    return VIBTANIUM_EFI_RESERVED_MEMORY_TYPE;
 }
 
 void vibtanium_efi_pal_code_memory_descriptor(uint32_t *type,
@@ -1607,6 +1621,8 @@ uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
     }
     write_return_gate(blob, VIBTANIUM_EFI_BLOB_SIZE,
                       VIBTANIUM_EFI_START_IMAGE_RETURN_GATE);
+    write_return_gate(blob, VIBTANIUM_EFI_BLOB_SIZE,
+                      VIBTANIUM_EFI_EVENT_NOTIFY_RETURN_GATE);
 
     write_loaded_image(blob, VIBTANIUM_EFI_BLOB_SIZE, image);
     write_console_protocols(blob, VIBTANIUM_EFI_BLOB_SIZE);

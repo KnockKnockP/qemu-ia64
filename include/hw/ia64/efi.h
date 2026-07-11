@@ -8,6 +8,7 @@
 typedef struct MemoryRegion MemoryRegion;
 
 #define VIBTANIUM_EFI_PE_MACHINE_IA64 0x0200
+#define VIBTANIUM_EFI_SUBSYSTEM_RUNTIME_DRIVER 12
 
 #define VIBTANIUM_EFI_APP_BASE          UINT64_C(0x01000000)
 #define VIBTANIUM_EFI_IMAGE_HANDLE      UINT64_C(0x00070000)
@@ -23,6 +24,7 @@ typedef struct MemoryRegion MemoryRegion;
 #define VIBTANIUM_EFI_DESCRIPTOR_BASE   UINT64_C(0x00084000)
 #define VIBTANIUM_EFI_CALL_GATE_BASE    UINT64_C(0x00085000)
 #define VIBTANIUM_EFI_START_IMAGE_RETURN_GATE UINT64_C(0x00085600)
+#define VIBTANIUM_EFI_EVENT_NOTIFY_RETURN_GATE UINT64_C(0x00085610)
 #define VIBTANIUM_EFI_FIRMWARE_VENDOR   UINT64_C(0x00086000)
 #define VIBTANIUM_EFI_CONFIGURATION_TABLE UINT64_C(0x00086100)
 #define VIBTANIUM_EFI_DEVICE_PATH       UINT64_C(0x00086200)
@@ -162,6 +164,7 @@ typedef struct VibtaniumEfiImage {
     uint32_t section_alignment;
     uint32_t relocation_rva;
     uint32_t relocation_size;
+    uint16_t subsystem;
     uint16_t number_of_sections;
     uint8_t *load_options;
     size_t load_options_size;
@@ -206,7 +209,9 @@ bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
                                   Error **errp);
 bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value);
 uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
-                                                   uint64_t memory_type);
+                                                    uint64_t memory_type);
+uint32_t vibtanium_efi_loaded_image_memory_type(
+    const VibtaniumEfiImage *image);
 void vibtanium_efi_pal_code_memory_descriptor(uint32_t *type,
                                               uint64_t *address,
                                               uint64_t *pages,
