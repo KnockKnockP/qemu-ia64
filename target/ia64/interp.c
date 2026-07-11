@@ -215,11 +215,19 @@ static G_NORETURN void ia64_exit_after_translation_fault(
     cpu_loop_exit(cpu);
 }
 
+static void ia64_rse_complete_pending_fill(CPUIA64State *env);
+static void ia64_rse_schedule_pending_fill(CPUIA64State *env, uint32_t count,
+                                           uint64_t resume_ip);
+
 static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
                                unsigned next_ri)
 {
     ia64_env_set_psr(env, ia64_psr_with_ri(ia64_env_psr(env), next_ri));
     env->ip = next_ip;
+    if (env->rse.pending_fill_count != 0 &&
+        env->rse.pending_fill_ip == next_ip) {
+        ia64_rse_complete_pending_fill(env);
+    }
 }
 
 static void ia64_finish_tcg_ticks(CPUIA64State *env, uint32_t bundle_count)
@@ -829,17 +837,13 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
                                            (env->ar[IA64_AR_PFS] >> 7) &
                                            0x7f);
     }
-    if (rfi_valid_ifs) {
-        ia64_rse_probe_restored_frame_fill(env,
-                                           env->cr[IA64_CR_IFS] & 0x7f);
-    }
     ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
     if (br_ret) {
         ia64_rse_maybe_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
     }
     if (rfi_valid_ifs) {
         IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-        ia64_rse_maybe_fill_restored_frame(env, env->rse.sof);
+        ia64_rse_schedule_pending_fill(env, env->rse.sof, next_ip);
     }
     if (rfi) {
         IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
@@ -1125,10 +1129,6 @@ static IA64PlannedSlotResult exec_predecoded_slot(
             ia64_rse_probe_restored_frame_fill(
                 env, (env->ar[IA64_AR_PFS] >> 7) & 0x7f);
         }
-        if (rfi_valid_ifs) {
-            ia64_rse_probe_restored_frame_fill(
-                env, env->cr[IA64_CR_IFS] & 0x7f);
-        }
         ia64_exec_b_indirect_branch_decoded(
             env, branch_major, branch_x6, branch.branch_reg,
             branch.target_reg, env->ip, next_ip);
@@ -1138,7 +1138,7 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         }
         if (rfi_valid_ifs) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-            ia64_rse_maybe_fill_restored_frame(env, env->rse.sof);
+            ia64_rse_schedule_pending_fill(env, env->rse.sof, *next_ip);
         }
         if (rfi) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
@@ -1818,10 +1818,6 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
                 ia64_rse_probe_restored_frame_fill(
                     env, (env->ar[IA64_AR_PFS] >> 7) & 0x7f);
             }
-            if (rfi_valid_ifs) {
-                ia64_rse_probe_restored_frame_fill(
-                    env, env->cr[IA64_CR_IFS] & 0x7f);
-            }
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
             if (br_ret) {
                 ia64_rse_maybe_fill_restored_frame(env,
@@ -1829,7 +1825,7 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             }
             if (rfi_valid_ifs) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-                ia64_rse_maybe_fill_restored_frame(env, env->rse.sof);
+                ia64_rse_schedule_pending_fill(env, env->rse.sof, next_ip);
             }
             if (rfi) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);

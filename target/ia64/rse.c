@@ -231,6 +231,34 @@ static void ia64_rse_probe_restored_frame_fill(CPUIA64State *env,
     }
 }
 
+/*
+ * RFI restores PSR before the RSE resumes filling clean registers.  Schedule
+ * that work at the resumed bundle so a VHPT/page fault is collected with the
+ * restored state and can restart the fill at the same bundle.  br.ret keeps
+ * its pre-commit probe because it does not change the translation regime.
+ */
+static void ia64_rse_schedule_pending_fill(CPUIA64State *env, uint32_t count,
+                                           uint64_t resume_ip)
+{
+    if (count == 0 || env->rse.bsp == 0) {
+        return;
+    }
+    env->rse.pending_fill_count = count;
+    env->rse.pending_fill_ip = resume_ip;
+}
+
+static void ia64_rse_complete_pending_fill(CPUIA64State *env)
+{
+    uint32_t count = env->rse.pending_fill_count;
+
+    if (count == 0) {
+        return;
+    }
+    ia64_rse_maybe_fill_restored_frame(env, count);
+    env->rse.pending_fill_count = 0;
+    env->rse.pending_fill_ip = 0;
+}
+
 static void ia64_exec_loadrs(CPUIA64State *env)
 {
     uint64_t bytes = (env->rse.rsc >> 16) & 0x3fff;

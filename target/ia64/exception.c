@@ -53,6 +53,19 @@ static bool ia64_exception_trace_enabled(uint64_t source_ip)
     return enabled && (!filtered || source_ip == filter_ip);
 }
 
+static bool ia64_exception_trace_kind_enabled(IA64ExceptionKind kind)
+{
+    static const char *filter;
+    static bool initialized;
+
+    if (!initialized) {
+        filter = g_getenv("VIBTANIUM_EXCEPTION_TRACE_KIND");
+        initialized = true;
+    }
+
+    return filter == NULL || strcmp(filter, ia64_exception_name(kind)) == 0;
+}
+
 static void ia64_exception_trace_registers(CPUIA64State *env,
                                            uint64_t source_ip)
 {
@@ -446,14 +459,15 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     data_nested_tlb = collection_disabled &&
                       (kind == IA64_EXCEPTION_DATA_TLB_MISS ||
                        kind == IA64_EXCEPTION_ALTERNATE_DATA_TLB_MISS);
-    trace_enabled = ia64_exception_trace_enabled(source_ip);
+    if (data_nested_tlb) {
+        kind = IA64_EXCEPTION_DATA_NESTED_TLB;
+    }
+
+    trace_enabled = ia64_exception_trace_enabled(source_ip) &&
+                    ia64_exception_trace_kind_enabled(kind);
     user_trace_enabled = ia64_user_exception_trace_enabled();
     if (trace_enabled) {
         ia64_exception_trace_registers(env, source_ip);
-    }
-
-    if (data_nested_tlb) {
-        kind = IA64_EXCEPTION_DATA_NESTED_TLB;
     }
 
     IA64_PERF_INC(IA64_PERF_EXCEPTION_DELIVERED);
