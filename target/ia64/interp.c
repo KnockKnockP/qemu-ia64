@@ -50,7 +50,8 @@ void HELPER(perf_tb_exit_lookup_ptr)(void)
     IA64_PERF_INC(IA64_PERF_TB_EXIT_LOOKUP_PTR);
 }
 
-void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip)
+void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip,
+                                uint64_t dispatch_ip)
 {
     CPUState *cpu = env_cpu(env);
 
@@ -70,12 +71,12 @@ void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip)
         ia64_progress_trace_bundle(env);
     }
 
-    if (!ia64_firmware_dispatch_gate(env, gate_ip)) {
+    if (!ia64_firmware_dispatch_gate(env, dispatch_ip)) {
         IA64_PERF_INC(IA64_PERF_TCG_FIRMWARE_CALL_GATE_FALLBACK);
         cpu_abort(cpu,
                   "IA-64 firmware call-gate fast path missed "
-                  "IP=0x%016" PRIx64 "\n",
-                  gate_ip);
+                  "IP=0x%016" PRIx64 " dispatch=0x%016" PRIx64 "\n",
+                  gate_ip, dispatch_ip);
     }
 }
 

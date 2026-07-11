@@ -34,9 +34,14 @@ typedef enum IA64TcgTbBoundary {
  */
 IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle(
     const IA64DecodedBundle *bundle, uint64_t pc);
+IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle_with_physical(
+    const IA64DecodedBundle *bundle, uint64_t pc, uint64_t physical_pc,
+    bool physical_pc_valid);
 const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary);
 bool ia64_tcg_tb_boundary_ends_tb(IA64TcgTbBoundary boundary);
 bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc);
+bool ia64_tcg_bundle_is_firmware_call_gate_candidate(
+    const IA64DecodedBundle *bundle);
 
 typedef enum IA64TcgFallbackReason {
     IA64_TCG_FALLBACK_NONE,

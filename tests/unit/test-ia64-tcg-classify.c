@@ -170,6 +170,9 @@ static void test_efi_call_gate_ends_tb(void)
         (IA64_TEST_EFI_SERVICE_DESCRIPTOR_COUNT -
          VIBTANIUM_EFI_GOP_SERVICE_COUNT) * IA64_BUNDLE_SIZE;
     uint64_t after_last_service_gate = last_service_gate + IA64_BUNDLE_SIZE;
+    IA64DecodedBundle branch_gate =
+        make_bundle(0x11, UINT64_C(1) << 27, UINT64_C(1) << 27,
+                    UINT64_C(0x20) << 27);
 
     assert_boundary(IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE,
                     &bundle, VIBTANIUM_EFI_PAL_PROC);
@@ -201,6 +204,16 @@ static void test_efi_call_gate_ends_tb(void)
     g_assert_false(ia64_tcg_pc_is_efi_call_gate(region4_service_alias));
     assert_boundary(IA64_TCG_TB_BOUNDARY_NONE, &bundle, region4_pal_alias);
     assert_boundary(IA64_TCG_TB_BOUNDARY_NONE, &bundle, region4_service_alias);
+    g_assert_true(ia64_tcg_bundle_is_firmware_call_gate_candidate(
+        &branch_gate));
+    g_assert_cmpint(ia64_tcg_tb_boundary_for_bundle_with_physical(
+                        &branch_gate, region4_pal_alias,
+                        VIBTANIUM_EFI_PAL_PROC, true),
+                    ==, IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE);
+    g_assert_cmpint(ia64_tcg_tb_boundary_for_bundle_with_physical(
+                        &branch_gate, region4_pal_alias,
+                        VIBTANIUM_EFI_PAL_PROC, false),
+                    ==, IA64_TCG_TB_BOUNDARY_BRANCH);
 }
 
 static void test_break_and_branch_end_tb(void)

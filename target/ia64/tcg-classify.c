@@ -41,6 +41,18 @@ bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc)
            IA64_FIRMWARE_EFI_CLASSIFY_SERVICE_COUNT;
 }
 
+bool ia64_tcg_bundle_is_firmware_call_gate_candidate(
+    const IA64DecodedBundle *bundle)
+{
+    const uint64_t nop = UINT64_C(1) << 27;
+    const uint64_t br_b0 = UINT64_C(0x20) << 27;
+    const uint64_t br_ret_b0 = UINT64_C(0x21) << 27;
+
+    return bundle && bundle->valid && bundle->tmpl == 0x11 &&
+           bundle->slot[0] == nop && bundle->slot[1] == nop &&
+           (bundle->slot[2] == br_b0 || bundle->slot[2] == br_ret_b0);
+}
+
 const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary)
 {
     switch (boundary) {
@@ -2762,10 +2774,20 @@ static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,
 IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle(
     const IA64DecodedBundle *bundle, uint64_t pc)
 {
+    return ia64_tcg_tb_boundary_for_bundle_with_physical(
+        bundle, pc, 0, false);
+}
+
+IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle_with_physical(
+    const IA64DecodedBundle *bundle, uint64_t pc, uint64_t physical_pc,
+    bool physical_pc_valid)
+{
     if (!bundle || !bundle->valid) {
         return IA64_TCG_TB_BOUNDARY_INVALID_TEMPLATE;
     }
-    if (ia64_tcg_pc_is_efi_call_gate(pc)) {
+    if (ia64_tcg_pc_is_efi_call_gate(pc) ||
+        (physical_pc_valid &&
+         ia64_tcg_pc_is_efi_call_gate(physical_pc))) {
         return IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE;
     }
 

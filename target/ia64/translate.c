@@ -14,6 +14,7 @@
 #include "exec/translator.h"
 #include "firmware.h"
 #include "hw/core/cpu.h"
+#include "mem.h"
 #include "perf.h"
 #include "tcg-classify.h"
 #include "tcg/tcg-op.h"
@@ -866,12 +867,29 @@ static void ia64_tr_emit_exec_bundle_lookup_ptr_cached_fallback(
     tcg_gen_exit_tb(NULL, 0);
 }
 
-static void ia64_tr_emit_firmware_call_gate(DisasContext *ctx, uint64_t pc)
+static void ia64_tr_emit_firmware_call_gate(DisasContext *ctx, uint64_t pc,
+                                            uint64_t dispatch_ip)
 {
     ia64_tr_state_cache_barrier(ctx);
     ia64_tr_flush_fast_bundle_ticks(ctx);
     ia64_tr_prepare_helper_ip(pc);
-    gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc));
+    gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc),
+                                  tcg_constant_i64(dispatch_ip));
+}
+
+static bool ia64_tr_instruction_physical_address(DisasContext *ctx,
+                                                 uint64_t pc,
+                                                 uint64_t *physical_pc)
+{
+    IA64TranslateResult result;
+    int mmu_idx = ia64_tcg_mmu_index_for_psr(ctx->env->psr, true);
+
+    if (!ia64_translate_address_no_detail(ctx->env, pc, MMU_INST_FETCH,
+                                          mmu_idx, false, &result)) {
+        return false;
+    }
+    *physical_pc = result.paddr;
+    return true;
 }
 
 static bool ia64_tr_gr_is_stacked(uint8_t reg)
@@ -3197,6 +3215,8 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     IA64TrBranchResult branch_result;
     char bundle_text[160];
     uint64_t pc = ctx->base.pc_next;
+    uint64_t dispatch_ip = pc;
+    bool dispatch_ip_is_physical = false;
     uint64_t lo;
     uint64_t hi;
 
@@ -3219,10 +3239,16 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     trace_ia64_bundle_decode(pc, bundle_text);
 
     ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
-    boundary = ia64_tcg_tb_boundary_for_bundle(&bundle, pc);
+    if (!ia64_tcg_pc_is_efi_call_gate(pc) &&
+        ia64_tcg_bundle_is_firmware_call_gate_candidate(&bundle)) {
+        dispatch_ip_is_physical = ia64_tr_instruction_physical_address(
+            ctx, pc, &dispatch_ip);
+    }
+    boundary = ia64_tcg_tb_boundary_for_bundle_with_physical(
+        &bundle, pc, dispatch_ip, dispatch_ip_is_physical);
     if (boundary == IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE) {
         ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_HELPER_FAST, 1);
-        ia64_tr_emit_firmware_call_gate(ctx, pc);
+        ia64_tr_emit_firmware_call_gate(ctx, pc, dispatch_ip);
         trace_ia64_tcg_tb_boundary(pc, ia64_tcg_tb_boundary_name(boundary));
         IA64_PERF_INC(IA64_PERF_TB_EXIT_FLOW_TRANSLATED);
         ctx->base.is_jmp = DISAS_EXIT;
