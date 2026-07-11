@@ -2331,13 +2331,9 @@ IA64TcgFallbackPlan ia64_tcg_fallback_plan_for_bundle(
     return plan;
 }
 
-static bool ia64_tcg_same_page(uint64_t left, uint64_t right)
-{
-    return ((left ^ right) & IA64_TCG_TARGET_PAGE_MASK) == 0;
-}
-
 static bool ia64_tcg_build_direct_branch_prefix(
-    const IA64DecodedBundle *bundle, IA64TcgFastBundle *prefix,
+    const IA64DecodedBundle *bundle, int branch_slot,
+    IA64TcgFastBundle *prefix,
     IA64TcgBranchReject *reject, int *prefix_slot)
 {
     uint64_t prior_dest_mask = 0;
@@ -2351,11 +2347,22 @@ static bool ia64_tcg_build_direct_branch_prefix(
      * value either way.
      */
     memset(prefix, 0, sizeof(*prefix));
-    for (int slot = 0; slot < 2; slot++) {
+    for (int slot = 0; slot < branch_slot; slot++) {
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
                                       bundle->slot[slot],
                                       slot,
                                       &prefix->slot[slot], prefix)) {
+            /*
+             * Keep one decoded helper at the end of the prefix.  With no
+             * later prefix slot, its unknown write set cannot invalidate a
+             * generated operand; the branch predicate/BR is loaded after the
+             * helper returns.
+             */
+            if (prefix->helper_mask == 0 && slot + 1 == branch_slot) {
+                prefix->helper_mask |= 1u << slot;
+                prefix->slot_count++;
+                continue;
+            }
             *reject = IA64_TCG_BRANCH_REJECT_PREFIX_UNSUPPORTED;
             *prefix_slot = slot;
             return false;
@@ -2434,8 +2441,10 @@ static bool ia64_tcg_build_direct_branch_internal(
     uint64_t fallthrough;
     uint8_t btype;
     uint8_t predicate;
+    uint8_t branch_slot = IA64_SLOT_COUNT;
     IA64TcgDirectBranchKind kind;
     uint8_t call_branch_reg = 0;
+    uint8_t target_branch_reg = 0;
 
     unsigned branch_count = 0;
 
@@ -2453,23 +2462,24 @@ static bool ia64_tcg_build_direct_branch_internal(
             ia64_slot_is_b_call_relative(type, candidate) ||
             ia64_slot_is_b_indirect_branch(type, candidate)) {
             branch_count++;
-            if (slot != 2) {
-                *reject = IA64_TCG_BRANCH_REJECT_NOT_SLOT2;
-            }
+            branch_slot = slot;
         }
     }
     if (branch_count > 1) {
         *reject = IA64_TCG_BRANCH_REJECT_MULTIPLE_BRANCH;
         return false;
     }
-    if (branch_count == 1 &&
-        !(ia64_slot_is_b_branch_relative(bundle->info->slot_type[2],
-                                         bundle->slot[2]) ||
-          ia64_slot_is_b_call_relative(bundle->info->slot_type[2],
-                                       bundle->slot[2]) ||
-          ia64_slot_is_b_indirect_branch(bundle->info->slot_type[2],
-                                         bundle->slot[2]))) {
+    if (branch_count != 1 || branch_slot >= IA64_SLOT_COUNT) {
         return false;
+    }
+
+    /* Later B slots are harmless only when they are architecturally hints. */
+    for (int slot = branch_slot + 1; slot < IA64_SLOT_COUNT; slot++) {
+        if (!ia64_slot_is_b_predict_or_nop(bundle->info->slot_type[slot],
+                                           bundle->slot[slot])) {
+            *reject = IA64_TCG_BRANCH_REJECT_NOT_SLOT2;
+            return false;
+        }
     }
 
     /*
@@ -2479,14 +2489,15 @@ static bool ia64_tcg_build_direct_branch_internal(
      * rfi, cover/clrrrb/bsw/epc forms and modulo-scheduled loop branches stay
      * on the helper path; rotating predicate reads are mapped at runtime.
      */
-    raw = bundle->slot[2];
+    raw = bundle->slot[branch_slot];
     predicate = ia64_slot_predicate(raw);
     if (predicate >= 16 &&
         ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) {
         *reject = IA64_TCG_BRANCH_REJECT_ROTATING_PREDICATE;
         return false;
     }
-    if (ia64_slot_is_b_branch_relative(bundle->info->slot_type[2], raw)) {
+    if (ia64_slot_is_b_branch_relative(bundle->info->slot_type[branch_slot],
+                                       raw)) {
         btype = (raw >> 6) & 0x7;
         switch (btype) {
         case 0:
@@ -2502,54 +2513,53 @@ static bool ia64_tcg_build_direct_branch_internal(
         default:
             return false;
         }
-    } else if (ia64_slot_is_b_call_relative(bundle->info->slot_type[2],
+    } else if (ia64_slot_is_b_call_relative(bundle->info->slot_type[branch_slot],
                                             raw)) {
         kind = IA64_TCG_DIRECT_BRANCH_CALL;
         call_branch_reg = (raw >> 6) & 0x7;
-    } else if (ia64_slot_is_b_indirect_branch(bundle->info->slot_type[2],
+    } else if (ia64_slot_is_b_indirect_branch(bundle->info->slot_type[branch_slot],
                                               raw)) {
         uint8_t major = ia64_slot_major_opcode(raw);
         uint8_t x6 = (raw >> 27) & 0x3f;
 
         if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_INDIRECT) ||
             !(major == 0x1 ||
-              (major == 0x0 && (x6 == 0x20 || x6 == 0x21)))) {
+              (major == 0x0 &&
+               (x6 == 0x08 || x6 == 0x20 || x6 == 0x21)))) {
             *reject = IA64_TCG_BRANCH_REJECT_INDIRECT_UNSUPPORTED;
             return false;
         }
-        kind = IA64_TCG_DIRECT_BRANCH_INDIRECT;
+        target_branch_reg = (raw >> 13) & 0x7;
+        if (major == 0x1) {
+            kind = IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL;
+            call_branch_reg = (raw >> 6) & 0x7;
+        } else if (x6 == 0x08) {
+            kind = IA64_TCG_DIRECT_BRANCH_RFI;
+        } else if (x6 == 0x21) {
+            kind = IA64_TCG_DIRECT_BRANCH_RET;
+        } else {
+            kind = IA64_TCG_DIRECT_BRANCH_INDIRECT;
+        }
     } else {
         return false;
     }
 
     fallthrough = pc + IA64_BUNDLE_SIZE;
-    /*
-     * The not-taken path must stay chainable, so the fallthrough keeps the
-     * same-page rule.  Calls routinely target other pages and indirect
-     * targets are runtime values; the translator falls back to a TB lookup
-     * for those, so only conditional and counted branches require a
-     * same-page target.
-     */
-    if (!ia64_tcg_same_page(pc, fallthrough)) {
-        *reject = IA64_TCG_BRANCH_REJECT_CROSS_PAGE;
-        return false;
-    }
-    if (kind == IA64_TCG_DIRECT_BRANCH_INDIRECT) {
+    if (kind == IA64_TCG_DIRECT_BRANCH_INDIRECT ||
+        kind == IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL ||
+        kind == IA64_TCG_DIRECT_BRANCH_RET ||
+        kind == IA64_TCG_DIRECT_BRANCH_RFI) {
         target = 0;
     } else {
         target = pc + ia64_branch_displacement(raw);
         if (target == 0) {
             return false;
         }
-        if (kind != IA64_TCG_DIRECT_BRANCH_CALL &&
-            !ia64_tcg_same_page(pc, target)) {
-            *reject = IA64_TCG_BRANCH_REJECT_CROSS_PAGE;
-            return false;
-        }
     }
 
     memset(branch, 0, sizeof(*branch));
-    if (!ia64_tcg_build_direct_branch_prefix(bundle, &branch->prefix,
+    if (!ia64_tcg_build_direct_branch_prefix(bundle, branch_slot,
+                                              &branch->prefix,
                                               reject, prefix_slot)) {
         return false;
     }
@@ -2557,10 +2567,11 @@ static bool ia64_tcg_build_direct_branch_internal(
     branch->fallthrough_ip = fallthrough;
     branch->branch_raw = raw;
     branch->kind = kind;
-    branch->slot = 2;
+    branch->slot = branch_slot;
     branch->predicate = predicate;
     branch->nop_count = ia64_tcg_fast_bundle_nop_count(&branch->prefix);
     branch->call_branch_reg = call_branch_reg;
+    branch->target_branch_reg = target_branch_reg;
     branch->conditional = kind == IA64_TCG_DIRECT_BRANCH_CLOOP ||
                           predicate != 0;
     *reject = IA64_TCG_BRANCH_REJECT_NONE;

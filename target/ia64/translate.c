@@ -59,6 +59,7 @@ typedef struct DisasContext {
     bool gr_nat_valid;
     bool gr_nat_dirty;
     bool profile_enabled;
+    uint8_t region_branch_count;
     IA64ProfileTbShape profile_shape;
 } DisasContext;
 
@@ -79,6 +80,10 @@ typedef struct IA64TrStateCacheDirty {
 #define IA64_CPU_OFFSET(field) \
     ((intptr_t)offsetof(IA64CPU, field) - \
      (intptr_t)offsetof(IA64CPU, env))
+
+#define IA64_TR_PFS_CFM_MASK UINT64_C(0x0000003fffffffff)
+#define IA64_TR_PFS_PEC_SHIFT 52
+#define IA64_TR_PFS_PPL_SHIFT 62
 
 static TCGv_i64 cpu_ip;
 
@@ -194,7 +199,7 @@ static bool ia64_tr_state_cache_enabled(void)
     if (enabled < 0) {
         const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE");
 
-        enabled = value == NULL ||
+        enabled = value != NULL &&
                   !(strcmp(value, "0") == 0 ||
                     g_ascii_strcasecmp(value, "off") == 0 ||
                     g_ascii_strcasecmp(value, "false") == 0);
@@ -279,6 +284,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->gr_nat_dirty = false;
     ctx->profile_enabled =
         (ctx->base.tb->flags & IA64_TB_FLAG_PROFILE) != 0;
+    ctx->region_branch_count = 0;
     memset(&ctx->profile_shape, 0, sizeof(ctx->profile_shape));
 
     /*
@@ -344,6 +350,51 @@ static bool ia64_tr_use_zero_helper_path(void)
     return ia64_tr_zero_helper_enabled() && !ia64_perf_enabled() &&
            !ia64_debug_hooks_active() &&
            !ia64_firmware_linux_cmdline_append_pending();
+}
+
+static bool ia64_tr_region_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_REGION");
+
+        enabled = value != NULL &&
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
+static bool ia64_tr_conditional_region_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_CONDITIONAL_REGION");
+
+        enabled = value != NULL &&
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
+static bool ia64_tr_inline_call_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_INLINE_CALL");
+
+        enabled = value != NULL &&
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
 }
 
 static size_t ia64_tr_static_gr_offset(DisasContext *ctx, uint8_t reg)
@@ -655,6 +706,15 @@ static void ia64_tr_flush_fast_bundle_ticks(DisasContext *ctx)
 static void ia64_tr_commit_ip(uint64_t ip)
 {
     tcg_gen_movi_i64(cpu_ip, ip);
+    tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, ri));
+    tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, ri_dirty));
+}
+
+static void ia64_tr_commit_ip_value(TCGv_i64 ip)
+{
+    tcg_gen_mov_i64(cpu_ip, ip);
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                     offsetof(CPUIA64State, ri));
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
@@ -2439,6 +2499,75 @@ static void ia64_tr_emit_inline_direct_branch_exit(
     tcg_gen_exit_tb(NULL, 0);
 }
 
+static void ia64_tr_emit_inline_indirect_branch_exit(DisasContext *ctx,
+                                                      TCGv_i64 target)
+{
+    TCGLabel *main_loop_exit = gen_new_label();
+
+    ia64_tr_sync_state_cache(ctx);
+    ia64_tr_commit_ip_value(target);
+    if (ctx->fast_bundle_ticks != NULL) {
+        ia64_tr_emit_benchmark_retire(ctx->fast_bundle_ticks);
+    }
+    ia64_tr_emit_exit_request_guard(main_loop_exit);
+    ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_LOOKUP);
+    tcg_gen_lookup_and_goto_ptr();
+
+    gen_set_label(main_loop_exit);
+    ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_MAIN);
+    tcg_gen_exit_tb(NULL, 0);
+}
+
+/*
+ * Enter the common zero-local IA-64 call frame without crossing into C.
+ * Calls with a nonzero local partition take the compact correctness side exit
+ * instead of embedding the full BSP-preservation sequence in every call TB.
+ */
+static TCGLabel *ia64_tr_emit_call_effects(DisasContext *ctx,
+                                           uint8_t branch_reg,
+                                           uint64_t return_ip)
+{
+    TCGLabel *slow = gen_new_label();
+    TCGv_i64 old_cfm = tcg_temp_new_i64();
+    TCGv_i64 sof = tcg_temp_new_i64();
+    TCGv_i64 sol = tcg_temp_new_i64();
+    TCGv_i64 pfs = tcg_temp_new_i64();
+    TCGv_i64 ec = tcg_temp_new_i64();
+    TCGv_i32 sof32 = tcg_temp_new_i32();
+
+    tcg_gen_ld_i64(old_cfm, tcg_env, offsetof(CPUIA64State, cfm));
+    tcg_gen_shri_i64(sol, old_cfm, 7);
+    tcg_gen_andi_i64(sol, sol, 0x7f);
+    tcg_gen_brcondi_i64(TCG_COND_NE, sol, 0, slow);
+
+    ia64_tr_store_br(ctx, branch_reg, tcg_constant_i64(return_ip));
+    tcg_gen_andi_i64(sof, old_cfm, 0x7f);
+    ia64_tr_load_ar(ctx, ec, IA64_AR_EC);
+    tcg_gen_andi_i64(ec, ec, 0x3f);
+    tcg_gen_shli_i64(ec, ec, IA64_TR_PFS_PEC_SHIFT);
+    tcg_gen_andi_i64(pfs, old_cfm, IA64_TR_PFS_CFM_MASK);
+    tcg_gen_or_i64(pfs, pfs, ec);
+    tcg_gen_ori_i64(pfs, pfs,
+                    (uint64_t)ia64_tcg_tb_flags_cpl(ctx->base.tb->flags)
+                        << IA64_TR_PFS_PPL_SHIFT);
+    ia64_tr_store_ar(ctx, IA64_AR_PFS, pfs);
+
+    tcg_gen_st_i64(sof, tcg_env, offsetof(CPUIA64State, cfm));
+    tcg_gen_extrl_i64_i32(sof32, sof);
+    tcg_gen_st_i32(sof32, tcg_env, offsetof(CPUIA64State, rse.sof));
+    tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                   offsetof(CPUIA64State, rse.sol));
+    tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                   offsetof(CPUIA64State, rse.sor));
+    tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                   offsetof(CPUIA64State, rse.rrb_gr));
+    tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                   offsetof(CPUIA64State, rse.rrb_fr));
+    tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                   offsetof(CPUIA64State, rse.rrb_pr));
+    return slow;
+}
+
 static void ia64_tr_emit_direct_branch_exit(DisasContext *ctx,
                                             const IA64TcgDirectBranch *branch,
                                             uint64_t target,
@@ -2451,7 +2580,10 @@ static void ia64_tr_emit_direct_branch_exit(DisasContext *ctx,
     TCGv_i32 branch_flags = tcg_temp_new_i32();
     uint32_t static_flags = 0;
 
-    if (taken && branch->kind == IA64_TCG_DIRECT_BRANCH_INDIRECT) {
+    if (taken && (branch->kind == IA64_TCG_DIRECT_BRANCH_INDIRECT ||
+                  branch->kind == IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL ||
+                  branch->kind == IA64_TCG_DIRECT_BRANCH_RET ||
+                  branch->kind == IA64_TCG_DIRECT_BRANCH_RFI)) {
         /* The runtime target comes from the raw B slot inside the helper. */
         if (branch->prefix.finalize_mask_hi != 0) {
             gen_helper_fast_gr_finish_hi(
@@ -2572,58 +2704,79 @@ static void ia64_tr_profile_note_unsupported_slots(
     }
 }
 
-static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
-                                            const IA64DecodedBundle *bundle,
-                                            uint64_t pc)
+typedef enum IA64TrBranchResult {
+    IA64_TR_BRANCH_REJECT,
+    IA64_TR_BRANCH_EXIT,
+    IA64_TR_BRANCH_CONTINUE_REGION,
+} IA64TrBranchResult;
+
+static IA64TrBranchResult ia64_tr_translate_direct_branch(
+    DisasContext *ctx, const IA64DecodedBundle *bundle, uint64_t pc)
 {
     IA64TcgDirectBranch branch;
     IA64TrStateCacheDirty dirty_before = { 0 };
     TCGLabel *fallback;
+    TCGLabel *flow_exit = NULL;
     TCGLabel *not_taken = NULL;
+    TCGLabel *slow_call = NULL;
     TCGv_i64 ldst_address[IA64_SLOT_COUNT] = { NULL, };
     TCGv_i64 runtime_dest_mask;
     TCGv_i64 runtime_dest_mask_hi;
     TCGv_i64 tmp;
+    TCGv_i64 indirect_target = NULL;
     bool cached_fallback;
     bool cache_suspended;
     bool has_ldst;
+    bool region_continue = false;
     bool zero_helper;
+    TCGLabel *region_label = NULL;
 
     if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_BRANCH)) {
         IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
-        return false;
+        return IA64_TR_BRANCH_REJECT;
     }
     if (!ia64_tcg_build_direct_branch(bundle, pc, &branch)) {
-        return false;
+        return IA64_TR_BRANCH_REJECT;
     }
     if (ia64_tcg_tb_flags_ri(ctx->base.tb->flags) != 0) {
         IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
-        return false;
+        return IA64_TR_BRANCH_REJECT;
     }
-    if (!translator_use_goto_tb(&ctx->base, branch.fallthrough_ip) ||
-        ((branch.kind == IA64_TCG_DIRECT_BRANCH_COND ||
-          branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP) &&
-         !translator_use_goto_tb(&ctx->base, branch.target_ip))) {
-        IA64_PERF_INC(IA64_PERF_TCG_BRANCH_DIRECT_FALLBACK);
-        return false;
-    }
-
     has_ldst = ia64_tr_fast_bundle_has_ldst(&branch.prefix);
     if (has_ldst && !ia64_tcg_fast_ldst_memory_inline_enabled()) {
-        return false;
+        return IA64_TR_BRANCH_REJECT;
     }
     zero_helper = ia64_tr_use_zero_helper_path() &&
-                  (branch.kind == IA64_TCG_DIRECT_BRANCH_COND ||
-                   branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP);
-    ia64_tr_profile_add(ctx,
-                        zero_helper ? IA64_PROFILE_BUNDLE_ZERO_HELPER :
-                                      IA64_PROFILE_BUNDLE_HELPER_FAST,
-                        1);
+                  branch.kind != IA64_TCG_DIRECT_BRANCH_RET &&
+                  branch.kind != IA64_TCG_DIRECT_BRANCH_RFI &&
+                  (ia64_tr_inline_call_enabled() ||
+                   (branch.kind != IA64_TCG_DIRECT_BRANCH_CALL &&
+                    branch.kind != IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL));
+    if (branch.kind == IA64_TCG_DIRECT_BRANCH_CALL ||
+        branch.kind == IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL) {
+        ia64_tr_profile_add(
+            ctx, zero_helper ? IA64_PROFILE_BRANCH_INLINE_CALL :
+                               IA64_PROFILE_BRANCH_CALL_HELPER,
+            1);
+    } else if (branch.kind == IA64_TCG_DIRECT_BRANCH_INDIRECT) {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_BRANCH_INLINE_INDIRECT, 1);
+    } else if (branch.kind == IA64_TCG_DIRECT_BRANCH_RET ||
+               branch.kind == IA64_TCG_DIRECT_BRANCH_RFI) {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_BRANCH_RSE_HELPER, 1);
+    } else {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_BRANCH_INLINE_DIRECT, 1);
+    }
+    ia64_tr_profile_add(
+        ctx,
+        branch.prefix.helper_mask != 0 ? IA64_PROFILE_BUNDLE_PARTIAL :
+        zero_helper ? IA64_PROFILE_BUNDLE_ZERO_HELPER :
+                      IA64_PROFILE_BUNDLE_HELPER_FAST,
+        1);
     if (ctx->state_cache_active) {
         ia64_tr_capture_state_cache_dirty(ctx, &dirty_before);
     }
     cache_suspended = ctx->state_cache_active &&
-                      (!zero_helper ||
+                      (!zero_helper || branch.prefix.helper_mask != 0 ||
                        ia64_tr_fast_bundle_requires_state_barrier(
                            &branch.prefix));
     cached_fallback = ctx->state_cache_active && !cache_suspended;
@@ -2631,6 +2784,9 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         ia64_tr_suspend_state_cache(ctx);
     }
     fallback = gen_new_label();
+    if (branch.prefix.helper_mask != 0) {
+        flow_exit = gen_new_label();
+    }
     runtime_dest_mask = zero_helper ? tcg_temp_new_i64() : NULL;
     runtime_dest_mask_hi = zero_helper ? tcg_temp_new_i64() : NULL;
     tmp = tcg_temp_new_i64();
@@ -2651,10 +2807,14 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         ia64_tr_emit_can_do_io();
     }
     ctx->inline_gr_nat_clear = zero_helper;
-    for (int slot = 0; slot < 2; slot++) {
-        ia64_tr_emit_fast_slot(ctx, &branch.prefix.slot[slot],
-                               ldst_address[slot], runtime_dest_mask,
-                               runtime_dest_mask_hi);
+    for (int slot = 0; slot < branch.slot; slot++) {
+        if ((branch.prefix.helper_mask & (1u << slot)) != 0) {
+            ia64_tr_emit_exec_slot(ctx, bundle, pc, slot, flow_exit);
+        } else {
+            ia64_tr_emit_fast_slot(ctx, &branch.prefix.slot[slot],
+                                   ldst_address[slot], runtime_dest_mask,
+                                   runtime_dest_mask_hi);
+        }
     }
     ctx->inline_gr_nat_clear = false;
     if (zero_helper) {
@@ -2674,23 +2834,84 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
         tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, not_taken);
     }
 
-    if (zero_helper) {
+    if (zero_helper && ia64_tr_region_enabled() &&
+        (branch.kind == IA64_TCG_DIRECT_BRANCH_COND ||
+         branch.kind == IA64_TCG_DIRECT_BRANCH_CLOOP) &&
+        (!branch.conditional || ia64_tr_conditional_region_enabled()) &&
+        branch.nop_count == branch.prefix.slot_count &&
+        !ia64_tr_fast_bundle_has_required_helper(&branch.prefix) &&
+        !ia64_tr_fast_bundle_requires_state_barrier(&branch.prefix) &&
+        ctx->region_branch_count < 4) {
+        bool likely_taken = !branch.conditional ||
+                            (((branch.branch_raw >> 33) & 1) == 0);
+        uint64_t next_pc = likely_taken ? branch.target_ip
+                                        : branch.fallthrough_ip;
+
+        if (next_pc > pc && translator_is_same_page(&ctx->base, next_pc)) {
+            region_label = gen_new_label();
+            if (!branch.conditional) {
+                tcg_gen_br(region_label);
+            } else if (likely_taken) {
+                tcg_gen_br(region_label);
+                gen_set_label(not_taken);
+                ia64_tr_emit_inline_direct_branch_exit(
+                    ctx, branch.fallthrough_ip, 1, false);
+            } else {
+                ia64_tr_emit_inline_direct_branch_exit(
+                    ctx, branch.target_ip, 0, false);
+                gen_set_label(not_taken);
+                tcg_gen_br(region_label);
+            }
+            ctx->base.pc_next = next_pc;
+            ctx->region_branch_count++;
+            ia64_tr_profile_add(ctx, IA64_PROFILE_BRANCH_REGION_FOLDED, 1);
+            region_continue = true;
+        }
+    }
+
+    if (!region_continue && zero_helper &&
+        (branch.kind == IA64_TCG_DIRECT_BRANCH_INDIRECT ||
+         branch.kind == IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL)) {
+        indirect_target = tcg_temp_new_i64();
+        ia64_tr_load_br(ctx, indirect_target, branch.target_branch_reg);
+        tcg_gen_andi_i64(indirect_target, indirect_target, ~UINT64_C(0xf));
+        if (branch.kind == IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL) {
+            slow_call = ia64_tr_emit_call_effects(
+                ctx, branch.call_branch_reg, branch.fallthrough_ip);
+        }
+        ia64_tr_emit_inline_indirect_branch_exit(ctx, indirect_target);
+    } else if (!region_continue && zero_helper) {
+        if (branch.kind == IA64_TCG_DIRECT_BRANCH_CALL) {
+            slow_call = ia64_tr_emit_call_effects(
+                ctx, branch.call_branch_reg, branch.fallthrough_ip);
+        }
         ia64_tr_emit_inline_direct_branch_exit(
             ctx, branch.target_ip, 0,
             translator_use_goto_tb(&ctx->base, branch.target_ip));
-    } else {
+    } else if (!region_continue) {
         ia64_tr_emit_direct_branch_exit(
             ctx, &branch, branch.target_ip, true, 0,
             translator_use_goto_tb(&ctx->base, branch.target_ip));
     }
-    if (branch.conditional) {
+    if (slow_call != NULL) {
+        gen_set_label(slow_call);
+        ia64_tr_sync_state_cache(ctx);
+        ia64_tr_commit_ip(pc);
+        ia64_tr_emit_direct_branch_exit(
+            ctx, &branch, branch.target_ip, true, 0, false);
+    }
+    if (!region_continue && branch.conditional) {
         gen_set_label(not_taken);
         if (zero_helper) {
             ia64_tr_emit_inline_direct_branch_exit(
-                ctx, branch.fallthrough_ip, 1, true);
+                ctx, branch.fallthrough_ip, 1,
+                translator_use_goto_tb(&ctx->base,
+                                       branch.fallthrough_ip));
         } else {
             ia64_tr_emit_direct_branch_exit(
-                ctx, &branch, branch.fallthrough_ip, false, 1, true);
+                ctx, &branch, branch.fallthrough_ip, false, 1,
+                translator_use_goto_tb(&ctx->base,
+                                       branch.fallthrough_ip));
         }
     }
 
@@ -2707,8 +2928,17 @@ static bool ia64_tr_translate_direct_branch(DisasContext *ctx,
     } else {
         ia64_tr_emit_exec_bundle_lookup_ptr(ctx, bundle, pc);
     }
+    if (flow_exit != NULL) {
+        gen_set_label(flow_exit);
+        ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_MAIN);
+        tcg_gen_exit_tb(NULL, 0);
+    }
+    if (region_continue) {
+        gen_set_label(region_label);
+    }
     ia64_tr_resume_state_cache(ctx, cache_suspended);
-    return true;
+    return region_continue ? IA64_TR_BRANCH_CONTINUE_REGION
+                           : IA64_TR_BRANCH_EXIT;
 }
 
 static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
@@ -2716,6 +2946,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
     IA64DecodedBundle bundle;
     IA64TcgTbBoundary boundary;
+    IA64TrBranchResult branch_result;
     char bundle_text[160];
     uint64_t pc = ctx->base.pc_next;
     uint64_t lo;
@@ -2749,10 +2980,15 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         ctx->base.is_jmp = DISAS_EXIT;
         return;
     }
-    if (boundary == IA64_TCG_TB_BOUNDARY_BRANCH &&
-        ia64_tr_translate_direct_branch(ctx, &bundle, pc)) {
-        ctx->base.is_jmp = DISAS_NORETURN;
-        return;
+    if (boundary == IA64_TCG_TB_BOUNDARY_BRANCH) {
+        branch_result = ia64_tr_translate_direct_branch(ctx, &bundle, pc);
+        if (branch_result == IA64_TR_BRANCH_EXIT) {
+            ctx->base.is_jmp = DISAS_NORETURN;
+            return;
+        }
+        if (branch_result == IA64_TR_BRANCH_CONTINUE_REGION) {
+            return;
+        }
     }
     if (boundary == IA64_TCG_TB_BOUNDARY_BRANCH) {
         ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_FULL_HELPER, 1);

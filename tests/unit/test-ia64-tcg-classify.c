@@ -1091,6 +1091,7 @@ static void test_direct_branch_accepts_p0_same_page(void)
 static void test_direct_branch_accepts_fast_prefix(void)
 {
     const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
+    const uint64_t setf_sig_f8_r17_raw = 0x0c70802220aULL;
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
     const uint64_t add_r4_r5_r6_raw =
         (8ULL << 37) | (6ULL << 20) | (5ULL << 13) | (4ULL << 6);
@@ -1115,6 +1116,13 @@ static void test_direct_branch_accepts_fast_prefix(void)
     g_assert_cmpuint(ia64_perf_fast_count(
                          branch.prefix.op_counts,
                          IA64_PERF_FAST_COUNT_ALU_ADD_SHIFT), ==, 1);
+
+    /* One final unsupported prefix slot remains decoded-helper partial. */
+    bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
+                         setf_sig_f8_r17_raw, br_cond_raw);
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmphex(branch.prefix.helper_mask, ==, 1u << 1);
+    g_assert_cmpuint(branch.prefix.slot_count, ==, 2);
 }
 
 static void test_direct_branch_accepts_predicate_to_next_bundle(void)
@@ -1199,19 +1207,21 @@ static void test_direct_branch_rejects_unsafe_forms(void)
     g_assert_cmpuint(branch.predicate, ==, 16);
     g_assert_true(branch.conditional);
 
-    /* Returns lower to the indirect finish helper with a TB-lookup exit. */
+    /* Returns are distinguished so translation can guard the RSE fill path. */
     bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
                          IA64_INSN_NOP_RAW, br_ret_b0_raw);
     g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
-    g_assert_cmpint(branch.kind, ==, IA64_TCG_DIRECT_BRANCH_INDIRECT);
+    g_assert_cmpint(branch.kind, ==, IA64_TCG_DIRECT_BRANCH_RET);
     g_assert_cmphex(branch.branch_raw, ==, br_ret_b0_raw);
+    g_assert_cmpuint(branch.target_branch_reg, ==, 0);
     g_assert_false(branch.conditional);
     g_assert_true(ia64_tcg_bundle_has_indirect_branch(&bundle));
 
-    /* rfi stays on the interpreter path. */
+    /* RFI retains a fill-aware branch helper but keeps a generated prefix. */
     bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
                          IA64_INSN_NOP_RAW, 0x08ULL << 27);
-    g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
+    g_assert_cmpint(branch.kind, ==, IA64_TCG_DIRECT_BRANCH_RFI);
 
     /*
      * A prefix compare producing the branch predicate is legal with a stop
@@ -1231,7 +1241,7 @@ static void test_direct_branch_rejects_unsafe_forms(void)
     g_assert_false(ia64_tcg_build_direct_branch(&bundle, 0x2000, &branch));
 }
 
-static void test_direct_branch_rejects_page_crossing(void)
+static void test_direct_branch_accepts_page_crossing(void)
 {
     const uint64_t br_cond_to_fallthrough_raw =
         0x08600002006ULL & ~0x3fULL;
@@ -1241,26 +1251,35 @@ static void test_direct_branch_rejects_page_crossing(void)
                     IA64_INSN_NOP_RAW, br_cond_to_fallthrough_raw);
     IA64TcgDirectBranch branch;
 
-    g_assert_false(ia64_tcg_build_direct_branch(&bundle, pc, &branch));
+    g_assert_true(ia64_tcg_build_direct_branch(&bundle, pc, &branch));
     g_assert_true(ia64_tcg_bundle_has_direct_branch(&bundle));
     g_assert_cmpint(ia64_tcg_direct_branch_rejection(&bundle, pc, NULL),
-                    ==, IA64_TCG_BRANCH_REJECT_CROSS_PAGE);
+                    ==, IA64_TCG_BRANCH_REJECT_NONE);
+    g_assert_cmphex(branch.fallthrough_ip, ==, 0x1000);
 }
 
 static void test_direct_branch_rejection_reasons(void)
 {
     const uint64_t br_cond_raw = 0x0800001a006ULL & ~0x3fULL;
+    const uint64_t nop_b_raw = (2ULL << 37) | IA64_INSN_NOP_RAW;
     const uint64_t add_r3_r3_r4_raw =
         (8ULL << 37) | (4ULL << 20) | (3ULL << 13) | (3ULL << 6);
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
     IA64DecodedBundle bundle;
     int prefix_slot = -1;
 
-    bundle = make_bundle(0x16, br_cond_raw, IA64_INSN_NOP_RAW,
-                         IA64_INSN_NOP_RAW);
+    bundle = make_bundle(0x16, br_cond_raw, nop_b_raw, nop_b_raw);
     g_assert_cmpint(ia64_tcg_direct_branch_rejection(
                         &bundle, 0x2000, &prefix_slot),
-                    ==, IA64_TCG_BRANCH_REJECT_NOT_SLOT2);
+                    ==, IA64_TCG_BRANCH_REJECT_NONE);
+    {
+        IA64TcgDirectBranch branch;
+
+        g_assert_true(ia64_tcg_build_direct_branch(&bundle, 0x2000,
+                                                   &branch));
+        g_assert_cmpuint(branch.slot, ==, 0);
+        g_assert_cmpuint(branch.prefix.slot_count, ==, 0);
+    }
 
     bundle = make_bundle(0x16, br_cond_raw, IA64_INSN_NOP_RAW,
                          br_cond_raw);
@@ -1401,8 +1420,8 @@ int main(int argc, char **argv)
                     test_direct_branch_accepts_relative_call);
     g_test_add_func("/ia64-tcg-classify/direct-branch-rejects-unsafe",
                     test_direct_branch_rejects_unsafe_forms);
-    g_test_add_func("/ia64-tcg-classify/direct-branch-rejects-page-crossing",
-                    test_direct_branch_rejects_page_crossing);
+    g_test_add_func("/ia64-tcg-classify/direct-branch-accepts-page-crossing",
+                    test_direct_branch_accepts_page_crossing);
     g_test_add_func("/ia64-tcg-classify/direct-branch-rejection-reasons",
                     test_direct_branch_rejection_reasons);
     g_test_add_func("/ia64-tcg-classify/fallback-reason-classifies-helper-sources",
