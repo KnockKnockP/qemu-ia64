@@ -1482,17 +1482,32 @@ static int ia64_tr_data_mmu_index(DisasContext *ctx)
     return ia64_tcg_data_mmu_index_for_tb_flags(ctx->base.tb->flags);
 }
 
-static void ia64_tr_publish_slot_ri(const IA64TcgFastSlot *slot)
+static void ia64_tr_publish_memory_slot(DisasContext *ctx,
+                                        const IA64TcgFastSlot *slot)
 {
+    uint64_t pc = ctx->base.pc_next - IA64_BUNDLE_SIZE;
+
     /*
      * The bundle has a single insn_start, so a fault inside the memory op
      * must find the executing slot in env->ri (see ia64_env_restore_ri).
-     * The bundle-finish helper republishes PSR.ri and clears the flag.
+     * Publish the decoded slot as well: data-fault delivery uses it to set
+     * ISR.sp/ed for speculative loads.  The bundle-finish helper republishes
+     * PSR.ri and clears the flag.
      */
     tcg_gen_st8_i32(tcg_constant_i32(slot->slot_index), tcg_env,
                     offsetof(CPUIA64State, ri));
     tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
                     offsetof(CPUIA64State, ri_dirty));
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                    offsetof(CPUIA64State, current_slot_valid));
+    tcg_gen_st8_i32(tcg_constant_i32(slot->slot_index), tcg_env,
+                    offsetof(CPUIA64State, current_slot_ri));
+    tcg_gen_st8_i32(tcg_constant_i32(slot->slot_type), tcg_env,
+                    offsetof(CPUIA64State, current_slot_type));
+    tcg_gen_st_i64(tcg_constant_i64(pc), tcg_env,
+                   offsetof(CPUIA64State, current_slot_ip));
+    tcg_gen_st_i64(tcg_constant_i64(slot->raw), tcg_env,
+                   offsetof(CPUIA64State, current_slot_raw));
 }
 
 static void ia64_tr_emit_ldst_alat_invalidate(const IA64TcgFastSlot *slot,
@@ -1938,7 +1953,7 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
             tcg_gen_brcondi_i32(TCG_COND_NE, deferred, 0, memory_done);
         }
         if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
-            ia64_tr_publish_slot_ri(slot);
+            ia64_tr_publish_memory_slot(ctx, slot);
             tcg_gen_qemu_ld_i64(result, ldst_address,
                                 ia64_tr_data_mmu_index(ctx),
                                 ia64_tr_ldst_memop(slot->width));
@@ -1970,7 +1985,7 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         g_assert(ldst_address != NULL);
         ia64_tr_load_static_gr(ctx, source2, slot->source2);
         if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
-            ia64_tr_publish_slot_ri(slot);
+            ia64_tr_publish_memory_slot(ctx, slot);
             tcg_gen_qemu_st_i64(source2, ldst_address,
                                 ia64_tr_data_mmu_index(ctx),
                                 ia64_tr_ldst_memop(slot->width));
@@ -2010,12 +2025,22 @@ static bool ia64_tr_fast_bundle_has_required_helper(
 {
     for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
         IA64TcgFastOp op = fast->slot[slot].op;
+        bool speculative_prepare =
+            op == IA64_TCG_FAST_OP_LDST_LOAD &&
+            (fast->slot[slot].memory_class == 1 ||
+             fast->slot[slot].memory_class == 3);
         bool ldst_helper = ia64_tcg_fast_ldst_mode() ==
                            IA64_TCG_FAST_LDST_HELPER &&
                            (op == IA64_TCG_FAST_OP_LDST_LOAD ||
                             op == IA64_TCG_FAST_OP_LDST_STORE);
 
-        if (op == IA64_TCG_FAST_OP_FP_SLOT || ldst_helper) {
+        /*
+         * Control-speculative preparation consults the current instruction
+         * page's ED attribute through env->ip even in direct qemu_ld mode.
+         * A multi-bundle TB may otherwise leave env->ip at an older bundle.
+         */
+        if (op == IA64_TCG_FAST_OP_FP_SLOT || speculative_prepare ||
+            ldst_helper) {
             return true;
         }
     }
@@ -2386,6 +2411,9 @@ static bool ia64_tr_translate_partial_bundle(DisasContext *ctx,
     runtime_dest_mask_hi = tcg_temp_new_i64();
     tcg_gen_movi_i64(runtime_dest_mask, 0);
     tcg_gen_movi_i64(runtime_dest_mask_hi, 0);
+    if (ia64_tr_fast_bundle_has_required_helper(&partial)) {
+        ia64_tr_commit_ip(pc);
+    }
     if (has_ldst) {
         ia64_tr_emit_can_do_io();
     }

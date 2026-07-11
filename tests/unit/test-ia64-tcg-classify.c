@@ -796,6 +796,8 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpuint(fast.slot[0].base, ==, 3);
     g_assert_cmpuint(fast.slot[0].width, ==, 8);
     g_assert_cmpuint(fast.slot[0].slot_index, ==, 0);
+    g_assert_cmpuint(fast.slot[0].slot_type, ==, IA64_SLOT_TYPE_M);
+    g_assert_cmphex(fast.slot[0].raw, ==, ld8_r2_r3_raw);
     g_assert_false(fast.slot[0].base_update);
     g_assert_cmphex(fast.dest_mask, ==, 1ULL << 2);
     g_assert_cmpuint(ia64_perf_fast_count(
@@ -853,6 +855,8 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpuint(fast.slot[1].target, ==, 2);
     g_assert_cmpuint(fast.slot[1].base, ==, 3);
     g_assert_cmpuint(fast.slot[1].slot_index, ==, 1);
+    g_assert_cmpuint(fast.slot[1].slot_type, ==, IA64_SLOT_TYPE_M);
+    g_assert_cmphex(fast.slot[1].raw, ==, ld8_r2_r3_raw);
     g_assert_cmphex(fast.dest_mask, ==, 1ULL << 2);
 
     bundle = make_bundle(0x08, IA64_INSN_NOP_RAW,

@@ -1053,6 +1053,9 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
 
     if (ia64_decode_ldst_immediate(type, raw, &ldst) &&
         ia64_tcg_build_fast_ldst_slot(&ldst, slot_index, slot, fast)) {
+        /* Fault delivery needs the exact decoded memory slot for ISR.sp/ed. */
+        slot->slot_type = type;
+        slot->raw = raw;
         return true;
     }
 
