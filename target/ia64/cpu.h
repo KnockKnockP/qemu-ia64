@@ -232,7 +232,9 @@ typedef struct IA64RSEState {
 
 typedef struct IA64NaTState {
     /*
-     * Static general-register NaT state. Stacked-register physical NaTs live
+     * gr_nat[0] holds the visible static-register NaTs.  Bits 16 through 31
+     * of gr_nat[1] hold the inactive bank's GR16-GR31 NaTs; those fields are
+     * exchanged whenever PSR.bn changes.  Stacked-register physical NaTs live
      * with the RSE state because the implementation has more physical stacked
      * slots than the 96 architectural stacked register numbers.
      */
@@ -469,6 +471,16 @@ struct ArchCPU {
 
 static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)
 {
+    if (((env->psr ^ psr) & IA64_TB_PSR_BN_BIT) != 0) {
+        const uint64_t banked_mask = UINT64_C(0x00000000ffff0000);
+        uint64_t visible = env->nat.gr_nat[0] & banked_mask;
+        uint64_t inactive = env->nat.gr_nat[1] & banked_mask;
+
+        env->nat.gr_nat[0] =
+            (env->nat.gr_nat[0] & ~banked_mask) | inactive;
+        env->nat.gr_nat[1] =
+            (env->nat.gr_nat[1] & ~banked_mask) | visible;
+    }
     env->psr = psr;
     env->ri = ia64_psr_ri(psr);
     env->ri_dirty = false;

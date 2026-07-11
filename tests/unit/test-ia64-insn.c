@@ -211,26 +211,42 @@ static void test_banked_register_switch_via_bsw(void)
     ia64_cpu_reset_synthetic_itanium2(&env);
 
     ia64_write_gr(&env, 16, 0x1111);
-    env.psr |= IA64_PSR_BN_BIT;
-    ia64_write_gr(&env, 16, 0x2222);
-    env.psr &= ~IA64_PSR_BN_BIT;
+    ia64_write_gr_nat(&env, 16, true);
+    g_assert_true(ia64_read_gr_nat(&env, 16));
 
-    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_1_raw, 0x1000,
+    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_1_raw, 0x0ff0,
                                               &target));
-    g_assert_cmphex(target, ==, 0x1010);
-    g_assert_cmphex(env.psr & IA64_PSR_BN_BIT, ==, IA64_PSR_BN_BIT);
-    g_assert_cmphex(ia64_read_gr(&env, 16), ==, 0x2222);
-    ia64_write_gr(&env, 16, 0x3333);
+    g_assert_false(ia64_read_gr_nat(&env, 16));
+    ia64_write_gr(&env, 16, 0x2222);
+    ia64_write_gr_nat(&env, 17, true);
 
-    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_0_raw, 0x1010,
+    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_0_raw, 0x1000,
+                                              &target));
+    g_assert_true(ia64_read_gr_nat(&env, 16));
+    g_assert_false(ia64_read_gr_nat(&env, 17));
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_1_raw, 0x1010,
                                               &target));
     g_assert_cmphex(target, ==, 0x1020);
+    g_assert_cmphex(env.psr & IA64_PSR_BN_BIT, ==, IA64_PSR_BN_BIT);
+    g_assert_cmphex(ia64_read_gr(&env, 16), ==, 0x2222);
+    g_assert_false(ia64_read_gr_nat(&env, 16));
+    g_assert_true(ia64_read_gr_nat(&env, 17));
+    ia64_write_gr(&env, 16, 0x3333);
+
+    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_0_raw, 0x1020,
+                                              &target));
+    g_assert_cmphex(target, ==, 0x1030);
     g_assert_cmphex(env.psr & IA64_PSR_BN_BIT, ==, 0);
     g_assert_cmphex(ia64_read_gr(&env, 16), ==, 0x1111);
+    g_assert_true(ia64_read_gr_nat(&env, 16));
+    g_assert_false(ia64_read_gr_nat(&env, 17));
 
-    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_1_raw, 0x1020,
+    g_assert_true(ia64_exec_b_indirect_branch(&env, bsw_1_raw, 0x1030,
                                               &target));
     g_assert_cmphex(ia64_read_gr(&env, 16), ==, 0x3333);
+    g_assert_false(ia64_read_gr_nat(&env, 16));
+    g_assert_true(ia64_read_gr_nat(&env, 17));
 }
 
 static void test_syscall_break_user_to_kernel_transition(void)

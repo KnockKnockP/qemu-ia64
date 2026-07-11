@@ -958,7 +958,6 @@ static void ia64_rse_invalidate(CPUIA64State *env, uint32_t first,
     if (count == IA64_STACKED_GR_COUNT) {
         memset(env->rse.stacked_gr, 0, sizeof(env->rse.stacked_gr));
         env->nat.gr_nat[0] &= (UINT64_C(1) << IA64_STATIC_GR_COUNT) - 1;
-        env->nat.gr_nat[1] = 0;
         memset(env->rse.stacked_nat, 0, sizeof(env->rse.stacked_nat));
         return;
     }
