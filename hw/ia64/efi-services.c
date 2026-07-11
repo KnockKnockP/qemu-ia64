@@ -222,6 +222,7 @@ typedef enum EfiMemoryMapRecordKind {
     EFI_MEMORY_MAP_RECORD_CONVENTIONAL_SPLIT,
     EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
     EFI_MEMORY_MAP_RECORD_LOADER_IF_NEEDED,
+    EFI_MEMORY_MAP_RECORD_PAL_CODE,
 } EfiMemoryMapRecordKind;
 
 typedef struct EfiMemoryMapRecord {
@@ -235,7 +236,21 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
         .range = {
             .type = EFI_RUNTIME_SERVICES_DATA,
             .address = EFI_RUNTIME_GRANULE_BASE,
-            .pages = (VIBTANIUM_VGA_LEGACY_BASE - EFI_RUNTIME_GRANULE_BASE) /
+            .pages = (VIBTANIUM_EFI_PAL_PROC - EFI_RUNTIME_GRANULE_BASE) /
+                     EFI_PAGE_SIZE,
+            .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
+        },
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_PAL_CODE,
+    },
+    {
+        .kind = EFI_MEMORY_MAP_RECORD_RUNTIME_WITH_LOADER,
+        .range = {
+            .type = EFI_RUNTIME_SERVICES_DATA,
+            .address = VIBTANIUM_EFI_PAL_PROC + EFI_PAGE_SIZE,
+            .pages = (VIBTANIUM_VGA_LEGACY_BASE -
+                      (VIBTANIUM_EFI_PAL_PROC + EFI_PAGE_SIZE)) /
                      EFI_PAGE_SIZE,
             .attributes = EFI_MEMORY_WB | EFI_MEMORY_RUNTIME,
         },
@@ -1785,6 +1800,16 @@ static unsigned efi_emit_memory_map(CPUIA64State *env, uint64_t map)
                                                    &loader_image);
             }
             break;
+        case EFI_MEMORY_MAP_RECORD_PAL_CODE: {
+            EfiMemoryRange pal_code;
+
+            vibtanium_efi_pal_code_memory_descriptor(&pal_code.type,
+                                                      &pal_code.address,
+                                                      &pal_code.pages,
+                                                      &pal_code.attributes);
+            index = efi_emit_memory_descriptor(env, map, index, &pal_code);
+            break;
+        }
         }
     }
 

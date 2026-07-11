@@ -908,6 +908,26 @@ static void test_exact_loader_pages_are_reserved(void)
                      ==, VIBTANIUM_EFI_LOADER_DATA);
 }
 
+static void test_pal_code_has_efi_memory_descriptor(void)
+{
+    uint32_t type = 0;
+    uint64_t address = 0;
+    uint64_t pages = 0;
+    uint64_t attributes = 0;
+
+    vibtanium_efi_pal_code_memory_descriptor(&type, &address, &pages,
+                                              &attributes);
+
+    g_assert_cmpuint(type, ==, VIBTANIUM_EFI_PAL_CODE);
+    g_assert_cmphex(address, ==, VIBTANIUM_EFI_PAL_PROC);
+    g_assert_cmphex(address & 0xfff, ==, 0);
+    g_assert_cmphex(pages, ==, 1);
+    g_assert_cmphex(attributes, ==, VIBTANIUM_EFI_MEMORY_WB);
+    g_assert_cmphex(address, >=, VIBTANIUM_EFI_BLOB_BASE);
+    g_assert_cmphex(address + pages * 0x1000, <=,
+                    VIBTANIUM_EFI_BLOB_BASE + VIBTANIUM_EFI_BLOB_SIZE);
+}
+
 static void test_timer_deadline_wraps(void)
 {
     g_assert_true(vibtanium_efi_timer_due(100, 100));
@@ -981,6 +1001,8 @@ int main(int argc, char **argv)
                     test_decodes_sign_extended_uint32_args);
     g_test_add_func("/ia64-efi-app/exact-loader-pages-are-reserved",
                     test_exact_loader_pages_are_reserved);
+    g_test_add_func("/ia64-efi-app/pal-code-has-efi-memory-descriptor",
+                    test_pal_code_has_efi_memory_descriptor);
     g_test_add_func("/ia64-efi-app/timer-deadline-wraps",
                     test_timer_deadline_wraps);
     g_test_add_func("/ia64-efi-app/unimplemented-service-log",

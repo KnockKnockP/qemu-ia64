@@ -29,7 +29,7 @@ typedef struct MemoryRegion MemoryRegion;
 #define VIBTANIUM_EFI_BLOCK_IO          UINT64_C(0x00086300)
 #define VIBTANIUM_EFI_BLOCK_IO_MEDIA    UINT64_C(0x00086340)
 #define VIBTANIUM_EFI_SIMPLE_FILE_SYSTEM UINT64_C(0x00086400)
-#define VIBTANIUM_EFI_PAL_PROC          UINT64_C(0x00086500)
+#define VIBTANIUM_EFI_PAL_PROC          UINT64_C(0x0008f000)
 #define VIBTANIUM_EFI_SAL_PROC          UINT64_C(0x00086510)
 #define VIBTANIUM_EFI_SAL_GP            UINT64_C(0x00086520)
 #define VIBTANIUM_EFI_SAL_SYSTEM_TABLE  UINT64_C(0x00086600)
@@ -105,6 +105,8 @@ typedef struct MemoryRegion MemoryRegion;
 #define VIBTANIUM_EFI_RESERVED_MEMORY_TYPE 0
 #define VIBTANIUM_EFI_LOADER_CODE          1
 #define VIBTANIUM_EFI_LOADER_DATA          2
+#define VIBTANIUM_EFI_PAL_CODE              13
+#define VIBTANIUM_EFI_MEMORY_WB UINT64_C(0x0000000000000008)
 
 #define VIBTANIUM_EFI_ALLOCATE_ANY_PAGES   0
 #define VIBTANIUM_EFI_ALLOCATE_MAX_ADDRESS 1
@@ -202,6 +204,10 @@ bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
 bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value);
 uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
                                                    uint64_t memory_type);
+void vibtanium_efi_pal_code_memory_descriptor(uint32_t *type,
+                                              uint64_t *address,
+                                              uint64_t *pages,
+                                              uint64_t *attributes);
 bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline);
 void vibtanium_efi_image_destroy(VibtaniumEfiImage *image);
 

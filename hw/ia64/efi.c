@@ -813,6 +813,17 @@ uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
     return (uint32_t)memory_type;
 }
 
+void vibtanium_efi_pal_code_memory_descriptor(uint32_t *type,
+                                              uint64_t *address,
+                                              uint64_t *pages,
+                                              uint64_t *attributes)
+{
+    *type = VIBTANIUM_EFI_PAL_CODE;
+    *address = VIBTANIUM_EFI_PAL_PROC;
+    *pages = 1;
+    *attributes = VIBTANIUM_EFI_MEMORY_WB;
+}
+
 bool vibtanium_efi_timer_due(uint64_t now, uint64_t deadline)
 {
     return (int64_t)(now - deadline) >= 0;
