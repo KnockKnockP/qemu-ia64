@@ -1033,6 +1033,8 @@ static void test_unsupported_slot_mask_tracks_helper_slot(void)
 static void test_fallback_plan_classifies_hot_helper_slots(void)
 {
     const uint64_t ld8_r2_r3_raw = make_ldst_load_raw(3, 2, 3);
+    const uint64_t windows_pmpyshr2_u_r30_r22_r11_raw =
+        0x0e210b2c780ULL;
     const uint64_t add_r1_r2_r3_raw =
         (8ULL << 37) | (3ULL << 20) | (2ULL << 13) | (1ULL << 6);
     const uint64_t br_cond_raw = 0x0800001a006ULL;
@@ -1070,6 +1072,13 @@ static void test_fallback_plan_classifies_hot_helper_slots(void)
     g_assert_cmpuint(decoded.u.ldst.width, ==, 8);
     g_assert_cmpuint(decoded.u.ldst.target, ==, 2);
     g_assert_cmpuint(decoded.u.ldst.base, ==, 3);
+
+    bundle = make_bundle(0x00, IA64_INSN_NOP_RAW,
+                         windows_pmpyshr2_u_r30_r22_r11_raw,
+                         IA64_INSN_NOP_RAW);
+    plan = ia64_tcg_fallback_plan_for_bundle(&bundle);
+    g_assert_cmpint(ia64_tcg_fallback_desc_op(plan.slot[1]), ==,
+                    IA64_TCG_FALLBACK_PLAN_I_MULTIPLY_SHIFT);
 
     bundle = make_bundle(0x10, IA64_INSN_NOP_RAW,
                          IA64_INSN_NOP_RAW, br_cond_raw);

@@ -2277,6 +2277,10 @@ static uint64_t ia64_tcg_fallback_plan_for_slot(IA64SlotType type,
         decoded.op = IA64_TCG_FALLBACK_PLAN_I_PACKED_I2;
         goto done;
     }
+    if (ia64_slot_is_i_multiply_shift(type, raw)) {
+        decoded.op = IA64_TCG_FALLBACK_PLAN_I_MULTIPLY_SHIFT;
+        goto done;
+    }
     if (ia64_slot_is_i_mux(type, raw)) {
         decoded.op = IA64_TCG_FALLBACK_PLAN_I_MUX;
         goto done;

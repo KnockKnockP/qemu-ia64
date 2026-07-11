@@ -3790,6 +3790,63 @@ typedef enum IA64PackedI2Op {
     IA64_PACKED_I2_PSAD1,
 } IA64PackedI2Op;
 
+typedef enum IA64MultiplyShiftOp {
+    IA64_MULTIPLY_SHIFT_INVALID = 0,
+    IA64_MULTIPLY_SHIFT_PMPYSHR2_U,
+    IA64_MULTIPLY_SHIFT_PMPYSHR2,
+    IA64_MULTIPLY_SHIFT_MPY4,
+    IA64_MULTIPLY_SHIFT_MPYSHL4,
+} IA64MultiplyShiftOp;
+
+static IA64MultiplyShiftOp ia64_decode_i_multiply_shift_op(
+    IA64SlotType type, uint64_t raw)
+{
+    uint8_t za;
+    uint8_t x2a;
+    uint8_t zb;
+    uint8_t ve;
+    uint8_t x2b;
+    uint8_t x2c;
+
+    if (type != IA64_SLOT_TYPE_I || ia64_slot_major_opcode(raw) != 0x7) {
+        return IA64_MULTIPLY_SHIFT_INVALID;
+    }
+
+    za = (raw >> 36) & 0x1;
+    x2a = (raw >> 34) & 0x3;
+    zb = (raw >> 33) & 0x1;
+    ve = (raw >> 32) & 0x1;
+    x2b = (raw >> 28) & 0x3;
+    x2c = (raw >> 30) & 0x3;
+
+    if (x2a != 0 || ve != 0) {
+        return IA64_MULTIPLY_SHIFT_INVALID;
+    }
+    if (za == 0 && zb == 1) {
+        if (x2b == 1) {
+            return IA64_MULTIPLY_SHIFT_PMPYSHR2_U;
+        }
+        if (x2b == 3) {
+            return IA64_MULTIPLY_SHIFT_PMPYSHR2;
+        }
+    }
+    if (za == 1 && zb == 0 && x2c == 3) {
+        if (x2b == 1) {
+            return IA64_MULTIPLY_SHIFT_MPY4;
+        }
+        if (x2b == 3) {
+            return IA64_MULTIPLY_SHIFT_MPYSHL4;
+        }
+    }
+    return IA64_MULTIPLY_SHIFT_INVALID;
+}
+
+bool ia64_slot_is_i_multiply_shift(IA64SlotType type, uint64_t raw)
+{
+    return ia64_decode_i_multiply_shift_op(type, raw) !=
+           IA64_MULTIPLY_SHIFT_INVALID;
+}
+
 #define IA64_PACKED_I2_KEY(za, zb, x2b, x2c) \
     ((((za) & 0x1) << 5) | (((zb) & 0x1) << 4) | \
      (((x2b) & 0x3) << 2) | ((x2c) & 0x3))
@@ -3905,6 +3962,61 @@ static uint64_t ia64_packed_set_u32(uint64_t result, unsigned lane,
                                     uint32_t value)
 {
     return result | ((uint64_t)value << (lane * 32));
+}
+
+bool ia64_exec_i_multiply_shift(CPUIA64State *env, uint64_t raw)
+{
+    static const uint8_t shift_count[4] = { 0, 7, 15, 16 };
+    IA64MultiplyShiftOp op;
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint64_t source2;
+    uint64_t source3;
+    uint64_t result = 0;
+    bool source_nat;
+
+    if (!env) {
+        return false;
+    }
+
+    op = ia64_decode_i_multiply_shift_op(IA64_SLOT_TYPE_I, raw);
+    if (op == IA64_MULTIPLY_SHIFT_INVALID) {
+        return false;
+    }
+
+    r1 = (raw >> 6) & 0x7f;
+    r2 = (raw >> 13) & 0x7f;
+    r3 = (raw >> 20) & 0x7f;
+    source2 = ia64_read_gr(env, r2);
+    source3 = ia64_read_gr(env, r3);
+    source_nat = ia64_read_gr_nat(env, r2) || ia64_read_gr_nat(env, r3);
+
+    if (op == IA64_MULTIPLY_SHIFT_PMPYSHR2_U ||
+        op == IA64_MULTIPLY_SHIFT_PMPYSHR2) {
+        unsigned count = shift_count[(raw >> 30) & 0x3];
+
+        for (unsigned lane = 0; lane < 4; lane++) {
+            uint16_t left = ia64_packed_u16(source2, lane);
+            uint16_t right = ia64_packed_u16(source3, lane);
+            uint32_t product = op == IA64_MULTIPLY_SHIFT_PMPYSHR2_U
+                ? (uint32_t)left * (uint32_t)right
+                : (uint32_t)((int32_t)(int16_t)left *
+                             (int32_t)(int16_t)right);
+
+            result = ia64_packed_set_u16(
+                result, lane, (product >> count) & 0xffff);
+        }
+    } else if (op == IA64_MULTIPLY_SHIFT_MPY4) {
+        result = (uint64_t)(uint32_t)source2 * (uint32_t)source3;
+    } else {
+        result = ((uint64_t)(uint32_t)(source2 >> 32) *
+                  (uint32_t)source3) << 32;
+    }
+
+    ia64_write_gr(env, r1, result);
+    ia64_write_gr_nat(env, r1, source_nat);
+    return true;
 }
 
 static uint8_t ia64_saturate_signed_i8(int64_t value)
@@ -4127,7 +4239,13 @@ bool ia64_exec_i_packed_i2(CPUIA64State *env, uint64_t raw)
         return false;
     }
 
-    ia64_write_gr(env, r1, result);
+    {
+        bool source_nat = ia64_read_gr_nat(env, r2) ||
+                          ia64_read_gr_nat(env, r3);
+
+        ia64_write_gr(env, r1, result);
+        ia64_write_gr_nat(env, r1, source_nat);
+    }
     return true;
 }
 

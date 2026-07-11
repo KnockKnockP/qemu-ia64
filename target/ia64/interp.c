@@ -1047,6 +1047,10 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         IA64_PERF_INC(IA64_PERF_OP_ALU);
         ia64_exec_i_packed_i2(env, raw);
         return IA64_PLANNED_SLOT_CONTINUE;
+    case IA64_TCG_FALLBACK_PLAN_I_MULTIPLY_SHIFT:
+        IA64_PERF_INC(IA64_PERF_OP_ALU);
+        ia64_exec_i_multiply_shift(env, raw);
+        return IA64_PLANNED_SLOT_CONTINUE;
     case IA64_TCG_FALLBACK_PLAN_I_MUX:
         IA64_PERF_INC(IA64_PERF_OP_ALU);
         ia64_exec_i_mux(env, raw);
@@ -1748,6 +1752,11 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
         if (ia64_slot_is_i_packed_i2(type, raw)) {
             IA64_PERF_INC(IA64_PERF_OP_ALU);
             ia64_exec_i_packed_i2(env, raw);
+            continue;
+        }
+        if (ia64_slot_is_i_multiply_shift(type, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_ALU);
+            ia64_exec_i_multiply_shift(env, raw);
             continue;
         }
         if (ia64_slot_is_i_mux(type, raw)) {

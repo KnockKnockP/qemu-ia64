@@ -103,6 +103,16 @@ static uint64_t make_i2_packed_raw(uint8_t za, uint8_t zb,
            ((uint64_t)r2 << 13) | ((uint64_t)r1 << 6);
 }
 
+static uint64_t make_i_multiply_shift_raw(uint8_t za, uint8_t zb,
+                                          uint8_t x2b, uint8_t x2c,
+                                          uint8_t r1, uint8_t r2, uint8_t r3)
+{
+    return (7ULL << 37) | ((uint64_t)za << 36) |
+           ((uint64_t)zb << 33) | ((uint64_t)x2c << 30) |
+           ((uint64_t)x2b << 28) | ((uint64_t)r3 << 20) |
+           ((uint64_t)r2 << 13) | ((uint64_t)r1 << 6);
+}
+
 static uint64_t make_packed_alu_raw(uint8_t za, uint8_t zb, uint8_t x4,
                                     uint8_t x2b, uint8_t r1, uint8_t r2,
                                     uint8_t r3)
@@ -2281,7 +2291,91 @@ static void test_i_unit_packed_i2_operations(void)
         g_assert_true(ia64_slot_is_i_packed_i2(IA64_SLOT_TYPE_I, raw));
         g_assert_true(ia64_exec_i_packed_i2(&env, raw));
         g_assert_cmphex(ia64_read_gr(&env, 10), ==, tc->expected);
+        g_assert_false(ia64_read_gr_nat(&env, 10));
     }
+
+    {
+        uint64_t raw = make_i2_packed_raw(0, 1, 1, 3, 10, 8, 9);
+        CPUIA64State env;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        ia64_write_gr(&env, 8, 0xfffb0004fffd0002ULL);
+        ia64_write_gr(&env, 9, 0xfff7fff800070006ULL);
+        ia64_write_gr_nat(&env, 8, true);
+        g_assert_true(ia64_exec_i_packed_i2(&env, raw));
+        g_assert_true(ia64_read_gr_nat(&env, 10));
+    }
+}
+
+typedef struct MultiplyShiftCase {
+    const char *name;
+    uint8_t za;
+    uint8_t zb;
+    uint8_t x2b;
+    uint8_t x2c;
+    uint64_t source2;
+    uint64_t source3;
+    uint64_t expected;
+} MultiplyShiftCase;
+
+static void test_i_unit_multiply_shift_family(void)
+{
+    static const MultiplyShiftCase cases[] = {
+        { "pmpyshr2.u-0",  0, 1, 1, 0, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0xff0134000000fffeULL },
+        { "pmpyshr2.u-7",  0, 1, 1, 1, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0xfdfe2468020003ffULL },
+        { "pmpyshr2.u-15", 0, 1, 1, 2, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0x01fd002400020003ULL },
+        { "pmpyshr2.u-16", 0, 1, 1, 3, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0x00fe001200010001ULL },
+        { "pmpyshr2-0",    0, 1, 3, 0, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0xff0134000000fffeULL },
+        { "pmpyshr2-7",    0, 1, 3, 1, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0xfffe2468fe00ffffULL },
+        { "pmpyshr2-15",   0, 1, 3, 2, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0xffff0024fffeffffULL },
+        { "pmpyshr2-16",   0, 1, 3, 3, 0x00ff12348000ffffULL,
+          0xffff010000020002ULL, 0xffff0012ffffffffULL },
+        { "mpy4",          1, 0, 1, 3, 0x1234567889abcdefULL,
+          0xfedcba9876543210ULL, 0x3fa27837e5618cf0ULL },
+        { "mpyshl4",       1, 0, 3, 3, 0x1234567889abcdefULL,
+          0xfedcba9876543210ULL, 0x0b88d78000000000ULL },
+    };
+    const uint64_t windows_pmpyshr2_u_0_raw =
+        make_i_multiply_shift_raw(0, 1, 1, 0, 30, 22, 11);
+    const uint64_t windows_pmpyshr2_u_16_raw =
+        make_i_multiply_shift_raw(0, 1, 1, 3, 10, 22, 11);
+
+    g_assert_cmphex(windows_pmpyshr2_u_0_raw, ==, 0x0e210b2c780ULL);
+    g_assert_cmphex(windows_pmpyshr2_u_16_raw, ==, 0x0e2d0b2c280ULL);
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(cases); i++) {
+        const MultiplyShiftCase *tc = &cases[i];
+        uint64_t raw = make_i_multiply_shift_raw(
+            tc->za, tc->zb, tc->x2b, tc->x2c, 10, 8, 9);
+        CPUIA64State env;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        ia64_write_gr(&env, 8, tc->source2);
+        ia64_write_gr(&env, 9, tc->source3);
+
+        g_test_message("checking %s", tc->name);
+        g_assert_true(ia64_slot_is_i_multiply_shift(IA64_SLOT_TYPE_I, raw));
+        g_assert_true(ia64_exec_i_multiply_shift(&env, raw));
+        g_assert_cmphex(ia64_read_gr(&env, 10), ==, tc->expected);
+        g_assert_false(ia64_read_gr_nat(&env, 10));
+
+        ia64_write_gr_nat(&env, 9, true);
+        g_assert_true(ia64_exec_i_multiply_shift(&env, raw));
+        g_assert_true(ia64_read_gr_nat(&env, 10));
+    }
+
+    g_assert_false(ia64_slot_is_i_multiply_shift(
+        IA64_SLOT_TYPE_I, make_i_multiply_shift_raw(1, 0, 1, 2,
+                                                    10, 8, 9)));
+    g_assert_false(ia64_slot_is_i_multiply_shift(
+        IA64_SLOT_TYPE_M, windows_pmpyshr2_u_0_raw));
 }
 
 static void test_i_unit_variable_shifts(void)
@@ -4489,6 +4583,8 @@ int main(int argc, char **argv)
                     test_i_unit_packed_i2_frontier_mix4r);
     g_test_add_func("/ia64-insn/i-unit-packed-i2-operations",
                     test_i_unit_packed_i2_operations);
+    g_test_add_func("/ia64-insn/i-unit-multiply-shift-family",
+                    test_i_unit_multiply_shift_family);
     g_test_add_func("/ia64-insn/i-unit-variable-shifts",
                     test_i_unit_variable_shifts);
     g_test_add_func("/ia64-insn/i-unit-bit-count",
