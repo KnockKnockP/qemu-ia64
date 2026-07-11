@@ -208,6 +208,11 @@ bool vibtanium_efi_image_from_file(const char *path,
 bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
                                   uint64_t load_base,
                                   Error **errp);
+bool vibtanium_efi_image_hot_relocate(const VibtaniumEfiImage *image,
+                                      uint8_t *current_data,
+                                      size_t current_size,
+                                      uint64_t virtual_base,
+                                      Error **errp);
 bool vibtanium_efi_decode_uint32_arg(uint64_t raw, uint32_t *value);
 uint32_t vibtanium_efi_page_allocation_memory_type(uint64_t allocate_type,
                                                     uint64_t memory_type);

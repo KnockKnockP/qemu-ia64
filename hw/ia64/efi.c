@@ -414,6 +414,7 @@ static bool apply_base_relocations(uint8_t *memory_image,
                                    uint64_t delta,
                                    uint32_t reloc_rva,
                                    uint32_t reloc_size,
+                                   const uint8_t *fixup_baseline,
                                    Error **errp)
 {
     uint32_t offset;
@@ -456,6 +457,23 @@ static bool apply_base_relocations(uint8_t *memory_image,
             case PE_BASE_RELOCATION_ABSOLUTE:
                 break;
             case PE_BASE_RELOCATION_IA64_IMM64:
+                if (fixup_baseline) {
+                    uint32_t bundle_rva = fixup_rva &
+                                          ~(IA64_BUNDLE_SIZE - 1);
+
+                    if (bundle_rva > size_of_image ||
+                        IA64_BUNDLE_SIZE > size_of_image - bundle_rva) {
+                        error_setg(errp,
+                                   "EFI image IA64_IMM64 relocation bundle "
+                                   "0x%x is outside image", bundle_rva);
+                        return false;
+                    }
+                    if (memcmp(memory_image + bundle_rva,
+                               fixup_baseline + bundle_rva,
+                               IA64_BUNDLE_SIZE) != 0) {
+                        break;
+                    }
+                }
                 if (!apply_ia64_imm64_relocation(memory_image,
                                                  size_of_image,
                                                  fixup_rva, delta,
@@ -473,6 +491,10 @@ static bool apply_base_relocations(uint8_t *memory_image,
                     return false;
                 }
                 value = rd64(memory_image + fixup_rva);
+                if (fixup_baseline &&
+                    value != rd64(fixup_baseline + fixup_rva)) {
+                    break;
+                }
                 wr64(memory_image + fixup_rva, value + delta);
                 break;
             default:
@@ -687,7 +709,7 @@ bool vibtanium_efi_image_from_buffer(const char *path,
 
     if (!apply_base_relocations(memory_image, size_of_image,
                                 load_base - preferred_image_base,
-                                reloc_rva, reloc_size, errp)) {
+                                reloc_rva, reloc_size, NULL, errp)) {
         g_free(memory_image);
         return false;
     }
@@ -759,7 +781,7 @@ bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
     delta = load_base - image->load_base;
     if (!apply_base_relocations(image->data, image->size, delta,
                                 image->relocation_rva,
-                                image->relocation_size, errp)) {
+                                image->relocation_size, NULL, errp)) {
         return false;
     }
 
@@ -775,6 +797,40 @@ bool vibtanium_efi_image_relocate(VibtaniumEfiImage *image,
                image->entry, image->global_pointer, image->size_of_image,
                image->number_of_sections);
     return true;
+}
+
+bool vibtanium_efi_image_hot_relocate(const VibtaniumEfiImage *image,
+                                      uint8_t *current_data,
+                                      size_t current_size,
+                                      uint64_t virtual_base,
+                                      Error **errp)
+{
+    uint64_t delta;
+
+    /*
+     * Virtual-address callbacks may update relocatable fields themselves.
+     * The baseline lets apply_base_relocations() leave those fields alone
+     * while adjusting compiled-in pointers that retain their loaded values.
+     */
+    g_return_val_if_fail(image != NULL, false);
+    if (!image->data || image->size == 0 || !current_data ||
+        current_size < image->size) {
+        error_setg(errp, "cannot hot-relocate an empty EFI image");
+        return false;
+    }
+    if (virtual_base == image->load_base) {
+        return true;
+    }
+    if (UINT64_MAX - virtual_base < image->size) {
+        error_setg(errp, "EFI image virtual address overflows");
+        return false;
+    }
+
+    delta = virtual_base - image->load_base;
+    return apply_base_relocations(current_data, image->size, delta,
+                                  image->relocation_rva,
+                                  image->relocation_size, image->data,
+                                  errp);
 }
 
 bool vibtanium_efi_image_from_file(const char *path,

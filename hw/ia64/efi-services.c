@@ -442,6 +442,7 @@ static EfiEventNotifyFrame efi_event_notify_frame;
 static EfiVirtualMapEntry
     efi_virtual_map_entries[EFI_MAX_VIRTUAL_MAP_ENTRIES];
 static unsigned efi_virtual_map_entry_count;
+static bool efi_virtual_map_committed;
 static EfiLoaderBenchmark efi_loader_benchmark;
 static uint8_t *efi_transfer_bounce;
 static size_t efi_transfer_bounce_capacity;
@@ -451,6 +452,8 @@ static bool efi_runtime_virtual_address(uint64_t physical,
                                         uint64_t *virtual_address);
 static bool efi_runtime_convert_service_descriptors(CPUIA64State *env,
                                                     bool commit);
+static bool efi_runtime_image_mappings_valid(void);
+static bool efi_runtime_commit_virtual_map(CPUIA64State *env);
 
 static void efi_media_cache_entry_free(gpointer opaque)
 {
@@ -747,6 +750,16 @@ static bool efi_memory_map_trace_enabled(void)
     return enabled != 0;
 }
 
+static bool efi_runtime_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        enabled = g_getenv("VIBTANIUM_EFI_RUNTIME_TRACE") != NULL;
+    }
+    return enabled != 0;
+}
+
 static uint64_t efi_ram_top(void)
 {
     return efi_guest_ram_top;
@@ -960,7 +973,10 @@ static void efi_trace_service(CPUIA64State *env, unsigned service_index,
                            ia64_read_gr(env, 32), ia64_read_gr(env, 33),
                            ia64_read_gr(env, 34), ia64_read_gr(env, 35),
                            ia64_read_gr(env, 36));
-    if (!efi_trace_enabled()) {
+    if (!efi_trace_enabled() &&
+        !(efi_runtime_trace_enabled() &&
+          service_index >= EFI_RUNTIME_SERVICE_BASE &&
+          service_index < EFI_CON_OUT_SERVICE_BASE)) {
         return;
     }
 
@@ -2015,6 +2031,7 @@ void vibtanium_efi_register_boot_media(
     memset(&efi_event_notify_frame, 0, sizeof(efi_event_notify_frame));
     memset(efi_virtual_map_entries, 0, sizeof(efi_virtual_map_entries));
     efi_virtual_map_entry_count = 0;
+    efi_virtual_map_committed = false;
     efi_pool_next = VIBTANIUM_EFI_POOL_BASE;
     efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
     efi_memory_map_key = 1;
@@ -3126,7 +3143,7 @@ static bool efi_return_from_event_notify(CPUIA64State *env)
     service_index = frame->service_index;
     if (status == VIBTANIUM_EFI_SUCCESS &&
         service_index == EFI_RUNTIME_SERVICE_BASE + 4 &&
-        !efi_runtime_convert_service_descriptors(env, true)) {
+        !efi_runtime_commit_virtual_map(env)) {
         status = VIBTANIUM_EFI_NO_MAPPING;
     }
     memset(frame, 0, sizeof(*frame));
@@ -3987,6 +4004,115 @@ static bool efi_runtime_virtual_address(uint64_t physical,
     return false;
 }
 
+static bool efi_runtime_image_virtual_base(const EfiChildImage *child,
+                                           uint64_t *virtual_base)
+{
+    const VibtaniumEfiImage *image = &child->image;
+    uint64_t virtual_end;
+    uint64_t physical_end;
+
+    if (image->size == 0 ||
+        UINT64_MAX - image->load_base < image->size - 1 ||
+        !efi_runtime_virtual_address(image->load_base, virtual_base)) {
+        return false;
+    }
+
+    physical_end = image->load_base + image->size - 1;
+    return UINT64_MAX - *virtual_base >= image->size - 1 &&
+           efi_runtime_virtual_address(physical_end, &virtual_end) &&
+           virtual_end == *virtual_base + image->size - 1;
+}
+
+static bool efi_runtime_image_mappings_valid(void)
+{
+    for (unsigned i = 0; i < EFI_MAX_LOADED_IMAGES; i++) {
+        const EfiChildImage *child = &efi_child_images[i];
+        const VibtaniumEfiImage *image = &child->image;
+        uint64_t virtual_base;
+
+        if (!child->in_use ||
+            vibtanium_efi_loaded_image_memory_type(image) !=
+                EFI_RUNTIME_SERVICES_CODE) {
+            continue;
+        }
+        if (!efi_runtime_image_virtual_base(child, &virtual_base) ||
+            (virtual_base != image->load_base &&
+             (image->relocation_rva == 0 ||
+              image->relocation_size == 0))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool efi_runtime_hot_relocate_images(CPUIA64State *env)
+{
+    struct EfiPreparedRuntimeImage {
+        EfiChildImage *child;
+        uint8_t *data;
+        uint64_t physical_base;
+        uint64_t virtual_base;
+    } prepared[EFI_MAX_LOADED_IMAGES] = { 0 };
+    unsigned prepared_count = 0;
+    bool success = false;
+
+    for (unsigned i = 0; i < EFI_MAX_LOADED_IMAGES; i++) {
+        EfiChildImage *child = &efi_child_images[i];
+        VibtaniumEfiImage *image = &child->image;
+        struct EfiPreparedRuntimeImage *item;
+        Error *local_err = NULL;
+        uint64_t virtual_base;
+
+        if (!child->in_use ||
+            vibtanium_efi_loaded_image_memory_type(image) !=
+                EFI_RUNTIME_SERVICES_CODE) {
+            continue;
+        }
+        if (!efi_runtime_image_virtual_base(child, &virtual_base)) {
+            goto out;
+        }
+        if (virtual_base == image->load_base) {
+            continue;
+        }
+
+        item = &prepared[prepared_count++];
+        item->child = child;
+        item->physical_base = image->load_base;
+        item->virtual_base = virtual_base;
+        item->data = g_malloc(image->size);
+        efi_guest_read_bulk(env, image->load_base, item->data, image->size);
+        if (!vibtanium_efi_image_hot_relocate(
+                image, item->data, image->size, virtual_base, &local_err)) {
+            warn_report("vibtanium EFI runtime image relocation failed: %s",
+                        error_get_pretty(local_err));
+            error_free(local_err);
+            goto out;
+        }
+    }
+
+    for (unsigned i = 0; i < prepared_count; i++) {
+        struct EfiPreparedRuntimeImage *item = &prepared[i];
+
+        efi_guest_write_bulk(env, item->physical_base, item->data,
+                             item->child->image.size);
+        if (efi_runtime_trace_enabled()) {
+            fprintf(stderr,
+                    "[efi-runtime-image] physical=0x%016" PRIx64
+                    " virtual=0x%016" PRIx64 " size=0x%zx path=%s\n",
+                    item->physical_base, item->virtual_base,
+                    item->child->image.size,
+                    item->child->image.source_path);
+        }
+    }
+    success = true;
+
+out:
+    for (unsigned i = 0; i < prepared_count; i++) {
+        g_free(prepared[i].data);
+    }
+    return success;
+}
+
 static bool efi_runtime_convert_service_descriptors(CPUIA64State *env,
                                                     bool commit)
 {
@@ -4025,6 +4151,16 @@ static bool efi_runtime_convert_service_descriptors(CPUIA64State *env,
         efi_guest_stq(env, descriptor + 8, global_pointer);
     }
 
+    return true;
+}
+
+static bool efi_runtime_commit_virtual_map(CPUIA64State *env)
+{
+    if (!efi_runtime_hot_relocate_images(env) ||
+        !efi_runtime_convert_service_descriptors(env, true)) {
+        return false;
+    }
+    efi_virtual_map_committed = true;
     return true;
 }
 
@@ -4067,6 +4203,9 @@ static uint64_t efi_runtime_set_virtual_address_map(CPUIA64State *env)
     uint64_t descriptor_version = ia64_read_gr(env, 34);
     uint64_t memory_map = ia64_read_gr(env, 35);
 
+    if (efi_virtual_map_committed) {
+        return VIBTANIUM_EFI_UNSUPPORTED;
+    }
     if (descriptor_version != EFI_MEMORY_DESCRIPTOR_VERSION ||
         descriptor_size < EFI_MEMORY_DESCRIPTOR_SIZE ||
         (memory_map == 0 && memory_map_size != 0)) {
@@ -4075,7 +4214,8 @@ static uint64_t efi_runtime_set_virtual_address_map(CPUIA64State *env)
 
     efi_runtime_cache_virtual_map(env, memory_map_size, descriptor_size,
                                   memory_map);
-    if (!efi_runtime_convert_service_descriptors(env, false)) {
+    if (!efi_runtime_convert_service_descriptors(env, false) ||
+        !efi_runtime_image_mappings_valid()) {
         return VIBTANIUM_EFI_NO_MAPPING;
     }
     {
@@ -4085,7 +4225,7 @@ static uint64_t efi_runtime_set_virtual_address_map(CPUIA64State *env)
             efi_next_virtual_address_change_event(&next_index);
     }
     if (!efi_pending_notify_event &&
-        !efi_runtime_convert_service_descriptors(env, true)) {
+        !efi_runtime_commit_virtual_map(env)) {
         return VIBTANIUM_EFI_NO_MAPPING;
     }
     return VIBTANIUM_EFI_SUCCESS;

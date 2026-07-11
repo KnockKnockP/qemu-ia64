@@ -883,6 +883,91 @@ static void test_relocates_parsed_image_without_reparse(void)
     vibtanium_efi_image_destroy(&image);
 }
 
+static void test_hot_relocates_unchanged_fixups(void)
+{
+    const uint64_t virtual_base = UINT64_C(0xe000000001000000);
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    g_autofree uint8_t *current = NULL;
+    VibtaniumEfiImage image;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64, 0, true);
+    g_assert_true(vibtanium_efi_image_from_buffer(
+        "synthetic-runtime.efi", pe, sizeof(pe), VIBTANIUM_EFI_APP_BASE,
+        &image, &err));
+    g_assert_null(err);
+    current = g_memdup2(image.data, image.size);
+
+    g_assert_true(vibtanium_efi_image_hot_relocate(
+        &image, current, image.size, virtual_base, &err));
+    g_assert_null(err);
+    g_assert_cmphex(load_le64(current + SYNTHETIC_DESCRIPTOR_RVA), ==,
+                    virtual_base + SYNTHETIC_TEXT_RVA);
+    g_assert_cmphex(load_le64(current + SYNTHETIC_DESCRIPTOR_RVA + 8), ==,
+                    virtual_base + SYNTHETIC_GP_RVA);
+    g_assert_cmphex(image.entry, ==,
+                    VIBTANIUM_EFI_APP_BASE + SYNTHETIC_TEXT_RVA);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
+static void test_hot_relocation_preserves_modified_fixup(void)
+{
+    const uint64_t virtual_base = UINT64_C(0xe000000001000000);
+    const uint64_t callback_value = UINT64_C(0xe123456789abcdef);
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    g_autofree uint8_t *current = NULL;
+    VibtaniumEfiImage image;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe(pe, VIBTANIUM_EFI_PE_MACHINE_IA64, 0, true);
+    g_assert_true(vibtanium_efi_image_from_buffer(
+        "synthetic-runtime.efi", pe, sizeof(pe), VIBTANIUM_EFI_APP_BASE,
+        &image, &err));
+    g_assert_null(err);
+    current = g_memdup2(image.data, image.size);
+    store_le64(current + SYNTHETIC_DESCRIPTOR_RVA, callback_value);
+
+    g_assert_true(vibtanium_efi_image_hot_relocate(
+        &image, current, image.size, virtual_base, &err));
+    g_assert_null(err);
+    g_assert_cmphex(load_le64(current + SYNTHETIC_DESCRIPTOR_RVA), ==,
+                    callback_value);
+    g_assert_cmphex(load_le64(current + SYNTHETIC_DESCRIPTOR_RVA + 8), ==,
+                    virtual_base + SYNTHETIC_GP_RVA);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
+static void test_hot_relocates_ia64_movl(void)
+{
+    const uint64_t virtual_base = UINT64_C(0xe000000001000000);
+    uint8_t pe[SYNTHETIC_PE_SIZE];
+    g_autofree uint8_t *current = NULL;
+    VibtaniumEfiImage image;
+    IA64DecodedBundle decoded;
+    Error *err = NULL;
+
+    make_synthetic_ia64_pe_with_movl_reloc(pe);
+    g_assert_true(vibtanium_efi_image_from_buffer(
+        "synthetic-runtime-movl.efi", pe, sizeof(pe),
+        VIBTANIUM_EFI_APP_BASE, &image, &err));
+    g_assert_null(err);
+    current = g_memdup2(image.data, image.size);
+
+    g_assert_true(vibtanium_efi_image_hot_relocate(
+        &image, current, image.size, virtual_base, &err));
+    g_assert_null(err);
+    g_assert_true(ia64_decode_bundle(current + SYNTHETIC_MOVL_RVA,
+                                     &decoded));
+    g_assert_true(ia64_slot_pair_is_lx_movl(decoded.slot[1],
+                                            decoded.slot[2]));
+    g_assert_cmphex(ia64_lx_movl_imm64(decoded.slot[1], decoded.slot[2]),
+                    ==, virtual_base + SYNTHETIC_GP_RVA);
+
+    vibtanium_efi_image_destroy(&image);
+}
+
 static void test_loads_fixed_ia64_pe_at_preferred_base(void)
 {
     uint8_t pe[SYNTHETIC_PE_SIZE];
@@ -1056,6 +1141,12 @@ int main(int argc, char **argv)
                     test_relocates_ia64_movl_imm64);
     g_test_add_func("/ia64-efi-app/relocate-parsed-image",
                     test_relocates_parsed_image_without_reparse);
+    g_test_add_func("/ia64-efi-app/hot-relocate-unchanged-fixups",
+                    test_hot_relocates_unchanged_fixups);
+    g_test_add_func("/ia64-efi-app/hot-relocate-preserves-modified-fixup",
+                    test_hot_relocation_preserves_modified_fixup);
+    g_test_add_func("/ia64-efi-app/hot-relocate-ia64-movl",
+                    test_hot_relocates_ia64_movl);
     g_test_add_func("/ia64-efi-app/load-fixed-at-preferred-base",
                     test_loads_fixed_ia64_pe_at_preferred_base);
     g_test_add_func("/ia64-efi-app/decode-sign-extended-uint32-args",
