@@ -413,6 +413,7 @@ typedef struct VibtaniumBlockReadRequest {
     QemuMutex lock;
     QemuCond cond;
     bool complete;
+    bool write;
     int ret;
 } VibtaniumBlockReadRequest;
 
@@ -495,8 +496,13 @@ static void vibtanium_block_pread_on_aio_context(void *opaque)
     VibtaniumBlockReadRequest *request = opaque;
     int ret;
 
-    ret = blk_pread(request->blk, request->offset,
-                    request->bytes, request->buffer, 0);
+    if (request->write) {
+        ret = blk_pwrite(request->blk, request->offset,
+                         request->bytes, request->buffer, 0);
+    } else {
+        ret = blk_pread(request->blk, request->offset,
+                        request->bytes, request->buffer, 0);
+    }
     qemu_mutex_lock(&request->lock);
     request->ret = ret;
     request->complete = true;
@@ -565,6 +571,45 @@ static int vibtanium_block_pread(void *opaque,
     return 0;
 }
 
+static int vibtanium_block_pwrite(void *opaque,
+                                  uint64_t offset,
+                                  uint32_t bytes,
+                                  const void *buffer,
+                                  Error **errp)
+{
+    VibtaniumBlockReadOpaque *write_opaque = opaque;
+    int ret;
+
+    if (qemu_get_current_aio_context() ==
+        blk_get_aio_context(write_opaque->blk)) {
+        ret = blk_pwrite(write_opaque->blk, offset, bytes, buffer, 0);
+    } else {
+        VibtaniumBlockReadRequest request = {
+            .blk = write_opaque->blk,
+            .offset = offset,
+            .bytes = bytes,
+            .buffer = (void *)buffer,
+            .write = true,
+        };
+
+        qemu_mutex_init(&request.lock);
+        qemu_cond_init(&request.cond);
+        aio_bh_schedule_oneshot(
+            blk_get_aio_context(write_opaque->blk),
+            vibtanium_block_pread_on_aio_context, &request);
+        vibtanium_block_pread_wait(&request);
+        qemu_cond_destroy(&request.cond);
+        qemu_mutex_destroy(&request.lock);
+        ret = request.ret;
+    }
+    if (ret < 0) {
+        error_setg(errp, "block write failed: %s", strerror(-ret));
+        return ret;
+    }
+
+    return 0;
+}
+
 bool vibtanium_blk_media_device(BlockBackend *blk,
                                 VibtaniumEfiBlockDevice *dev)
 {
@@ -596,10 +641,13 @@ bool vibtanium_blk_media_device(BlockBackend *blk,
         .name = name && *name ? name : "<unnamed>",
         .size = length,
         .block_size = cdrom ? 2048 : 512,
+        .ide_bus = dinfo->bus,
+        .ide_unit = dinfo->unit,
         .read_only = !blk_is_writable(blk),
         .removable = cdrom,
         .cdrom = cdrom,
         .read = vibtanium_block_pread,
+        .write = blk_is_writable(blk) ? vibtanium_block_pwrite : NULL,
         .opaque = read_opaque,
     };
     return true;
@@ -746,6 +794,9 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     VibtaniumEfiFirmwareOptions firmware_options = {
         .hcdp_serial_console = vms->hcdp_serial_console,
     };
+    VibtaniumEfiBlockDevice media[VIBTANIUM_EFI_MAX_MEDIA] = { 0 };
+    unsigned media_count = 0;
+    BlockBackend *blk = NULL;
 
     if (!linux_append || !linux_append[0]) {
         linux_append = VIBTANIUM_DEFAULT_LINUX_APPEND;
@@ -780,11 +831,39 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
     ia64_diag_record_efi_commit(&vms->cpu->env, "begin",
                                 image->source_path, image->load_base,
                                 image->size);
+
+    if (boot_media) {
+        media[media_count++] = *boot_media;
+    }
+    while (media_count < ARRAY_SIZE(media) && (blk = blk_next(blk)) != NULL) {
+        VibtaniumEfiBlockDevice dev;
+        VibtaniumEfiBlockDevice retained;
+        Error *local_err = NULL;
+
+        if (!vibtanium_blk_media_device(blk, &dev)) {
+            continue;
+        }
+        if (boot_media && dev.ide_bus == boot_media->ide_bus &&
+            dev.ide_unit == boot_media->ide_unit) {
+            vibtanium_blk_media_device_cleanup(&dev);
+            continue;
+        }
+        if (!vibtanium_cache_boot_media(&dev, &retained, &local_err)) {
+            warn_report("could not retain EFI media %s: %s", dev.name,
+                        error_get_pretty(local_err));
+            error_free(local_err);
+            vibtanium_blk_media_device_cleanup(&dev);
+            continue;
+        }
+        media[media_count++] = retained;
+        vibtanium_blk_media_device_cleanup(&dev);
+    }
+
     firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
-                                                      image, boot_media,
+                                                      image, media, media_count,
                                                       &firmware_options);
     vibtanium_efi_input_set_auto_enter(vms->efi_auto_enter);
-    vibtanium_efi_register_boot_media(boot_media);
+    vibtanium_efi_register_media(media, media_count);
     vibtanium_efi_register_loaded_image(image->load_base, image->size);
     vibtanium_efi_set_linux_cmdline_append(linux_append);
     vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-tables",

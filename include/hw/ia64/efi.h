@@ -15,6 +15,8 @@ typedef struct ISADevice ISADevice;
 #define VIBTANIUM_EFI_IMAGE_HANDLE      UINT64_C(0x00070000)
 #define VIBTANIUM_EFI_LOADED_IMAGE      UINT64_C(0x00071000)
 #define VIBTANIUM_EFI_BOOT_DEVICE_HANDLE UINT64_C(0x00072000)
+#define VIBTANIUM_EFI_MEDIA_HANDLE_STRIDE UINT64_C(0x00000100)
+#define VIBTANIUM_EFI_MAX_MEDIA          4
 #define VIBTANIUM_EFI_CON_IN_WAIT_EVENT UINT64_C(0x00074000)
 #define VIBTANIUM_EFI_SYSTEM_TABLE      UINT64_C(0x00080000)
 #define VIBTANIUM_EFI_CON_IN            UINT64_C(0x00080800)
@@ -50,6 +52,15 @@ typedef struct ISADevice ISADevice;
 #define VIBTANIUM_EFI_LOAD_OPTIONS      UINT64_C(0x00088100)
 #define VIBTANIUM_EFI_LOAD_OPTIONS_SIZE UINT64_C(0x00001000)
 #define VIBTANIUM_EFI_LOADED_IMAGE_FILE_PATH UINT64_C(0x00089100)
+#define VIBTANIUM_EFI_EXTRA_MEDIA_BASE  UINT64_C(0x00089a00)
+#define VIBTANIUM_EFI_EXTRA_MEDIA_STRIDE UINT64_C(0x00000100)
+#define VIBTANIUM_EFI_EXTRA_DEVICE_PATH(slot) \
+    (VIBTANIUM_EFI_EXTRA_MEDIA_BASE + ((slot) - 1) * \
+     VIBTANIUM_EFI_EXTRA_MEDIA_STRIDE)
+#define VIBTANIUM_EFI_EXTRA_BLOCK_IO(slot) \
+    (VIBTANIUM_EFI_EXTRA_DEVICE_PATH(slot) + UINT64_C(0x40))
+#define VIBTANIUM_EFI_EXTRA_BLOCK_IO_MEDIA(slot) \
+    (VIBTANIUM_EFI_EXTRA_DEVICE_PATH(slot) + UINT64_C(0x80))
 #define VIBTANIUM_EFI_BLOB_BASE         UINT64_C(0x00070000)
 #define VIBTANIUM_EFI_BLOB_SIZE         UINT64_C(0x00020000)
 #define VIBTANIUM_EFI_GATE_SIZE         16
@@ -237,7 +248,8 @@ bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
 void vibtanium_efi_loader_benchmark_start(void);
 uint8_t *vibtanium_efi_build_firmware_blob(size_t *size,
                                            const VibtaniumEfiImage *image,
-                                           const struct VibtaniumEfiBlockDevice *boot_media,
+                                           const struct VibtaniumEfiBlockDevice *media,
+                                           unsigned media_count,
                                            const VibtaniumEfiFirmwareOptions *options);
 void vibtanium_efi_build_branch_gate(
     uint8_t gate[VIBTANIUM_EFI_GATE_SIZE]);
@@ -246,8 +258,8 @@ bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
 void vibtanium_efi_register_loaded_image(uint64_t image_base,
                                          uint64_t image_size);
 void vibtanium_efi_set_guest_ram_size(uint64_t ram_size);
-void vibtanium_efi_register_boot_media(
-    const struct VibtaniumEfiBlockDevice *boot_media);
+void vibtanium_efi_register_media(
+    const struct VibtaniumEfiBlockDevice *media, unsigned media_count);
 void vibtanium_efi_set_linux_cmdline_append(const char *append);
 bool vibtanium_efi_linux_cmdline_append_pending(void);
 void vibtanium_efi_maybe_apply_linux_cmdline_append(CPUIA64State *env);

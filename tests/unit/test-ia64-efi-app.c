@@ -406,6 +406,7 @@ static void test_builds_guest_firmware_tables(void)
     VibtaniumEfiBlockDevice boot_media = {
         .size = 2048 * 10,
         .block_size = 2048,
+        .ide_bus = 1,
         .read_only = true,
         .removable = true,
         .cdrom = true,
@@ -422,7 +423,7 @@ static void test_builds_guest_firmware_tables(void)
     size_t blob_size = 0;
     uint8_t sal_gate[VIBTANIUM_EFI_GATE_SIZE];
     uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
-                                                      &boot_media, NULL);
+                                                      &boot_media, 1, NULL);
     uint64_t boot_services;
     uint64_t runtime_services;
     uint64_t get_time_descriptor;
@@ -765,7 +766,7 @@ static void test_builds_hcdp_serial_console_table(void)
     };
     size_t blob_size = 0;
     uint8_t *blob = vibtanium_efi_build_firmware_blob(&blob_size, &image,
-                                                      NULL, &options);
+                                                      NULL, 0, &options);
     const uint8_t *config_entry;
     const uint8_t *hcdp_config_entry;
     const uint8_t *hcdp_table;
@@ -822,6 +823,57 @@ static void test_relocates_ia64_entry_descriptor(void)
                     VIBTANIUM_EFI_APP_BASE + SYNTHETIC_GP_RVA);
 
     vibtanium_efi_image_destroy(&image);
+}
+
+static void test_builds_fixed_media_protocol(void)
+{
+    VibtaniumEfiImage image = {
+        .load_base = VIBTANIUM_EFI_APP_BASE,
+        .size = 0x123450,
+    };
+    VibtaniumEfiBlockDevice media[2] = {
+        {
+            .size = 2048 * 10,
+            .block_size = 2048,
+            .ide_bus = 1,
+            .read_only = true,
+            .removable = true,
+            .cdrom = true,
+        },
+        {
+            .size = 10 * GiB,
+            .block_size = 512,
+            .ide_bus = 0,
+            .ide_unit = 0,
+        },
+    };
+    const uint8_t expected_fixed_path[] = {
+        0x01, 0x01, 0x06, 0x00, 0x00, 0x01,
+        0x03, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x7f, 0xff, 0x04, 0x00,
+    };
+    size_t blob_size = 0;
+    uint8_t *blob = vibtanium_efi_build_firmware_blob(
+        &blob_size, &image, media, ARRAY_SIZE(media), NULL);
+
+    g_assert_cmpuint(blob_size, ==, VIBTANIUM_EFI_BLOB_SIZE);
+    g_assert_cmpmem(firmware_ptr(blob, VIBTANIUM_EFI_EXTRA_DEVICE_PATH(1)),
+                    sizeof(expected_fixed_path), expected_fixed_path,
+                    sizeof(expected_fixed_path));
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob, VIBTANIUM_EFI_EXTRA_BLOCK_IO(1))),
+                    ==, VIBTANIUM_EFI_PROTOCOL_REVISION);
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob, VIBTANIUM_EFI_EXTRA_BLOCK_IO(1) + 8)),
+                    ==, VIBTANIUM_EFI_EXTRA_BLOCK_IO_MEDIA(1));
+    g_assert_cmpuint(load_le32(firmware_ptr(
+                          blob, VIBTANIUM_EFI_EXTRA_BLOCK_IO_MEDIA(1) + 12)),
+                     ==, 512);
+    g_assert_cmphex(load_le64(firmware_ptr(
+                         blob, VIBTANIUM_EFI_EXTRA_BLOCK_IO_MEDIA(1) + 24)),
+                    ==, (10 * GiB / 512) - 1);
+
+    g_free(blob);
 }
 
 static void test_runtime_driver_uses_runtime_memory(void)
@@ -1155,6 +1207,8 @@ int main(int argc, char **argv)
                     test_builds_guest_firmware_tables);
     g_test_add_func("/ia64-efi-app/build-hcdp-serial-console-table",
                     test_builds_hcdp_serial_console_table);
+    g_test_add_func("/ia64-efi-app/build-fixed-media-protocol",
+                    test_builds_fixed_media_protocol);
     g_test_add_func("/ia64-efi-app/relocate-entry-descriptor",
                     test_relocates_ia64_entry_descriptor);
     g_test_add_func("/ia64-efi-app/relocate-ia64-movl-imm64",

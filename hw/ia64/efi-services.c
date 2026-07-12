@@ -416,6 +416,9 @@ static const EfiMemoryMapRecord efi_memory_map_records[] = {
 static VibtaniumEfiBlockDevice efi_boot_media;
 static char *efi_boot_media_name;
 static bool efi_boot_media_valid;
+static VibtaniumEfiBlockDevice efi_extra_media[VIBTANIUM_EFI_MAX_MEDIA - 1];
+static char *efi_extra_media_names[VIBTANIUM_EFI_MAX_MEDIA - 1];
+static unsigned efi_media_count;
 static uint64_t efi_pool_next = VIBTANIUM_EFI_POOL_BASE;
 static uint64_t efi_page_alloc_next = EFI_PAGE_ALLOC_BASE;
 static uint64_t efi_guest_ram_top = EFI_DEFAULT_GUEST_RAM_TOP;
@@ -2029,8 +2032,8 @@ static uint64_t efi_exit_boot_services(CPUIA64State *env)
     return VIBTANIUM_EFI_SUCCESS;
 }
 
-void vibtanium_efi_register_boot_media(
-    const VibtaniumEfiBlockDevice *boot_media)
+void vibtanium_efi_register_media(const VibtaniumEfiBlockDevice *media,
+                                  unsigned media_count)
 {
     for (unsigned i = 0; i < EFI_MAX_FILE_HANDLES; i++) {
         memset(&efi_guest_files[i], 0, sizeof(efi_guest_files[i]));
@@ -2066,27 +2069,69 @@ void vibtanium_efi_register_boot_media(
     vibtanium_efi_storage_cache_cleanup(&efi_boot_media);
     g_clear_pointer(&efi_boot_media_name, g_free);
     memset(&efi_boot_media, 0, sizeof(efi_boot_media));
+    for (unsigned i = 0; i < ARRAY_SIZE(efi_extra_media); i++) {
+        vibtanium_efi_storage_cache_cleanup(&efi_extra_media[i]);
+        g_clear_pointer(&efi_extra_media_names[i], g_free);
+        memset(&efi_extra_media[i], 0, sizeof(efi_extra_media[i]));
+    }
     efi_boot_media_valid = false;
+    efi_media_count = 0;
 
-    if (!boot_media) {
+    if (!media || media_count == 0) {
         return;
     }
 
-    efi_boot_media = *boot_media;
-    efi_boot_media_name = g_strdup(boot_media->name);
+    media_count = MIN(media_count, (unsigned)VIBTANIUM_EFI_MAX_MEDIA);
+    efi_boot_media = media[0];
+    efi_boot_media_name = g_strdup(media[0].name);
     efi_boot_media.name = efi_boot_media_name;
-    efi_boot_media_valid = boot_media->read != NULL;
+    efi_boot_media_valid = media[0].read != NULL;
+    efi_media_count = media_count;
     if (efi_boot_media_valid) {
         vibtanium_efi_storage_cache_enable(&efi_boot_media);
         efi_media_files = g_hash_table_new_full(
             g_str_hash, g_str_equal, g_free, efi_media_cache_entry_free);
     }
+    for (unsigned i = 1; i < media_count; i++) {
+        unsigned extra = i - 1;
+
+        efi_extra_media[extra] = media[i];
+        efi_extra_media_names[extra] = g_strdup(media[i].name);
+        efi_extra_media[extra].name = efi_extra_media_names[extra];
+    }
+}
+
+static VibtaniumEfiBlockDevice *efi_media_at(unsigned slot)
+{
+    if (slot >= efi_media_count) {
+        return NULL;
+    }
+    return slot == 0 ? &efi_boot_media : &efi_extra_media[slot - 1];
+}
+
+static uint64_t efi_media_handle(unsigned slot)
+{
+    return VIBTANIUM_EFI_BOOT_DEVICE_HANDLE +
+        slot * VIBTANIUM_EFI_MEDIA_HANDLE_STRIDE;
+}
+
+static uint64_t efi_media_device_path(unsigned slot)
+{
+    return slot == 0 ? VIBTANIUM_EFI_DEVICE_PATH
+        : VIBTANIUM_EFI_EXTRA_DEVICE_PATH(slot);
+}
+
+static uint64_t efi_media_block_io(unsigned slot)
+{
+    return slot == 0 ? VIBTANIUM_EFI_BLOCK_IO
+        : VIBTANIUM_EFI_EXTRA_BLOCK_IO(slot);
 }
 
 static uint64_t efi_preinstalled_interface(uint64_t handle,
                                            const uint8_t guid[16])
 {
     EfiChildImage *child;
+    unsigned media_slot;
 
     if (handle == VIBTANIUM_EFI_IMAGE_HANDLE &&
         efi_guid_bytes_equal(guid, efi_loaded_image_guid)) {
@@ -2098,24 +2143,31 @@ static uint64_t efi_preinstalled_interface(uint64_t handle,
         return child->loaded_image;
     }
 
+    for (media_slot = 0; media_slot < efi_media_count; media_slot++) {
+        if (handle != efi_media_handle(media_slot)) {
+            continue;
+        }
+        if (efi_guid_bytes_equal(guid, efi_device_path_guid)) {
+            return efi_media_device_path(media_slot);
+        }
+        if (efi_media_at(media_slot)->read &&
+            efi_guid_bytes_equal(guid, efi_block_io_guid)) {
+            return efi_media_block_io(media_slot);
+        }
+        break;
+    }
+
     if (handle != VIBTANIUM_EFI_BOOT_DEVICE_HANDLE) {
         return 0;
     }
-
     if (efi_guid_bytes_equal(guid, efi_simple_text_output_guid)) {
         return VIBTANIUM_EFI_CON_OUT;
     }
     if (efi_guid_bytes_equal(guid, efi_simple_text_input_guid)) {
         return VIBTANIUM_EFI_CON_IN;
     }
-    if (efi_guid_bytes_equal(guid, efi_device_path_guid)) {
-        return VIBTANIUM_EFI_DEVICE_PATH;
-    }
     if (efi_guid_bytes_equal(guid, efi_graphics_output_guid)) {
         return VIBTANIUM_EFI_GOP;
-    }
-    if (efi_boot_media_valid && efi_guid_bytes_equal(guid, efi_block_io_guid)) {
-        return VIBTANIUM_EFI_BLOCK_IO;
     }
     if (efi_boot_media_valid &&
         efi_guid_bytes_equal(guid, efi_simple_file_system_guid)) {
@@ -2222,13 +2274,21 @@ static unsigned efi_locate_handles_for_protocol(CPUIA64State *env,
 
     if (efi_guid_bytes_equal(guid, efi_simple_text_output_guid) ||
         efi_guid_bytes_equal(guid, efi_simple_text_input_guid) ||
-        efi_guid_bytes_equal(guid, efi_device_path_guid) ||
         efi_guid_bytes_equal(guid, efi_graphics_output_guid) ||
         (efi_boot_media_valid &&
-         (efi_guid_bytes_equal(guid, efi_block_io_guid) ||
-          efi_guid_bytes_equal(guid, efi_simple_file_system_guid)))) {
+         efi_guid_bytes_equal(guid, efi_simple_file_system_guid))) {
         efi_add_unique_handle(handles, capacity, &count,
                               VIBTANIUM_EFI_BOOT_DEVICE_HANDLE);
+    }
+
+    if (efi_guid_bytes_equal(guid, efi_device_path_guid) ||
+        efi_guid_bytes_equal(guid, efi_block_io_guid)) {
+        for (unsigned i = 0; i < efi_media_count; i++) {
+            if (efi_media_at(i)->read) {
+                efi_add_unique_handle(handles, capacity, &count,
+                                      efi_media_handle(i));
+            }
+        }
     }
 
     for (unsigned i = 0; i < EFI_MAX_INSTALLED_PROTOCOLS; i++) {
@@ -3514,13 +3574,19 @@ static uint64_t efi_dispatch_simple_file_system(CPUIA64State *env,
 static uint64_t efi_dispatch_block_io(CPUIA64State *env, unsigned index)
 {
     uint64_t this_ptr = ia64_read_gr(env, 32);
-    uint32_t block_size = efi_boot_media.block_size
-        ? efi_boot_media.block_size
-        : 2048;
+    VibtaniumEfiBlockDevice *media = NULL;
+    uint32_t block_size;
 
-    if (this_ptr != VIBTANIUM_EFI_BLOCK_IO || !efi_boot_media_valid) {
+    for (unsigned slot = 0; slot < efi_media_count; slot++) {
+        if (this_ptr == efi_media_block_io(slot)) {
+            media = efi_media_at(slot);
+            break;
+        }
+    }
+    if (!media || !media->read) {
         return VIBTANIUM_EFI_INVALID_PARAMETER;
     }
+    block_size = media->block_size ? media->block_size : 512;
 
     switch (index) {
     case 0:
@@ -3551,8 +3617,8 @@ static uint64_t efi_dispatch_block_io(CPUIA64State *env, unsigned index)
             uint32_t chunk = MIN((uint64_t)capacity, buffer_size - done);
             int ret;
 
-            ret = efi_boot_media.read(efi_boot_media.opaque, offset + done,
-                                      chunk, data, &local_err);
+            ret = media->read(media->opaque, offset + done, chunk, data,
+                              &local_err);
             if (ret < 0) {
                 error_free(local_err);
                 return VIBTANIUM_EFI_DEVICE_ERROR;
@@ -3565,8 +3631,46 @@ static uint64_t efi_dispatch_block_io(CPUIA64State *env, unsigned index)
         }
         return VIBTANIUM_EFI_SUCCESS;
     }
-    case 2:
-        return VIBTANIUM_EFI_WRITE_PROTECTED;
+    case 2: {
+        uint64_t media_id = ia64_read_gr(env, 33);
+        uint64_t lba = ia64_read_gr(env, 34);
+        uint64_t buffer_size = ia64_read_gr(env, 35);
+        uint64_t buffer = ia64_read_gr(env, 36);
+        uint64_t offset = lba * block_size;
+        uint8_t *data;
+        size_t capacity;
+        uint64_t done = 0;
+
+        if (media->read_only || !media->write) {
+            return VIBTANIUM_EFI_WRITE_PROTECTED;
+        }
+        if (media_id != 1 || buffer_size > EFI_MAX_FILE_READ_BYTES ||
+            (buffer_size != 0 && buffer == 0) ||
+            (block_size != 0 && (buffer_size % block_size) != 0) ||
+            (lba != 0 && offset / lba != block_size)) {
+            return VIBTANIUM_EFI_INVALID_PARAMETER;
+        }
+        data = efi_transfer_bounce_get(buffer_size);
+        capacity = MIN((size_t)buffer_size, efi_transfer_bounce_capacity);
+        if (block_size != 0 && capacity > block_size) {
+            capacity -= capacity % block_size;
+        }
+        while (done < buffer_size) {
+            Error *local_err = NULL;
+            uint32_t chunk = MIN((uint64_t)capacity, buffer_size - done);
+            int ret;
+
+            efi_guest_read_bulk(env, buffer + done, data, chunk);
+            ret = media->write(media->opaque, offset + done, chunk, data,
+                               &local_err);
+            if (ret < 0) {
+                error_free(local_err);
+                return VIBTANIUM_EFI_DEVICE_ERROR;
+            }
+            done += chunk;
+        }
+        return VIBTANIUM_EFI_SUCCESS;
+    }
     case 3:
         return VIBTANIUM_EFI_SUCCESS;
     default:

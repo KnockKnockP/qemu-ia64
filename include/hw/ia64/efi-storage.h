@@ -11,6 +11,11 @@ typedef int (*VibtaniumEfiBlockReadFunc)(void *opaque,
                                          uint32_t bytes,
                                          void *buffer,
                                          Error **errp);
+typedef int (*VibtaniumEfiBlockWriteFunc)(void *opaque,
+                                          uint64_t offset,
+                                          uint32_t bytes,
+                                          const void *buffer,
+                                          Error **errp);
 
 typedef struct VibtaniumEfiStorageCache VibtaniumEfiStorageCache;
 
@@ -27,10 +32,13 @@ typedef struct VibtaniumEfiBlockDevice {
     const char *name;
     uint64_t size;
     uint32_t block_size;
+    uint8_t ide_bus;
+    uint8_t ide_unit;
     bool read_only;
     bool removable;
     bool cdrom;
     VibtaniumEfiBlockReadFunc read;
+    VibtaniumEfiBlockWriteFunc write;
     void *opaque;
     VibtaniumEfiStorageCache *cache;
 } VibtaniumEfiBlockDevice;
