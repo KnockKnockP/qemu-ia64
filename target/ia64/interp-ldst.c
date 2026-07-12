@@ -299,6 +299,45 @@ static void ia64_trace_ldst_decoded(CPUIA64State *env, const char *op,
             env->br[0], env->br[6]);
 }
 
+static void ia64_trace_ldst_decoded_prepare(
+    CPUIA64State *env, const char *op, uint64_t address,
+    const IA64LdstImmediate *decoded)
+{
+    IA64TranslateResult result;
+    MMUAccessType access_type = g_str_equal(op, "store") ? MMU_DATA_STORE
+                                                          : MMU_DATA_LOAD;
+    bool has_paddr;
+    uint64_t paddr;
+
+    if (!ia64_ldst_decode_trace_enabled() || !decoded ||
+        !ia64_ldst_trace_op_matches(op) ||
+        !ia64_ldst_trace_width_matches(decoded->width) ||
+        (!ia64_ldst_trace_matches(address, 0, false, decoded->width) &&
+         !ia64_ldst_trace_needs_paddr())) {
+        return;
+    }
+
+    has_paddr = ia64_translate_address(env, address, access_type, 0, true,
+                                       &result);
+    paddr = has_paddr ? result.paddr : 0;
+    if (!ia64_ldst_trace_matches(address, paddr, has_paddr,
+                                 decoded->width)) {
+        return;
+    }
+
+    fprintf(stderr,
+            "[ia64-ldst-prepare] ip=0x%016" PRIx64
+            " op=%s vaddr=0x%016" PRIx64 " paddr=%s0x%016" PRIx64
+            " width=%u class=%u base=r%u target=r%u"
+            " psr=0x%016" PRIx64 " base-nat=%u target-nat=%u"
+            " alat-valid=0x%08x\n",
+            env->ip, op, address, has_paddr ? "" : "?", paddr,
+            decoded->width, decoded->memory_class, decoded->base,
+            decoded->target, ia64_env_psr(env),
+            ia64_read_gr_nat(env, decoded->base),
+            ia64_read_gr_nat(env, decoded->target), env->alat.valid_mask);
+}
+
 static bool ia64_alat_ranges_overlap(uint64_t a, uint8_t a_width,
                                      uint64_t b, uint8_t b_width)
 {
@@ -806,6 +845,7 @@ static bool exec_ldst_immediate(CPUIA64State *env,
     switch (decoded->kind) {
     case IA64_LDST_IMM_LOAD:
         address = ia64_read_gr(env, decoded->base);
+        ia64_trace_ldst_decoded_prepare(env, "load", address, decoded);
         if (ia64_read_gr_nat(env, decoded->base)) {
             if (ia64_ldst_defer_nat_consumption(env, decoded)) {
                 break;
