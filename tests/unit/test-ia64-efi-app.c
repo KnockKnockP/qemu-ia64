@@ -643,12 +643,15 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_true(bytes_contain(dsdt, dsdt_length, "COM1", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length, "KBD_", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length, "PCI0", 4));
+    g_assert_true(bytes_contain(dsdt, dsdt_length, "EIO0", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x0c\x41\xd0\x05\x01", 5));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x0c\x41\xd0\x03\x03", 5));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x0c\x41\xd0\x0a\x03", 5));
+    g_assert_true(bytes_contain(dsdt, dsdt_length,
+                                "\x0c\x41\xd0\x0a\x05", 5));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x47\x01\xf8\x03\xf8\x03\x00\x08", 8));
     g_assert_true(bytes_contain(dsdt, dsdt_length,

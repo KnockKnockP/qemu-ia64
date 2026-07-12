@@ -1240,6 +1240,18 @@ static Aml *build_acpi_keyboard_device(void)
     return dev;
 }
 
+static Aml *build_acpi_legacy_bus_device(void)
+{
+    Aml *dev = aml_device("EIO0");
+
+    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A05")));
+    aml_append(dev, aml_name_decl("_UID", aml_int(0)));
+    aml_append(dev, aml_name_decl("_STA", aml_int(0x0f)));
+    aml_append(dev, build_acpi_com1_device());
+    aml_append(dev, build_acpi_keyboard_device());
+    return dev;
+}
+
 static Aml *build_acpi_pci0_device(void)
 {
     Aml *dev = aml_device("PCI0");
@@ -1282,6 +1294,7 @@ static Aml *build_acpi_pci0_device(void)
         }
     }
     aml_append(dev, aml_name_decl("_PRT", prt));
+    aml_append(dev, build_acpi_legacy_bus_device());
     return dev;
 }
 
@@ -1300,8 +1313,6 @@ static GArray *build_acpi_dsdt_table(void)
     acpi_table_begin(&table, table_data);
     dsdt = init_aml_allocator();
     scope = aml_scope("_SB");
-    aml_append(scope, build_acpi_com1_device());
-    aml_append(scope, build_acpi_keyboard_device());
     aml_append(scope, build_acpi_pci0_device());
     aml_append(dsdt, scope);
     g_array_append_vals(table_data, dsdt->buf->data, dsdt->buf->len);
