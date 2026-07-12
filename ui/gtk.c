@@ -1349,7 +1349,10 @@ static gboolean gd_text_key_down(GtkWidget *widget,
         qemu_text_console_put_string(con, key->string, key->length);
     } else {
         unsigned int lnx = gd_map_keycode(gd_get_keycode(key));
-        qemu_text_console_put_linux(con, lnx, false);
+        bool handled = qemu_text_console_put_linux(con, lnx, false);
+
+        trace_gd_text_key_event(vc->label, gd_get_keycode(key), lnx,
+                                handled);
     }
     return TRUE;
 }

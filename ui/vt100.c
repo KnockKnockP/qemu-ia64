@@ -913,6 +913,9 @@ void vt100_keysym(QemuVT100 *vt, int keysym)
             }
             *q++ = '0' + (c % 10);
             *q++ = '~';
+        } else if (keysym >= 0xe200 && keysym <= 0xe2ff) {
+            *q++ = '\033';
+            *q++ = keysym & 0xff;
         } else if (keysym >= 0xe120 && keysym <= 0xe17f) {
             *q++ = '\033';
             *q++ = '[';

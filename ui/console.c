@@ -315,6 +315,18 @@ static const int linux_to_keysym[] = {
     [KEY_DELETE] = QEMU_KEY_DELETE,
     [KEY_TAB]    = QEMU_KEY_TAB,
     [KEY_BACKSPACE] = QEMU_KEY_BACKSPACE,
+    [KEY_F1] = QEMU_KEY_F1,
+    [KEY_F2] = QEMU_KEY_F2,
+    [KEY_F3] = QEMU_KEY_F3,
+    [KEY_F4] = QEMU_KEY_F4,
+    [KEY_F5] = QEMU_KEY_F5,
+    [KEY_F6] = QEMU_KEY_F6,
+    [KEY_F7] = QEMU_KEY_F7,
+    [KEY_F8] = QEMU_KEY_F8,
+    [KEY_F9] = QEMU_KEY_F9,
+    [KEY_F10] = QEMU_KEY_F10,
+    [KEY_F11] = QEMU_KEY_F11,
+    [KEY_F12] = QEMU_KEY_F12,
 };
 
 static const int ctrl_linux_to_keysym[] = {

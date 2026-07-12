@@ -59,6 +59,7 @@ bool qemu_mouse_set(int index, Error **errp);
 /* keysym is a unicode code except for special keys (see QEMU_KEY_xxx
    constants) */
 #define QEMU_KEY_ESC1(c) ((c) | 0xe100)
+#define QEMU_KEY_ESC(c)  ((c) | 0xe200)
 #define QEMU_KEY_TAB        0x0009
 #define QEMU_KEY_BACKSPACE  0x007f
 #define QEMU_KEY_UP         QEMU_KEY_ESC1('A')
@@ -70,6 +71,18 @@ bool qemu_mouse_set(int index, Error **errp);
 #define QEMU_KEY_PAGEUP     QEMU_KEY_ESC1(5)
 #define QEMU_KEY_PAGEDOWN   QEMU_KEY_ESC1(6)
 #define QEMU_KEY_DELETE     QEMU_KEY_ESC1(3)
+#define QEMU_KEY_F1         QEMU_KEY_ESC('1')
+#define QEMU_KEY_F2         QEMU_KEY_ESC('2')
+#define QEMU_KEY_F3         QEMU_KEY_ESC('3')
+#define QEMU_KEY_F4         QEMU_KEY_ESC('4')
+#define QEMU_KEY_F5         QEMU_KEY_ESC('5')
+#define QEMU_KEY_F6         QEMU_KEY_ESC('6')
+#define QEMU_KEY_F7         QEMU_KEY_ESC('7')
+#define QEMU_KEY_F8         QEMU_KEY_ESC('8')
+#define QEMU_KEY_F9         QEMU_KEY_ESC('9')
+#define QEMU_KEY_F10        QEMU_KEY_ESC('0')
+#define QEMU_KEY_F11        QEMU_KEY_ESC('!')
+#define QEMU_KEY_F12        QEMU_KEY_ESC('@')
 
 #define QEMU_KEY_CTRL_UP         0xe400
 #define QEMU_KEY_CTRL_DOWN       0xe401
