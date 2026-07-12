@@ -6,6 +6,7 @@
 #include "target/ia64/cpu.h"
 
 typedef struct MemoryRegion MemoryRegion;
+typedef struct ISADevice ISADevice;
 
 #define VIBTANIUM_EFI_PE_MACHINE_IA64 0x0200
 #define VIBTANIUM_EFI_SUBSYSTEM_RUNTIME_DRIVER 12
@@ -255,9 +256,8 @@ bool vibtanium_efi_input_enqueue(uint16_t scan_code, uint16_t unicode_char);
 bool vibtanium_efi_input_has_key(void);
 bool vibtanium_efi_input_dequeue(VibtaniumEfiInputKey *key);
 
-void vibtanium_efi_console_init(MemoryRegion *framebuffer,
-                                MemoryRegion *vga_legacy,
-                                uint8_t *vga_crtc);
+void vibtanium_efi_console_init(ISADevice *vga);
+void vibtanium_efi_console_enter_graphics_mode(void);
 void vibtanium_efi_console_set_input_active(bool active);
 void vibtanium_efi_console_set_vga_text_active(bool active);
 void vibtanium_efi_console_recover_post_load(uint64_t ip);

@@ -289,6 +289,7 @@ static void vibtanium_reset(MachineState *machine, ResetType type)
 
     qemu_devices_reset(type);
     vibtanium_configure_firmware_pci(vms);
+    vibtanium_efi_console_enter_graphics_mode();
 }
 
 static void vibtanium_pci_init(VibtaniumMachineState *vms)
@@ -1109,6 +1110,7 @@ static void vibtanium_init(MachineState *machine)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
+    ISADevice *vga;
     uint64_t kernel_alias_size;
     Error *local_err = NULL;
 
@@ -1165,17 +1167,12 @@ static void vibtanium_init(MachineState *machine)
 
     vibtanium_sparse_io_init(vms, sysmem);
     vibtanium_isa_init(vms);
-    isa_vga_init(vms->isa_bus);
+    vga = isa_vga_init(vms->isa_bus);
     vms->acpi_sci = qdev_get_gpio_in(vms->iosapic, VIBTANIUM_ACPI_SCI_IRQ);
     vibtanium_acpi_init(vms);
     vibtanium_pci_init(vms);
 
-    memory_region_init_ram(&vms->framebuffer, NULL,
-                           "vibtanium.efi-framebuffer",
-                           VIBTANIUM_FRAMEBUFFER_SIZE, &error_fatal);
-    memory_region_add_subregion(sysmem, VIBTANIUM_FRAMEBUFFER_BASE,
-                                &vms->framebuffer);
-    vibtanium_efi_console_init(&vms->framebuffer, NULL, NULL);
+    vibtanium_efi_console_init(vga);
 
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);
@@ -1317,6 +1314,7 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     mc->default_ram_size = 512 * MiB;
     mc->default_ram_id = "vibtanium.ram";
     mc->default_nic = "e1000";
+    mc->default_display = "std";
     mc->block_default_type = IF_IDE;
     mc->units_per_default_bus = MAX_IDE_DEVS;
     mc->no_cdrom = 0;

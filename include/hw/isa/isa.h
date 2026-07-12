@@ -86,6 +86,9 @@ bool isa_realize_and_unref(ISADevice *dev, ISABus *bus, Error **errp);
 ISADevice *isa_create_simple(ISABus *bus, const char *name);
 
 ISADevice *isa_vga_init(ISABus *bus);
+void isa_vga_set_vbe_mode(ISADevice *dev, uint16_t width, uint16_t height,
+                          uint16_t bpp);
+void isa_vga_disable_vbe(ISADevice *dev);
 
 qemu_irq isa_get_irq(ISADevice *dev, unsigned isairq);
 void isa_connect_gpio_out(ISADevice *isadev, int gpioirq, unsigned isairq);

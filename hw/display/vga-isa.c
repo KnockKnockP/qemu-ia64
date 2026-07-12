@@ -29,6 +29,7 @@
 #include "vga_int.h"
 #include "ui/pixel_ops.h"
 #include "qemu/module.h"
+#include "qemu/main-loop.h"
 #include "qemu/timer.h"
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
@@ -53,6 +54,65 @@ static void vga_isa_reset(DeviceState *dev)
     VGACommonState *s = &d->state;
 
     vga_common_reset(s);
+}
+
+void isa_vga_set_vbe_mode(ISADevice *dev, uint16_t width, uint16_t height,
+                          uint16_t bpp)
+{
+    VGACommonState *s;
+    bool need_lock;
+
+    if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_ISA_VGA)) {
+        return;
+    }
+    s = &ISA_VGA(dev)->state;
+    need_lock = !bql_locked();
+    if (need_lock) {
+        bql_lock();
+    }
+
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_ENABLE);
+    vbe_ioport_write_data(s, 0, VBE_DISPI_DISABLED);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_XRES);
+    vbe_ioport_write_data(s, 0, width);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_YRES);
+    vbe_ioport_write_data(s, 0, height);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_BPP);
+    vbe_ioport_write_data(s, 0, bpp);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_VIRT_WIDTH);
+    vbe_ioport_write_data(s, 0, width);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_X_OFFSET);
+    vbe_ioport_write_data(s, 0, 0);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_Y_OFFSET);
+    vbe_ioport_write_data(s, 0, 0);
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_ENABLE);
+    vbe_ioport_write_data(s, 0,
+                          VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+    s->ar_index |= 0x20;
+    if (need_lock) {
+        bql_unlock();
+    }
+}
+
+void isa_vga_disable_vbe(ISADevice *dev)
+{
+    VGACommonState *s;
+    bool need_lock;
+
+    if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_ISA_VGA)) {
+        return;
+    }
+    s = &ISA_VGA(dev)->state;
+    need_lock = !bql_locked();
+    if (need_lock) {
+        bql_lock();
+    }
+
+    vbe_ioport_write_index(s, 0, VBE_DISPI_INDEX_ENABLE);
+    vbe_ioport_write_data(s, 0, VBE_DISPI_DISABLED);
+    if (need_lock) {
+        bql_unlock();
+    }
 }
 
 static void vga_isa_realizefn(DeviceState *dev, Error **errp)

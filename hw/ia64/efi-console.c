@@ -4,14 +4,15 @@
 #include "hw/core/sysbus.h"
 #include "hw/ia64/efi.h"
 #include "hw/ia64/vibtanium.h"
+#include "hw/isa/isa.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "standard-headers/linux/input-event-codes.h"
+#include "system/address-spaces.h"
 #include "system/memory.h"
-#include "ui/console.h"
+#include "system/reset.h"
 #include "ui/input.h"
-#include "ui/surface.h"
 #include "ui/vgafont.h"
 
 #define TYPE_VIBTANIUM_EFI_DISPLAY "vibtanium-efi-display"
@@ -22,14 +23,18 @@ OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumEfiDisplayState, VIBTANIUM_EFI_DISPLAY)
 #define EFI_TEXT_ROWS \
     (VIBTANIUM_FRAMEBUFFER_HEIGHT / FONT_HEIGHT)
 #define EFI_DEFAULT_ATTRIBUTE 0x07
-#define VGA_CRTC_CURSOR_START 0x0a
-#define VGA_CRTC_START_ADDR_HIGH 0x0c
-#define VGA_CRTC_START_ADDR_LOW 0x0d
-#define VGA_CRTC_CURSOR_LOC_HIGH 0x0e
-#define VGA_CRTC_CURSOR_LOC_LOW 0x0f
-#define VGA_TEXT_CELL_BYTES 2
-#define VGA_TEXT_CELL_COUNT \
-    (VIBTANIUM_VGA_TEXT_SIZE / VGA_TEXT_CELL_BYTES)
+#define VGA_PORT_ATTRIBUTE       0x3c0
+#define VGA_PORT_MISC_WRITE      0x3c2
+#define VGA_PORT_SEQUENCER_INDEX 0x3c4
+#define VGA_PORT_SEQUENCER_DATA  0x3c5
+#define VGA_PORT_DAC_MASK        0x3c6
+#define VGA_PORT_DAC_WRITE_INDEX 0x3c8
+#define VGA_PORT_DAC_DATA        0x3c9
+#define VGA_PORT_GRAPHICS_INDEX  0x3ce
+#define VGA_PORT_GRAPHICS_DATA   0x3cf
+#define VGA_PORT_CRTC_INDEX      0x3d4
+#define VGA_PORT_CRTC_DATA       0x3d5
+#define VGA_PORT_INPUT_STATUS_1  0x3da
 
 struct VibtaniumEfiDisplayState {
     SysBusDevice parent_obj;
@@ -44,17 +49,13 @@ struct VibtaniumEfiDisplayState {
 };
 
 typedef struct VibtaniumEfiConsole {
-    QemuConsole *con;
-    DisplaySurface *surface;
-    uint32_t *fb;
-    uint8_t *vga_text;
-    uint8_t *vga_crtc;
+    ISADevice *vga;
     uint32_t attribute;
     uint32_t cursor_column;
     uint32_t cursor_row;
     bool cursor_visible;
     bool initialized;
-    bool vga_text_active;
+    bool output_started;
 } VibtaniumEfiConsole;
 
 static VibtaniumEfiConsole efi_console;
@@ -404,22 +405,40 @@ static uint32_t efi_console_bg(void)
     return efi_vga_palette[(efi_console.attribute >> 4) & 0x7];
 }
 
-static void efi_console_update_pixels(uint32_t x, uint32_t y,
-                                      uint32_t width, uint32_t height)
+static void efi_io_write8(hwaddr port, uint8_t value)
 {
-    if (!efi_console.con || width == 0 || height == 0) {
-        return;
-    }
+    address_space_stb(&address_space_io, port, value,
+                      MEMTXATTRS_UNSPECIFIED, NULL);
+}
 
-    qemu_console_update(efi_console.con, x, y, width, height);
+static uint8_t efi_io_read8(hwaddr port)
+{
+    return address_space_ldub(&address_space_io, port,
+                              MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static void efi_vga_indexed_write(hwaddr index_port, hwaddr data_port,
+                                  uint8_t index, uint8_t value)
+{
+    efi_io_write8(index_port, index);
+    efi_io_write8(data_port, value);
+}
+
+static void efi_framebuffer_write(hwaddr offset, const void *buffer,
+                                  size_t length)
+{
+    address_space_write(&address_space_memory,
+                        VIBTANIUM_FRAMEBUFFER_BASE + offset,
+                        MEMTXATTRS_UNSPECIFIED, buffer, length);
 }
 
 static void efi_console_fill_rect(uint32_t x, uint32_t y,
                                   uint32_t width, uint32_t height,
                                   uint32_t color)
 {
-    if (!efi_console.fb || width == 0 || height == 0 ||
-        x >= VIBTANIUM_FRAMEBUFFER_WIDTH ||
+    uint32_t *pixels;
+
+    if (width == 0 || height == 0 || x >= VIBTANIUM_FRAMEBUFFER_WIDTH ||
         y >= VIBTANIUM_FRAMEBUFFER_HEIGHT) {
         return;
     }
@@ -427,143 +446,59 @@ static void efi_console_fill_rect(uint32_t x, uint32_t y,
     width = MIN(width, VIBTANIUM_FRAMEBUFFER_WIDTH - x);
     height = MIN(height, VIBTANIUM_FRAMEBUFFER_HEIGHT - y);
 
-    for (uint32_t row = 0; row < height; row++) {
-        uint32_t *dst = efi_console.fb +
-                        (y + row) * VIBTANIUM_FRAMEBUFFER_WIDTH + x;
-        for (uint32_t col = 0; col < width; col++) {
-            dst[col] = color;
-        }
+    pixels = g_new(uint32_t, width);
+    for (uint32_t col = 0; col < width; col++) {
+        pixels[col] = cpu_to_le32(color);
     }
-    efi_console_update_pixels(x, y, width, height);
+    for (uint32_t row = 0; row < height; row++) {
+        efi_framebuffer_write((y + row) * VIBTANIUM_FRAMEBUFFER_STRIDE +
+                              x * sizeof(uint32_t),
+                              pixels, width * sizeof(uint32_t));
+    }
+    g_free(pixels);
 }
 
-static void efi_console_draw_glyph_colors(uint32_t column, uint32_t row,
-                                          uint8_t ch, uint32_t fg,
-                                          uint32_t bg, bool update)
+static void efi_console_draw_glyph(uint32_t column, uint32_t row, uint8_t ch)
 {
     uint32_t x = column * FONT_WIDTH;
     uint32_t y = row * FONT_HEIGHT;
+    uint32_t fg = efi_console_fg();
+    uint32_t bg = efi_console_bg();
 
-    if (!efi_console.fb || column >= EFI_TEXT_COLUMNS ||
-        row >= EFI_TEXT_ROWS) {
+    if (column >= EFI_TEXT_COLUMNS || row >= EFI_TEXT_ROWS) {
         return;
     }
 
     for (uint32_t glyph_y = 0; glyph_y < FONT_HEIGHT; glyph_y++) {
         uint8_t bits = vgafont16[ch * FONT_HEIGHT + glyph_y];
-        uint32_t *dst = efi_console.fb +
-                        (y + glyph_y) * VIBTANIUM_FRAMEBUFFER_WIDTH + x;
+        uint32_t pixels[FONT_WIDTH];
 
         for (uint32_t glyph_x = 0; glyph_x < FONT_WIDTH; glyph_x++) {
-            dst[glyph_x] = (bits & (0x80 >> glyph_x)) ? fg : bg;
+            pixels[glyph_x] = cpu_to_le32(
+                (bits & (0x80 >> glyph_x)) ? fg : bg);
         }
+        efi_framebuffer_write((y + glyph_y) *
+                              VIBTANIUM_FRAMEBUFFER_STRIDE +
+                              x * sizeof(uint32_t),
+                              pixels, sizeof(pixels));
     }
-    if (update) {
-        efi_console_update_pixels(x, y, FONT_WIDTH, FONT_HEIGHT);
-    }
-}
-
-static void efi_console_draw_glyph(uint32_t column, uint32_t row, uint8_t ch)
-{
-    efi_console_draw_glyph_colors(column, row, ch, efi_console_fg(),
-                                  efi_console_bg(), true);
-}
-
-static uint16_t efi_console_vga_word(uint8_t high_reg, uint8_t low_reg)
-{
-    if (!efi_console.vga_crtc) {
-        return 0;
-    }
-
-    return ((uint16_t)efi_console.vga_crtc[high_reg] << 8) |
-           efi_console.vga_crtc[low_reg];
-}
-
-static void efi_console_draw_vga_cursor(uint16_t start_cell)
-{
-    uint16_t cursor;
-    uint16_t relative;
-    uint32_t x;
-    uint32_t y;
-
-    if (!efi_console.fb || !efi_console.vga_crtc ||
-        (efi_console.vga_crtc[VGA_CRTC_CURSOR_START] & 0x20)) {
-        return;
-    }
-
-    cursor = efi_console_vga_word(VGA_CRTC_CURSOR_LOC_HIGH,
-                                  VGA_CRTC_CURSOR_LOC_LOW);
-    relative = (cursor + VGA_TEXT_CELL_COUNT - start_cell) %
-               VGA_TEXT_CELL_COUNT;
-    if (relative >= VIBTANIUM_VGA_TEXT_COLUMNS * VIBTANIUM_VGA_TEXT_ROWS) {
-        return;
-    }
-
-    x = (relative % VIBTANIUM_VGA_TEXT_COLUMNS) * FONT_WIDTH;
-    y = (relative / VIBTANIUM_VGA_TEXT_COLUMNS) * FONT_HEIGHT +
-        FONT_HEIGHT - 2;
-
-    for (uint32_t row = 0; row < 2; row++) {
-        uint32_t *dst =
-            efi_console.fb + (y + row) * VIBTANIUM_FRAMEBUFFER_WIDTH + x;
-
-        for (uint32_t column = 0; column < FONT_WIDTH; column++) {
-            dst[column] = efi_vga_palette[15];
-        }
-    }
-}
-
-static void efi_console_render_vga_text(void)
-{
-    uint16_t start_cell;
-
-    if (!efi_console.fb || !efi_console.vga_text ||
-        !efi_console.vga_text_active) {
-        return;
-    }
-
-    start_cell = efi_console_vga_word(VGA_CRTC_START_ADDR_HIGH,
-                                      VGA_CRTC_START_ADDR_LOW) %
-                 VGA_TEXT_CELL_COUNT;
-
-    for (uint32_t row = 0; row < VIBTANIUM_VGA_TEXT_ROWS; row++) {
-        for (uint32_t column = 0; column < VIBTANIUM_VGA_TEXT_COLUMNS;
-             column++) {
-            uint16_t cell_index =
-                (start_cell + row * VIBTANIUM_VGA_TEXT_COLUMNS + column) %
-                VGA_TEXT_CELL_COUNT;
-            const uint8_t *cell =
-                efi_console.vga_text + cell_index * VGA_TEXT_CELL_BYTES;
-            uint8_t ch = cell[0] >= 0x20 ? cell[0] : ' ';
-            uint8_t attribute = cell[1] ? cell[1] : EFI_DEFAULT_ATTRIBUTE;
-            uint32_t fg = efi_vga_palette[attribute & 0xf];
-            uint32_t bg = efi_vga_palette[(attribute >> 4) & 0x7];
-
-            efi_console_draw_glyph_colors(column, row, ch, fg, bg, false);
-        }
-    }
-
-    efi_console_draw_vga_cursor(start_cell);
 }
 
 static void efi_console_scroll(void)
 {
-    uint8_t *fb = (uint8_t *)efi_console.fb;
     size_t line_bytes = VIBTANIUM_FRAMEBUFFER_STRIDE * FONT_HEIGHT;
     size_t scroll_bytes = VIBTANIUM_FRAMEBUFFER_STRIDE *
                           (VIBTANIUM_FRAMEBUFFER_HEIGHT - FONT_HEIGHT);
-
-    if (!fb) {
-        return;
-    }
-
-    memmove(fb, fb + line_bytes, scroll_bytes);
+    uint8_t *pixels = g_malloc(scroll_bytes);
+    address_space_read(&address_space_memory,
+                       VIBTANIUM_FRAMEBUFFER_BASE + line_bytes,
+                       MEMTXATTRS_UNSPECIFIED, pixels, scroll_bytes);
+    efi_framebuffer_write(0, pixels, scroll_bytes);
+    g_free(pixels);
     efi_console_fill_rect(0, VIBTANIUM_FRAMEBUFFER_HEIGHT - FONT_HEIGHT,
                           VIBTANIUM_FRAMEBUFFER_WIDTH, FONT_HEIGHT,
                           efi_console_bg());
     efi_console.cursor_row = EFI_TEXT_ROWS - 1;
-    efi_console_update_pixels(0, 0, VIBTANIUM_FRAMEBUFFER_WIDTH,
-                              VIBTANIUM_FRAMEBUFFER_HEIGHT);
 }
 
 static void efi_console_newline(void)
@@ -576,31 +511,131 @@ static void efi_console_newline(void)
     }
 }
 
-static bool vibtanium_efi_console_gfx_update(void *opaque)
+void vibtanium_efi_console_enter_graphics_mode(void)
 {
-    VibtaniumEfiConsole *console = opaque;
-
-    if (console->con) {
-        efi_console_render_vga_text();
-        qemu_console_update_full(console->con);
+    if (!efi_console.initialized) {
+        return;
     }
-    return true;
+
+    isa_vga_set_vbe_mode(efi_console.vga, VIBTANIUM_FRAMEBUFFER_WIDTH,
+                         VIBTANIUM_FRAMEBUFFER_HEIGHT, 32);
 }
 
-static void vibtanium_efi_console_invalidate(void *opaque)
+static void efi_vga_load_text_font(void)
 {
-    VibtaniumEfiConsole *console = opaque;
+    uint8_t font[256 * 32] = { 0 };
 
-    if (console->con) {
-        efi_console_render_vga_text();
-        qemu_console_update_full(console->con);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x00, 0x01);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x02, 0x04);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x04, 0x07);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x00, 0x03);
+    efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                          VGA_PORT_GRAPHICS_DATA, 0x04, 0x02);
+    efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                          VGA_PORT_GRAPHICS_DATA, 0x05, 0x00);
+    efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                          VGA_PORT_GRAPHICS_DATA, 0x06, 0x04);
+
+    for (unsigned ch = 0; ch < 256; ch++) {
+        memcpy(font + ch * 32, vgafont16 + ch * FONT_HEIGHT, FONT_HEIGHT);
+    }
+    address_space_write(&address_space_memory, VIBTANIUM_VGA_LEGACY_BASE,
+                        MEMTXATTRS_UNSPECIFIED, font, sizeof(font));
+
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x00, 0x01);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x02, 0x03);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x04, 0x02);
+    efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                          VGA_PORT_SEQUENCER_DATA, 0x00, 0x03);
+    efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                          VGA_PORT_GRAPHICS_DATA, 0x04, 0x00);
+    efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                          VGA_PORT_GRAPHICS_DATA, 0x05, 0x10);
+    efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                          VGA_PORT_GRAPHICS_DATA, 0x06, 0x0e);
+}
+
+static void efi_vga_set_palette(void)
+{
+    efi_io_write8(VGA_PORT_DAC_MASK, 0xff);
+    efi_io_write8(VGA_PORT_DAC_WRITE_INDEX, 0);
+    for (unsigned i = 0; i < ARRAY_SIZE(efi_vga_palette); i++) {
+        uint32_t color = efi_vga_palette[i];
+
+        efi_io_write8(VGA_PORT_DAC_DATA, ((color >> 16) & 0xff) >> 2);
+        efi_io_write8(VGA_PORT_DAC_DATA, ((color >> 8) & 0xff) >> 2);
+        efi_io_write8(VGA_PORT_DAC_DATA, (color & 0xff) >> 2);
     }
 }
 
-static const GraphicHwOps vibtanium_efi_console_ops = {
-    .invalidate = vibtanium_efi_console_invalidate,
-    .gfx_update = vibtanium_efi_console_gfx_update,
-};
+static void efi_vga_enter_text_mode(void)
+{
+    static const uint8_t sequencer[] = { 0x03, 0x00, 0x03, 0x00, 0x02 };
+    static const uint8_t crtc[] = {
+        0x5f, 0x4f, 0x50, 0x82, 0x55, 0x81, 0xbf, 0x1f,
+        0x00, 0x4f, 0x0d, 0x0e, 0x00, 0x00, 0x00, 0x50,
+        0x9c, 0x0e, 0x8f, 0x28, 0x1f, 0x96, 0xb9, 0xa3,
+        0xff,
+    };
+    static const uint8_t graphics[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0e, 0x00, 0xff,
+    };
+    static const uint8_t attribute[] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x0c, 0x00, 0x0f, 0x08, 0x00,
+    };
+    uint8_t text[VIBTANIUM_VGA_TEXT_COLUMNS *
+                 VIBTANIUM_VGA_TEXT_ROWS * 2];
+
+    isa_vga_disable_vbe(efi_console.vga);
+    efi_io_write8(VGA_PORT_MISC_WRITE, 0x67);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(sequencer); i++) {
+        efi_vga_indexed_write(VGA_PORT_SEQUENCER_INDEX,
+                              VGA_PORT_SEQUENCER_DATA, i, sequencer[i]);
+    }
+
+    /* CRTC registers 0-7 are protected by bit 7 of register 0x11. */
+    efi_vga_indexed_write(VGA_PORT_CRTC_INDEX, VGA_PORT_CRTC_DATA,
+                          0x11, crtc[0x11] & 0x7f);
+    for (unsigned i = 0; i < ARRAY_SIZE(crtc); i++) {
+        efi_vga_indexed_write(VGA_PORT_CRTC_INDEX, VGA_PORT_CRTC_DATA,
+                              i, crtc[i]);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(graphics); i++) {
+        efi_vga_indexed_write(VGA_PORT_GRAPHICS_INDEX,
+                              VGA_PORT_GRAPHICS_DATA, i, graphics[i]);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(attribute); i++) {
+        efi_io_read8(VGA_PORT_INPUT_STATUS_1);
+        efi_io_write8(VGA_PORT_ATTRIBUTE, i);
+        efi_io_write8(VGA_PORT_ATTRIBUTE, attribute[i]);
+    }
+    efi_io_read8(VGA_PORT_INPUT_STATUS_1);
+    efi_io_write8(VGA_PORT_ATTRIBUTE, 0x20);
+
+    efi_vga_set_palette();
+    efi_vga_load_text_font();
+
+    for (unsigned i = 0; i < ARRAY_SIZE(text); i += 2) {
+        text[i] = ' ';
+        text[i + 1] = EFI_DEFAULT_ATTRIBUTE;
+    }
+    address_space_write(&address_space_memory, VIBTANIUM_VGA_TEXT_BASE,
+                        MEMTXATTRS_UNSPECIFIED, text, sizeof(text));
+    efi_vga_indexed_write(VGA_PORT_CRTC_INDEX, VGA_PORT_CRTC_DATA,
+                          0x0e, 0x00);
+    efi_vga_indexed_write(VGA_PORT_CRTC_INDEX, VGA_PORT_CRTC_DATA,
+                          0x0f, 0x00);
+}
 
 static void vibtanium_efi_display_realize(DeviceState *dev, Error **errp)
 {
@@ -624,21 +659,29 @@ static void vibtanium_efi_display_unrealize(DeviceState *dev)
     g_clear_pointer(&s->keyboard, qemu_input_handler_unregister);
 }
 
+static void vibtanium_efi_display_apply_state(VibtaniumEfiDisplayState *s);
+
+static void vibtanium_efi_display_reset(DeviceState *dev)
+{
+    VibtaniumEfiDisplayState *s = VIBTANIUM_EFI_DISPLAY(dev);
+
+    s->left_shift_down = false;
+    s->right_shift_down = false;
+    s->caps_lock_down = false;
+    s->caps_lock = false;
+    s->input_active = true;
+    s->vga_text_active = false;
+    efi_console.output_started = false;
+    vibtanium_efi_display_apply_state(s);
+}
+
 static void vibtanium_efi_display_apply_state(VibtaniumEfiDisplayState *s)
 {
-    efi_console.vga_text_active = s->vga_text_active;
-
     if (s->keyboard) {
         if (s->input_active) {
             qemu_input_handler_activate(s->keyboard);
         } else {
             qemu_input_handler_deactivate(s->keyboard);
-        }
-    }
-    if (s->vga_text_active) {
-        efi_console_render_vga_text();
-        if (efi_console.con) {
-            qemu_console_update_full(efi_console.con);
         }
     }
 }
@@ -671,11 +714,11 @@ static void vibtanium_efi_display_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
-    dc->desc = "vibtanium EFI framebuffer display";
+    dc->desc = "vibtanium EFI keyboard input";
     dc->realize = vibtanium_efi_display_realize;
     dc->unrealize = vibtanium_efi_display_unrealize;
+    device_class_set_legacy_reset(dc, vibtanium_efi_display_reset);
     dc->vmsd = &vmstate_vibtanium_efi_display;
-    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
 static const TypeInfo vibtanium_efi_display_info = {
@@ -692,51 +735,26 @@ static void vibtanium_efi_display_register_types(void)
 
 type_init(vibtanium_efi_display_register_types)
 
-void vibtanium_efi_console_init(MemoryRegion *framebuffer,
-                                MemoryRegion *vga_legacy,
-                                uint8_t *vga_crtc)
+static void vibtanium_efi_console_system_reset(void *opaque)
+{
+    efi_console.output_started = false;
+    vibtanium_efi_console_enter_graphics_mode();
+}
+
+void vibtanium_efi_console_init(ISADevice *vga)
 {
     DeviceState *dev;
-    uint8_t *fb;
-    uint8_t *vga_legacy_ptr = NULL;
-
-    if (!framebuffer) {
-        return;
-    }
-
-    fb = memory_region_get_ram_ptr(framebuffer);
-    if (!fb) {
-        return;
-    }
-    if (vga_legacy) {
-        vga_legacy_ptr = memory_region_get_ram_ptr(vga_legacy);
-    }
 
     memset(&efi_console, 0, sizeof(efi_console));
-    efi_console.fb = (uint32_t *)fb;
-    if (vga_legacy_ptr) {
-        efi_console.vga_text =
-            vga_legacy_ptr + VIBTANIUM_VGA_TEXT_OFFSET;
-    }
-    efi_console.vga_crtc = vga_crtc;
+    efi_console.vga = vga;
     efi_console.attribute = EFI_DEFAULT_ATTRIBUTE;
     efi_console.cursor_visible = true;
     efi_console.initialized = true;
 
-    memset(fb, 0, VIBTANIUM_FRAMEBUFFER_SIZE);
-    efi_console.surface =
-        qemu_create_displaysurface_from(VIBTANIUM_FRAMEBUFFER_WIDTH,
-                                        VIBTANIUM_FRAMEBUFFER_HEIGHT,
-                                        PIXMAN_x8r8g8b8,
-                                        VIBTANIUM_FRAMEBUFFER_STRIDE,
-                                        fb);
     dev = qdev_new(TYPE_VIBTANIUM_EFI_DISPLAY);
-    efi_console.con =
-        qemu_graphic_console_create(dev, 0, &vibtanium_efi_console_ops,
-                                    &efi_console);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    qemu_console_set_surface(efi_console.con, efi_console.surface);
-    qemu_console_update_full(efi_console.con);
+    qemu_register_reset(vibtanium_efi_console_system_reset, NULL);
+    vibtanium_efi_console_enter_graphics_mode();
 }
 
 void vibtanium_efi_console_set_input_active(bool active)
@@ -755,15 +773,13 @@ void vibtanium_efi_console_set_input_active(bool active)
 
 void vibtanium_efi_console_set_vga_text_active(bool active)
 {
-    efi_console.vga_text_active = active;
     if (efi_display) {
         efi_display->vga_text_active = active;
     }
     if (active) {
-        efi_console_render_vga_text();
-        if (efi_console.con) {
-            qemu_console_update_full(efi_console.con);
-        }
+        efi_vga_enter_text_mode();
+    } else {
+        vibtanium_efi_console_enter_graphics_mode();
     }
 }
 
@@ -779,6 +795,9 @@ void vibtanium_efi_console_recover_post_load(uint64_t ip)
     if (!efi_display) {
         return;
     }
+
+    /* VGA VRAM and mode registers were restored by the VGA VMState. */
+    efi_console.output_started = true;
 
     if (in_efi_blob || in_efi_image) {
         efi_display->input_active = true;
@@ -809,6 +828,10 @@ void vibtanium_efi_console_putchar(uint16_t ch)
 {
     if (!efi_console.initialized) {
         return;
+    }
+    if (!efi_console.output_started) {
+        vibtanium_efi_console_enter_graphics_mode();
+        efi_console.output_started = true;
     }
 
     switch (ch) {
@@ -893,12 +916,5 @@ bool vibtanium_efi_console_cursor_visible(void)
 void vibtanium_efi_console_update_rect(uint64_t x, uint64_t y,
                                        uint64_t width, uint64_t height)
 {
-    if (x >= VIBTANIUM_FRAMEBUFFER_WIDTH ||
-        y >= VIBTANIUM_FRAMEBUFFER_HEIGHT) {
-        return;
-    }
-
-    width = MIN(width, VIBTANIUM_FRAMEBUFFER_WIDTH - x);
-    height = MIN(height, VIBTANIUM_FRAMEBUFFER_HEIGHT - y);
-    efi_console_update_pixels(x, y, width, height);
+    /* ISA VGA observes VRAM dirty bits; no second console needs updating. */
 }

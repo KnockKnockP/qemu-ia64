@@ -26,7 +26,8 @@ typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 #define VIBTANIUM_LOCAL_SAPIC_IPI_BASE VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_BASE
 #define VIBTANIUM_IOSAPIC_BASE UINT64_C(0xfec00000)
 #define VIBTANIUM_UART_BASE     UINT64_C(0xff000000)
-#define VIBTANIUM_FRAMEBUFFER_BASE UINT64_C(0xff100000)
+/* ISA VGA's Bochs VBE linear framebuffer (see bochs-vbe.h). */
+#define VIBTANIUM_FRAMEBUFFER_BASE UINT64_C(0xe0000000)
 #define VIBTANIUM_NVRAM_BASE    UINT64_C(0xffe00000)
 #define VIBTANIUM_FIRMWARE_BASE UINT64_C(0xfff00000)
 
@@ -101,11 +102,9 @@ struct VibtaniumMachineState {
     DeviceState *i8042;
     MemoryRegion *i8042_mmio;
     MemoryRegion kernel_alias;
-    MemoryRegion vga_legacy;
     MemoryRegion io_port_space;
     MemoryRegion local_sapic_pib;
     uint8_t local_sapic_xtpr;
-    MemoryRegion framebuffer;
     MemoryRegion nvram;
     MemoryRegion firmware;
     char *nvram_path;
@@ -114,8 +113,6 @@ struct VibtaniumMachineState {
     bool built_in_test;
     bool efi_auto_enter;
     bool hcdp_serial_console;
-    uint8_t vga_crtc_index;
-    uint8_t vga_crtc[0x19];
 };
 
 #endif
