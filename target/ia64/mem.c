@@ -21,6 +21,7 @@
 #define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_ED_BIT UINT64_C(0x0000080000000000)
+#define IA64_PSR_AC_BIT UINT64_C(0x0000000000000008)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
 #define IA64_FIRMWARE_IDENTITY_PAGE_BITS 22
@@ -1175,9 +1176,34 @@ bool ia64_control_speculative_load_fault_deferred(
     }
 }
 
+bool ia64_data_access_alignment_fault(CPUIA64State *env, vaddr address,
+                                      uint8_t size, bool strict)
+{
+    uint8_t alignment;
+
+    if (!env || size <= 1) {
+        return false;
+    }
+
+    alignment = size >= 16 ? 16 : size;
+    if ((address & (alignment - 1)) == 0) {
+        return false;
+    }
+
+    /*
+     * Ordinary unaligned references may be supported while PSR.ac is clear.
+     * Semaphores and 16-byte references are always strict, and every IA-64
+     * implementation must fault a datum that crosses a 4 KiB boundary.
+     */
+    return strict || size >= 16 ||
+           (ia64_env_psr(env) & IA64_PSR_AC_BIT) != 0 ||
+           (address & 0xfff) + size > 0x1000;
+}
+
 bool ia64_control_speculative_load_defer(CPUIA64State *env,
                                          uint8_t memory_class,
                                          bool base_nat, vaddr address,
+                                         uint8_t width,
                                          IA64TranslateResult *fault)
 {
     IA64TranslateResult local_fault;
@@ -1192,6 +1218,10 @@ bool ia64_control_speculative_load_defer(CPUIA64State *env,
 
     if ((ia64_env_psr(env) & IA64_PSR_ED_BIT) != 0) {
         ia64_env_set_psr(env, ia64_env_psr(env) & ~IA64_PSR_ED_BIT);
+        return true;
+    }
+
+    if (ia64_data_access_alignment_fault(env, address, width, false)) {
         return true;
     }
 

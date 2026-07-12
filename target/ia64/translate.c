@@ -1949,18 +1949,14 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         return;
     case IA64_TCG_FAST_OP_LDST_LOAD:
     {
-        bool prepare = slot->memory_class == 1 ||
-                       slot->memory_class == 3 ||
-                       slot->memory_class == 8 ||
-                       slot->memory_class == 9 ||
-                       slot->memory_class == 0x0a;
         bool special = slot->memory_class != 0 &&
                        slot->memory_class != 4 &&
                        slot->memory_class != 5;
         TCGLabel *memory_done = special ? gen_new_label() : NULL;
 
         g_assert(ldst_address != NULL);
-        if (prepare) {
+        ia64_tr_publish_memory_slot(ctx, slot);
+        {
             TCGv_i32 deferred = tcg_temp_new_i32();
 
             gen_helper_fast_ldst_prepare(
@@ -1968,10 +1964,11 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
                 tcg_constant_i32(slot->target),
                 tcg_constant_i32(slot->width),
                 tcg_constant_i32(slot->memory_class));
-            tcg_gen_brcondi_i32(TCG_COND_NE, deferred, 0, memory_done);
+            if (special) {
+                tcg_gen_brcondi_i32(TCG_COND_NE, deferred, 0, memory_done);
+            }
         }
         if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
-            ia64_tr_publish_memory_slot(ctx, slot);
             tcg_gen_qemu_ld_i64(result, ldst_address,
                                 ia64_tr_data_mmu_index(ctx),
                                 ia64_tr_ldst_memop(slot->width));
@@ -2000,10 +1997,17 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
         return;
     }
     case IA64_TCG_FAST_OP_LDST_STORE:
+    {
+        TCGv_i32 checked = tcg_temp_new_i32();
+
         g_assert(ldst_address != NULL);
+        ia64_tr_publish_memory_slot(ctx, slot);
+        gen_helper_fast_ldst_prepare(
+            checked, tcg_env, ldst_address, tcg_constant_i32(0),
+            tcg_constant_i32(slot->width),
+            tcg_constant_i32(slot->memory_class));
         ia64_tr_load_static_gr(ctx, source2, slot->source2);
         if (ia64_tcg_fast_ldst_mode() == IA64_TCG_FAST_LDST_DIRECT) {
-            ia64_tr_publish_memory_slot(ctx, slot);
             tcg_gen_qemu_st_i64(source2, ldst_address,
                                 ia64_tr_data_mmu_index(ctx),
                                 ia64_tr_ldst_memop(slot->width));
@@ -2021,6 +2025,7 @@ static void ia64_tr_emit_fast_slot(DisasContext *ctx,
                                   runtime_dest_mask_hi);
         ia64_tr_finish_fast_slot_predicate_guard(skip);
         return;
+    }
     default:
         g_assert_not_reached();
     }

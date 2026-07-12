@@ -392,6 +392,12 @@ uint32_t HELPER(fast_ldst_prepare)(CPUIA64State *env, uint64_t address,
                                     uint32_t memory_class)
 {
     IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_SPECIAL_LDST);
+    if (ia64_data_access_alignment_fault(env, address, width, false) &&
+        !ia64_memory_class_is_control_speculative(memory_class)) {
+        ia64_exit_after_unaligned_data_reference(
+            env, address,
+            memory_class >= 0x0c ? MMU_DATA_STORE : MMU_DATA_LOAD);
+    }
     if (memory_class == 8 || memory_class == 9 || memory_class == 0x0a) {
         uint64_t resolved;
         bool physical;
@@ -406,7 +412,7 @@ uint32_t HELPER(fast_ldst_prepare)(CPUIA64State *env, uint64_t address,
     }
     if ((memory_class == 1 || memory_class == 3) &&
         ia64_control_speculative_load_defer(env, memory_class, false,
-                                            address, NULL)) {
+                                            address, width, NULL)) {
         ia64_write_gr_nat(env, target, true);
         ia64_alat_invalidate_gr(env, target);
         return 1;

@@ -85,11 +85,14 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
 void ia64_format_translate_result(const IA64TranslateResult *result,
                                   char *buf, size_t buflen);
 bool ia64_memory_class_is_control_speculative(uint8_t memory_class);
+bool ia64_data_access_alignment_fault(CPUIA64State *env, vaddr address,
+                                      uint8_t size, bool strict);
 bool ia64_control_speculative_load_fault_deferred(
     CPUIA64State *env, const IA64TranslateResult *result);
 bool ia64_control_speculative_load_defer(CPUIA64State *env,
                                          uint8_t memory_class,
                                          bool base_nat, vaddr address,
+                                         uint8_t width,
                                          IA64TranslateResult *fault);
 
 #endif

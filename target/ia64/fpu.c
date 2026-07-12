@@ -115,6 +115,8 @@ static bool exec_floating_memory(CPUIA64State *env,
 {
     uint64_t address = ia64_read_gr(env, decoded->base);
     uint64_t update;
+    uint8_t access_size = decoded->kind == IA64_FLOAT_MEM_LOAD_PAIR
+        ? decoded->width * 2 : decoded->width;
     bool base_nat = ia64_read_gr_nat(env, decoded->base);
 
     switch (decoded->kind) {
@@ -127,6 +129,11 @@ static bool exec_floating_memory(CPUIA64State *env,
             ia64_exit_after_register_nat_consumption(env, MMU_DATA_LOAD,
                                                      "floating load base NaT");
         }
+        if (ia64_data_access_alignment_fault(env, address, access_size,
+                                             false)) {
+            ia64_exit_after_unaligned_data_reference(env, address,
+                                                     MMU_DATA_LOAD);
+        }
         exec_floating_load(env, decoded, address);
         break;
     case IA64_FLOAT_MEM_LOAD_PAIR:
@@ -138,12 +145,22 @@ static bool exec_floating_memory(CPUIA64State *env,
             ia64_exit_after_register_nat_consumption(
                 env, MMU_DATA_LOAD, "floating load pair base NaT");
         }
+        if (ia64_data_access_alignment_fault(env, address, access_size,
+                                             false)) {
+            ia64_exit_after_unaligned_data_reference(env, address,
+                                                     MMU_DATA_LOAD);
+        }
         exec_floating_load_pair(env, decoded, address);
         break;
     case IA64_FLOAT_MEM_STORE:
         if (base_nat) {
             ia64_exit_after_register_nat_consumption(env, MMU_DATA_STORE,
                                                      "floating store base NaT");
+        }
+        if (ia64_data_access_alignment_fault(env, address, access_size,
+                                             false)) {
+            ia64_exit_after_unaligned_data_reference(env, address,
+                                                     MMU_DATA_STORE);
         }
         exec_floating_store(env, decoded, address);
         break;

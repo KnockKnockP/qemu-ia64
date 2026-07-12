@@ -14,6 +14,7 @@
 #define IA64_PSR_I_BIT    UINT64_C(0x0000000000004000)
 #define IA64_PSR_BN_BIT   UINT64_C(0x0000100000000000)
 #define IA64_PSR_ED_BIT   UINT64_C(0x0000080000000000)
+#define IA64_PSR_AC_BIT   UINT64_C(0x0000000000000008)
 #define IA64_PSR_RT_BIT   UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_DCR_DM_BIT   UINT64_C(0x0000000000000100)
@@ -208,7 +209,7 @@ static void test_control_speculative_load_deferral_policy(void)
     ia64_cpu_reset_synthetic_itanium2(&env);
     env.psr = IA64_PSR_ED_BIT;
     g_assert_true(ia64_control_speculative_load_defer(&env, 1, false,
-                                                      miss, NULL));
+                                                      miss, 8, NULL));
     g_assert_cmphex(env.psr & IA64_PSR_ED_BIT, ==, 0);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
@@ -219,13 +220,60 @@ static void test_control_speculative_load_deferral_policy(void)
     g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
                                            code_pte_ed, itir));
     g_assert_true(ia64_control_speculative_load_defer(&env, 1, false,
-                                                      miss, NULL));
+                                                      miss, 8, NULL));
 
     env.cr[IA64_CR_DCR] = 0;
     g_assert_false(ia64_control_speculative_load_defer(&env, 1, false,
-                                                       miss, NULL));
+                                                       miss, 8, NULL));
     g_assert_false(ia64_control_speculative_load_defer(&env, 0, false,
-                                                       miss, NULL));
+                                                       miss, 8, NULL));
+}
+
+static void test_unaligned_data_reference_policy(void)
+{
+    CPUIA64State env;
+    vaddr cross_page = 0x1ffc;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    g_assert_false(ia64_data_access_alignment_fault(&env, 0x1004, 8,
+                                                    false));
+    g_assert_true(ia64_data_access_alignment_fault(&env, cross_page, 8,
+                                                   false));
+    g_assert_true(ia64_data_access_alignment_fault(&env, 0x1004, 8, true));
+    g_assert_true(ia64_data_access_alignment_fault(&env, 0x1008, 16,
+                                                   false));
+
+    env.psr |= IA64_PSR_AC_BIT;
+    g_assert_true(ia64_data_access_alignment_fault(&env, 0x1004, 8,
+                                                   false));
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    g_assert_true(ia64_control_speculative_load_defer(
+        &env, 3, false, cross_page, 8, NULL));
+    g_assert_false(ia64_control_speculative_load_defer(
+        &env, 0, false, cross_page, 8, NULL));
+}
+
+static void test_unaligned_data_reference_delivery(void)
+{
+    CPUIA64State env;
+    vaddr address = 0x1ffc;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = 0x4000;
+    env.psr = IA64_PSR_IC_BIT;
+    env.cr[IA64_CR_IVA] = 0x100000;
+
+    ia64_deliver_exception(&env, IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE,
+                           address, MMU_DATA_LOAD, "unit-test");
+
+    g_assert_cmphex(env.exception.vector, ==, 0x5a00);
+    g_assert_cmphex(env.cr[IA64_CR_IFA], ==, address);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, 0x4000);
+    g_assert_cmphex(env.ip, ==, 0x105a00);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & (UINT64_C(1) << IA64_ISR_R_BIT),
+                    ==, UINT64_C(1) << IA64_ISR_R_BIT);
 }
 
 static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
@@ -1199,6 +1247,10 @@ int main(int argc, char **argv)
                     test_speculative_load_exception_records_isr_sp_ed);
     g_test_add_func("/ia64-memory/control-speculative-load-deferral-policy",
                     test_control_speculative_load_deferral_policy);
+    g_test_add_func("/ia64-memory/unaligned-data-reference-policy",
+                    test_unaligned_data_reference_policy);
+    g_test_add_func("/ia64-exception/unaligned-data-reference-delivery",
+                    test_unaligned_data_reference_delivery);
     g_test_add_func("/ia64-memory/tcg-tb-flags-mmu-index-cpl",
                     test_tcg_tb_flags_and_mmu_indexes_include_cpl);
     g_test_add_func("/ia64-memory/translated-miss",

@@ -258,6 +258,8 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
         return "disabled-fp-register-high";
     case IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION:
         return "register-nat-consumption";
+    case IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE:
+        return "unaligned-data-reference";
     default:
         return "unknown";
     }
@@ -358,6 +360,9 @@ static void ia64_record_exception_common(CPUIA64State *env,
         break;
     case IA64_EXCEPTION_GENERAL_EXCEPTION:
         record->vector = 0x5400;
+        break;
+    case IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE:
+        record->vector = 0x5a00;
         break;
     case IA64_EXCEPTION_BREAK:
         record->vector = 0x2c00;

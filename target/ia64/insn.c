@@ -5194,8 +5194,11 @@ bool ia64_defer_floating_speculative_load(
         return false;
     }
 
-    if (!ia64_control_speculative_load_defer(env, decoded->memory_class,
-                                             base_nat, address, NULL)) {
+    if (!ia64_control_speculative_load_defer(
+            env, decoded->memory_class, base_nat, address,
+            decoded->kind == IA64_FLOAT_MEM_LOAD_PAIR ? decoded->width * 2
+                                                       : decoded->width,
+            NULL)) {
         return false;
     }
 

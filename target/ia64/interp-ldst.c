@@ -516,10 +516,26 @@ static void ia64_rse_shadow_check_fill(CPUIA64State *env, uint64_t address,
     }
 }
 
+static G_NORETURN void ia64_exit_after_unaligned_data_reference(
+    CPUIA64State *env, uint64_t address, MMUAccessType access_type)
+{
+    CPUState *cpu = env_cpu(env);
+
+    ia64_deliver_exception(env, IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE,
+                           address, access_type, "unaligned data reference");
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu_loop_exit(cpu);
+}
+
 static uint64_t ia64_ldst_read(CPUIA64State *env, uint64_t address,
                                uint8_t width)
 {
     uint64_t value;
+
+    if (ia64_data_access_alignment_fault(env, address, width, false)) {
+        ia64_exit_after_unaligned_data_reference(env, address,
+                                                 MMU_DATA_LOAD);
+    }
 
     IA64_PERF_INC(IA64_PERF_LDST_READ);
     if (width > 1 && (address & (width - 1)) != 0) {
@@ -553,6 +569,11 @@ static uint64_t ia64_ldst_read(CPUIA64State *env, uint64_t address,
 static void ia64_ldst_write(CPUIA64State *env, uint64_t address,
                             uint8_t width, uint64_t value)
 {
+    if (ia64_data_access_alignment_fault(env, address, width, false)) {
+        ia64_exit_after_unaligned_data_reference(env, address,
+                                                 MMU_DATA_STORE);
+    }
+
     IA64_PERF_INC(IA64_PERF_LDST_WRITE);
     ia64_rse_shadow_note_store(address, width, value);
     ia64_trace_ldst(env, "store", address, width, value);
@@ -621,7 +642,8 @@ static bool ia64_ldst_maybe_defer_control_speculative(
     CPUIA64State *env, const IA64LdstImmediate *decoded, uint64_t address)
 {
     if (!ia64_control_speculative_load_defer(env, decoded->memory_class,
-                                             false, address, NULL)) {
+                                             false, address, decoded->width,
+                                             NULL)) {
         return false;
     }
 
@@ -719,6 +741,12 @@ static bool exec_m_atomic(CPUIA64State *env,
                                                  "atomic base NaT");
     }
     address = ia64_read_gr(env, decoded->base);
+
+    if (ia64_data_access_alignment_fault(env, address, decoded->width,
+                                         true)) {
+        ia64_exit_after_unaligned_data_reference(env, address,
+                                                 MMU_DATA_LOAD);
+    }
 
     IA64_PERF_INC(IA64_PERF_ATOMIC_MEMORY_OP);
     if (decoded->kind == IA64_ATOMIC_CMPXCHG) {
