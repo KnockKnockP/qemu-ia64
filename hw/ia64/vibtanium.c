@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "qemu/aio.h"
 #include "qemu/error-report.h"
+#include "qemu/main-loop.h"
 #include "qemu/thread.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
@@ -31,6 +32,7 @@
 #include "system/block-backend.h"
 #include "system/block-backend-io.h"
 #include "system/blockdev.h"
+#include "system/cpus.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "system/reset.h"
@@ -408,7 +410,9 @@ typedef struct VibtaniumBlockReadRequest {
     uint64_t offset;
     uint32_t bytes;
     void *buffer;
-    QemuEvent complete;
+    QemuMutex lock;
+    QemuCond cond;
+    bool complete;
     int ret;
 } VibtaniumBlockReadRequest;
 
@@ -489,10 +493,38 @@ static const char *vibtanium_efi_reserved_overlap(
 static void vibtanium_block_pread_on_aio_context(void *opaque)
 {
     VibtaniumBlockReadRequest *request = opaque;
+    int ret;
 
-    request->ret = blk_pread(request->blk, request->offset,
-                             request->bytes, request->buffer, 0);
-    qemu_event_set(&request->complete);
+    ret = blk_pread(request->blk, request->offset,
+                    request->bytes, request->buffer, 0);
+    qemu_mutex_lock(&request->lock);
+    request->ret = ret;
+    request->complete = true;
+    qemu_cond_signal(&request->cond);
+    qemu_mutex_unlock(&request->lock);
+}
+
+static void vibtanium_block_pread_wait(VibtaniumBlockReadRequest *request)
+{
+    qemu_mutex_lock(&request->lock);
+    while (!request->complete) {
+        qemu_cond_timedwait(&request->cond, &request->lock, 1);
+        qemu_mutex_unlock(&request->lock);
+
+        /*
+         * VGA dirty-log synchronization uses run_on_cpu().  Firmware block
+         * reads run inside the vCPU helper, so service queued CPU work while
+         * waiting for the main AIO context or GTK can deadlock with this read.
+         */
+        if (current_cpu && !cpu_work_list_empty(current_cpu)) {
+            bql_lock();
+            qemu_process_cpu_events_common(current_cpu);
+            bql_unlock();
+        }
+
+        qemu_mutex_lock(&request->lock);
+    }
+    qemu_mutex_unlock(&request->lock);
 }
 
 static int vibtanium_block_pread(void *opaque,
@@ -515,12 +547,14 @@ static int vibtanium_block_pread(void *opaque,
             .buffer = buffer,
         };
 
-        qemu_event_init(&request.complete, false);
+        qemu_mutex_init(&request.lock);
+        qemu_cond_init(&request.cond);
         aio_bh_schedule_oneshot(
             blk_get_aio_context(read_opaque->blk),
             vibtanium_block_pread_on_aio_context, &request);
-        qemu_event_wait(&request.complete);
-        qemu_event_destroy(&request.complete);
+        vibtanium_block_pread_wait(&request);
+        qemu_cond_destroy(&request.cond);
+        qemu_mutex_destroy(&request.lock);
         ret = request.ret;
     }
     if (ret < 0) {
