@@ -1590,7 +1590,7 @@ static void write_device_path(uint8_t *blob, size_t size,
     path = blob_ptr(blob, size, VIBTANIUM_EFI_DEVICE_PATH, path_length);
     if (boot_media && boot_media->cdrom) {
         /*
-         * vibtanium wires the boot optical drive as the CMD646 secondary
+         * vibtanium wires the boot optical drive as the PCI IDE secondary
          * master. Windows IA-64 uses these standard EFI nodes to recover its
          * BootContext and later rematch the Block I/O handle.
          */

@@ -12,6 +12,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
+#include "hw/ide/piix.h"
 #ifdef CONFIG_VIBTANIUM_BIT
 #include "hw/ia64/efi-bit.h"
 #endif
@@ -42,7 +43,9 @@
 
 #define VIBTANIUM_DEFAULT_LINUX_APPEND ""
 #define TYPE_VIBTANIUM_PCI_HOST "vibtanium-pci-host"
-#define TYPE_VIBTANIUM_IDE "cmd646-ide"
+#define VIBTANIUM_PIIX_IDETIM_PRIMARY 0x41
+#define VIBTANIUM_PIIX_IDETIM_SECONDARY 0x43
+#define VIBTANIUM_PIIX_IDETIM_ENABLE 0x80
 #define VIBTANIUM_PIB_INTA_OFFSET UINT64_C(0x1e0000)
 #define VIBTANIUM_PIB_XTPR_OFFSET UINT64_C(0x1e0008)
 
@@ -268,6 +271,13 @@ static void vibtanium_configure_firmware_pci(VibtaniumMachineState *vms)
         pci_default_write_config(vms->pci_ide, PCI_COMMAND,
                                  PCI_COMMAND_IO | PCI_COMMAND_MASTER,
                                  2);
+        /* PIIX3 leaves these firmware-owned channel enables clear at reset. */
+        pci_default_write_config(vms->pci_ide,
+                                 VIBTANIUM_PIIX_IDETIM_PRIMARY,
+                                 VIBTANIUM_PIIX_IDETIM_ENABLE, 1);
+        pci_default_write_config(vms->pci_ide,
+                                 VIBTANIUM_PIIX_IDETIM_SECONDARY,
+                                 VIBTANIUM_PIIX_IDETIM_ENABLE, 1);
     }
 
     vibtanium_assign_pci_bars(vms);
@@ -301,8 +311,7 @@ static void vibtanium_pci_init(VibtaniumMachineState *vms)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(vms->pci_host), &error_fatal);
     ia64_firmware_set_pci_bus(vms->pci_bus);
 
-    vms->pci_ide = pci_new(PCI_DEVFN(1, 0), TYPE_VIBTANIUM_IDE);
-    qdev_prop_set_uint32(&vms->pci_ide->qdev, "secondary", 1);
+    vms->pci_ide = pci_new(PCI_DEVFN(1, 0), TYPE_PIIX3_IDE);
     pci_realize_and_unref(vms->pci_ide, vms->pci_bus, &error_fatal);
     pci_ide_create_devs(vms->pci_ide);
 
