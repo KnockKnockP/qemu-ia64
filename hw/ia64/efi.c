@@ -1244,7 +1244,7 @@ static Aml *build_acpi_legacy_bus_device(void)
 {
     Aml *dev = aml_device("EIO0");
 
-    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A05")));
+    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A00")));
     aml_append(dev, aml_name_decl("_UID", aml_int(0)));
     aml_append(dev, aml_name_decl("_STA", aml_int(0x0f)));
     aml_append(dev, build_acpi_com1_device());
