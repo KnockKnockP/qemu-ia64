@@ -985,6 +985,50 @@ static void test_i_unit_mov_ip_and_nop(void)
                     ==, 0x100000);
 }
 
+static void test_performance_hint_family(void)
+{
+    const uint64_t immediate = (1ULL << 36) | (0xabcdeULL << 6);
+    const uint64_t hint_m_raw = immediate | (1ULL << 27) | (1ULL << 26);
+    const uint64_t hint_i_pause_raw = (1ULL << 27) | (1ULL << 26);
+    const uint64_t hint_i_raw = immediate | (1ULL << 27) | (1ULL << 26);
+    const uint64_t hint_f_raw = immediate | (1ULL << 27) | (1ULL << 26);
+    const uint64_t hint_b_raw = (2ULL << 37) | immediate | (1ULL << 27);
+    uint8_t bundle[IA64_BUNDLE_SIZE];
+    IA64InsnReport report;
+    CPUIA64State env;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = 0x4000;
+
+    g_assert_true(ia64_slot_is_nop_or_hint(IA64_SLOT_TYPE_M, hint_m_raw));
+    g_assert_true(ia64_slot_is_nop_or_hint(IA64_SLOT_TYPE_I,
+                                           hint_i_pause_raw));
+    g_assert_true(ia64_slot_is_nop_or_hint(IA64_SLOT_TYPE_I, hint_i_raw));
+    g_assert_true(ia64_slot_is_nop_or_hint(IA64_SLOT_TYPE_F, hint_f_raw));
+    g_assert_true(ia64_slot_is_nop_or_hint(IA64_SLOT_TYPE_B, hint_b_raw));
+    g_assert_true(ia64_insn_slot_supported(IA64_SLOT_TYPE_I,
+                                           hint_i_pause_raw));
+
+    g_assert_false(ia64_slot_is_nop_or_hint(
+        IA64_SLOT_TYPE_I, hint_i_raw | (1ULL << 33)));
+    g_assert_false(ia64_slot_is_nop_or_hint(
+        IA64_SLOT_TYPE_M, hint_m_raw | (1ULL << 31)));
+    g_assert_false(ia64_slot_is_nop_or_hint(
+        IA64_SLOT_TYPE_F, hint_f_raw | (1ULL << 33)));
+    g_assert_false(ia64_slot_is_nop_or_hint(
+        IA64_SLOT_TYPE_B, hint_b_raw | (1ULL << 28)));
+
+    make_bundle(bundle, 0x00, hint_m_raw, hint_i_pause_raw, hint_i_raw);
+    g_assert_cmpint(ia64_insn_exec_bundle(&env, bundle, &report), ==,
+                    IA64_INSN_OK);
+    g_assert_cmphex(env.ip, ==, 0x4010);
+
+    make_bundle(bundle, 0x1c, hint_m_raw, hint_f_raw, hint_b_raw);
+    g_assert_cmpint(ia64_insn_exec_bundle(&env, bundle, &report), ==,
+                    IA64_INSN_OK);
+    g_assert_cmphex(env.ip, ==, 0x4020);
+}
+
 static void test_i_unit_break_delivers_interruption_state(void)
 {
     const uint64_t bundle_ip = 0x200000;
@@ -4529,6 +4573,8 @@ int main(int argc, char **argv)
                     test_rse_alloc_spill_noop_paths);
     g_test_add_func("/ia64-insn/i-unit-mov-ip-and-nop",
                     test_i_unit_mov_ip_and_nop);
+    g_test_add_func("/ia64-insn/performance-hint-family",
+                    test_performance_hint_family);
     g_test_add_func("/ia64-insn/i-unit-break-delivers-interruption-state",
                     test_i_unit_break_delivers_interruption_state);
     g_test_add_func("/ia64-insn/i-unit-break-ic-clear-preserves-state",

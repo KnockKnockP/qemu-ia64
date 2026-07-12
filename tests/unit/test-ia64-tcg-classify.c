@@ -397,6 +397,31 @@ static void test_fast_bundle_accepts_nop_and_add_immediate(void)
                      ==, 2);
 }
 
+static void test_fast_bundle_accepts_performance_hints(void)
+{
+    const uint64_t immediate = (1ULL << 36) | (0xabcdeULL << 6);
+    const uint64_t hint_raw = immediate | (1ULL << 27) | (1ULL << 26);
+    const uint64_t hint_b_raw = (2ULL << 37) | immediate | (1ULL << 27);
+    IA64DecodedBundle bundle =
+        make_bundle(0x0c, hint_raw, hint_raw, hint_raw);
+    IA64TcgFastBundle fast;
+
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpuint(fast.slot_count, ==, IA64_SLOT_COUNT);
+    for (unsigned slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        g_assert_cmpint(fast.slot[slot].op, ==, IA64_TCG_FAST_OP_NOP);
+    }
+    g_assert_cmpuint(ia64_perf_fast_count(
+                         fast.op_counts, IA64_PERF_FAST_COUNT_NOP_SHIFT),
+                     ==, 3);
+
+    bundle = make_bundle(0x10, hint_raw, hint_raw, hint_b_raw);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    for (unsigned slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+        g_assert_cmpint(fast.slot[slot].op, ==, IA64_TCG_FAST_OP_NOP);
+    }
+}
+
 static void test_fast_bundle_accepts_banked_static_gr(void)
 {
     const uint64_t add_r17_r18_r19_raw =
@@ -1122,6 +1147,8 @@ static void test_fallback_plan_keeps_long_immediate_tail_generic(void)
 {
     const uint64_t l_raw = 0x1ffffffffffULL;
     const uint64_t x_raw = 0x0d807000900ULL;
+    const uint64_t hint_x_raw =
+        (1ULL << 36) | (1ULL << 27) | (1ULL << 26) | (0x12345ULL << 6);
     IA64DecodedBundle bundle =
         make_bundle(0x04, IA64_INSN_NOP_RAW, 0, 0);
     IA64TcgFastBundle fast;
@@ -1142,6 +1169,11 @@ static void test_fallback_plan_keeps_long_immediate_tail_generic(void)
     g_assert_cmphex((uint64_t)fast.slot[1].immediate, ==,
                     0xffffffffffdc8000ULL);
     g_assert_cmphex(fast.dest_mask, ==, 1ULL << 36);
+
+    bundle = make_bundle(0x04, IA64_INSN_NOP_RAW, l_raw, hint_x_raw);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_cmpint(fast.slot[1].op, ==, IA64_TCG_FAST_OP_NOP);
+    g_assert_cmphex(fast.dest_mask, ==, 0);
 }
 
 static void test_direct_branch_accepts_p0_same_page(void)
@@ -1457,6 +1489,8 @@ int main(int argc, char **argv)
                     test_fast_bundle_accepts_hot_integer_subset);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-nop-add-immediate",
                     test_fast_bundle_accepts_nop_and_add_immediate);
+    g_test_add_func("/ia64-tcg-classify/fast-bundle-performance-hints",
+                    test_fast_bundle_accepts_performance_hints);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-banked-static-gr",
                     test_fast_bundle_accepts_banked_static_gr);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-compare",

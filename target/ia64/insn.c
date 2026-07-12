@@ -263,13 +263,7 @@ const char *ia64_insn_status_name(IA64InsnStatus status)
 
 bool ia64_insn_slot_supported(IA64SlotType type, uint64_t raw)
 {
-    switch (type) {
-    case IA64_SLOT_TYPE_M:
-    case IA64_SLOT_TYPE_I:
-        return raw == IA64_INSN_NOP_RAW;
-    default:
-        return false;
-    }
+    return ia64_slot_is_nop_or_hint(type, raw);
 }
 
 uint64_t ia64_make_cfm(uint32_t sof, uint32_t sol, uint32_t sor)
@@ -1736,11 +1730,34 @@ static void ia64_write_ar(CPUIA64State *env, uint32_t reg, uint64_t value)
     }
 }
 
+bool ia64_slot_is_nop_or_hint(IA64SlotType type, uint64_t raw)
+{
+    uint8_t major = ia64_slot_major_opcode(raw);
+
+    switch (type) {
+    case IA64_SLOT_TYPE_I:
+        return major == 0 && ((raw >> 33) & 0x7) == 0 &&
+               ((raw >> 27) & 0x3f) == 1;
+    case IA64_SLOT_TYPE_M:
+        return major == 0 && ((raw >> 33) & 0x7) == 0 &&
+               ((raw >> 31) & 0x3) == 0 &&
+               ((raw >> 27) & 0xf) == 1;
+    case IA64_SLOT_TYPE_F:
+        return major == 0 && ((raw >> 33) & 0x1) == 0 &&
+               ((raw >> 27) & 0x3f) == 1;
+    case IA64_SLOT_TYPE_B:
+        return major == 2 && ((raw >> 27) & 0x3f) <= 1;
+    default:
+        return false;
+    }
+}
+
 bool ia64_slot_is_i_nop(IA64SlotType type, uint64_t raw)
 {
     uint8_t y = (raw >> 26) & 0x1;
 
-    return ia64_slot_is_i_misc_x6(type, raw, 0x1) && y == 0;
+    return type == IA64_SLOT_TYPE_I &&
+           ia64_slot_is_nop_or_hint(type, raw) && y == 0;
 }
 
 bool ia64_slot_is_i_break(IA64SlotType type, uint64_t raw)
@@ -3355,6 +3372,10 @@ bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw)
         return false;
     }
 
+    if (ia64_slot_is_nop_or_hint(type, raw)) {
+        return true;
+    }
+
     major = ia64_slot_major_opcode(raw);
     if (((raw >> 33) & 0x7) != 0) {
         return false;
@@ -3377,13 +3398,6 @@ bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw)
     if (x2 == 3 && (x4 == 0 || x4 == 1 || x4 == 3)) {
         return true;
     }
-    if (x2 == 0 && x4 == 1) {
-        uint8_t y = (raw >> 26) & 0x1;
-        uint8_t z = (raw >> 10) & 0x3;
-
-        return y == 0 || z == 0;
-    }
-
     return false;
 }
 

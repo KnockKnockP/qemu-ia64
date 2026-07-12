@@ -1378,11 +1378,7 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             }
             planned_bailout_count++;
         }
-        if (ia64_insn_slot_supported(type, raw)) {
-            IA64_PERF_INC(IA64_PERF_OP_INSN);
-            continue;
-        }
-        if (ia64_slot_is_i_nop(type, raw)) {
+        if (ia64_slot_is_nop_or_hint(type, raw)) {
             IA64_PERF_INC(IA64_PERF_OP_NOP);
             continue;
         }

@@ -590,8 +590,7 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
     }
     slot->qualifying_predicate = qp;
 
-    if (ia64_insn_slot_supported(type, raw) ||
-        ia64_slot_is_i_nop(type, raw)) {
+    if (ia64_slot_is_nop_or_hint(type, raw)) {
         slot->op = IA64_TCG_FAST_OP_NOP;
         ia64_tcg_fast_count_op(fast, IA64_PERF_FAST_COUNT_NOP_SHIFT);
         return true;
@@ -1092,8 +1091,7 @@ static IA64TcgFallbackReason ia64_tcg_fast_slot_fallback_reason(
     IA64FloatingClassInstruction fclass;
     uint8_t qp = ia64_slot_predicate(raw);
 
-    if (ia64_insn_slot_supported(type, raw) ||
-        ia64_slot_is_i_nop(type, raw)) {
+    if (ia64_slot_is_nop_or_hint(type, raw)) {
         return IA64_TCG_FALLBACK_NONE;
     }
 
