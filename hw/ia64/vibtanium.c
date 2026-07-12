@@ -1139,10 +1139,6 @@ static void vibtanium_init(MachineState *machine)
         vibtanium_efi_console_recover_post_load);
 
     memory_region_add_subregion(sysmem, VIBTANIUM_RAM_BASE, machine->ram);
-    memory_region_init_ram(&vms->vga_legacy, NULL, "vibtanium.vga-legacy",
-                           VIBTANIUM_VGA_LEGACY_SIZE, &error_fatal);
-    memory_region_add_subregion_overlap(sysmem, VIBTANIUM_VGA_LEGACY_BASE,
-                                        &vms->vga_legacy, 1);
 
     kernel_alias_size = machine->ram_size - VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET;
     memory_region_init_alias(&vms->kernel_alias, OBJECT(machine),
@@ -1169,6 +1165,7 @@ static void vibtanium_init(MachineState *machine)
 
     vibtanium_sparse_io_init(vms, sysmem);
     vibtanium_isa_init(vms);
+    isa_vga_init(vms->isa_bus);
     vms->acpi_sci = qdev_get_gpio_in(vms->iosapic, VIBTANIUM_ACPI_SCI_IRQ);
     vibtanium_acpi_init(vms);
     vibtanium_pci_init(vms);
@@ -1178,8 +1175,7 @@ static void vibtanium_init(MachineState *machine)
                            VIBTANIUM_FRAMEBUFFER_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, VIBTANIUM_FRAMEBUFFER_BASE,
                                 &vms->framebuffer);
-    vibtanium_efi_console_init(&vms->framebuffer, &vms->vga_legacy,
-                               vms->vga_crtc);
+    vibtanium_efi_console_init(&vms->framebuffer, NULL, NULL);
 
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);
@@ -1192,7 +1188,9 @@ static void vibtanium_init(MachineState *machine)
     memory_region_add_subregion(sysmem, VIBTANIUM_FIRMWARE_BASE,
                                 &vms->firmware);
 
-    if (!vibtanium_efi_vars_global_load(vms->nvram_path, &local_err)) {
+    if (!vibtanium_efi_vars_global_load(vms->nvram_path,
+                                        vms->hcdp_serial_console,
+                                        &local_err)) {
         error_reportf_err(local_err, "could not load IA-64 EFI NVRAM: ");
         exit(1);
     }

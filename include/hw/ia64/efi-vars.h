@@ -33,6 +33,7 @@ void vibtanium_efi_varstore_destroy(VibtaniumEfiVarStore *store);
 
 bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
                                  const char *path,
+                                 bool serial_console,
                                  Error **errp);
 bool vibtanium_efi_varstore_save(VibtaniumEfiVarStore *store,
                                  Error **errp);
@@ -88,7 +89,9 @@ bool vibtanium_efi_varstore_delete_boot_next(VibtaniumEfiVarStore *store,
                                              Error **errp);
 void vibtanium_efi_boot_entry_free(VibtaniumEfiBootEntry *entry);
 
-bool vibtanium_efi_vars_global_load(const char *path, Error **errp);
+bool vibtanium_efi_vars_global_load(const char *path,
+                                    bool serial_console,
+                                    Error **errp);
 bool vibtanium_efi_vars_global_save(Error **errp);
 uint64_t vibtanium_efi_vars_get(const char *guid,
                                 const char *name,

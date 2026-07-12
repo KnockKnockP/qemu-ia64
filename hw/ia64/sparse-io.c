@@ -77,80 +77,6 @@ static void vibtanium_io_port_space_write(unsigned port, uint64_t value,
                         data, size);
 }
 
-static bool vibtanium_vga_crtc_index_port(unsigned port)
-{
-    return port == VIBTANIUM_LEGACY_VGA_CRTC_INDEX_COLOR ||
-           port == VIBTANIUM_LEGACY_VGA_CRTC_INDEX_MONO;
-}
-
-static bool vibtanium_vga_crtc_data_port(unsigned port)
-{
-    return port == VIBTANIUM_LEGACY_VGA_CRTC_DATA_COLOR ||
-           port == VIBTANIUM_LEGACY_VGA_CRTC_DATA_MONO;
-}
-
-static bool vibtanium_vga_crtc_port(unsigned port)
-{
-    return vibtanium_vga_crtc_index_port(port) ||
-           vibtanium_vga_crtc_data_port(port);
-}
-
-static uint64_t vibtanium_vga_crtc_read(VibtaniumMachineState *vms,
-                                        unsigned port, unsigned size)
-{
-    if (size == 1) {
-        if (vibtanium_vga_crtc_index_port(port)) {
-            return vms->vga_crtc_index;
-        }
-        if (vibtanium_vga_crtc_data_port(port) &&
-            vms->vga_crtc_index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
-            return vms->vga_crtc[vms->vga_crtc_index];
-        }
-        return UINT8_MAX;
-    }
-
-    if (size == 2 && vibtanium_vga_crtc_index_port(port)) {
-        uint8_t data = UINT8_MAX;
-
-        if (vms->vga_crtc_index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
-            data = vms->vga_crtc[vms->vga_crtc_index];
-        }
-        return vms->vga_crtc_index | ((uint16_t)data << 8);
-    }
-
-    return vibtanium_io_port_default_read(size);
-}
-
-static bool vibtanium_vga_crtc_write(VibtaniumMachineState *vms,
-                                     unsigned port, uint64_t value,
-                                     unsigned size)
-{
-    if (size == 1) {
-        if (vibtanium_vga_crtc_index_port(port)) {
-            vms->vga_crtc_index = value & UINT8_MAX;
-            return true;
-        }
-        if (vibtanium_vga_crtc_data_port(port)) {
-            if (vms->vga_crtc_index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
-                vms->vga_crtc[vms->vga_crtc_index] = value & UINT8_MAX;
-            }
-            return true;
-        }
-    }
-
-    if (size == 2 && vibtanium_vga_crtc_index_port(port)) {
-        uint8_t index = value & UINT8_MAX;
-
-        vms->vga_crtc_index = index;
-        if (index < VIBTANIUM_VGA_CRTC_REGISTER_COUNT) {
-            vms->vga_crtc[index] = (value >> 8) & UINT8_MAX;
-        }
-        return true;
-    }
-
-    return false;
-}
-
 static bool vibtanium_i8042_port_offset(unsigned port, hwaddr *i8042_offset)
 {
     switch (port) {
@@ -184,9 +110,6 @@ static uint64_t vibtanium_io_port_read(void *opaque, hwaddr offset,
                                     MO_8, MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
         return value & UINT8_MAX;
     }
-    if (vibtanium_vga_crtc_port(port)) {
-        return vibtanium_vga_crtc_read(vms, port, size);
-    }
     if (size == 1 && port >= VIBTANIUM_LEGACY_COM1_BASE &&
         port < VIBTANIUM_LEGACY_COM1_BASE + VIBTANIUM_LEGACY_COM1_SIZE) {
         return serial_io_ops.read(&vms->uart->serial,
@@ -213,10 +136,6 @@ static void vibtanium_io_port_write(void *opaque, hwaddr offset,
         memory_region_dispatch_write(vms->i8042_mmio, i8042_offset,
                                      value & UINT8_MAX, MO_8,
                                      MEMTXATTRS_UNSPECIFIED);
-        return;
-    }
-    if (vibtanium_vga_crtc_port(port) &&
-        vibtanium_vga_crtc_write(vms, port, value, size)) {
         return;
     }
     if (size == 1 && port >= VIBTANIUM_LEGACY_COM1_BASE &&

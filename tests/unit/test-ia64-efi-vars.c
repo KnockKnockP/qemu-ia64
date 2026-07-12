@@ -126,7 +126,7 @@ static void test_loads_missing_empty_and_rejects_corrupt(void)
 
     vibtanium_efi_varstore_init(&store);
 
-    g_assert_true(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, false, &err));
     g_assert_null(err);
     g_assert_cmphex(vibtanium_efi_varstore_get(
                         &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
@@ -134,11 +134,11 @@ static void test_loads_missing_empty_and_rejects_corrupt(void)
                     ==, VIBTANIUM_EFI_NOT_FOUND);
 
     g_assert_true(g_file_set_contents(path, "", 0, NULL));
-    g_assert_true(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, false, &err));
     g_assert_null(err);
 
     g_assert_true(g_file_set_contents(path, "not json", -1, NULL));
-    g_assert_false(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_false(vibtanium_efi_varstore_load(&store, path, false, &err));
     g_assert_nonnull(err);
     error_free(err);
 
@@ -146,7 +146,55 @@ static void test_loads_missing_empty_and_rejects_corrupt(void)
     cleanup_temp_var_path(dir, path);
 }
 
-static void test_load_adds_default_console_variables(void)
+static void test_load_adds_graphical_console_variables_by_default(void)
+{
+    VibtaniumEfiVarStore store;
+    Error *err = NULL;
+    const uint8_t expected_input_path[] = {
+        0x02, 0x01, 0x0c, 0x00,
+        0x41, 0xd0, 0x03, 0x03,
+        0x00, 0x00, 0x00, 0x00,
+        0x7f, 0xff, 0x04, 0x00,
+    };
+    const uint8_t expected_output_path[] = {
+        0x02, 0x01, 0x0c, 0x00,
+        0x41, 0xd0, 0x00, 0x09,
+        0x00, 0x00, 0x00, 0x00,
+        0x7f, 0xff, 0x04, 0x00,
+    };
+    const uint8_t *actual = NULL;
+    size_t actual_size = 0;
+    char *dir;
+    char *path = make_temp_var_path(&dir);
+
+    vibtanium_efi_varstore_init(&store);
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, false, &err));
+    g_assert_null(err);
+
+    g_assert_cmphex(vibtanium_efi_varstore_get(
+                        &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
+                        "ConIn", NULL, &actual, &actual_size),
+                    ==, VIBTANIUM_EFI_SUCCESS);
+    g_assert_cmpmem(actual, actual_size, expected_input_path,
+                    sizeof(expected_input_path));
+    g_assert_cmphex(vibtanium_efi_varstore_get(
+                        &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
+                        "ConOut", NULL, &actual, &actual_size),
+                    ==, VIBTANIUM_EFI_SUCCESS);
+    g_assert_cmpmem(actual, actual_size, expected_output_path,
+                    sizeof(expected_output_path));
+    g_assert_cmphex(vibtanium_efi_varstore_get(
+                        &store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
+                        "ErrOut", NULL, &actual, &actual_size),
+                    ==, VIBTANIUM_EFI_SUCCESS);
+    g_assert_cmpmem(actual, actual_size, expected_output_path,
+                    sizeof(expected_output_path));
+
+    vibtanium_efi_varstore_destroy(&store);
+    cleanup_temp_var_path(dir, path);
+}
+
+static void test_load_adds_serial_console_variables_when_requested(void)
 {
     VibtaniumEfiVarStore store;
     Error *err = NULL;
@@ -167,7 +215,7 @@ static void test_load_adds_default_console_variables(void)
     char *path = make_temp_var_path(&dir);
 
     vibtanium_efi_varstore_init(&store);
-    g_assert_true(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, true, &err));
     g_assert_null(err);
 
     g_assert_cmphex(vibtanium_efi_varstore_get(
@@ -210,7 +258,7 @@ static void test_round_trips_json_variable(void)
 
     vibtanium_efi_varstore_init(&store);
     vibtanium_efi_varstore_init(&reloaded);
-    g_assert_true(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, false, &err));
     g_assert_null(err);
 
     set_var(&store, "TestVar", expected, sizeof(expected));
@@ -220,7 +268,7 @@ static void test_round_trips_json_variable(void)
     g_assert_nonnull(strstr(contents, "\"version\": 2"));
     g_assert_nonnull(strstr(contents, "\"name\": \"TestVar\""));
 
-    g_assert_true(vibtanium_efi_varstore_load(&reloaded, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&reloaded, path, false, &err));
     g_assert_null(err);
     g_assert_cmphex(vibtanium_efi_varstore_get(
                         &reloaded, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
@@ -294,7 +342,7 @@ static void test_boot_next_is_one_shot(void)
 
     vibtanium_efi_varstore_init(&store);
     vibtanium_efi_varstore_init(&reloaded);
-    g_assert_true(vibtanium_efi_varstore_load(&store, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&store, path, false, &err));
     g_assert_null(err);
 
     set_var(&store, "Boot0001", boot1->data, boot1->len);
@@ -315,7 +363,7 @@ static void test_boot_next_is_one_shot(void)
     g_assert_false(second->from_boot_next);
     g_ptr_array_unref(entries);
 
-    g_assert_true(vibtanium_efi_varstore_load(&reloaded, path, &err));
+    g_assert_true(vibtanium_efi_varstore_load(&reloaded, path, false, &err));
     g_assert_null(err);
     g_assert_cmphex(vibtanium_efi_varstore_get(
                         &reloaded, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID,
@@ -424,8 +472,10 @@ int main(int argc, char **argv)
                     test_status_codes_match_uefi);
     g_test_add_func("/ia64-efi-vars/load-missing-empty-corrupt",
                     test_loads_missing_empty_and_rejects_corrupt);
-    g_test_add_func("/ia64-efi-vars/default-console-variables",
-                    test_load_adds_default_console_variables);
+    g_test_add_func("/ia64-efi-vars/default-graphical-console-variables",
+                    test_load_adds_graphical_console_variables_by_default);
+    g_test_add_func("/ia64-efi-vars/requested-serial-console-variables",
+                    test_load_adds_serial_console_variables_when_requested);
     g_test_add_func("/ia64-efi-vars/round-trip-json-variable",
                     test_round_trips_json_variable);
     g_test_add_func("/ia64-efi-vars/boot-order-yields-active-entries",

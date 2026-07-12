@@ -36,8 +36,9 @@ static bool global_varstore_initialized;
  * ACPI(PNP0500,0x3f8)/UART(115200 8N1). EFI firmware normally exposes the
  * active console handles through ConIn/ConOut/ErrOut variables; Windows uses
  * ConOut to carry serial redirection settings when SPCR/HCDP are insufficient.
+ * Only install this path when serial-console firmware discovery is requested.
  */
-static const uint8_t default_console_device_path[] = {
+static const uint8_t serial_console_device_path[] = {
     0x02, 0x01, 0x0c, 0x00,             /* ACPI HID node */
     0x41, 0xd0, 0x00, 0x05,             /* EISA PNP0500 */
     EFI_CONSOLE_COM1_BASE & 0xff,
@@ -50,6 +51,22 @@ static const uint8_t default_console_device_path[] = {
     0x08,                               /* data bits */
     0x01,                               /* no parity */
     0x01,                               /* one stop bit */
+    0x7f, 0xff, 0x04, 0x00,             /* end entire path */
+};
+
+/* ACPI(PNP0303,0): the machine's i8042 keyboard. */
+static const uint8_t keyboard_console_device_path[] = {
+    0x02, 0x01, 0x0c, 0x00,             /* ACPI HID node */
+    0x41, 0xd0, 0x03, 0x03,             /* EISA PNP0303 */
+    0x00, 0x00, 0x00, 0x00,             /* UID 0 */
+    0x7f, 0xff, 0x04, 0x00,             /* end entire path */
+};
+
+/* ACPI(PNP0900,0): the machine's legacy VGA-compatible display. */
+static const uint8_t display_console_device_path[] = {
+    0x02, 0x01, 0x0c, 0x00,             /* ACPI HID node */
+    0x41, 0xd0, 0x00, 0x09,             /* EISA PNP0900 */
+    0x00, 0x00, 0x00, 0x00,             /* UID 0 */
     0x7f, 0xff, 0x04, 0x00,             /* end entire path */
 };
 
@@ -285,21 +302,36 @@ static void add_default_variable_if_missing(VibtaniumEfiVarStore *store,
                  EFI_CONSOLE_VARIABLE_ATTRIBUTES, bytes);
 }
 
-static void add_default_console_variables(VibtaniumEfiVarStore *store)
+static void add_default_console_variables(VibtaniumEfiVarStore *store,
+                                          bool serial_console)
 {
+    const uint8_t *input_path;
+    size_t input_path_size;
+    const uint8_t *output_path;
+    size_t output_path_size;
+
     if (!store || !store->variables) {
         return;
     }
 
+    if (serial_console) {
+        input_path = serial_console_device_path;
+        input_path_size = sizeof(serial_console_device_path);
+        output_path = serial_console_device_path;
+        output_path_size = sizeof(serial_console_device_path);
+    } else {
+        input_path = keyboard_console_device_path;
+        input_path_size = sizeof(keyboard_console_device_path);
+        output_path = display_console_device_path;
+        output_path_size = sizeof(display_console_device_path);
+    }
+
     add_default_variable_if_missing(store, "ConIn",
-                                    default_console_device_path,
-                                    sizeof(default_console_device_path));
+                                    input_path, input_path_size);
     add_default_variable_if_missing(store, "ConOut",
-                                    default_console_device_path,
-                                    sizeof(default_console_device_path));
+                                    output_path, output_path_size);
     add_default_variable_if_missing(store, "ErrOut",
-                                    default_console_device_path,
-                                    sizeof(default_console_device_path));
+                                    output_path, output_path_size);
 }
 
 static bool import_qapi_store(VibtaniumEfiVarStore *store,
@@ -341,6 +373,7 @@ static bool import_qapi_store(VibtaniumEfiVarStore *store,
 
 bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
                                  const char *path,
+                                 bool serial_console,
                                  Error **errp)
 {
     g_autofree gchar *contents = NULL;
@@ -356,7 +389,7 @@ bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
     store->path = g_strdup(path);
 
     if (!path || !*path || !g_file_test(path, G_FILE_TEST_EXISTS)) {
-        add_default_console_variables(store);
+        add_default_console_variables(store, serial_console);
         store->dirty = false;
         return true;
     }
@@ -367,7 +400,7 @@ bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
         return false;
     }
     if (length == 0) {
-        add_default_console_variables(store);
+        add_default_console_variables(store, serial_console);
         store->dirty = false;
         return true;
     }
@@ -389,7 +422,7 @@ bool vibtanium_efi_varstore_load(VibtaniumEfiVarStore *store,
         error_prepend(errp, "invalid NVRAM file '%s': ", path);
     }
     if (ok) {
-        add_default_console_variables(store);
+        add_default_console_variables(store, serial_console);
     }
 
 out:
@@ -1070,13 +1103,16 @@ bool vibtanium_efi_varstore_delete_boot_next(VibtaniumEfiVarStore *store,
     return vibtanium_efi_varstore_save(store, errp);
 }
 
-bool vibtanium_efi_vars_global_load(const char *path, Error **errp)
+bool vibtanium_efi_vars_global_load(const char *path,
+                                    bool serial_console,
+                                    Error **errp)
 {
     if (!global_varstore_initialized) {
         vibtanium_efi_varstore_init(&global_varstore);
         global_varstore_initialized = true;
     }
-    return vibtanium_efi_varstore_load(&global_varstore, path, errp);
+    return vibtanium_efi_varstore_load(&global_varstore, path,
+                                       serial_console, errp);
 }
 
 bool vibtanium_efi_vars_global_save(Error **errp)

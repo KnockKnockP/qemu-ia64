@@ -9,3 +9,4 @@ config VIBTANIUM
     select IDE_PIIX
     select PCKBD
     select SERIAL_MM
+    select VGA_ISA
