@@ -615,8 +615,25 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(byte_sum(fadt, 244), ==, 0);
     facs_addr = load_le32(fadt + 36);
     dsdt_addr = load_le32(fadt + 40);
+    g_assert_cmphex(load_le16(fadt + 46), ==, VIBTANIUM_ACPI_SCI_IRQ);
+    g_assert_cmphex(load_le32(fadt + 56), ==, VIBTANIUM_ACPI_PM_BASE);
+    g_assert_cmphex(load_le32(fadt + 64), ==,
+                    VIBTANIUM_ACPI_PM_BASE + 4);
+    g_assert_cmphex(load_le32(fadt + 76), ==,
+                    VIBTANIUM_ACPI_PM_BASE + 8);
+    g_assert_cmpuint(fadt[88], ==, 4);
+    g_assert_cmpuint(fadt[89], ==, 2);
+    g_assert_cmpuint(fadt[91], ==, 4);
     g_assert_cmphex(load_le64(fadt + 132), ==, facs_addr);
     g_assert_cmphex(load_le64(fadt + 140), ==, dsdt_addr);
+    g_assert_cmpuint(fadt[148], ==, 1);
+    g_assert_cmphex(load_le64(fadt + 152), ==, VIBTANIUM_ACPI_PM_BASE);
+    g_assert_cmpuint(fadt[172], ==, 1);
+    g_assert_cmphex(load_le64(fadt + 176), ==,
+                    VIBTANIUM_ACPI_PM_BASE + 4);
+    g_assert_cmpuint(fadt[208], ==, 1);
+    g_assert_cmphex(load_le64(fadt + 212), ==,
+                    VIBTANIUM_ACPI_PM_BASE + 8);
 
     dsdt = firmware_ptr(blob, dsdt_addr);
     dsdt_length = load_le32(dsdt + 4);

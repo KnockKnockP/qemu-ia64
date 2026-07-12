@@ -4,6 +4,7 @@
 
 #include "hw/core/boards.h"
 #include "hw/core/irq.h"
+#include "hw/acpi/acpi.h"
 #include "qemu/units.h"
 #include "target/ia64/cpu-qom.h"
 
@@ -40,6 +41,9 @@ typedef struct VibtaniumEfiBootManagerState VibtaniumEfiBootManagerState;
 #define VIBTANIUM_LEGACY_COM1_BASE 0x3f8
 #define VIBTANIUM_LEGACY_COM1_SIZE 8
 #define VIBTANIUM_LEGACY_COM1_IRQ 4
+#define VIBTANIUM_ACPI_SCI_IRQ 9
+#define VIBTANIUM_ACPI_PM_BASE 0x400
+#define VIBTANIUM_ACPI_PM_SIZE 12
 #define VIBTANIUM_LEGACY_ISA_IRQS 16
 #define VIBTANIUM_PCI_INTX_IRQ_BASE 16
 #define VIBTANIUM_PCI_INTX_IRQS 4
@@ -85,6 +89,10 @@ struct VibtaniumMachineState {
     DeviceState *iosapic;
     ISABus *isa_bus;
     qemu_irq isa_irqs[VIBTANIUM_LEGACY_ISA_IRQS];
+    qemu_irq acpi_sci;
+    ACPIREGS acpi_regs;
+    MemoryRegion acpi_io;
+    Notifier acpi_powerdown_notifier;
     DeviceState *pci_host;
     PCIBus *pci_bus;
     PCIDevice *pci_ide;

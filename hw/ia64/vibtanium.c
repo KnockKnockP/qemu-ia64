@@ -6,6 +6,7 @@
 #include "qemu/thread.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
+#include "hw/acpi/acpi.h"
 #include "hw/char/serial-mm.h"
 #include "hw/core/cpu.h"
 #include "hw/core/sysbus.h"
@@ -25,12 +26,14 @@
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_host.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "system/block-backend.h"
 #include "system/block-backend-io.h"
 #include "system/blockdev.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "system/system.h"
 #include "target/ia64/flight-recorder.h"
 #include "target/ia64/firmware.h"
@@ -53,6 +56,78 @@ typedef struct VibtaniumPciBarAllocator {
 } VibtaniumPciBarAllocator;
 
 OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumPciHostState, VIBTANIUM_PCI_HOST)
+
+static void vibtanium_acpi_update_sci(ACPIREGS *regs)
+{
+    VibtaniumMachineState *vms =
+        container_of(regs, VibtaniumMachineState, acpi_regs);
+
+    acpi_update_sci(regs, vms->acpi_sci);
+}
+
+static void vibtanium_acpi_reset(void *opaque)
+{
+    VibtaniumMachineState *vms = opaque;
+
+    acpi_pm1_evt_reset(&vms->acpi_regs);
+    acpi_pm1_cnt_reset(&vms->acpi_regs);
+    acpi_pm_tmr_reset(&vms->acpi_regs);
+    acpi_gpe_reset(&vms->acpi_regs);
+    vibtanium_acpi_update_sci(&vms->acpi_regs);
+}
+
+static int vibtanium_acpi_post_load(void *opaque, int version_id)
+{
+    VibtaniumMachineState *vms = opaque;
+
+    vibtanium_acpi_update_sci(&vms->acpi_regs);
+    return 0;
+}
+
+static const VMStateDescription vmstate_vibtanium_acpi = {
+    .name = "vibtanium-acpi",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = vibtanium_acpi_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(acpi_regs.pm1.evt.sts, VibtaniumMachineState),
+        VMSTATE_UINT16(acpi_regs.pm1.evt.en, VibtaniumMachineState),
+        VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, VibtaniumMachineState),
+        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, VibtaniumMachineState),
+        VMSTATE_INT64(acpi_regs.tmr.overflow_time, VibtaniumMachineState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void vibtanium_acpi_powerdown_req(Notifier *notifier, void *opaque)
+{
+    VibtaniumMachineState *vms =
+        container_of(notifier, VibtaniumMachineState,
+                     acpi_powerdown_notifier);
+
+    acpi_pm1_evt_power_down(&vms->acpi_regs);
+}
+
+static void vibtanium_acpi_init(VibtaniumMachineState *vms)
+{
+    memory_region_init(&vms->acpi_io, OBJECT(vms), "vibtanium-acpi-pm",
+                       VIBTANIUM_ACPI_PM_SIZE);
+    acpi_pm1_evt_init(&vms->acpi_regs, vibtanium_acpi_update_sci,
+                      &vms->acpi_io);
+    acpi_pm1_cnt_init(&vms->acpi_regs, &vms->acpi_io,
+                      true, true, 0, true);
+    acpi_pm_tmr_init(&vms->acpi_regs, vibtanium_acpi_update_sci,
+                     &vms->acpi_io);
+    acpi_gpe_init(&vms->acpi_regs, 2);
+    memory_region_add_subregion(get_system_io(), VIBTANIUM_ACPI_PM_BASE,
+                                &vms->acpi_io);
+
+    vms->acpi_powerdown_notifier.notify = vibtanium_acpi_powerdown_req;
+    qemu_register_powerdown_notifier(&vms->acpi_powerdown_notifier);
+    qemu_register_reset(vibtanium_acpi_reset, vms);
+    vmstate_register(NULL, 0, &vmstate_vibtanium_acpi, vms);
+    vibtanium_acpi_reset(vms);
+}
 
 static void vibtanium_isa_init(VibtaniumMachineState *vms)
 {
@@ -1085,6 +1160,8 @@ static void vibtanium_init(MachineState *machine)
 
     vibtanium_sparse_io_init(vms, sysmem);
     vibtanium_isa_init(vms);
+    vms->acpi_sci = qdev_get_gpio_in(vms->iosapic, VIBTANIUM_ACPI_SCI_IRQ);
+    vibtanium_acpi_init(vms);
     vibtanium_pci_init(vms);
 
     memory_region_init_ram(&vms->framebuffer, NULL,
