@@ -375,6 +375,46 @@ static void test_boot_next_is_one_shot(void)
     cleanup_temp_var_path(dir, path);
 }
 
+static void test_driver_order_yields_active_entries(void)
+{
+    VibtaniumEfiVarStore store;
+    GPtrArray *entries = NULL;
+    g_autoptr(GByteArray) driver1 = make_boot_option(
+        "first driver", "\\EFI\\Drivers\\first.efi", NULL, 0);
+    g_autoptr(GByteArray) driver2 = make_boot_option(
+        "floating point driver", "\\EFI\\Microsoft\\EFIDrivers\\fpswa.efi",
+        (const uint8_t *)"driver-options", 14);
+    uint8_t order[] = { 2, 0, 1, 0 };
+    VibtaniumEfiBootEntry *first;
+    VibtaniumEfiBootEntry *second;
+
+    memset(driver2->data, 0, sizeof(uint32_t));
+
+    vibtanium_efi_varstore_init(&store);
+    set_var(&store, "Driver0001", driver1->data, driver1->len);
+    set_var(&store, "Driver0002", driver2->data, driver2->len);
+    set_var(&store, "DriverOrder", order, sizeof(order));
+
+    g_assert_true(vibtanium_efi_varstore_driver_entries(
+        &store, &entries, &error_abort));
+    g_assert_cmpuint(entries->len, ==, 2);
+    first = g_ptr_array_index(entries, 0);
+    second = g_ptr_array_index(entries, 1);
+    g_assert_cmpuint(first->id, ==, 2);
+    g_assert_false(first->active);
+    g_assert_cmpstr(first->description, ==, "floating point driver");
+    g_assert_cmpstr(first->loader_path, ==,
+                    "/EFI/Microsoft/EFIDrivers/fpswa.efi");
+    g_assert_cmpmem(first->load_options->data, first->load_options->len,
+                    "driver-options", 14);
+    g_assert_cmpuint(second->id, ==, 1);
+    g_assert_true(second->active);
+    g_assert_cmpstr(second->loader_path, ==, "/EFI/Drivers/first.efi");
+
+    g_ptr_array_unref(entries);
+    vibtanium_efi_varstore_destroy(&store);
+}
+
 static void test_boot_entry_write_edit_and_delete(void)
 {
     VibtaniumEfiVarStore store;
@@ -482,6 +522,8 @@ int main(int argc, char **argv)
                     test_boot_order_yields_active_entries);
     g_test_add_func("/ia64-efi-vars/boot-next-is-one-shot",
                     test_boot_next_is_one_shot);
+    g_test_add_func("/ia64-efi-vars/driver-order-yields-active-entries",
+                    test_driver_order_yields_active_entries);
     g_test_add_func("/ia64-efi-vars/boot-entry-write-edit-delete",
                     test_boot_entry_write_edit_and_delete);
     g_test_add_func("/ia64-efi-vars/boot-order-helpers-allocate-reorder",

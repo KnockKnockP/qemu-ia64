@@ -1013,6 +1013,91 @@ bool vibtanium_builtin_bit_available(void)
 #endif
 }
 
+static bool vibtanium_queue_driver_entry(VibtaniumMachineState *vms,
+                                         const VibtaniumEfiBootEntry *entry)
+{
+    BlockBackend *blk = NULL;
+
+    while ((blk = blk_next(blk)) != NULL) {
+        VibtaniumEfiBlockDevice dev;
+        VibtaniumEfiStorageReport report;
+        g_autofree uint8_t *file_data = NULL;
+        size_t file_size = 0;
+        char source[384];
+        Error *local_err = NULL;
+
+        if (!vibtanium_blk_media_device(blk, &dev)) {
+            continue;
+        }
+        if (!vibtanium_efi_media_read_path(&dev, entry->loader_path,
+                                           &file_data, &file_size, source,
+                                           sizeof(source), &report,
+                                           &local_err)) {
+            error_free(local_err);
+            vibtanium_blk_media_device_cleanup(&dev);
+            continue;
+        }
+        vibtanium_blk_media_device_cleanup(&dev);
+
+        if (!vibtanium_efi_queue_driver_image(
+                &vms->cpu->env, source, file_data, file_size,
+                entry->loader_path,
+                entry->load_options ? entry->load_options->data : NULL,
+                entry->load_options ? entry->load_options->len : 0,
+                &local_err)) {
+            warn_report("vibtanium EFI Driver%04X path=%s failed: %s",
+                        entry->id, entry->loader_path,
+                        error_get_pretty(local_err));
+            error_free(local_err);
+            return false;
+        }
+
+        warn_report("vibtanium EFI Driver%04X path=%s queued",
+                    entry->id, entry->loader_path);
+        return true;
+    }
+
+    warn_report("vibtanium EFI Driver%04X path=%s not found",
+                entry->id, entry->loader_path);
+    return false;
+}
+
+static void vibtanium_queue_nvram_drivers(VibtaniumMachineState *vms)
+{
+    g_autoptr(GPtrArray) entries = NULL;
+    Error *local_err = NULL;
+    unsigned queued = 0;
+
+    if (!vibtanium_efi_vars_driver_entries(&entries, &local_err)) {
+        warn_report("vibtanium EFI could not read DriverOrder: %s",
+                    error_get_pretty(local_err));
+        error_free(local_err);
+        return;
+    }
+
+    for (size_t i = 0; i < entries->len; i++) {
+        VibtaniumEfiBootEntry *entry = g_ptr_array_index(entries, i);
+
+        warn_report("vibtanium EFI DriverOrder[%zu]=Driver%04X path=%s "
+                    "active=%s",
+                    i, entry->id, entry->loader_path,
+                    entry->active ? "yes" : "no");
+        if (!entry->active) {
+            warn_report("vibtanium EFI Driver%04X not started: load option "
+                        "is inactive",
+                        entry->id);
+            continue;
+        }
+        if (vibtanium_queue_driver_entry(vms, entry)) {
+            queued++;
+        }
+    }
+
+    if (queued != 0 && !vibtanium_efi_start_driver_images(&vms->cpu->env)) {
+        warn_report("vibtanium EFI DriverOrder images failed to start");
+    }
+}
+
 bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
                                  MachineState *machine,
                                  VibtaniumEfiBlockDevice *dev,
@@ -1091,6 +1176,9 @@ bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
                 cached_dev.size);
 
     vibtanium_commit_efi_image(vms, machine, &image, &cached_dev);
+    if (entry) {
+        vibtanium_queue_nvram_drivers(vms);
+    }
     vibtanium_trace_loader_frontier(&image);
     vibtanium_efi_image_destroy(&image);
     return true;

@@ -14,7 +14,7 @@
 #include "hw/ia64/efi.h"
 #include "hw/ia64/efi-vars.h"
 
-#define EFI_BOOT_ENTRY_NAME_LEN 8
+#define EFI_LOAD_OPTION_NAME_LEN 10
 #define EFI_MAX_VAR_NAME_CHARS 1024
 #define EFI_CONSOLE_COM1_BASE 0x3f8
 #define EFI_CONSOLE_VARIABLE_ATTRIBUTES \
@@ -626,16 +626,17 @@ static bool read_u16_variable(VibtaniumEfiVarStore *store,
     return true;
 }
 
-static bool read_boot_order(VibtaniumEfiVarStore *store,
-                            const uint16_t **ids,
-                            size_t *count)
+static bool read_load_option_order(VibtaniumEfiVarStore *store,
+                                   const char *name,
+                                   const uint16_t **ids,
+                                   size_t *count)
 {
     const uint8_t *data;
     size_t size;
     uint64_t status;
 
     status = vibtanium_efi_varstore_get(
-        store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID, "BootOrder", NULL,
+        store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID, name, NULL,
         &data, &size);
     if (status != VIBTANIUM_EFI_SUCCESS || (size & 1) != 0) {
         *ids = NULL;
@@ -647,9 +648,14 @@ static bool read_boot_order(VibtaniumEfiVarStore *store,
     return true;
 }
 
-static void boot_name(uint16_t id, char name[EFI_BOOT_ENTRY_NAME_LEN + 1])
+static void boot_name(uint16_t id, char name[EFI_LOAD_OPTION_NAME_LEN + 1])
 {
-    g_snprintf(name, EFI_BOOT_ENTRY_NAME_LEN + 1, "Boot%04X", id);
+    g_snprintf(name, EFI_LOAD_OPTION_NAME_LEN + 1, "Boot%04X", id);
+}
+
+static void driver_name(uint16_t id, char name[EFI_LOAD_OPTION_NAME_LEN + 1])
+{
+    g_snprintf(name, EFI_LOAD_OPTION_NAME_LEN + 1, "Driver%04X", id);
 }
 
 static bool utf16_data_to_ascii_path(const uint8_t *data,
@@ -761,28 +767,33 @@ static bool parse_boot_entry(uint16_t id,
     return true;
 }
 
-static bool append_boot_entry(VibtaniumEfiVarStore *store,
-                              GPtrArray *entries,
-                              uint16_t id,
-                              bool from_boot_next)
+static bool append_load_option(VibtaniumEfiVarStore *store,
+                               GPtrArray *entries,
+                               uint16_t id,
+                               bool from_boot_next,
+                               bool driver)
 {
-    char name[EFI_BOOT_ENTRY_NAME_LEN + 1];
+    char name[EFI_LOAD_OPTION_NAME_LEN + 1];
     const uint8_t *data;
     size_t size;
     uint64_t status;
     VibtaniumEfiBootEntry *entry = NULL;
 
-    boot_name(id, name);
+    if (driver) {
+        driver_name(id, name);
+    } else {
+        boot_name(id, name);
+    }
     status = vibtanium_efi_varstore_get(
         store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID, name, NULL, &data, &size);
     if (status != VIBTANIUM_EFI_SUCCESS ||
         !parse_boot_entry(id, from_boot_next, data, size, &entry)) {
-        warn_report("vibtanium EFI boot entry %s skipped: invalid or missing",
+        warn_report("vibtanium EFI load option %s skipped: invalid or missing",
                     name);
         return false;
     }
-    if (!entry->active) {
-        warn_report("vibtanium EFI boot entry %s skipped: inactive", name);
+    if (!entry->active && !driver) {
+        warn_report("vibtanium EFI load option %s skipped: inactive", name);
         vibtanium_efi_boot_entry_free(entry);
         return false;
     }
@@ -807,7 +818,7 @@ bool vibtanium_efi_varstore_boot_entries(VibtaniumEfiVarStore *store,
     }
 
     if (read_u16_variable(store, "BootNext", &boot_next)) {
-        append_boot_entry(store, result, boot_next, true);
+        append_load_option(store, result, boot_next, true, false);
         if (consume_boot_next) {
             vibtanium_efi_varstore_set(
                 store, VIBTANIUM_EFI_GLOBAL_VARIABLE_GUID, "BootNext", 0,
@@ -818,7 +829,7 @@ bool vibtanium_efi_varstore_boot_entries(VibtaniumEfiVarStore *store,
         }
     }
 
-    if (read_boot_order(store, &order, &order_count)) {
+    if (read_load_option_order(store, "BootOrder", &order, &order_count)) {
         for (size_t i = 0; i < order_count; i++) {
             uint16_t id = rd16((const uint8_t *)order + i * 2);
 
@@ -829,7 +840,33 @@ bool vibtanium_efi_varstore_boot_entries(VibtaniumEfiVarStore *store,
                     continue;
                 }
             }
-            append_boot_entry(store, result, id, false);
+            append_load_option(store, result, id, false, false);
+        }
+    }
+
+    *entries = g_steal_pointer(&result);
+    return true;
+}
+
+bool vibtanium_efi_varstore_driver_entries(VibtaniumEfiVarStore *store,
+                                           GPtrArray **entries,
+                                           Error **errp)
+{
+    g_autoptr(GPtrArray) result = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)vibtanium_efi_boot_entry_free);
+    const uint16_t *order;
+    size_t order_count;
+
+    if (!store || !entries) {
+        error_setg(errp, "invalid EFI variable store driver-entry request");
+        return false;
+    }
+
+    if (read_load_option_order(store, "DriverOrder", &order, &order_count)) {
+        for (size_t i = 0; i < order_count; i++) {
+            uint16_t id = rd16((const uint8_t *)order + i * 2);
+
+            append_load_option(store, result, id, false, true);
         }
     }
 
@@ -949,7 +986,7 @@ bool vibtanium_efi_varstore_write_boot_entry(VibtaniumEfiVarStore *store,
                                              Error **errp)
 {
     g_autoptr(GByteArray) option = NULL;
-    char name[EFI_BOOT_ENTRY_NAME_LEN + 1];
+    char name[EFI_LOAD_OPTION_NAME_LEN + 1];
     uint64_t status;
 
     if (!store) {
@@ -981,7 +1018,7 @@ bool vibtanium_efi_varstore_delete_boot_entry(VibtaniumEfiVarStore *store,
                                               uint16_t id,
                                               Error **errp)
 {
-    char name[EFI_BOOT_ENTRY_NAME_LEN + 1];
+    char name[EFI_LOAD_OPTION_NAME_LEN + 1];
     uint64_t status;
 
     if (!store) {
@@ -1014,7 +1051,8 @@ bool vibtanium_efi_varstore_boot_order_get(VibtaniumEfiVarStore *store,
 
     *ids = NULL;
     *count = 0;
-    if (!read_boot_order(store, &order, &order_count) || order_count == 0) {
+    if (!read_load_option_order(store, "BootOrder", &order, &order_count) ||
+        order_count == 0) {
         return true;
     }
 
@@ -1063,7 +1101,7 @@ bool vibtanium_efi_varstore_allocate_boot_entry_id(VibtaniumEfiVarStore *store,
                                                    uint16_t *id,
                                                    Error **errp)
 {
-    char name[EFI_BOOT_ENTRY_NAME_LEN + 1];
+    char name[EFI_LOAD_OPTION_NAME_LEN + 1];
 
     if (!store || !id) {
         error_setg(errp, "invalid EFI boot-entry allocation request");
@@ -1186,6 +1224,17 @@ bool vibtanium_efi_vars_boot_entries(GPtrArray **entries,
     }
     return vibtanium_efi_varstore_boot_entries(&global_varstore, entries,
                                                consume_boot_next, errp);
+}
+
+bool vibtanium_efi_vars_driver_entries(GPtrArray **entries, Error **errp)
+{
+    if (!global_varstore_initialized) {
+        *entries = g_ptr_array_new_with_free_func(
+            (GDestroyNotify)vibtanium_efi_boot_entry_free);
+        return true;
+    }
+    return vibtanium_efi_varstore_driver_entries(&global_varstore, entries,
+                                                 errp);
 }
 
 bool vibtanium_efi_vars_set_boot_current(uint16_t id, Error **errp)

@@ -257,6 +257,15 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
 bool vibtanium_efi_dispatch_gate(CPUIA64State *env, uint64_t gate_ip);
 void vibtanium_efi_register_loaded_image(uint64_t image_base,
                                          uint64_t image_size);
+bool vibtanium_efi_queue_driver_image(CPUIA64State *env,
+                                      const char *source,
+                                      const uint8_t *file_data,
+                                      size_t file_size,
+                                      const char *path,
+                                      const uint8_t *load_options,
+                                      size_t load_options_size,
+                                      Error **errp);
+bool vibtanium_efi_start_driver_images(CPUIA64State *env);
 void vibtanium_efi_set_guest_ram_size(uint64_t ram_size);
 void vibtanium_efi_register_media(
     const struct VibtaniumEfiBlockDevice *media, unsigned media_count);

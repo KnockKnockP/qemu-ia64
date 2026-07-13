@@ -61,6 +61,9 @@ bool vibtanium_efi_varstore_boot_entries(VibtaniumEfiVarStore *store,
                                          GPtrArray **entries,
                                          bool consume_boot_next,
                                          Error **errp);
+bool vibtanium_efi_varstore_driver_entries(VibtaniumEfiVarStore *store,
+                                           GPtrArray **entries,
+                                           Error **errp);
 bool vibtanium_efi_varstore_set_boot_current(VibtaniumEfiVarStore *store,
                                              uint16_t id,
                                              Error **errp);
@@ -112,6 +115,7 @@ uint64_t vibtanium_efi_vars_next_name(const char *guid,
 bool vibtanium_efi_vars_boot_entries(GPtrArray **entries,
                                      bool consume_boot_next,
                                      Error **errp);
+bool vibtanium_efi_vars_driver_entries(GPtrArray **entries, Error **errp);
 bool vibtanium_efi_vars_set_boot_current(uint16_t id, Error **errp);
 bool vibtanium_efi_vars_write_boot_entry(uint16_t id,
                                          const char *description,
