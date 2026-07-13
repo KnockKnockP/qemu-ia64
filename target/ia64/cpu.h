@@ -350,8 +350,10 @@ typedef struct IA64AlatEntry {
 typedef struct IA64AlatState {
     IA64AlatEntry entries[IA64_ALAT_COUNT];
     uint8_t next;
-    /* Transient validity bitmap, reconstructed from entries after migration. */
+    /* Transient summaries, reconstructed from entries after migration. */
     uint32_t valid_mask;
+    uint64_t gr_mask[2];
+    uint8_t gr_refcount[IA64_GR_COUNT];
 } IA64AlatState;
 
 typedef enum IA64CPUModel {

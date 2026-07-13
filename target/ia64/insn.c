@@ -711,16 +711,18 @@ static int ia64_alat_find_gr(CPUIA64State *env, uint32_t reg)
         return -1;
     }
 
-    valid_mask = env->alat.valid_mask;
-    if (valid_mask == 0) {
+    if ((env->alat.gr_mask[reg / 64] & (1ULL << (reg % 64))) == 0) {
         return -1;
     }
 
-    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
-        if ((valid_mask & (1u << i)) != 0 &&
-            env->alat.entries[i].target == reg) {
+    valid_mask = env->alat.valid_mask;
+    while (valid_mask != 0) {
+        unsigned i = ctz32(valid_mask);
+
+        if (env->alat.entries[i].target == reg) {
             return i;
         }
+        valid_mask &= valid_mask - 1;
     }
 
     return -1;
@@ -728,15 +730,31 @@ static int ia64_alat_find_gr(CPUIA64State *env, uint32_t reg)
 
 void ia64_alat_set_valid(CPUIA64State *env, unsigned index, bool valid)
 {
+    IA64AlatEntry *entry;
+    unsigned target;
+
     if (!env || index >= IA64_ALAT_COUNT) {
         return;
     }
 
-    env->alat.entries[index].valid = valid;
+    entry = &env->alat.entries[index];
+    if (entry->valid == valid) {
+        return;
+    }
+    target = entry->target;
+    entry->valid = valid;
     if (valid) {
         env->alat.valid_mask |= 1u << index;
+        if (target < IA64_GR_COUNT &&
+            env->alat.gr_refcount[target]++ == 0) {
+            env->alat.gr_mask[target / 64] |= 1ULL << (target % 64);
+        }
     } else {
         env->alat.valid_mask &= ~(1u << index);
+        if (target < IA64_GR_COUNT && env->alat.gr_refcount[target] != 0 &&
+            --env->alat.gr_refcount[target] == 0) {
+            env->alat.gr_mask[target / 64] &= ~(1ULL << (target % 64));
+        }
     }
 }
 
@@ -748,9 +766,17 @@ void ia64_alat_reconstruct_transients(CPUIA64State *env)
         return;
     }
 
+    memset(env->alat.gr_mask, 0, sizeof(env->alat.gr_mask));
+    memset(env->alat.gr_refcount, 0, sizeof(env->alat.gr_refcount));
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
         if (env->alat.entries[i].valid) {
+            unsigned target = env->alat.entries[i].target;
+
             valid_mask |= 1u << i;
+            if (target < IA64_GR_COUNT &&
+                env->alat.gr_refcount[target]++ == 0) {
+                env->alat.gr_mask[target / 64] |= 1ULL << (target % 64);
+            }
         }
     }
     env->alat.valid_mask = valid_mask;
@@ -771,6 +797,8 @@ static void ia64_alat_invalidate_all(CPUIA64State *env)
 
     env->alat.next = 0;
     env->alat.valid_mask = 0;
+    memset(env->alat.gr_mask, 0, sizeof(env->alat.gr_mask));
+    memset(env->alat.gr_refcount, 0, sizeof(env->alat.gr_refcount));
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
         if (valid_mask & (1u << i)) {
             env->alat.entries[i].valid = false;
@@ -786,14 +814,16 @@ void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
         return;
     }
 
-    valid_mask = env->alat.valid_mask;
-    if (valid_mask == 0) {
+    if ((env->alat.gr_mask[reg / 64] & (1ULL << (reg % 64))) == 0) {
         return;
     }
 
-    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
-        if ((valid_mask & (1u << i)) != 0 &&
-            env->alat.entries[i].target == reg) {
+    valid_mask = env->alat.valid_mask;
+    while (valid_mask != 0) {
+        unsigned i = ctz32(valid_mask);
+
+        valid_mask &= valid_mask - 1;
+        if (env->alat.entries[i].target == reg) {
             ia64_alat_set_valid(env, i, false);
         }
     }
@@ -814,6 +844,7 @@ void ia64_alat_record_gr(CPUIA64State *env, uint32_t target,
     entry = &env->alat.entries[index];
     env->alat.next = (env->alat.next + 1) % IA64_ALAT_COUNT;
 
+    ia64_alat_set_valid(env, index, false);
     memset(entry, 0, sizeof(*entry));
     entry->target = target;
     entry->width = width;
@@ -831,15 +862,17 @@ bool ia64_alat_check_gr(CPUIA64State *env, uint32_t reg, uint64_t address,
         return false;
     }
 
-    valid_mask = env->alat.valid_mask;
-    if (valid_mask == 0) {
+    if ((env->alat.gr_mask[reg / 64] & (1ULL << (reg % 64))) == 0) {
         return false;
     }
 
-    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+    valid_mask = env->alat.valid_mask;
+    while (valid_mask != 0) {
+        unsigned i = ctz32(valid_mask);
         IA64AlatEntry *entry = &env->alat.entries[i];
 
-        if ((valid_mask & (1u << i)) == 0 || entry->target != reg) {
+        valid_mask &= valid_mask - 1;
+        if (entry->target != reg) {
             continue;
         }
 

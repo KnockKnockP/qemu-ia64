@@ -404,11 +404,12 @@ static void ia64_alat_invalidate_store(CPUIA64State *env, uint64_t address,
 
     ia64_alat_resolve_address(env, address, MMU_DATA_STORE,
                               &resolved, &physical);
-    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+    while (valid_mask != 0) {
+        unsigned i = ctz32(valid_mask);
         IA64AlatEntry *entry = &env->alat.entries[i];
 
-        if ((valid_mask & (1u << i)) != 0 &&
-            entry->physical == physical &&
+        valid_mask &= valid_mask - 1;
+        if (entry->physical == physical &&
             ia64_alat_ranges_overlap(entry->address, entry->width,
                                      resolved, width)) {
             ia64_alat_set_valid(env, i, false);

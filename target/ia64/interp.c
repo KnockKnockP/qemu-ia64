@@ -315,22 +315,25 @@ static void ia64_alat_invalidate_gr_mask(CPUIA64State *env,
                                          uint64_t dest_mask,
                                          uint64_t dest_mask_hi)
 {
+    uint32_t valid_mask;
+
     dest_mask &= ~1ULL;
-    if ((dest_mask | dest_mask_hi) == 0 || env->alat.valid_mask == 0) {
+    dest_mask &= env->alat.gr_mask[0];
+    dest_mask_hi &= env->alat.gr_mask[1];
+    if ((dest_mask | dest_mask_hi) == 0) {
         return;
     }
 
-    while (dest_mask && env->alat.valid_mask != 0) {
-        unsigned reg = ctz64(dest_mask);
+    valid_mask = env->alat.valid_mask;
+    while (valid_mask != 0) {
+        unsigned index = ctz32(valid_mask);
+        unsigned reg = env->alat.entries[index].target;
+        uint64_t mask = reg < 64 ? dest_mask : dest_mask_hi;
 
-        ia64_alat_invalidate_gr(env, reg);
-        dest_mask &= dest_mask - 1;
-    }
-    while (dest_mask_hi && env->alat.valid_mask != 0) {
-        unsigned reg = 64 + ctz64(dest_mask_hi);
-
-        ia64_alat_invalidate_gr(env, reg);
-        dest_mask_hi &= dest_mask_hi - 1;
+        valid_mask &= valid_mask - 1;
+        if (mask & (1ULL << (reg % 64))) {
+            ia64_alat_set_valid(env, index, false);
+        }
     }
 }
 
