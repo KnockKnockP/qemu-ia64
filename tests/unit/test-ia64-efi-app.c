@@ -643,12 +643,15 @@ static void test_builds_guest_firmware_tables(void)
     g_assert_cmphex(byte_sum(dsdt, dsdt_length), ==, 0);
     g_assert_true(bytes_contain(dsdt, dsdt_length, "COM1", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length, "KBD_", 4));
+    g_assert_true(bytes_contain(dsdt, dsdt_length, "MOU_", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length, "PCI0", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length, "EIO0", 4));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x0c\x41\xd0\x05\x01", 5));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x0c\x41\xd0\x03\x03", 5));
+    g_assert_true(bytes_contain(dsdt, dsdt_length,
+                                "\x0c\x41\xd0\x0f\x13", 5));
     g_assert_true(bytes_contain(dsdt, dsdt_length,
                                 "\x0c\x41\xd0\x0a\x03", 5));
     g_assert_true(bytes_contain(dsdt, dsdt_length,

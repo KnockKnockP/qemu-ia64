@@ -1240,6 +1240,19 @@ static Aml *build_acpi_keyboard_device(void)
     return dev;
 }
 
+static Aml *build_acpi_mouse_device(void)
+{
+    Aml *dev = aml_device("MOU_");
+    Aml *crs = aml_resource_template();
+
+    /* The auxiliary port shares the i8042 I/O registers with the keyboard. */
+    aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0F13")));
+    aml_append(dev, aml_name_decl("_STA", aml_int(0x0f)));
+    aml_append(crs, aml_irq_no_flags(VIBTANIUM_LEGACY_I8042_MOUSE_IRQ));
+    aml_append(dev, aml_name_decl("_CRS", crs));
+    return dev;
+}
+
 static Aml *build_acpi_legacy_bus_device(void)
 {
     Aml *dev = aml_device("EIO0");
@@ -1249,6 +1262,7 @@ static Aml *build_acpi_legacy_bus_device(void)
     aml_append(dev, aml_name_decl("_STA", aml_int(0x0f)));
     aml_append(dev, build_acpi_com1_device());
     aml_append(dev, build_acpi_keyboard_device());
+    aml_append(dev, build_acpi_mouse_device());
     return dev;
 }
 

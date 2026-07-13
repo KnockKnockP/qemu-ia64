@@ -147,7 +147,10 @@ qtests_alpha = ['boot-serial-test'] + \
 
 qtests_avr = [ 'boot-serial-test' ]
 
-qtests_ia64 = [ 'ia64-acpi-test' ]
+qtests_ia64 = [
+  'ia64-acpi-test',
+  'ia64-input-test',
+]
 
 qtests_hppa = \
   qtests_filter + \
