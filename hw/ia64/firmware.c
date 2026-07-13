@@ -457,7 +457,9 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
         return firmware_success(pal_supported_page_size_mask(),
                                 pal_supported_page_size_mask(), 0);
     case IA64_PAL_PTCE_INFO:
-        return firmware_success(1, 4096, 0);
+        return firmware_success(IA64_FIRMWARE_PAL_PTCE_BASE,
+                                IA64_FIRMWARE_PAL_PTCE_COUNTS,
+                                IA64_FIRMWARE_PAL_PTCE_STRIDES);
     case IA64_PAL_REGISTER_INFO:
         return firmware_success(IA64_AR_COUNT, IA64_CR_COUNT,
                                 IA64_PROCESSOR_IDENTIFIER_REGISTER_COUNT);

@@ -550,6 +550,41 @@ static void test_translation_cache_purge_and_same_va_remap(void)
     g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
 }
 
+static void test_translation_cache_purge_all_and_same_va_remap(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t first_translation = 0x0010000004000661ULL;
+    uint64_t second_translation = 0x0010000008000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_DT_BIT;
+    env.rr[5] = test_rr(0x300, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           first_translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+
+    ia64_purge_all_translation_cache(&env);
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           second_translation, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
+}
+
 static void test_host_tlb_flush_span_for_ia64_page(void)
 {
     const uint8_t min_page_bits = 12;
@@ -1271,6 +1306,8 @@ int main(int argc, char **argv)
                     test_cr_iva_write_masks_base_and_disables_firmware_assist);
     g_test_add_func("/ia64-memory/tc-purge-same-va-remap",
                     test_translation_cache_purge_and_same_va_remap);
+    g_test_add_func("/ia64-memory/tc-purge-all-same-va-remap",
+                    test_translation_cache_purge_all_and_same_va_remap);
     g_test_add_func("/ia64-memory/host-tlb-flush-span",
                     test_host_tlb_flush_span_for_ia64_page);
     g_test_add_func("/ia64-memory/tr-purge-pinned-entry",

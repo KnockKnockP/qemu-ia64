@@ -10,6 +10,17 @@
 #define IA64_FIRMWARE_EFI_PAL_PROC       UINT64_C(0x0008f000)
 #define IA64_FIRMWARE_EFI_SAL_PROC       UINT64_C(0x00100000)
 
+/*
+ * PAL_PTCE_INFO describes a pair of nested loops.  The outer count occupies
+ * the high half of ret1 and the inner count occupies the low half.  ptc.e is
+ * modeled as an implementation-permitted full dynamic-TC purge, so one
+ * iteration with an arbitrary base and zero strides is sufficient.
+ */
+#define IA64_FIRMWARE_PAL_PTCE_BASE       UINT64_C(0)
+#define IA64_FIRMWARE_PAL_PTCE_COUNTS \
+    ((UINT64_C(1) << 32) | UINT64_C(1))
+#define IA64_FIRMWARE_PAL_PTCE_STRIDES    UINT64_C(0)
+
 #define IA64_FIRMWARE_EFI_BOOT_SERVICE_COUNT 43
 #define IA64_FIRMWARE_EFI_RUNTIME_SERVICE_COUNT 11
 #define IA64_FIRMWARE_EFI_CON_OUT_SERVICE_COUNT 9

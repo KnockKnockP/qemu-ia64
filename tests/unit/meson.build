@@ -51,6 +51,7 @@ tests = {
   'test-fifo': [],
   'test-envlist': [],
   'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
+  'test-ia64-firmware': [],
   'test-ia64-tcg-classify': [
     'test-ia64-address-space-stubs.c',
     meson.project_source_root() / 'fpu/softfloat.c',
