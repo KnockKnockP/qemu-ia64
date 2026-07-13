@@ -183,7 +183,7 @@ bool ia64_slot_raises_disabled_fp(CPUIA64State *env, IA64SlotType type,
         } else if (ia64_slot_is_f_misc(type, raw)) {
             uint8_t x6 = (raw >> 27) & 0x3f;
 
-            if (x6 == 0x01) {
+            if (x6 == 0x01 || x6 == 0x05) {
                 return false;
             }
             regs[count++] = (raw >> 6) & 0x7f;
@@ -5744,7 +5744,7 @@ bool ia64_slot_is_f_misc(IA64SlotType type, uint64_t raw)
         return false;
     }
 
-    return x6 == 0x01 ||
+    return x6 == 0x01 || x6 == 0x05 ||
            (x6 >= 0x10 && x6 <= 0x12) ||
            (x6 >= 0x14 && x6 <= 0x17) ||
            (x6 >= 0x18 && x6 <= 0x1c) ||
@@ -5807,6 +5807,25 @@ bool ia64_exec_f_misc(CPUIA64State *env, uint64_t raw)
     f3 = (raw >> 20) & 0x7f;
 
     if (x6 == 0x01) {
+        return true;
+    }
+
+    if (x6 == 0x05) {
+        const uint64_t flags_mask =
+            UINT64_C(0x3f) <<
+            (IA64_FPSR_STATUS_FIELD_SHIFT(sf) + 7);
+        uint64_t old_fpsr = env->ar[IA64_AR_FPSR];
+
+        env->ar[IA64_AR_FPSR] &= ~flags_mask;
+        if (ia64_fpu_trace_enabled(env)) {
+            fprintf(stderr,
+                    "[ia64-fpu] fclrf ip=0x%016" PRIx64
+                    " raw=0x%011" PRIx64 " sf=%u"
+                    " old-fpsr=0x%016" PRIx64
+                    " new-fpsr=0x%016" PRIx64 "\n",
+                    env->ip, raw, sf, old_fpsr,
+                    env->ar[IA64_AR_FPSR]);
+        }
         return true;
     }
 

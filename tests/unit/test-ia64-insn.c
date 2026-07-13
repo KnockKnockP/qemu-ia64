@@ -2897,6 +2897,37 @@ static uint64_t f_misc_slot_raw(uint8_t x6, uint8_t f1,
            ((uint64_t)f1 << 6);
 }
 
+static void test_f_unit_clear_status_flags(void)
+{
+    const uint64_t all_status_flags =
+        (UINT64_C(0x3f) << 13) |
+        (UINT64_C(0x3f) << 26) |
+        (UINT64_C(0x3f) << 39) |
+        (UINT64_C(0x3f) << 52);
+    const uint64_t controls_and_traps = UINT64_C(0x0123456789abcdef) &
+                                        ~all_status_flags;
+    CPUIA64State env;
+
+    for (unsigned sf = 0; sf < 4; sf++) {
+        const uint64_t raw = (UINT64_C(5) << 27) |
+                             ((uint64_t)sf << 34);
+        const uint64_t selected_flags = UINT64_C(0x3f) << (13 + 13 * sf);
+        bool high = false;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        env.ar[IA64_AR_FPSR] = controls_and_traps | all_status_flags;
+        env.psr |= IA64_PSR_DFL_BIT | IA64_PSR_DFH_BIT;
+
+        g_assert_true(ia64_slot_is_f_misc(IA64_SLOT_TYPE_F, raw));
+        g_assert_false(ia64_slot_raises_disabled_fp(
+                           &env, IA64_SLOT_TYPE_F, raw, &high));
+        g_assert_true(ia64_exec_f_misc(&env, raw));
+        g_assert_cmphex(env.ar[IA64_AR_FPSR], ==,
+                        controls_and_traps |
+                        (all_status_flags & ~selected_flags));
+    }
+}
+
 static uint64_t test_pair32(uint32_t high, uint32_t low)
 {
     return ((uint64_t)high << 32) | low;
@@ -4687,6 +4718,8 @@ int main(int argc, char **argv)
                     test_f_unit_misc_packed_data_family);
     g_test_add_func("/ia64-insn/f-unit-misc-minmax-family",
                     test_f_unit_misc_minmax_family);
+    g_test_add_func("/ia64-insn/f-unit-clear-status-flags",
+                    test_f_unit_clear_status_flags);
     g_test_add_func("/ia64-insn/f-unit-misc-noop",
                     test_f_unit_misc_noop);
     g_test_add_func("/ia64-insn/ldst-immediate-decode",
