@@ -358,6 +358,10 @@ typedef enum IA64CPUModel {
     IA64_CPU_MODEL_ITANIUM2,
 } IA64CPUModel;
 
+struct CPUArchState;
+typedef bool (*IA64PlatformBreakHandler)(struct CPUArchState *env,
+                                         uint64_t immediate);
+
 typedef struct CPUArchState {
     /* r0 is architecturally hardwired to zero; writes must be ignored. */
     uint64_t gr[IA64_GR_COUNT];
@@ -440,6 +444,13 @@ typedef struct CPUArchState {
     bool fault_exit_pending_tb_translate;
 
     struct {} end_reset_fields;
+
+    /*
+     * Optional machine-owned monitor for platform debug-service breaks.
+     * This is host policy rather than architectural CPU state, so reset and
+     * migration must not treat it as guest-visible state.
+     */
+    IA64PlatformBreakHandler platform_break_handler;
 
     /*
      * QEMU virtual-clock deadline timer for CR.ITM, owned by the CPU.  NULL

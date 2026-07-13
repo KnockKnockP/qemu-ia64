@@ -120,6 +120,12 @@ void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
     *next_ip = env->ip;
 }
 
+bool ia64_try_platform_break(CPUIA64State *env, uint64_t iim)
+{
+    return env != NULL && env->platform_break_handler != NULL &&
+           env->platform_break_handler(env, iim);
+}
+
 void ia64_deliver_disabled_fp_interruption(CPUIA64State *env, bool high,
                                            uint64_t *next_ip)
 {

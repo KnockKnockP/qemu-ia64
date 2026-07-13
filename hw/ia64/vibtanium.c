@@ -7,6 +7,7 @@
 #include "qemu/thread.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
+#include "accel/tcg/cpu-ldst.h"
 #include "hw/acpi/acpi.h"
 #include "hw/char/serial-mm.h"
 #include "hw/core/cpu.h"
@@ -50,6 +51,7 @@
 #define VIBTANIUM_PIIX_IDETIM_ENABLE 0x80
 #define VIBTANIUM_PIB_INTA_OFFSET UINT64_C(0x1e0000)
 #define VIBTANIUM_PIB_XTPR_OFFSET UINT64_C(0x1e0008)
+#define VIBTANIUM_WINDOWS_DEBUG_PROMPT UINT64_C(0x80015)
 
 typedef struct VibtaniumPciHostState {
     PCIHostState parent_obj;
@@ -61,6 +63,37 @@ typedef struct VibtaniumPciBarAllocator {
 } VibtaniumPciBarAllocator;
 
 OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumPciHostState, VIBTANIUM_PCI_HOST)
+
+static bool vibtanium_handle_platform_break(CPUIA64State *env,
+                                             uint64_t immediate)
+{
+    uint64_t response = ia64_read_gr(env, 9);
+    uint64_t maximum = ia64_read_gr(env, 10);
+    uint64_t length = 0;
+
+    /* Windows' IA-64 DebugPrompt stub places break.i in slot 2. */
+    if (immediate != VIBTANIUM_WINDOWS_DEBUG_PROMPT ||
+        ia64_env_ri(env) != 2) {
+        return false;
+    }
+
+    /*
+     * An inactive Windows kernel-debugger stub does not consume prompt
+     * services.  Checked components then redispatch the prompt breakpoint
+     * recursively.  Act as the vibtanium platform debugger and choose the
+     * documented "g" (ignore and continue) response for headless guests.
+    */
+    if (response != 0 && maximum != 0) {
+        cpu_stb_data(env, response, 'g');
+        length = 1;
+        if (maximum > 1) {
+            cpu_stb_data(env, response + 1, '\n');
+            length = 2;
+        }
+    }
+    ia64_write_gr(env, 8, length);
+    return true;
+}
 
 static void vibtanium_acpi_update_sci(ACPIREGS *regs)
 {
@@ -1329,6 +1362,10 @@ static void vibtanium_init(MachineState *machine)
     }
     vibtanium_efi_set_guest_ram_size(machine->ram_size);
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
+    if (vms->debug_prompt_autocontinue) {
+        vms->cpu->env.platform_break_handler =
+            vibtanium_handle_platform_break;
+    }
     vms->iosapic = qdev_new(TYPE_IA64_IOSAPIC);
     ia64_iosapic_set_cpu(IA64_IOSAPIC(vms->iosapic), vms->cpu);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(vms->iosapic), &error_fatal);
@@ -1445,6 +1482,22 @@ static void vibtanium_set_hcdp_serial_console(Object *obj, bool value,
     vms->hcdp_serial_console = value;
 }
 
+static bool vibtanium_get_debug_prompt_autocontinue(Object *obj,
+                                                     Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    return vms->debug_prompt_autocontinue;
+}
+
+static void vibtanium_set_debug_prompt_autocontinue(Object *obj, bool value,
+                                                     Error **errp)
+{
+    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
+
+    vms->debug_prompt_autocontinue = value;
+}
+
 static char *vibtanium_get_nvram(Object *obj, Error **errp)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
@@ -1501,6 +1554,7 @@ static void vibtanium_machine_instance_init(Object *obj)
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
     vms->built_in_test = vibtanium_builtin_bit_available();
+    vms->debug_prompt_autocontinue = true;
 }
 
 static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
@@ -1540,6 +1594,12 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
                                    vibtanium_set_hcdp_serial_console);
     object_class_property_set_description(oc, "hcdp-serial-console",
         "Expose the IA-64 HCDP UART as the firmware-selected primary console");
+
+    object_class_property_add_bool(oc, "debug-prompt-autocontinue",
+                                   vibtanium_get_debug_prompt_autocontinue,
+                                   vibtanium_set_debug_prompt_autocontinue);
+    object_class_property_set_description(oc, "debug-prompt-autocontinue",
+        "Reply 'g' to Windows IA-64 debugger prompts when running headless");
 
     object_class_property_add_str(oc, "nvram",
                                   vibtanium_get_nvram,

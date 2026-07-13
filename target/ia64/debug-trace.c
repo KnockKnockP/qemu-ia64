@@ -1304,6 +1304,9 @@ void ia64_state_trace_bundle(CPUIA64State *env)
             " r44=0x%016" PRIx64 " r45=0x%016" PRIx64
             " r46=0x%016" PRIx64 " r47=0x%016" PRIx64
             " r48=0x%016" PRIx64 " r49=0x%016" PRIx64
+            " r55=0x%016" PRIx64 " r58=0x%016" PRIx64
+            " r63=0x%016" PRIx64 " r67=0x%016" PRIx64
+            " r55nat=%d r58nat=%d r63nat=%d r67nat=%d"
             " r70=0x%016" PRIx64 " r71=0x%016" PRIx64
             " r72=0x%016" PRIx64 " r73=0x%016" PRIx64
             " r74=0x%016" PRIx64 " r75=0x%016" PRIx64
@@ -1337,6 +1340,10 @@ void ia64_state_trace_bundle(CPUIA64State *env)
             ia64_read_gr(env, 44), ia64_read_gr(env, 45),
             ia64_read_gr(env, 46), ia64_read_gr(env, 47),
             ia64_read_gr(env, 48), ia64_read_gr(env, 49),
+            ia64_read_gr(env, 55), ia64_read_gr(env, 58),
+            ia64_read_gr(env, 63), ia64_read_gr(env, 67),
+            ia64_read_gr_nat(env, 55), ia64_read_gr_nat(env, 58),
+            ia64_read_gr_nat(env, 63), ia64_read_gr_nat(env, 67),
             ia64_read_gr(env, 70), ia64_read_gr(env, 71),
             ia64_read_gr(env, 72), ia64_read_gr(env, 73),
             ia64_read_gr(env, 74), ia64_read_gr(env, 75),

@@ -568,6 +568,25 @@ static void test_rse_bspstore_write_preserves_dirty_boundary(void)
     g_assert_cmpuint(env.rse.clean_count, ==, 101);
 }
 
+static bool test_platform_break_handler(CPUIA64State *env, uint64_t iim)
+{
+    ia64_write_gr(env, 8, iim);
+    return iim == 0x80015;
+}
+
+static void test_platform_break_handler_survives_reset(void)
+{
+    CPUIA64State env = { 0 };
+
+    env.platform_break_handler = test_platform_break_handler;
+    ia64_cpu_reset_synthetic_itanium2(&env);
+
+    g_assert_true(ia64_try_platform_break(&env, 0x80015));
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 0x80015);
+    g_assert_false(ia64_try_platform_break(&env, 0x80014));
+    g_assert_cmphex(ia64_read_gr(&env, 8), ==, 0x80014);
+}
+
 static void test_rse_loadrs_dirty_partition_survives_bspstore_switch(void)
 {
     const uint64_t mov_ar_bspstore_r33_raw =
@@ -4564,6 +4583,8 @@ int main(int argc, char **argv)
                     test_banked_register_switch_via_bsw);
     g_test_add_func("/ia64-insn/syscall-break-user-to-kernel",
                     test_syscall_break_user_to_kernel_transition);
+    g_test_add_func("/ia64-insn/platform-break-handler-survives-reset",
+                    test_platform_break_handler_survives_reset);
     g_test_add_func("/ia64-insn/syscall-rfi-kernel-to-user",
                     test_syscall_return_rfi_kernel_to_user_transition);
     g_test_add_func("/ia64-insn/epc-user-to-kernel",

@@ -113,6 +113,7 @@ struct VibtaniumMachineState {
     bool built_in_test;
     bool efi_auto_enter;
     bool hcdp_serial_console;
+    bool debug_prompt_autocontinue;
 };
 
 #endif

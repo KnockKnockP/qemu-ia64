@@ -190,6 +190,11 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
         IA64_PERF_INC(IA64_PERF_TRANSITION_BREAK_SYSCALL);
     }
     ia64_trace_linux_syscall_break(env, mnemonic, iim, *next_ip);
+    if (ia64_try_platform_break(env, iim)) {
+        ia64_progress_trace_event(env, mnemonic, iim, source_ip, source_ri,
+                                  *next_ip);
+        return;
+    }
     ia64_deliver_break_interruption(env, iim, next_ip, detail);
     ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
     ia64_progress_trace_event(env, mnemonic, iim, source_ip, source_ri,

@@ -249,6 +249,7 @@ void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env);
 void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env);
 void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
                                      uint64_t *next_ip, const char *detail);
+bool ia64_try_platform_break(CPUIA64State *env, uint64_t iim);
 void ia64_deliver_disabled_fp_interruption(CPUIA64State *env, bool high,
                                            uint64_t *next_ip);
 bool ia64_slot_raises_disabled_fp(CPUIA64State *env, IA64SlotType type,
