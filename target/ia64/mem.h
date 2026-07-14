@@ -72,6 +72,9 @@ IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
                                       MMUAccessType access_type);
 bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
                                     hwaddr *paddr);
+bool ia64_translate_data_non_access_checked(CPUIA64State *env,
+                                            vaddr address, bool debug,
+                                            IA64TranslateResult *result);
 bool ia64_translate_address(CPUIA64State *env, vaddr address,
                             MMUAccessType access_type, int mmu_idx,
                             bool debug, IA64TranslateResult *result);

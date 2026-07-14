@@ -3329,8 +3329,8 @@ ia64_exec_m_virtual_translation_checked(CPUIA64State *env, uint64_t raw,
     {
         IA64TranslateResult result;
 
-        if (!ia64_translate_address(env, address, MMU_DATA_LOAD, 0, true,
-                                    &result)) {
+        if (!ia64_translate_data_non_access_checked(env, address, true,
+                                                    &result)) {
             if (fault) {
                 *fault = result;
             }

@@ -1613,6 +1613,9 @@ static void test_m_unit_system_memory_management(void)
                                                  kernel_itr_i_r16_r18_raw));
     g_assert_cmphex(env.itr[2], ==, 0x0010000004000661ULL);
 
+    g_assert_true(ia64_install_translation(
+                      &env, false, true, 2, 0xa000000100bc0000ULL,
+                      0x0010000100bc0661ULL, 12ULL << 2));
     ia64_write_gr(&env, 2, 0xa000000100bc0000ULL);
     g_assert_true(ia64_slot_is_m_virtual_translation(IA64_SLOT_TYPE_M,
                                                      kernel_tpa_r3_r2_raw));
@@ -1635,6 +1638,13 @@ static void test_m_unit_system_memory_management(void)
                       &env, false, true, 0, 0xa000000000040000ULL,
                       0x0000000004b48000ULL | (7ULL << 9) | 1ULL,
                       12ULL << 2));
+    g_assert_cmpint(ia64_exec_m_virtual_translation_checked(
+                        &env, kernel_tpa_r3_r2_raw, &fault),
+                    ==, IA64_VIRTUAL_TRANSLATION_OK);
+    g_assert_cmphex(ia64_read_gr(&env, 3), ==, 0x0000000004b48a10ULL);
+
+    env.psr &= ~IA64_PSR_DT_BIT;
+    ia64_write_gr(&env, 3, 0);
     g_assert_cmpint(ia64_exec_m_virtual_translation_checked(
                         &env, kernel_tpa_r3_r2_raw, &fault),
                     ==, IA64_VIRTUAL_TRANSLATION_OK);

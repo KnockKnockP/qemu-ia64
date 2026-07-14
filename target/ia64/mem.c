@@ -47,6 +47,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           MMUAccessType access_type,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
+                                          bool non_access,
                                           IA64TranslateResult *result);
 static const char *ia64_access_kind(bool instruction);
 
@@ -479,7 +480,7 @@ IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
 
     if (!ia64_translate_address_common(env, iha, MMU_DATA_LOAD,
                                        IA64_MMU_DATA_CPL0, 0, false, false,
-                                       &vhpt_addr)) {
+                                       false, &vhpt_addr)) {
         IA64_PERF_INC(IA64_PERF_VHPT_WALK_VADDR_MISS);
         trace_ia64_vhpt_walk("vaddr-miss", ia64_access_kind(instruction),
                              address, iha, 0, 0, itir);
@@ -915,8 +916,8 @@ bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
 {
     IA64TranslateResult result;
 
-    if (!ia64_translate_address_no_detail(env, address, MMU_DATA_LOAD, 0,
-                                          true, &result)) {
+    if (!ia64_translate_data_non_access_checked(env, address, false,
+                                                &result)) {
         return false;
     }
     if (paddr) {
@@ -925,13 +926,23 @@ bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
     return true;
 }
 
+bool ia64_translate_data_non_access_checked(CPUIA64State *env,
+                                            vaddr address, bool debug,
+                                            IA64TranslateResult *result)
+{
+    /* tpa searches the DTLB even when PSR.dt disables normal data mapping. */
+    return ia64_translate_address_common(
+        env, address, MMU_DATA_LOAD, 0,
+        ia64_current_privilege_level(env->psr), debug, true, true, result);
+}
+
 bool ia64_translate_address(CPUIA64State *env, vaddr address,
                             MMUAccessType access_type, int mmu_idx,
                             bool debug, IA64TranslateResult *result)
 {
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
-        ia64_current_privilege_level(env->psr), debug, true, result);
+        ia64_current_privilege_level(env->psr), debug, true, false, result);
 }
 
 bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
@@ -940,7 +951,7 @@ bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
 {
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
-        ia64_current_privilege_level(env->psr), debug, false, result);
+        ia64_current_privilege_level(env->psr), debug, false, false, result);
 }
 
 bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
@@ -949,17 +960,20 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
                                      IA64TranslateResult *result)
 {
     return ia64_translate_address_common(env, address, access_type, mmu_idx,
-                                         cpl, debug, true, result);
+                                         cpl, debug, true, false, result);
 }
 
 static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           MMUAccessType access_type,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
+                                          bool non_access,
                                           IA64TranslateResult *result)
 {
     bool instruction = access_type == MMU_INST_FETCH;
-    bool needs_translation = ia64_translation_required(env->psr, access_type);
+    bool needs_translation = non_access ||
+                             ia64_translation_required(env->psr,
+                                                       access_type);
     const IA64TranslationEntry *entry;
     uint64_t rr;
 
@@ -1045,7 +1059,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         goto record;
     }
 
-    if (!debug && !entry->accessed) {
+    if (!non_access && !debug && !entry->accessed) {
         result->status = IA64_TRANSLATE_ACCESS_BIT;
         if (format_detail) {
             snprintf(result->message, sizeof(result->message),
@@ -1057,7 +1071,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         goto record;
     }
 
-    if (!ia64_translation_allows(entry, access_type, cpl)) {
+    if (!non_access && !ia64_translation_allows(entry, access_type, cpl)) {
         result->status = IA64_TRANSLATE_ACCESS_DENIED;
         if (format_detail) {
             snprintf(result->message, sizeof(result->message),
