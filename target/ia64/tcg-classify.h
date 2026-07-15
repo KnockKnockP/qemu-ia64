@@ -13,6 +13,7 @@ typedef enum IA64TcgTbBoundary {
     IA64_TCG_TB_BOUNDARY_VIRTUAL_TRANSLATION,
     IA64_TCG_TB_BOUNDARY_BRANCH,
     IA64_TCG_TB_BOUNDARY_CPU_STATE,
+    IA64_TCG_TB_BOUNDARY_SERIALIZATION,
     IA64_TCG_TB_BOUNDARY_TRANSLATION_STATE,
     IA64_TCG_TB_BOUNDARY_RSE_STATE,
 } IA64TcgTbBoundary;
@@ -37,6 +38,9 @@ IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle(
 IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle_with_physical(
     const IA64DecodedBundle *bundle, uint64_t pc, uint64_t physical_pc,
     bool physical_pc_valid);
+IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle_from_slot_with_physical(
+    const IA64DecodedBundle *bundle, uint64_t pc, uint64_t physical_pc,
+    bool physical_pc_valid, unsigned start_slot);
 const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary);
 bool ia64_tcg_tb_boundary_ends_tb(IA64TcgTbBoundary boundary);
 bool ia64_tcg_pc_is_efi_call_gate(uint64_t pc);
@@ -143,6 +147,7 @@ typedef struct IA64TcgFastSlot {
     bool deposit_zero;
     bool addp4;
     bool uses_stacked_gr;
+    bool starts_group;
     int64_t immediate;
     uint64_t raw;
     uint64_t source_nat_mask;

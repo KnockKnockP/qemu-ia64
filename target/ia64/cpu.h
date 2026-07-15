@@ -9,6 +9,7 @@
 
 #define IA64_GR_COUNT 128
 #define IA64_STATIC_GR_COUNT 32
+#define IA64_MAX_STACKED_REGS (IA64_GR_COUNT - IA64_STATIC_GR_COUNT)
 #define IA64_STACKED_GR_COUNT 4096
 #define IA64_RSE_NAT_WORDS ((IA64_STACKED_GR_COUNT + 63) / 64)
 #define IA64_FR_COUNT 128
@@ -31,6 +32,14 @@
 #define IA64_PMD_COUNT 256
 #define IA64_CFM_MASK UINT64_C(0x0000003fffffffff)
 #define IA64_IFS_VALID_BIT UINT64_C(0x8000000000000000)
+#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
+#define IA64_PSR_LP_BIT UINT64_C(0x0000000002000000)
+#define IA64_PSR_TB_BIT UINT64_C(0x0000000004000000)
+#define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
+#define IA64_PSR_CPL_SHIFT 32
+#define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_PSR_DA_BIT UINT64_C(0x0000004000000000)
+#define IA64_PSR_DD_BIT UINT64_C(0x0000008000000000)
 #define IA64_PSR_RI_SHIFT 41
 #define IA64_PSR_RI_MASK UINT64_C(0x0000060000000000)
 #define IA64_TB_PSR_DT_BIT UINT64_C(0x0000000000020000)
@@ -47,16 +56,31 @@
 #define IA64_TB_FLAG_RI_MASK (3u << IA64_TB_FLAG_RI_SHIFT)
 #define IA64_TB_FLAG_BENCHMARK (1u << 7)
 #define IA64_TB_FLAG_PROFILE (1u << 8)
+#define IA64_TB_FLAG_GROUP_START (1u << 9)
+#define IA64_TB_FLAG_TYPED_GROUP (1u << 10)
+
+#define IA64_INSN_START_GROUP_START (UINT64_C(1) << 0)
+#define IA64_INSN_START_TYPED_GROUP (UINT64_C(1) << 1)
 #define IA64_ISR_X_BIT 32
 #define IA64_ISR_W_BIT 33
 #define IA64_ISR_R_BIT 34
+#define IA64_ISR_NA_BIT 35
 #define IA64_ISR_CODE_MASK UINT64_C(0x000000000000ffff)
 #define IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION UINT64_C(0x10)
 #define IA64_ISR_SP_BIT 36
+#define IA64_ISR_RS_BIT 37
+#define IA64_ISR_IR_BIT 38
 #define IA64_ISR_NI_BIT 39
 #define IA64_ISR_EI_SHIFT 41
 #define IA64_ISR_EI_MASK UINT64_C(0x0000060000000000)
 #define IA64_ISR_ED_BIT 43
+
+#define IA64_RSC_MODE_MASK UINT64_C(0x3)
+#define IA64_RSC_PL_SHIFT 2
+#define IA64_RSC_PL_MASK UINT64_C(0xc)
+#define IA64_RSC_BE_BIT UINT64_C(0x10)
+#define IA64_RSC_LOADRS_SHIFT 16
+#define IA64_RSC_LOADRS_MASK UINT64_C(0x3fff)
 
 /*
  * AR.ITC advances at a fixed declared rate backed by the QEMU virtual clock,
@@ -79,7 +103,16 @@ typedef enum IA64MmuIndex {
     IA64_MMU_INST_CPL1 = 6,
     IA64_MMU_INST_CPL2 = 7,
     IA64_MMU_INST_CPL3 = 8,
-    IA64_MMU_INDEX_COUNT = 9,
+    /*
+     * RSE backing-store references are governed by PSR.rt and RSC.pl, not
+     * PSR.dt and PSR.cpl.  Keep the access level in the softmmu index so a
+     * cached translation never silently survives an RSC.pl change.
+     */
+    IA64_MMU_RSE_CPL0 = 9,
+    IA64_MMU_RSE_CPL1 = 10,
+    IA64_MMU_RSE_CPL2 = 11,
+    IA64_MMU_RSE_CPL3 = 12,
+    IA64_MMU_INDEX_COUNT = 13,
 } IA64MmuIndex;
 
 #define IA64_MMU_ALL_IDXMAP ((uint32_t)((1u << IA64_MMU_INDEX_COUNT) - 1u))
@@ -145,6 +178,31 @@ static inline int ia64_tcg_data_mmu_index_for_tb_flags(uint32_t flags)
         return IA64_MMU_PHYSICAL;
     }
     return IA64_MMU_DATA_CPL0 + ia64_tcg_tb_flags_cpl(flags);
+}
+
+static inline unsigned ia64_rsc_pl(uint64_t rsc)
+{
+    return (rsc & IA64_RSC_PL_MASK) >> IA64_RSC_PL_SHIFT;
+}
+
+static inline int ia64_rse_mmu_index(uint64_t psr, uint64_t rsc)
+{
+    if ((psr & IA64_PSR_RT_BIT) == 0) {
+        return IA64_MMU_PHYSICAL;
+    }
+    return IA64_MMU_RSE_CPL0 + ia64_rsc_pl(rsc);
+}
+
+static inline bool ia64_mmu_index_is_rse(int mmu_idx)
+{
+    return mmu_idx >= IA64_MMU_RSE_CPL0 &&
+           mmu_idx <= IA64_MMU_RSE_CPL3;
+}
+
+static inline unsigned ia64_rse_mmu_index_cpl(int mmu_idx)
+{
+    g_assert(ia64_mmu_index_is_rse(mmu_idx));
+    return mmu_idx - IA64_MMU_RSE_CPL0;
 }
 
 enum IA64ApplicationRegister {
@@ -218,6 +276,24 @@ typedef struct IA64RSEState {
     uint32_t rrb_fr;
     uint32_t rrb_pr;
     uint32_t current_frame_base;
+    /* Architectural RSE.BOF index within the 96-register physical window. */
+    uint32_t bol;
+    /*
+     * Architectural 96-register physical-file partitions (SDM Vol. 2,
+     * chapter 6).  stacked_gr[] remains a larger migration-compatible
+     * implementation ring, but only the 96-register window described by
+     * these counters is physically resident.  dirty/dirty_nat may be
+     * negative while a br.ret/rfi target frame is incomplete; in that state
+     * BSPSTORE lies above BSP until mandatory loads commit each missing word.
+     */
+    int32_t dirty;
+    int32_t dirty_nat;
+    int32_t clean;
+    int32_t clean_nat;
+    int32_t invalid;
+    bool cfle;
+    /* Transient tag while the current memory reference is issued by RSE. */
+    bool reference;
     uint32_t pending_fill_count;
     uint64_t pending_fill_ip;
     /*
@@ -226,6 +302,14 @@ typedef struct IA64RSEState {
      * serializing it in vmstate_rse.
      */
     uint32_t clean_count;
+    /*
+     * Logical (architectural-name) view of stacked-register NaTs and the
+     * registers whose logical value/NaT must be copied back to the physical
+     * RSE file.  env->gr[32..127] holds the corresponding values.  These are
+     * transient caches, not additional migration authority.
+     */
+    uint64_t logical_nat[2];
+    uint64_t logical_dirty[2];
     uint64_t stacked_gr[IA64_STACKED_GR_COUNT];
     uint64_t stacked_nat[IA64_RSE_NAT_WORDS];
 } IA64RSEState;
@@ -325,6 +409,9 @@ typedef enum IA64ExceptionKind {
     IA64_EXCEPTION_DISABLED_FP_HIGH,
     IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION,
     IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE,
+    /* Post-instruction traps; appended to preserve serialized kind values. */
+    IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER,
+    IA64_EXCEPTION_TAKEN_BRANCH_TRAP,
 } IA64ExceptionKind;
 
 typedef struct IA64ExceptionRecord {
@@ -355,6 +442,35 @@ typedef struct IA64AlatState {
     uint64_t gr_mask[2];
     uint8_t gr_refcount[IA64_GR_COUNT];
 } IA64AlatState;
+
+/*
+ * Hidden ordinary-source overlay for eagerly retired translated results.
+ * The first write to a GR/NaT or PR preserves its source-visibility-epoch
+ * entry value here; later ordinary reads in the same epoch select the saved
+ * value.  Explicitly forwarded sources must bypass this overlay.  It is
+ * migrated together with an explicit typed owner so an epoch can span a TB,
+ * page, restore, or migration boundary without entering the shadow-unaware
+ * coexistence engine.
+ */
+typedef struct IA64IssueGroupState {
+    uint64_t saved_gr[IA64_GR_COUNT];
+    uint64_t saved_nat[IA64_GR_COUNT];
+    uint64_t saved_gr_mask[2];
+    uint64_t saved_br[IA64_BR_COUNT];
+    uint64_t saved_pr;
+    /* Ordinary entry image and branch-only forwarding for AR.PFS. */
+    uint64_t saved_pfs;
+    /* Physical PR bits explicitly forwarded from eligible nonbranch writers. */
+    uint64_t branch_pr_forward_mask;
+    /* BR writes have the same ordinary-vs-branch visibility split as PR. */
+    uint8_t saved_br_mask;
+    uint8_t branch_br_forward_mask;
+    bool pr_saved;
+    bool pfs_saved;
+    bool branch_pfs_forwarded;
+    /* True while a split typed region owns the open visibility epoch. */
+    bool typed_active;
+} IA64IssueGroupState;
 
 typedef enum IA64CPUModel {
     IA64_CPU_MODEL_ITANIUM2,
@@ -396,9 +512,35 @@ typedef struct CPUArchState {
     uint64_t pmd[IA64_PMD_COUNT];
 
     uint64_t ip;
+    /*
+     * Internal retirement state used to populate CR.IIPA on a collected
+     * interruption.  It is distinct from CR.IIPA because handler software may
+     * read and write that control register while PSR.ic is clear.
+     */
+    uint64_t last_successful_bundle;
+    IA64IssueGroupState issue_group;
     uint64_t psr;
+    /*
+     * A guest PSR.ic transition has executed but has not yet crossed a data or
+     * instruction serialization boundary.  Visible PSR.ic still controls
+     * interruption-resource collection; this bit controls ISR.ni and the
+     * special Data Nested TLB selection during the in-flight interval.
+     */
+    bool psr_ic_inflight;
     uint8_t ri;
     bool ri_dirty;
+    /*
+     * True when the next instruction begins a new source-visibility epoch.
+     * This is an execution frontier, not proof that an encoded stop preceded
+     * every exception or control-transfer path that can establish it.
+     */
+    bool instruction_group_start;
+    /*
+     * Transient translated-memory breadcrumb.  insn_start records the issue
+     * group frontier at bundle entry, while a fault in slot 1 or 2 may need
+     * the more precise frontier published immediately before the access.
+     */
+    bool instruction_group_dirty;
     uint64_t cfm;
 
     IA64RSEState rse;
@@ -483,6 +625,34 @@ struct ArchCPU {
     IA64ProductionProfile production_profile;
 };
 
+/* Restore only the translated/interpreted execution frontier metadata. */
+static inline void ia64_env_set_source_visibility_frontier(
+    CPUIA64State *env, bool starts_epoch)
+{
+    env->instruction_group_start = starts_epoch;
+    env->instruction_group_dirty = false;
+}
+
+static inline void ia64_env_clear_ordinary_source_overlay(CPUIA64State *env)
+{
+    env->issue_group.saved_gr_mask[0] = 0;
+    env->issue_group.saved_gr_mask[1] = 0;
+    env->issue_group.saved_br_mask = 0;
+    env->issue_group.branch_br_forward_mask = 0;
+    env->issue_group.pr_saved = false;
+    env->issue_group.branch_pr_forward_mask = 0;
+    env->issue_group.pfs_saved = false;
+    env->issue_group.branch_pfs_forwarded = false;
+    env->issue_group.typed_active = false;
+}
+
+/* Establish a fresh ordinary-source epoch after a real architectural event. */
+static inline void ia64_env_begin_source_visibility_epoch(CPUIA64State *env)
+{
+    ia64_env_clear_ordinary_source_overlay(env);
+    ia64_env_set_source_visibility_frontier(env, true);
+}
+
 static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)
 {
     if (((env->psr ^ psr) & IA64_TB_PSR_BN_BIT) != 0) {
@@ -498,6 +668,27 @@ static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)
     env->psr = psr;
     env->ri = ia64_psr_ri(psr);
     env->ri_dirty = false;
+}
+
+/* Apply an architected guest PSR write without conflating host-side restores. */
+static inline void ia64_env_write_psr_guest(CPUIA64State *env, uint64_t psr)
+{
+    if ((env->psr ^ psr) & IA64_PSR_IC_BIT) {
+        env->psr_ic_inflight = true;
+    }
+    ia64_env_set_psr(env, psr);
+}
+
+static inline void ia64_env_serialize_psr_ic(CPUIA64State *env)
+{
+    env->psr_ic_inflight = false;
+}
+
+/* Reset/debug replacement and implicit architectural serialization. */
+static inline void ia64_env_replace_psr(CPUIA64State *env, uint64_t psr)
+{
+    ia64_env_set_psr(env, psr);
+    ia64_env_serialize_psr_ic(env);
 }
 
 static inline uint64_t ia64_env_psr(CPUIA64State *env)
@@ -533,6 +724,24 @@ static inline unsigned ia64_env_restore_ri(const CPUIA64State *env,
                                            unsigned data_ri)
 {
     return (env->ri_dirty ? env->ri : data_ri) & 3;
+}
+
+/*
+ * Consume the slot-precise issue-group frontier published around a translated
+ * memory access.  With no active override, bundle-granular insn_start data is
+ * authoritative.
+ */
+static inline void ia64_env_restore_source_visibility(
+    CPUIA64State *env, uint64_t data_state)
+{
+    if (!env->instruction_group_dirty) {
+        env->instruction_group_start =
+            (data_state & IA64_INSN_START_GROUP_START) != 0;
+        env->issue_group.typed_active =
+            (data_state & IA64_INSN_START_TYPED_GROUP) != 0;
+    }
+
+    env->instruction_group_dirty = false;
 }
 
 #define CPU_RESOLVING_TYPE TYPE_IA64_CPU

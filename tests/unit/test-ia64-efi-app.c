@@ -308,6 +308,9 @@ static void test_prepare_cpu_entry_abi(void)
     g_assert_null(err);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+    env.nat.gr_nat[0] = UINT64_C(1) << 16;
+    env.nat.gr_nat[1] = UINT64_C(1) << 17;
+    env.psr_ic_inflight = true;
     g_assert_true(vibtanium_efi_cpu_is_pristine_for_handoff(&env));
     g_assert_true(vibtanium_efi_prepare_cpu(&env, &image));
     g_assert_false(vibtanium_efi_cpu_is_pristine_for_handoff(&env));
@@ -323,11 +326,15 @@ static void test_prepare_cpu_entry_abi(void)
     g_assert_cmphex(ia64_read_gr(&env, 32), ==, VIBTANIUM_EFI_IMAGE_HANDLE);
     g_assert_cmphex(ia64_read_gr(&env, 33), ==, VIBTANIUM_EFI_SYSTEM_TABLE);
     g_assert_cmphex(env.psr & IA64_PSR_BN_BIT, ==, IA64_PSR_BN_BIT);
+    g_assert_cmphex(env.nat.gr_nat[0], ==, UINT64_C(1) << 17);
+    g_assert_cmphex(env.nat.gr_nat[1], ==, UINT64_C(1) << 16);
+    g_assert_true(env.psr_ic_inflight);
     ia64_write_gr(&env, 28, 0x123456789abcdef0ULL);
-    env.psr &= ~IA64_PSR_BN_BIT;
+    ia64_env_set_psr(&env, ia64_env_psr(&env) & ~IA64_PSR_BN_BIT);
     g_assert_cmphex(ia64_read_gr(&env, 28), ==, 0);
-    env.psr |= IA64_PSR_BN_BIT;
+    ia64_env_set_psr(&env, ia64_env_psr(&env) | IA64_PSR_BN_BIT);
     g_assert_cmphex(ia64_read_gr(&env, 28), ==, 0x123456789abcdef0ULL);
+    g_assert_true(env.psr_ic_inflight);
     g_assert_cmphex(env.ar[IA64_AR_BSP], ==,
                     VIBTANIUM_EFI_BACKING_STORE_BASE);
     g_assert_cmphex(env.ar[IA64_AR_BSPSTORE], ==,

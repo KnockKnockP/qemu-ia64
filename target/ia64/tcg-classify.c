@@ -73,6 +73,8 @@ const char *ia64_tcg_tb_boundary_name(IA64TcgTbBoundary boundary)
         return "branch";
     case IA64_TCG_TB_BOUNDARY_CPU_STATE:
         return "cpu-state";
+    case IA64_TCG_TB_BOUNDARY_SERIALIZATION:
+        return "serialization";
     case IA64_TCG_TB_BOUNDARY_TRANSLATION_STATE:
         return "translation-state";
     case IA64_TCG_TB_BOUNDARY_RSE_STATE:
@@ -106,6 +108,8 @@ static IA64TcgFallbackReason ia64_tcg_fallback_reason_for_boundary(
     case IA64_TCG_TB_BOUNDARY_BRANCH:
         return IA64_TCG_FALLBACK_BOUNDARY_BRANCH;
     case IA64_TCG_TB_BOUNDARY_CPU_STATE:
+        return IA64_TCG_FALLBACK_BOUNDARY_CPU_STATE;
+    case IA64_TCG_TB_BOUNDARY_SERIALIZATION:
         return IA64_TCG_FALLBACK_BOUNDARY_CPU_STATE;
     case IA64_TCG_TB_BOUNDARY_TRANSLATION_STATE:
         return IA64_TCG_FALLBACK_BOUNDARY_TRANSLATION_STATE;
@@ -560,7 +564,7 @@ static bool ia64_tcg_build_fast_ldst_slot(const IA64LdstImmediate *ldst,
 }
 
 static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
-                                     unsigned slot_index,
+                                     unsigned slot_index, bool starts_group,
                                      IA64TcgFastSlot *slot,
                                      IA64TcgFastBundle *fast)
 {
@@ -583,6 +587,7 @@ static bool ia64_tcg_build_fast_slot(IA64SlotType type, uint64_t raw,
 
     memset(slot, 0, sizeof(*slot));
     slot->slot_index = slot_index;
+    slot->starts_group = starts_group;
     qp = ia64_slot_predicate(raw);
     if (qp >= 16 &&
         ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_PREDICATE)) {
@@ -1393,7 +1398,10 @@ static bool ia64_tcg_bundle_has_ldst_base_dependency(
     memset(&scratch, 0, sizeof(scratch));
     for (int i = 0; i < IA64_SLOT_COUNT; i++) {
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[i],
-                                      bundle->slot[i], i, &slot, &scratch)) {
+                                      bundle->slot[i], i,
+                                      i != 0 &&
+                                          bundle->info->stop_after_slot[i - 1],
+                                      &slot, &scratch)) {
             return false;
         }
         if (ia64_tcg_fast_slot_has_prior_base_dependency(&slot,
@@ -1482,7 +1490,7 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
 
         if (ia64_tcg_fast_disabled(IA64_TCG_FAST_DISABLE_MOVL) ||
             !ia64_tcg_build_fast_slot(bundle->info->slot_type[0],
-                                      bundle->slot[0], 0,
+                                      bundle->slot[0], 0, false,
                                       &fast->slot[0], fast)) {
             return false;
         }
@@ -1527,6 +1535,9 @@ bool ia64_tcg_build_fast_bundle(const IA64DecodedBundle *bundle,
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
                                       bundle->slot[slot],
                                       slot,
+                                      slot != 0 &&
+                                          bundle->info->stop_after_slot[
+                                              slot - 1],
                                       &fast->slot[slot], fast)) {
             return false;
         }
@@ -1589,7 +1600,10 @@ bool ia64_tcg_build_partial_bundle(const IA64DecodedBundle *bundle,
             return false;
         }
         fast = ia64_tcg_build_fast_slot(
-            type, bundle->slot[slot_index], slot_index, &slot, &slot_counts);
+            type, bundle->slot[slot_index], slot_index,
+            slot_index != 0 &&
+                bundle->info->stop_after_slot[slot_index - 1],
+            &slot, &slot_counts);
 
         /*
          * The ordinary bundle path reads every memory base before executing
@@ -1636,6 +1650,9 @@ uint8_t ia64_tcg_unsupported_slot_mask(const IA64DecodedBundle *bundle)
 
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
                                       bundle->slot[slot], slot,
+                                      slot != 0 &&
+                                          bundle->info->stop_after_slot[
+                                              slot - 1],
                                       &decoded, &scratch)) {
             mask |= 1u << slot;
         }
@@ -2369,6 +2386,9 @@ static bool ia64_tcg_build_direct_branch_prefix(
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
                                       bundle->slot[slot],
                                       slot,
+                                      slot != 0 &&
+                                          bundle->info->stop_after_slot[
+                                              slot - 1],
                                       &prefix->slot[slot], prefix)) {
             /*
              * Keep one decoded helper at the end of the prefix.  With no
@@ -2443,7 +2463,11 @@ bool ia64_tcg_build_speculation_check(const IA64DecodedBundle *bundle,
             continue;
         }
         if (!ia64_tcg_build_fast_slot(bundle->info->slot_type[slot],
-                                      bundle->slot[slot], slot, &fast_slot,
+                                      bundle->slot[slot], slot,
+                                      slot != 0 &&
+                                          bundle->info->stop_after_slot[
+                                              slot - 1],
+                                      &fast_slot,
                                       &slot_counts) ||
             fast_slot.op == IA64_TCG_FAST_OP_ALLOC ||
             fast_slot.op == IA64_TCG_FAST_OP_FP_SLOT ||
@@ -2728,6 +2752,9 @@ static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,
     if (ia64_slot_is_m_virtual_translation(type, raw)) {
         return IA64_TCG_TB_BOUNDARY_VIRTUAL_TRANSLATION;
     }
+    if (ia64_slot_is_m_serialization(type, raw)) {
+        return IA64_TCG_TB_BOUNDARY_SERIALIZATION;
+    }
     if (ia64_slot_is_m_processor_mask(type, raw) ||
         ia64_slot_is_m_mov_to_processor_status(type, raw) ||
         ia64_slot_is_m_mov_to_control(type, raw)) {
@@ -2770,6 +2797,13 @@ static IA64TcgTbBoundary ia64_tcg_slot_boundary(IA64SlotType type,
             }
         }
     }
+    if (type == IA64_SLOT_TYPE_X) {
+        major = ia64_slot_major_opcode(raw);
+        if (major == 0xc || major == 0xd) {
+            /* X3 brl.cond and X4 brl.call are control-flow boundaries. */
+            return IA64_TCG_TB_BOUNDARY_BRANCH;
+        }
+    }
 
     return IA64_TCG_TB_BOUNDARY_NONE;
 }
@@ -2785,16 +2819,28 @@ IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle_with_physical(
     const IA64DecodedBundle *bundle, uint64_t pc, uint64_t physical_pc,
     bool physical_pc_valid)
 {
+    return ia64_tcg_tb_boundary_for_bundle_from_slot_with_physical(
+        bundle, pc, physical_pc, physical_pc_valid, 0);
+}
+
+IA64TcgTbBoundary ia64_tcg_tb_boundary_for_bundle_from_slot_with_physical(
+    const IA64DecodedBundle *bundle, uint64_t pc, uint64_t physical_pc,
+    bool physical_pc_valid, unsigned start_slot)
+{
     if (!bundle || !bundle->valid) {
         return IA64_TCG_TB_BOUNDARY_INVALID_TEMPLATE;
     }
-    if (ia64_tcg_pc_is_efi_call_gate(pc) ||
+    if (start_slot >= IA64_SLOT_COUNT) {
+        start_slot = 0;
+    }
+    if (start_slot == 0 &&
+        (ia64_tcg_pc_is_efi_call_gate(pc) ||
         (physical_pc_valid &&
-         ia64_tcg_pc_is_efi_call_gate(physical_pc))) {
+         ia64_tcg_pc_is_efi_call_gate(physical_pc)))) {
         return IA64_TCG_TB_BOUNDARY_EFI_CALL_GATE;
     }
 
-    for (int slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+    for (unsigned slot = start_slot; slot < IA64_SLOT_COUNT; slot++) {
         IA64TcgTbBoundary boundary =
             ia64_tcg_slot_boundary(bundle->info->slot_type[slot],
                                    bundle->slot[slot]);

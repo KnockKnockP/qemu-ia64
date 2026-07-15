@@ -51,6 +51,10 @@ tests = {
   'test-fifo': [],
   'test-envlist': [],
   'test-ia64-bundle': [meson.project_source_root() / 'target/ia64/bundle.c'],
+  'test-ia64-decode': [
+    meson.project_source_root() / 'target/ia64/bundle.c',
+    meson.project_source_root() / 'target/ia64/decode.c',
+  ],
   'test-ia64-firmware': [],
   'test-ia64-tcg-classify': [
     'test-ia64-address-space-stubs.c',
@@ -102,6 +106,12 @@ tests = {
     meson.project_source_root() / 'hw/ia64/efi-vars.c',
   ],
 }
+
+if 'ia64-softmmu' in target_dirs
+  tests += {
+    'test-ia64-vmstate': [migration, io],
+  }
+endif
 
 if have_system or have_tools
   tests += {
@@ -242,9 +252,15 @@ foreach test_name, extra: tests
     src += test_ss.all_sources()
     deps += test_ss.all_dependencies()
   endif
-  if test_name == 'test-ia64-efi-app'
+  if test_name in ['test-ia64-efi-app', 'test-ia64-vmstate']
     test_c_args += ['-ffunction-sections', '-fdata-sections']
     test_link_args += ['-Wl,--gc-sections']
+  endif
+  if test_name == 'test-ia64-vmstate'
+    test_c_args += [
+      '-DCOMPILING_PER_TARGET',
+      '-DCONFIG_TARGET="ia64-softmmu-config-target.h"',
+    ]
   endif
   exe = executable(test_name, src, genh,
                    c_args: test_c_args,
@@ -260,3 +276,21 @@ foreach test_name, extra: tests
        priority: slow_tests.get(test_name, 30),
        suite: ['unit'])
 endforeach
+
+test('test-ia64-full-tcg-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-full-tcg-static.py',
+            meson.project_source_root() / 'target/ia64/translate.c'],
+     timeout: 30,
+     suite: ['unit'])
+
+if 'ia64-softmmu' in target_dirs
+  ia64_full_tcg_emulator = emulators['qemu-system-ia64']
+  test('test-ia64-full-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-full-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
+       timeout: 60,
+       suite: ['unit'])
+endif

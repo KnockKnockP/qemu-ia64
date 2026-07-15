@@ -20,6 +20,44 @@
 #include "tcg-classify.h"
 #include "trace-target_ia64.h"
 
+static G_NORETURN void ia64_raise_illegal_operation(CPUIA64State *env)
+{
+    CPUState *cpu = env_cpu(env);
+
+    /*
+     * The typed or legacy caller publishes the precise bundle and slot before
+     * entering this path.  Keep delivery independent of MMU access
+     * classification, and never return to the faulting TB.
+     */
+    ia64_deliver_illegal_operation_fast(env);
+    env->fault_exit_pending_tb_translate = true;
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu_loop_exit(cpu);
+}
+
+G_NORETURN void HELPER(raise_illegal_operation)(CPUIA64State *env)
+{
+    ia64_raise_illegal_operation(env);
+}
+
+G_NORETURN void HELPER(raise_register_nat_consumption)(CPUIA64State *env)
+{
+    CPUState *cpu = env_cpu(env);
+
+    /*
+     * The typed lowering publishes the precise instruction and its eagerly
+     * retired prefix before entering this helper.  Register NaT Consumption
+     * is not a memory access, so keep this helper deliberately narrower than
+     * the load/store fault machinery and never return to the faulting TB.
+     */
+    ia64_deliver_exception_fast(env,
+                                IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION,
+                                env->ip, IA64_EXCEPTION_ACCESS_NONE, NULL);
+    env->fault_exit_pending_tb_translate = true;
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu_loop_exit(cpu);
+}
+
 void HELPER(perf_tb_exec)(void)
 {
     IA64_PERF_INC(IA64_PERF_TB_EXECUTED);
@@ -78,6 +116,7 @@ void HELPER(firmware_call_gate)(CPUIA64State *env, uint64_t gate_ip,
                   "IP=0x%016" PRIx64 " dispatch=0x%016" PRIx64 "\n",
                   gate_ip, dispatch_ip);
     }
+    ia64_env_begin_source_visibility_epoch(env);
 }
 
 #define IA64_LINUX_BREAK_SYSCALL UINT64_C(0x100000)
@@ -175,7 +214,7 @@ static void abort_zero_branch(CPUIA64State *env,
               env->ip, slot_text, bundle_text);
 }
 
-static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
+static bool ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
                                uint64_t iim, uint64_t *next_ip)
 {
     char detail[64];
@@ -193,12 +232,13 @@ static void ia64_deliver_break(CPUIA64State *env, const char *mnemonic,
     if (ia64_try_platform_break(env, iim)) {
         ia64_progress_trace_event(env, mnemonic, iim, source_ip, source_ri,
                                   *next_ip);
-        return;
+        return false;
     }
     ia64_deliver_break_interruption(env, iim, next_ip, detail);
     ia64_count_psr_transition(env, old_psr, ia64_env_psr(env));
     ia64_progress_trace_event(env, mnemonic, iim, source_ip, source_ri,
                               *next_ip);
+    return true;
 }
 
 static void ia64_deliver_translation_fault(CPUIA64State *env,
@@ -225,10 +265,16 @@ static void ia64_rse_schedule_pending_fill(CPUIA64State *env, uint32_t count,
                                            uint64_t resume_ip);
 
 static void ia64_finish_bundle(CPUIA64State *env, uint64_t next_ip,
-                               unsigned next_ri)
+                               unsigned next_ri,
+                               bool instruction_group_start)
 {
     ia64_env_set_psr(env, ia64_psr_with_ri(ia64_env_psr(env), next_ri));
     env->ip = next_ip;
+    if (instruction_group_start) {
+        ia64_env_begin_source_visibility_epoch(env);
+    } else {
+        ia64_env_set_source_visibility_frontier(env, false);
+    }
     if (env->rse.pending_fill_count != 0 &&
         env->rse.pending_fill_ip == next_ip) {
         ia64_rse_complete_pending_fill(env);
@@ -258,9 +304,10 @@ static void ia64_finish_tcg_ticks(CPUIA64State *env, uint32_t bundle_count)
 }
 
 static void ia64_finish_interpreted_bundle(CPUIA64State *env, uint64_t next_ip,
-                                           unsigned next_ri)
+                                           unsigned next_ri,
+                                           bool instruction_group_start)
 {
-    ia64_finish_bundle(env, next_ip, next_ri);
+    ia64_finish_bundle(env, next_ip, next_ri, instruction_group_start);
     ia64_finish_tcg_ticks(env, 1);
 }
 
@@ -505,6 +552,7 @@ static bool exec_counted_store_loop(CPUIA64State *env,
                                     const IA64CountedStoreLoop *loop,
                                     uint64_t *next_ip)
 {
+    uint64_t pre_instruction_psr;
     uint64_t loop_count = env->ar[IA64_AR_LC];
     uint64_t iterations;
     uint64_t address;
@@ -516,6 +564,7 @@ static bool exec_counted_store_loop(CPUIA64State *env,
     }
 
     IA64_PERF_INC(IA64_PERF_COUNTED_STORE_LOOP);
+    pre_instruction_psr = ia64_env_psr(env);
     iterations = loop_count + 1;
     address = ia64_read_gr(env, loop->store.base);
     value = ia64_read_gr(env, loop->store.source);
@@ -523,6 +572,8 @@ static bool exec_counted_store_loop(CPUIA64State *env,
 
     for (uint64_t i = 0; i < iterations; i++) {
         ia64_ldst_write(env, address, loop->store.width, value);
+        ia64_note_successful_instruction(env, env->ip,
+                                         pre_instruction_psr);
         address += update;
     }
 
@@ -679,12 +730,13 @@ void HELPER(start_fast_bundle)(CPUIA64State *env, uint32_t slot_count,
 }
 
 void HELPER(finish_fast_bundle)(CPUIA64State *env, uint64_t next_ip,
-                                uint64_t dest_mask, uint64_t dest_mask_hi)
+                                uint64_t dest_mask, uint64_t dest_mask_hi,
+                                uint32_t instruction_group_start)
 {
     ia64_alat_invalidate_gr_mask(env, dest_mask, dest_mask_hi);
     ia64_gr_nat_clear_mask(env, dest_mask, dest_mask_hi);
     env->gr[0] = 0;
-    ia64_finish_bundle(env, next_ip, 0);
+    ia64_finish_bundle(env, next_ip, 0, instruction_group_start != 0);
 }
 
 void HELPER(finish_fast_tb)(CPUIA64State *env, uint32_t bundle_count)
@@ -749,7 +801,8 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
                                              uint32_t branch_flags,
                                              uint32_t prefix_slot_count,
                                              uint32_t prefix_op_counts,
-                                             uint64_t prefix_dest_mask)
+                                             uint64_t prefix_dest_mask,
+                                             uint32_t fallthrough_group_start)
 {
     CPUState *cpu = env_cpu(env);
     /*
@@ -792,7 +845,8 @@ uint32_t HELPER(finish_direct_branch_bundle)(CPUIA64State *env,
         ia64_branch_call_effects(env, call_branch_reg, env->ip);
     }
     env->gr[0] = 0;
-    ia64_finish_bundle(env, next_ip, 0);
+    ia64_finish_bundle(env, next_ip, 0,
+                       taken || fallthrough_group_start != 0);
     ia64_finish_tcg_ticks(env, pending_bundle_count + 1);
 
     chain_ok = ia64_tcg_can_chain(env);
@@ -846,18 +900,12 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
      * reports the precise PSR.ri/ISR.ei.
      */
     ia64_env_set_ri(env, 2);
-    if (br_ret) {
-        ia64_rse_probe_restored_frame_fill(env,
-                                           (env->ar[IA64_AR_PFS] >> 7) &
-                                           0x7f);
-    }
     ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
-    if (br_ret) {
-        ia64_rse_maybe_fill_restored_frame(env, (env->cfm >> 7) & 0x7f);
+    if (br_ret || rfi) {
+        ia64_rse_schedule_pending_fill(env, 0, next_ip);
     }
     if (rfi_valid_ifs) {
         IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-        ia64_rse_schedule_pending_fill(env, env->rse.sof, next_ip);
     }
     if (rfi) {
         IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
@@ -876,7 +924,7 @@ uint32_t HELPER(finish_indirect_branch_bundle)(CPUIA64State *env,
     }
 
     env->gr[0] = 0;
-    ia64_finish_bundle(env, next_ip, rfi ? ia64_env_ri(env) : 0);
+    ia64_finish_bundle(env, next_ip, rfi ? ia64_env_ri(env) : 0, true);
     ia64_finish_tcg_ticks(env, pending_bundle_count + 1);
     return ia64_lookup_ptr_chain_ok(env);
 }
@@ -888,11 +936,83 @@ void HELPER(fast_alloc)(CPUIA64State *env, uint64_t raw)
     ia64_exec_alloc_with_spill(env, raw);
 }
 
+void HELPER(rotate_modulo_registers)(CPUIA64State *env)
+{
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE);
+    ia64_rotate_modulo_scheduled_registers(env);
+}
+
+void HELPER(enter_call_frame)(CPUIA64State *env)
+{
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE);
+    ia64_enter_call_frame(env);
+}
+
+uint32_t HELPER(return_frame_from_pfs)(CPUIA64State *env, uint64_t pfs)
+{
+    uint32_t old_cpl =
+        (ia64_env_psr(env) & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    uint32_t new_cpl;
+
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE);
+    ia64_rse_return_frame_from_pfs(env, pfs);
+    new_cpl =
+        (ia64_env_psr(env) & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    return new_cpl > old_cpl;
+}
+
+void HELPER(complete_rse_frame_loads)(CPUIA64State *env)
+{
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE);
+    ia64_rse_complete_frame_loads(env);
+}
+
+static G_NORETURN void ia64_raise_branch_trap(CPUIA64State *env,
+                                               IA64ExceptionKind kind)
+{
+    CPUState *cpu = env_cpu(env);
+
+    ia64_deliver_branch_trap(env, kind);
+    env->fault_exit_pending_tb_translate = true;
+    IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+    cpu_loop_exit(cpu);
+}
+
+G_NORETURN void HELPER(raise_lower_privilege_transfer_trap)(
+    CPUIA64State *env)
+{
+    ia64_raise_branch_trap(env, IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER);
+}
+
+G_NORETURN void HELPER(raise_taken_branch_trap)(CPUIA64State *env)
+{
+    ia64_raise_branch_trap(env, IA64_EXCEPTION_TAKEN_BRANCH_TRAP);
+}
+
 typedef enum IA64PlannedSlotResult {
     IA64_PLANNED_SLOT_GENERIC,
     IA64_PLANNED_SLOT_CONTINUE,
-    IA64_PLANNED_SLOT_BREAK,
+    IA64_PLANNED_SLOT_CONTROL_TRANSFER,
 } IA64PlannedSlotResult;
+
+static bool ia64_b_indirect_is_sequential(uint8_t major, uint8_t x6)
+{
+    if (major != 0) {
+        return false;
+    }
+
+    switch (x6) {
+    case 0x02: /* cover */
+    case 0x04: /* clrrrb */
+    case 0x05: /* clrrrb.pr */
+    case 0x0c: /* bsw.0 */
+    case 0x0d: /* bsw.1 */
+    case 0x10: /* epc */
+        return true;
+    default:
+        return false;
+    }
+}
 
 static IA64PlannedSlotResult exec_predecoded_slot(
     CPUIA64State *env, const IA64DecodedBundle *decoded, int slot,
@@ -1096,7 +1216,7 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         }
         if (branch_taken || *next_ip != env->ip + IA64_BUNDLE_SIZE) {
             IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
-            return IA64_PLANNED_SLOT_BREAK;
+            return IA64_PLANNED_SLOT_CONTROL_TRANSFER;
         }
         IA64_PERF_INC(IA64_PERF_BRANCH_FALLTHROUGH);
         return IA64_PLANNED_SLOT_CONTINUE;
@@ -1112,7 +1232,7 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         if (*next_ip == 0) {
             abort_zero_branch(env, decoded, slot);
         }
-        return IA64_PLANNED_SLOT_BREAK;
+        return IA64_PLANNED_SLOT_CONTROL_TRANSFER;
     }
     case IA64_TCG_FALLBACK_PLAN_BRANCH_INDIRECT: {
         IA64TcgFallbackBranch branch;
@@ -1143,20 +1263,14 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         if (epc) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_EPC);
         }
-        if (br_ret) {
-            ia64_rse_probe_restored_frame_fill(
-                env, (env->ar[IA64_AR_PFS] >> 7) & 0x7f);
-        }
         ia64_exec_b_indirect_branch_decoded(
             env, branch_major, branch_x6, branch.branch_reg,
             branch.target_reg, env->ip, next_ip);
-        if (br_ret) {
-            ia64_rse_maybe_fill_restored_frame(env,
-                                               (env->cfm >> 7) & 0x7f);
+        if (br_ret || rfi) {
+            ia64_rse_schedule_pending_fill(env, 0, *next_ip);
         }
         if (rfi_valid_ifs) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-            ia64_rse_schedule_pending_fill(env, env->rse.sof, *next_ip);
         }
         if (rfi) {
             IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
@@ -1169,7 +1283,9 @@ static IA64PlannedSlotResult exec_predecoded_slot(
         if (*next_ip == 0) {
             abort_zero_branch(env, decoded, slot);
         }
-        return IA64_PLANNED_SLOT_BREAK;
+        return ia64_b_indirect_is_sequential(branch_major, branch_x6) ?
+            IA64_PLANNED_SLOT_CONTINUE :
+            IA64_PLANNED_SLOT_CONTROL_TRANSFER;
     }
     case IA64_TCG_FALLBACK_PLAN_BRANCH_PREDICT_OR_NOP:
         IA64_PERF_INC(IA64_PERF_OP_BRANCH_PREDICT);
@@ -1207,6 +1323,24 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
     uint32_t planned_bailout_count = 0;
     bool debug_hooks = ia64_debug_hooks_active();
     bool partial = selected_slot < IA64_SLOT_COUNT;
+    bool bundle_group_start = env->instruction_group_start;
+    bool control_transfer = false;
+    uint64_t pre_instruction_psr = 0;
+
+    if (unlikely(env->issue_group.typed_active ||
+                 env->issue_group.saved_gr_mask[0] != 0 ||
+                 env->issue_group.saved_gr_mask[1] != 0 ||
+                 env->issue_group.saved_br_mask != 0 ||
+                 env->issue_group.branch_br_forward_mask != 0 ||
+                 env->issue_group.pr_saved ||
+                 env->issue_group.branch_pr_forward_mask != 0 ||
+                 env->issue_group.pfs_saved ||
+                 env->issue_group.branch_pfs_forwarded)) {
+        cpu_abort(cpu,
+                  "IA-64 legacy execution entered an active typed "
+                  "ordinary-source epoch at 0x%016" PRIx64,
+                  env->ip);
+    }
 
     if (!partial) {
         IA64_PERF_INC(IA64_PERF_HELPER_EXEC_BUNDLE);
@@ -1276,7 +1410,8 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             ia64_decode_counted_store_loop(&decoded, env->ip, &store_loop) &&
             exec_counted_store_loop(env, &store_loop, &next_ip)) {
             IA64_PERF_INC(IA64_PERF_OP_STORE);
-            ia64_finish_interpreted_bundle(env, next_ip, 0);
+            ia64_finish_interpreted_bundle(
+                env, next_ip, 0, decoded.info->stop_after_slot[2]);
             return true;
         }
     }
@@ -1285,7 +1420,10 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
         start_slot = 0;
     }
 
-    for (int slot = start_slot; slot < end_slot; slot++) {
+    for (int slot = start_slot; slot < end_slot;
+         ia64_note_successful_instruction(env, bundle_ip,
+                                          pre_instruction_psr),
+         slot++) {
         IA64SlotType type = decoded.info->slot_type[slot];
         uint64_t raw = decoded.slot[slot];
         uint64_t fallback_slot_desc = fallback_desc[slot];
@@ -1303,6 +1441,8 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
         IA64DepositInstruction deposit;
         IA64IntegerExtendInstruction int_ext;
 
+        pre_instruction_psr = ia64_env_psr(env);
+
         if (planned_op >= IA64_TCG_FALLBACK_PLAN_COUNT) {
             planned_op = IA64_TCG_FALLBACK_PLAN_GENERIC;
             qp = ia64_slot_predicate(raw);
@@ -1310,12 +1450,25 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             qp = ia64_tcg_fallback_desc_predicate(fallback_slot_desc);
         }
 
+        bool starts_epoch = slot == start_slot
+                                ? bundle_group_start
+                                : decoded.info->stop_after_slot[slot - 1];
+
+        if (starts_epoch) {
+            ia64_env_begin_source_visibility_epoch(env);
+        } else {
+            ia64_env_set_source_visibility_frontier(env, false);
+        }
         ia64_env_set_ri(env, slot);
         env->current_slot_valid = true;
         env->current_slot_ip = env->ip;
         env->current_slot_ri = slot;
         env->current_slot_type = type;
         env->current_slot_raw = raw;
+        if (!ia64_b_loop_branch_is_legal(type, raw, slot)) {
+            /* current_slot_* already identifies the precise offending slot. */
+            ia64_raise_illegal_operation(env);
+        }
         IA64_PERF_INC(IA64_PERF_INTERP_SLOT_ITERATION);
         if (ia64_perf_enabled()) {
             ia64_perf_count_slot_type(type);
@@ -1382,6 +1535,9 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
                 if (planned_result == IA64_PLANNED_SLOT_CONTINUE) {
                     continue;
                 }
+                ia64_note_successful_instruction(env, bundle_ip,
+                                                 pre_instruction_psr);
+                control_transfer = true;
                 break;
             }
             planned_bailout_count++;
@@ -1395,7 +1551,11 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
 
             ia64_progress_trace_break_slot(env, &decoded, slot, "break.i",
                                            iim);
-            ia64_deliver_break(env, "break.i", iim, &next_ip);
+            control_transfer = ia64_deliver_break(
+                env, "break.i", iim, &next_ip);
+            if (!control_transfer) {
+                continue;
+            }
             break;
         }
         if (ia64_slot_is_m34_alloc(type, raw)) {
@@ -1449,23 +1609,35 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             continue;
         }
         if (ia64_slot_is_check_speculative(type, raw)) {
+            bool branch_taken = false;
+
             IA64_PERF_INC(IA64_PERF_OP_SPECULATION_CHECK);
-            ia64_exec_check_speculative(env, type, raw, env->ip, &next_ip);
+            ia64_exec_check_speculative(env, type, raw, env->ip, &next_ip,
+                                        &branch_taken);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
-            if (next_ip != env->ip + IA64_BUNDLE_SIZE) {
+            if (branch_taken) {
+                ia64_note_successful_instruction(env, bundle_ip,
+                                                 pre_instruction_psr);
+                control_transfer = true;
                 break;
             }
             continue;
         }
         if (ia64_slot_is_m_check_advanced(type, raw)) {
+            bool branch_taken = false;
+
             IA64_PERF_INC(IA64_PERF_OP_SPECULATION_CHECK);
-            ia64_exec_m_check_advanced(env, raw, env->ip, &next_ip);
+            ia64_exec_m_check_advanced(env, raw, env->ip, &next_ip,
+                                       &branch_taken);
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
-            if (next_ip != env->ip + IA64_BUNDLE_SIZE) {
+            if (branch_taken) {
+                ia64_note_successful_instruction(env, bundle_ip,
+                                                 pre_instruction_psr);
+                control_transfer = true;
                 break;
             }
             continue;
@@ -1498,7 +1670,11 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
 
             ia64_progress_trace_break_slot(env, &decoded, slot, "break.m",
                                            iim);
-            ia64_deliver_break(env, "break.m", iim, &next_ip);
+            control_transfer = ia64_deliver_break(
+                env, "break.m", iim, &next_ip);
+            if (!control_transfer) {
+                continue;
+            }
             break;
         }
         if (ia64_slot_is_b_break(type, raw)) {
@@ -1506,7 +1682,11 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
 
             ia64_progress_trace_break_slot(env, &decoded, slot, "break.b",
                                            iim);
-            ia64_deliver_break(env, "break.b", iim, &next_ip);
+            control_transfer = ia64_deliver_break(
+                env, "break.b", iim, &next_ip);
+            if (!control_transfer) {
+                continue;
+            }
             break;
         }
         if (ia64_slot_is_m_mov_to_region_register(type, raw) &&
@@ -1625,6 +1805,11 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
         }
         if (ia64_slot_is_m_loadrs(type, raw)) {
             ia64_exec_loadrs(env);
+            continue;
+        }
+        if (ia64_slot_is_m_serialization(type, raw) &&
+            ia64_exec_m_serialization(env, raw)) {
+            IA64_PERF_INC(IA64_PERF_OP_SYSTEM_NOOP);
             continue;
         }
         if (ia64_slot_is_m_system_noop(type, raw)) {
@@ -1800,6 +1985,9 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             }
             if (branch_taken || next_ip != env->ip + IA64_BUNDLE_SIZE) {
                 IA64_PERF_INC(IA64_PERF_BRANCH_TAKEN);
+                ia64_note_successful_instruction(env, bundle_ip,
+                                                 pre_instruction_psr);
+                control_transfer = true;
                 break;
             }
             IA64_PERF_INC(IA64_PERF_BRANCH_FALLTHROUGH);
@@ -1812,6 +2000,9 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
+            ia64_note_successful_instruction(env, bundle_ip,
+                                             pre_instruction_psr);
+            control_transfer = true;
             break;
         }
         if (ia64_slot_is_b_indirect_branch(type, raw)) {
@@ -1833,18 +2024,12 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             if (epc) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_EPC);
             }
-            if (br_ret) {
-                ia64_rse_probe_restored_frame_fill(
-                    env, (env->ar[IA64_AR_PFS] >> 7) & 0x7f);
-            }
             ia64_exec_b_indirect_branch(env, raw, env->ip, &next_ip);
-            if (br_ret) {
-                ia64_rse_maybe_fill_restored_frame(env,
-                                                   (env->cfm >> 7) & 0x7f);
+            if (br_ret || rfi) {
+                ia64_rse_schedule_pending_fill(env, 0, next_ip);
             }
             if (rfi_valid_ifs) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI_VALID_IFS);
-                ia64_rse_schedule_pending_fill(env, env->rse.sof, next_ip);
             }
             if (rfi) {
                 IA64_PERF_INC(IA64_PERF_TRANSITION_RFI);
@@ -1857,6 +2042,12 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
             if (next_ip == 0) {
                 abort_zero_branch(env, &decoded, slot);
             }
+            if (ia64_b_indirect_is_sequential(branch_major, branch_x6)) {
+                continue;
+            }
+            ia64_note_successful_instruction(env, bundle_ip,
+                                             pre_instruction_psr);
+            control_transfer = true;
             break;
         }
         if (ia64_slot_is_b_predict_or_nop(type, raw)) {
@@ -1873,13 +2064,23 @@ static bool ia64_exec_bundle_impl(CPUIA64State *env,
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_SLOT, planned_slot_count);
     IA64_PERF_ADD(IA64_PERF_TCG_FALLBACK_PLAN_BAILOUT, planned_bailout_count);
     if (partial) {
-        if (next_ip != bundle_ip + IA64_BUNDLE_SIZE || next_ri != 0) {
-            ia64_finish_interpreted_bundle(env, next_ip, next_ri);
+        if (control_transfer) {
+            ia64_finish_interpreted_bundle(env, next_ip, next_ri, true);
             return false;
+        }
+        if (decoded.info->stop_after_slot[
+                decoded.info->long_immediate && selected_slot == 1
+                    ? 2
+                    : selected_slot]) {
+            ia64_env_begin_source_visibility_epoch(env);
+        } else {
+            ia64_env_set_source_visibility_frontier(env, false);
         }
         return true;
     }
-    ia64_finish_interpreted_bundle(env, next_ip, next_ri);
+    ia64_finish_interpreted_bundle(
+        env, next_ip, next_ri,
+        control_transfer || decoded.info->stop_after_slot[2]);
     return true;
 }
 

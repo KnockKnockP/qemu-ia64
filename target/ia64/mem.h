@@ -51,6 +51,10 @@ uint64_t ia64_default_itir(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_hash_address(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_tag(CPUIA64State *env, vaddr address);
 bool ia64_vhpt_walk_runtime_enabled(void);
+bool ia64_vhpt_is_enabled(uint64_t pta, uint64_t rr, uint64_t psr,
+                          MMUAccessType access_type);
+bool ia64_vhpt_backing_miss_reports_original_tlb(bool psr_ic_inflight,
+                                                 MMUAccessType access_type);
 void ia64_firmware_identity_tlb_set(CPUIA64State *env, bool enabled);
 bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
                                      MMUAccessType access_type, int mmu_idx,
@@ -70,6 +74,10 @@ IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
                                       struct AddressSpace *as,
                                       vaddr address,
                                       MMUAccessType access_type);
+IA64VHPTWalkStatus ia64_try_rse_vhpt_walk(CPUIA64State *env,
+                                          struct AddressSpace *as,
+                                          vaddr address,
+                                          MMUAccessType access_type);
 bool ia64_translate_data_non_access(CPUIA64State *env, vaddr address,
                                     hwaddr *paddr);
 bool ia64_translate_data_non_access_checked(CPUIA64State *env,
@@ -85,6 +93,14 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
                                      MMUAccessType access_type, int mmu_idx,
                                      int cpl, bool debug,
                                      IA64TranslateResult *result);
+bool ia64_translate_rse_address_no_detail(CPUIA64State *env, vaddr address,
+                                          MMUAccessType access_type,
+                                          int mmu_idx, bool debug,
+                                          IA64TranslateResult *result);
+uint64_t ia64_rse_read_u64(CPUIA64State *env, vaddr address,
+                           uintptr_t retaddr);
+void ia64_rse_write_u64(CPUIA64State *env, vaddr address, uint64_t value,
+                        uintptr_t retaddr);
 void ia64_format_translate_result(const IA64TranslateResult *result,
                                   char *buf, size_t buflen);
 bool ia64_memory_class_is_control_speculative(uint8_t memory_class);

@@ -1781,11 +1781,12 @@ bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
 
     env->ip = image->entry;
     env->cr[IA64_CR_IIP] = image->entry;
+    ia64_env_begin_source_visibility_epoch(env);
     /*
      * EFI/SAL hand off to OS loaders in the OS register bank. Linux/ia64
      * preserves ELILO's boot-parameter pointer through banked r28.
      */
-    env->psr |= IA64_PSR_BN_BIT;
+    ia64_env_set_psr(env, ia64_env_psr(env) | IA64_PSR_BN_BIT);
     ia64_write_gr(env, 0, 0);
     ia64_write_gr(env, 1, image->global_pointer);
     ia64_write_gr(env, 12,

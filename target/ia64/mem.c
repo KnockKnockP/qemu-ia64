@@ -17,8 +17,6 @@
 #define IA64_PTA_VE_BIT UINT64_C(0x0000000000000001)
 #define IA64_PTA_VF_BIT UINT64_C(0x0000000000000100)
 #define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
-#define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
-#define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_ED_BIT UINT64_C(0x0000080000000000)
 #define IA64_PSR_AC_BIT UINT64_C(0x0000000000000008)
@@ -47,7 +45,7 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           MMUAccessType access_type,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
-                                          bool non_access,
+                                          bool non_access, bool rse_access,
                                           IA64TranslateResult *result);
 static const char *ia64_access_kind(bool instruction);
 
@@ -377,29 +375,50 @@ static const IA64TranslationEntry *ia64_lookup_translation(CPUIA64State *env,
     return best;
 }
 
-static bool ia64_vhpt_walk_enabled(CPUIA64State *env,
-                                   MMUAccessType access_type, uint64_t rr)
+bool ia64_vhpt_is_enabled(uint64_t pta, uint64_t rr, uint64_t psr,
+                          MMUAccessType access_type)
 {
-    uint64_t psr = ia64_env_psr(env);
-
-    if ((env->cr[IA64_CR_PTA] & IA64_PTA_VE_BIT) == 0 ||
-        !ia64_region_vhpt_enabled(rr)) {
+    if ((pta & IA64_PTA_VE_BIT) == 0 || !ia64_region_vhpt_enabled(rr) ||
+        (psr & IA64_PSR_DT_BIT) == 0) {
         return false;
     }
 
     switch (access_type) {
     case MMU_INST_FETCH:
-        return (psr & (IA64_PSR_DT_BIT | IA64_PSR_IT_BIT |
-                       IA64_PSR_IC_BIT)) ==
-               (IA64_PSR_DT_BIT | IA64_PSR_IT_BIT | IA64_PSR_IC_BIT);
+        return (psr & (IA64_PSR_IT_BIT | IA64_PSR_IC_BIT)) ==
+               (IA64_PSR_IT_BIT | IA64_PSR_IC_BIT);
     case MMU_DATA_LOAD:
     case MMU_DATA_STORE:
-        return (psr & (IA64_PSR_DT_BIT | IA64_PSR_IC_BIT)) ==
-               (IA64_PSR_DT_BIT | IA64_PSR_IC_BIT);
+        return true;
     default:
-        return (psr & (IA64_PSR_RT_BIT | IA64_PSR_IC_BIT)) ==
-               (IA64_PSR_RT_BIT | IA64_PSR_IC_BIT);
+        return (psr & IA64_PSR_RT_BIT) != 0;
     }
+}
+
+static bool ia64_rse_vhpt_is_enabled(uint64_t pta, uint64_t rr,
+                                     uint64_t psr)
+{
+    return (pta & IA64_PTA_VE_BIT) != 0 &&
+           ia64_region_vhpt_enabled(rr) &&
+           (psr & IA64_PSR_RT_BIT) != 0;
+}
+
+bool ia64_vhpt_backing_miss_reports_original_tlb(bool psr_ic_inflight,
+                                                 MMUAccessType access_type)
+{
+    return access_type != MMU_INST_FETCH && psr_ic_inflight;
+}
+
+static bool ia64_vhpt_walk_enabled(CPUIA64State *env,
+                                   MMUAccessType access_type, uint64_t rr,
+                                   bool rse_access)
+{
+    if (rse_access) {
+        return ia64_rse_vhpt_is_enabled(env->cr[IA64_CR_PTA], rr,
+                                        ia64_env_psr(env));
+    }
+    return ia64_vhpt_is_enabled(env->cr[IA64_CR_PTA], rr,
+                                ia64_env_psr(env), access_type);
 }
 
 static bool ia64_vhpt_short_entry_valid(uint64_t entry, uint64_t itir)
@@ -443,10 +462,9 @@ static bool ia64_read_vhpt_u64(CPUIA64State *env, struct AddressSpace *as,
     return memtx == MEMTX_OK;
 }
 
-IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
-                                      struct AddressSpace *as,
-                                      vaddr address,
-                                      MMUAccessType access_type)
+static IA64VHPTWalkStatus ia64_try_vhpt_walk_common(
+    CPUIA64State *env, struct AddressSpace *as, vaddr address,
+    MMUAccessType access_type, bool rse_access)
 {
     IA64TranslateResult vhpt_addr;
     uint64_t rr;
@@ -462,7 +480,7 @@ IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
     }
 
     rr = env->rr[ia64_va_region(address)];
-    if (!ia64_vhpt_walk_enabled(env, access_type, rr)) {
+    if (!ia64_vhpt_walk_enabled(env, access_type, rr, rse_access)) {
         return IA64_VHPT_WALK_MISS;
     }
 
@@ -476,11 +494,14 @@ IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
 
     iha = ia64_vhpt_hash_address(env, address);
     itir = ia64_default_itir(env, address);
-    can_deliver_vhpt_fault = (ia64_env_psr(env) & IA64_PSR_IC_BIT) != 0;
+    can_deliver_vhpt_fault =
+        (ia64_env_psr(env) & IA64_PSR_IC_BIT) != 0 &&
+        !ia64_vhpt_backing_miss_reports_original_tlb(
+            env->psr_ic_inflight, access_type);
 
     if (!ia64_translate_address_common(env, iha, MMU_DATA_LOAD,
                                        IA64_MMU_DATA_CPL0, 0, false, false,
-                                       false, &vhpt_addr)) {
+                                       false, false, &vhpt_addr)) {
         IA64_PERF_INC(IA64_PERF_VHPT_WALK_VADDR_MISS);
         trace_ia64_vhpt_walk("vaddr-miss", ia64_access_kind(instruction),
                              address, iha, 0, 0, itir);
@@ -527,6 +548,24 @@ IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
                 entry, itir);
     }
     return IA64_VHPT_WALK_INSTALLED;
+}
+
+IA64VHPTWalkStatus ia64_try_vhpt_walk(CPUIA64State *env,
+                                      struct AddressSpace *as,
+                                      vaddr address,
+                                      MMUAccessType access_type)
+{
+    return ia64_try_vhpt_walk_common(env, as, address, access_type, false);
+}
+
+IA64VHPTWalkStatus ia64_try_rse_vhpt_walk(CPUIA64State *env,
+                                          struct AddressSpace *as,
+                                          vaddr address,
+                                          MMUAccessType access_type)
+{
+    g_assert(access_type == MMU_DATA_LOAD ||
+             access_type == MMU_DATA_STORE);
+    return ia64_try_vhpt_walk_common(env, as, address, access_type, true);
 }
 
 static void ia64_trace_translation_candidate(const char *kind,
@@ -801,16 +840,21 @@ bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
     uint64_t translation;
     uint64_t itir;
     bool instruction = access_type == MMU_INST_FETCH;
+    bool rse_access;
+    int access_cpl;
 
     if (!env || !env->firmware_identity_tlb) {
         return false;
     }
+    rse_access = ia64_mmu_index_is_rse(mmu_idx);
+    access_cpl = rse_access ? ia64_rse_mmu_index_cpl(mmu_idx) :
+                             ia64_current_privilege_level(env->psr);
     if (access_type != MMU_INST_FETCH &&
         access_type != MMU_DATA_LOAD &&
         access_type != MMU_DATA_STORE) {
         return false;
     }
-    if (ia64_current_privilege_level(env->psr) != 0) {
+    if (access_cpl != 0) {
         return false;
     }
 
@@ -840,8 +884,9 @@ bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
                 page_base & IA64_INSERTION_PPN_MASK, itir);
     }
 
-    return ia64_translate_address_no_detail(env, address, access_type,
-                                            mmu_idx, false, result);
+    return ia64_translate_address_common(env, address, access_type, mmu_idx,
+                                         access_cpl, false, false, false,
+                                         rse_access, result);
 }
 
 static IA64TranslationEntry ia64_purge_probe(CPUIA64State *env, vaddr address,
@@ -933,7 +978,8 @@ bool ia64_translate_data_non_access_checked(CPUIA64State *env,
     /* tpa searches the DTLB even when PSR.dt disables normal data mapping. */
     return ia64_translate_address_common(
         env, address, MMU_DATA_LOAD, 0,
-        ia64_current_privilege_level(env->psr), debug, true, true, result);
+        ia64_current_privilege_level(env->psr), debug, true, true, false,
+        result);
 }
 
 bool ia64_translate_address(CPUIA64State *env, vaddr address,
@@ -942,7 +988,8 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
 {
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
-        ia64_current_privilege_level(env->psr), debug, true, false, result);
+        ia64_current_privilege_level(env->psr), debug, true, false, false,
+        result);
 }
 
 bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
@@ -951,7 +998,8 @@ bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
 {
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
-        ia64_current_privilege_level(env->psr), debug, false, false, result);
+        ia64_current_privilege_level(env->psr), debug, false, false, false,
+        result);
 }
 
 bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
@@ -960,18 +1008,33 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
                                      IA64TranslateResult *result)
 {
     return ia64_translate_address_common(env, address, access_type, mmu_idx,
-                                         cpl, debug, true, false, result);
+                                         cpl, debug, true, false, false,
+                                         result);
+}
+
+bool ia64_translate_rse_address_no_detail(CPUIA64State *env, vaddr address,
+                                          MMUAccessType access_type,
+                                          int mmu_idx, bool debug,
+                                          IA64TranslateResult *result)
+{
+    g_assert(access_type == MMU_DATA_LOAD ||
+             access_type == MMU_DATA_STORE);
+    g_assert(ia64_mmu_index_is_rse(mmu_idx));
+
+    return ia64_translate_address_common(
+        env, address, access_type, mmu_idx,
+        ia64_rse_mmu_index_cpl(mmu_idx), debug, false, false, true, result);
 }
 
 static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           MMUAccessType access_type,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
-                                          bool non_access,
+                                          bool non_access, bool rse_access,
                                           IA64TranslateResult *result)
 {
     bool instruction = access_type == MMU_INST_FETCH;
-    bool needs_translation = non_access ||
+    bool needs_translation = non_access || rse_access ||
                              ia64_translation_required(env->psr,
                                                        access_type);
     const IA64TranslationEntry *entry;
@@ -991,7 +1054,11 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
     result->vaddr = address;
     result->region = ia64_va_region(address);
     rr = env->rr[result->region];
-    result->vhpt_enabled = ia64_region_vhpt_enabled(rr);
+    result->vhpt_enabled = rse_access ?
+        ia64_rse_vhpt_is_enabled(env->cr[IA64_CR_PTA], rr,
+                                 ia64_env_psr(env)) :
+        ia64_vhpt_is_enabled(env->cr[IA64_CR_PTA], rr,
+                             ia64_env_psr(env), access_type);
     result->access_type = access_type;
     result->mmu_idx = mmu_idx;
     result->debug = debug;

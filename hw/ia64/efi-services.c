@@ -198,6 +198,7 @@ typedef struct EfiCpuFrame {
     uint64_t pmd[IA64_PMD_COUNT];
     uint64_t ip;
     uint64_t psr;
+    bool psr_ic_inflight;
     uint64_t cfm;
     uint8_t ri;
     bool ri_dirty;
@@ -3025,8 +3026,10 @@ static uint64_t efi_load_image(CPUIA64State *env)
     return VIBTANIUM_EFI_SUCCESS;
 }
 
-static void efi_save_cpu_frame(EfiCpuFrame *frame, const CPUIA64State *env)
+static void efi_save_cpu_frame(EfiCpuFrame *frame, CPUIA64State *env)
 {
+    /* Make the raw physical/logical snapshot a single canonical RSE image. */
+    ia64_rse_sync_logical_out(env);
     memcpy(frame->gr, env->gr, sizeof(frame->gr));
     memcpy(frame->banked_gr, env->banked_gr, sizeof(frame->banked_gr));
     memcpy(frame->fr, env->fr, sizeof(frame->fr));
@@ -3045,6 +3048,7 @@ static void efi_save_cpu_frame(EfiCpuFrame *frame, const CPUIA64State *env)
     memcpy(frame->pmd, env->pmd, sizeof(frame->pmd));
     frame->ip = env->ip;
     frame->psr = env->psr;
+    frame->psr_ic_inflight = env->psr_ic_inflight;
     frame->cfm = env->cfm;
     frame->ri = env->ri;
     frame->ri_dirty = env->ri_dirty;
@@ -3072,7 +3076,9 @@ static void efi_restore_cpu_frame(CPUIA64State *env,
     memcpy(env->pmc, frame->pmc, sizeof(env->pmc));
     memcpy(env->pmd, frame->pmd, sizeof(env->pmd));
     env->ip = frame->ip;
+    ia64_env_begin_source_visibility_epoch(env);
     env->psr = frame->psr;
+    env->psr_ic_inflight = frame->psr_ic_inflight;
     env->cfm = frame->cfm;
     env->ri = frame->ri;
     env->ri_dirty = frame->ri_dirty;
@@ -3149,15 +3155,14 @@ static bool efi_enter_child_image(CPUIA64State *env, EfiChildImage *child)
 
     env->ip = image->entry;
     env->cr[IA64_CR_IIP] = image->entry;
-    env->psr |= IA64_PSR_BN_BIT;
+    ia64_env_begin_source_visibility_epoch(env);
+    ia64_env_set_psr(env, ia64_env_psr(env) | IA64_PSR_BN_BIT);
     env->pr = 1;
     ia64_set_cfm(env, 0);
     ia64_write_gr(env, 0, 0);
     ia64_write_gr(env, 1, image->global_pointer);
     ia64_write_gr(env, 12,
                   VIBTANIUM_EFI_STACK_BASE + VIBTANIUM_EFI_STACK_SIZE - 16);
-    ia64_write_gr(env, 32, child->handle);
-    ia64_write_gr(env, 33, VIBTANIUM_EFI_SYSTEM_TABLE);
     env->br[0] = VIBTANIUM_EFI_START_IMAGE_RETURN_GATE;
 
     env->rse.bsp = VIBTANIUM_EFI_BACKING_STORE_BASE;
@@ -3165,6 +3170,10 @@ static bool efi_enter_child_image(CPUIA64State *env, EfiChildImage *child)
     env->rse.bsp_load = VIBTANIUM_EFI_BACKING_STORE_BASE;
     env->ar[IA64_AR_BSP] = env->rse.bsp;
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
+    /* Rebase all 96 logical names before staging the SOF=0 entry arguments. */
+    ia64_rse_sync_logical_in(env);
+    ia64_write_gr(env, 32, child->handle);
+    ia64_write_gr(env, 33, VIBTANIUM_EFI_SYSTEM_TABLE);
     env->ar[IA64_AR_PFS] = 0;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
     ia64_firmware_identity_tlb_set(env, true);
@@ -3278,7 +3287,9 @@ static bool efi_launch_event_notify(CPUIA64State *env,
      */
     notify_context = event->notify_context;
 
+    ia64_rse_sync_logical_out(env);
     ia64_set_cfm(env, ia64_make_cfm(2, 0, 0));
+    ia64_rse_sync_logical_in(env);
     ia64_write_gr(env, 32, event->handle);
     ia64_write_gr(env, 33, notify_context);
     ia64_branch_call_effects(
@@ -3288,6 +3299,7 @@ static bool efi_launch_event_notify(CPUIA64State *env,
     ia64_env_set_psr(env, ia64_env_psr(env) | IA64_PSR_BN_BIT);
     env->ip = entry;
     env->cr[IA64_CR_IIP] = entry;
+    ia64_env_begin_source_visibility_epoch(env);
     return true;
 }
 

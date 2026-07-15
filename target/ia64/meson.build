@@ -3,6 +3,7 @@ ia64_ss.add(files(
   'bundle.c',
   'cpu.c',
   'debug-trace.c',
+  'decode.c',
   'exception.c',
   'flight-recorder.c',
   'firmware-hook.c',

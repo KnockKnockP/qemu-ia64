@@ -1,0 +1,1756 @@
+/*
+ * Focused VMState coverage for the IA-64 typed issue-group continuation.
+ *
+ * Include machine.c so this test exercises the production-private subsection
+ * descriptions and validation routine instead of duplicating their schema.
+ */
+#include "qemu/osdep.h"
+
+#include "migration/qemu-file-types.h"
+#include "migration/vmstate.h"
+#include "../migration/qemu-file.h"
+#include "../migration/savevm.h"
+#include "io/channel-file.h"
+#include "qapi/error.h"
+#include "qemu/module.h"
+
+#include "../../target/ia64/machine.c"
+
+/*
+ * machine.c's complete CPU description retains its pre/post-load callbacks in
+ * this test executable.  The focused root deliberately invokes the production
+ * pre-load hook to verify absent-version defaults, while the unrelated
+ * architecture hooks below remain inert.  The overlay descriptions and
+ * validator themselves are compiled directly from production above.
+ */
+void ia64_itc_sync(CPUIA64State *env)
+{
+    (void)env;
+}
+
+static unsigned rse_hook_sequence;
+static unsigned rse_reconstruct_order;
+static unsigned rse_sync_out_order;
+static unsigned rse_sync_in_order;
+static unsigned rse_sync_out_count;
+static unsigned rse_sync_in_count;
+
+static uint32_t test_logical_stacked_slot(const CPUIA64State *env,
+                                          unsigned logical)
+{
+    uint32_t rotating_count = env->rse.sor * 8;
+    uint32_t offset = logical;
+
+    g_assert_cmpuint(logical, <, IA64_GR_COUNT - IA64_STATIC_GR_COUNT);
+    if (rotating_count != 0 && offset < rotating_count) {
+        offset = (offset + env->rse.rrb_gr) % rotating_count;
+    }
+    return ia64_rse_wrap_slot(env->rse.current_frame_base + offset);
+}
+
+static bool test_word_bit(const uint64_t words[2], unsigned bit)
+{
+    return (words[bit / 64] & (UINT64_C(1) << (bit % 64))) != 0;
+}
+
+static void test_set_word_bit(uint64_t words[2], unsigned bit, bool value)
+{
+    uint64_t mask = UINT64_C(1) << (bit % 64);
+
+    if (value) {
+        words[bit / 64] |= mask;
+    } else {
+        words[bit / 64] &= ~mask;
+    }
+}
+
+static bool test_physical_nat(const CPUIA64State *env, uint32_t slot)
+{
+    slot = ia64_rse_wrap_slot(slot);
+    return (env->rse.stacked_nat[slot / 64] &
+            (UINT64_C(1) << (slot % 64))) != 0;
+}
+
+static void test_set_physical_nat(CPUIA64State *env, uint32_t slot,
+                                  bool value)
+{
+    uint64_t mask;
+
+    slot = ia64_rse_wrap_slot(slot);
+    mask = UINT64_C(1) << (slot % 64);
+    if (value) {
+        env->rse.stacked_nat[slot / 64] |= mask;
+    } else {
+        env->rse.stacked_nat[slot / 64] &= ~mask;
+    }
+}
+
+void ia64_rse_reconstruct_transients(CPUIA64State *env)
+{
+    (void)env;
+    rse_reconstruct_order = ++rse_hook_sequence;
+}
+
+/*
+ * The production RSE implementation is intentionally not linked into this
+ * focused VMState binary.  These contract stubs model the two boundary APIs
+ * so the tests below exercise machine.c's call placement, wire authority, and
+ * compatibility behavior rather than silently making the hooks no-ops.
+ */
+void ia64_rse_sync_logical_out(CPUIA64State *env)
+{
+    rse_sync_out_count++;
+    rse_sync_out_order = ++rse_hook_sequence;
+    for (unsigned logical = 0;
+         logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT; logical++) {
+        uint32_t slot;
+
+        if (!test_word_bit(env->rse.logical_dirty, logical)) {
+            continue;
+        }
+        slot = test_logical_stacked_slot(env, logical);
+        env->rse.stacked_gr[slot] =
+            env->gr[IA64_STATIC_GR_COUNT + logical];
+        test_set_physical_nat(env, slot,
+                              test_word_bit(env->rse.logical_nat, logical));
+    }
+    memset(env->rse.logical_dirty, 0, sizeof(env->rse.logical_dirty));
+}
+
+void ia64_rse_sync_logical_in(CPUIA64State *env)
+{
+    rse_sync_in_count++;
+    rse_sync_in_order = ++rse_hook_sequence;
+    g_assert_cmphex(env->rse.logical_dirty[0], ==, 0);
+    g_assert_cmphex(env->rse.logical_dirty[1], ==, 0);
+    memset(env->rse.logical_nat, 0, sizeof(env->rse.logical_nat));
+    for (unsigned logical = 0;
+         logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT; logical++) {
+        uint32_t slot = test_logical_stacked_slot(env, logical);
+
+        env->gr[IA64_STATIC_GR_COUNT + logical] =
+            env->rse.stacked_gr[slot];
+        test_set_word_bit(env->rse.logical_nat, logical,
+                          test_physical_nat(env, slot));
+    }
+    memset(env->rse.logical_dirty, 0, sizeof(env->rse.logical_dirty));
+}
+
+void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env)
+{
+    (void)env;
+}
+
+void ia64_translation_lookup_cache_flush(CPUIA64State *env)
+{
+    (void)env;
+}
+
+void ia64_alat_reconstruct_transients(CPUIA64State *env)
+{
+    (void)env;
+}
+
+void ia64_itc_set(CPUIA64State *env, uint64_t value)
+{
+    (void)env;
+    (void)value;
+}
+
+void ia64_itc_timer_update(CPUIA64State *env)
+{
+    (void)env;
+}
+
+void ia64_reconcile_interrupt_state(CPUIA64State *env)
+{
+    (void)env;
+}
+
+void ia64_firmware_recover_post_load(uint64_t ip)
+{
+    (void)ip;
+}
+
+void tlb_flush(CPUState *cpu)
+{
+    (void)cpu;
+}
+
+static int temp_fd;
+
+static QEMUFile *open_test_file(bool write)
+{
+    QIOChannel *ioc;
+    QEMUFile *f;
+    int fd = dup(temp_fd);
+
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(lseek(fd, 0, SEEK_SET), ==, 0);
+    if (write) {
+        g_assert_cmpint(ftruncate(fd, 0), ==, 0);
+    }
+
+    ioc = QIO_CHANNEL(qio_channel_file_new_fd(fd));
+    f = write ? qemu_file_new_output(ioc) : qemu_file_new_input(ioc);
+    object_unref(OBJECT(ioc));
+    return f;
+}
+
+static int validate_loaded_issue_group(void *opaque, int version_id)
+{
+    CPUIA64State *env = opaque;
+
+    g_assert_cmpint(version_id, ==, 1);
+    return ia64_validate_issue_group_overlay(env);
+}
+
+/*
+ * This root contains the live PR image plus the two pieces of IA-64 state
+ * involved in carrying an open typed group across a migration boundary.  Both
+ * subsection descriptions and their .needed callbacks are production objects.
+ */
+static const VMStateDescription vmstate_issue_group_test_root = {
+    .name = "env",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_load = ia64_env_pre_load,
+    .post_load = validate_loaded_issue_group,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(pr, CPUIA64State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_instruction_group_state,
+        &vmstate_issue_group_overlay,
+        NULL
+    },
+};
+
+/*
+ * Version 3 predates the ordered BR resource.  Keep a writer for that exact
+ * wire schema so compatibility coverage proves the production v5 reader
+ * preserves predicate forwarding while defaulting both BR masks.
+ */
+static const VMStateDescription vmstate_issue_group_overlay_v3_test = {
+    .name = "env/issue-group-overlay",
+    .version_id = 3,
+    .minimum_version_id = 1,
+    .needed = ia64_issue_group_overlay_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(issue_group.saved_gr, CPUIA64State,
+                             IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_nat, CPUIA64State,
+                             IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_gr_mask, CPUIA64State, 2),
+        VMSTATE_UINT64(issue_group.saved_pr, CPUIA64State),
+        VMSTATE_BOOL(issue_group.pr_saved, CPUIA64State),
+        VMSTATE_BOOL_V(issue_group.typed_active, CPUIA64State, 2),
+        VMSTATE_UINT64_V(issue_group.branch_pr_forward_mask,
+                         CPUIA64State, 3),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_issue_group_v3_test_root = {
+    .name = "env",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(pr, CPUIA64State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_instruction_group_state,
+        &vmstate_issue_group_overlay_v3_test,
+        NULL
+    },
+};
+
+/*
+ * Version 2 predates explicit predicate forwarding.  Keep a writer for that
+ * exact wire schema so compatibility coverage exercises the production v5
+ * reader instead of manufacturing an incomplete byte stream by hand.
+ */
+static const VMStateDescription vmstate_issue_group_overlay_v2_test = {
+    .name = "env/issue-group-overlay",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .needed = ia64_issue_group_overlay_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(issue_group.saved_gr, CPUIA64State,
+                             IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_nat, CPUIA64State,
+                             IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_gr_mask, CPUIA64State, 2),
+        VMSTATE_UINT64(issue_group.saved_pr, CPUIA64State),
+        VMSTATE_BOOL(issue_group.pr_saved, CPUIA64State),
+        VMSTATE_BOOL_V(issue_group.typed_active, CPUIA64State, 2),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_issue_group_v2_test_root = {
+    .name = "env",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(pr, CPUIA64State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_instruction_group_state,
+        &vmstate_issue_group_overlay_v2_test,
+        NULL
+    },
+};
+
+/* Version 1 used subsection presence itself as the typed-owner marker. */
+static const VMStateDescription vmstate_issue_group_overlay_v1_test = {
+    .name = "env/issue-group-overlay",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ia64_issue_group_overlay_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(issue_group.saved_gr, CPUIA64State,
+                             IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_nat, CPUIA64State,
+                             IA64_GR_COUNT),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_gr_mask, CPUIA64State, 2),
+        VMSTATE_UINT64(issue_group.saved_pr, CPUIA64State),
+        VMSTATE_BOOL(issue_group.pr_saved, CPUIA64State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_issue_group_v1_test_root = {
+    .name = "env",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(pr, CPUIA64State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_instruction_group_state,
+        &vmstate_issue_group_overlay_v1_test,
+        NULL
+    },
+};
+
+/*
+ * Exercise the production env payload followed by the outer CPU field and
+ * production collection-state subsection.  Omitting CPUState's unrelated
+ * common payload keeps this focused while preserving the fixed CPU-v3 /
+ * env-v5 / RSE-v4 version chain.
+ */
+static const VMStateDescription vmstate_collection_test_root = {
+    .name = "cpu",
+    .version_id = 3,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v3, 0,
+                             vmstate_env, CPUIA64State, 3),
+        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v4, 0,
+                             vmstate_env, CPUIA64State, 4),
+        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v5, 0,
+                             vmstate_env, CPUIA64State, 5),
+        VMSTATE_UINT64_V(env.rse.bsp_load, IA64CPU, 2),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ia64_collection_state,
+        NULL
+    },
+};
+
+static const VMStateDescription vmstate_legacy_cpu_v2_test_root = {
+    .name = "cpu",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VSTRUCT(env, IA64CPU, vmstate_env, CPUIA64State, 4),
+        VMSTATE_UINT64_V(env.rse.bsp_load, IA64CPU, 2),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_legacy_cpu_v1_test_root = {
+    .name = "cpu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VSTRUCT(env, IA64CPU, vmstate_env, CPUIA64State, 3),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+/* Exact writer for the final pre-partition RSE wire generation. */
+static const VMStateDescription vmstate_rse_v3_test = {
+    .name = "rse",
+    .version_id = 3,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(rsc, IA64RSEState),
+        VMSTATE_UINT64(bsp, IA64RSEState),
+        VMSTATE_UINT64(bspstore, IA64RSEState),
+        VMSTATE_UINT64(rnat, IA64RSEState),
+        VMSTATE_UINT64(loadrs, IA64RSEState),
+        VMSTATE_UINT32(sof, IA64RSEState),
+        VMSTATE_UINT32(sol, IA64RSEState),
+        VMSTATE_UINT32(sor, IA64RSEState),
+        VMSTATE_UINT32(rrb_gr, IA64RSEState),
+        VMSTATE_UINT32(rrb_fr, IA64RSEState),
+        VMSTATE_UINT32(rrb_pr, IA64RSEState),
+        VMSTATE_UINT32(current_frame_base, IA64RSEState),
+        VMSTATE_UINT32_V(pending_fill_count, IA64RSEState, 3),
+        VMSTATE_UINT64_V(pending_fill_ip, IA64RSEState, 3),
+        VMSTATE_UINT64_ARRAY(stacked_gr, IA64RSEState,
+                             IA64_STACKED_GR_COUNT),
+        VMSTATE_UINT64_ARRAY_V(stacked_nat, IA64RSEState,
+                               IA64_RSE_NAT_WORDS, 2),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int save_issue_group_with_vmsd(const CPUIA64State *env,
+                                      const VMStateDescription *vmsd)
+{
+    Error *local_err = NULL;
+    QEMUFile *f = open_test_file(true);
+    int ret;
+
+    ret = vmstate_save_state(f, vmsd, (void *)env, NULL, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    }
+    if (ret == 0) {
+        qemu_put_byte(f, QEMU_VM_EOF);
+        ret = qemu_file_get_error(f);
+    }
+    qemu_fclose(f);
+    return ret;
+}
+
+static int save_issue_group(const CPUIA64State *env)
+{
+    return save_issue_group_with_vmsd(env, &vmstate_issue_group_test_root);
+}
+
+static int load_issue_group(CPUIA64State *env)
+{
+    Error *local_err = NULL;
+    QEMUFile *f = open_test_file(false);
+    int ret;
+
+    ret = vmstate_load_state(f, &vmstate_issue_group_test_root, env, 1,
+                             &local_err);
+    if (local_err) {
+        error_free(local_err);
+    }
+    qemu_fclose(f);
+    return ret;
+}
+
+static int save_cpu_with_vmsd(const IA64CPU *cpu,
+                              const VMStateDescription *vmsd)
+{
+    Error *local_err = NULL;
+    QEMUFile *f = open_test_file(true);
+    int ret;
+
+    ret = vmstate_save_state(f, vmsd, (void *)cpu, NULL, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    }
+    if (ret == 0) {
+        qemu_put_byte(f, QEMU_VM_EOF);
+        ret = qemu_file_get_error(f);
+    }
+    qemu_fclose(f);
+    return ret;
+}
+
+static int load_cpu_with_current_root(IA64CPU *cpu, int version_id)
+{
+    Error *local_err = NULL;
+    QEMUFile *f = open_test_file(false);
+    int ret;
+
+    ret = vmstate_load_state(f, &vmstate_collection_test_root, cpu,
+                             version_id, &local_err);
+    if (local_err) {
+        error_free(local_err);
+    }
+    qemu_fclose(f);
+    return ret;
+}
+
+static int save_rse_with_vmsd(const IA64RSEState *rse,
+                              const VMStateDescription *vmsd)
+{
+    Error *local_err = NULL;
+    QEMUFile *f = open_test_file(true);
+    int ret;
+
+    ret = vmstate_save_state(f, vmsd, (void *)rse, NULL, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    }
+    if (ret == 0) {
+        qemu_put_byte(f, QEMU_VM_EOF);
+        ret = qemu_file_get_error(f);
+    }
+    qemu_fclose(f);
+    return ret;
+}
+
+static int load_rse_with_current_vmsd(IA64RSEState *rse, int version_id)
+{
+    Error *local_err = NULL;
+    QEMUFile *f = open_test_file(false);
+    int ret;
+
+    ret = vmstate_load_state(f, &vmstate_rse, rse, version_id, &local_err);
+    if (local_err) {
+        error_free(local_err);
+    }
+    qemu_fclose(f);
+    return ret;
+}
+
+static void init_cpu_stream(IA64CPU *cpu, uint64_t last_successful_bundle,
+                            bool psr_ic_inflight)
+{
+    CPUIA64State *env;
+
+    memset(cpu, 0, sizeof(*cpu));
+    env = &cpu->env;
+    env->gr[0] = 0;
+    env->pr = 1;
+    env->instruction_group_start = true;
+    env->rse.invalid = IA64_GR_COUNT - IA64_STATIC_GR_COUNT;
+    env->last_successful_bundle = last_successful_bundle;
+    env->psr_ic_inflight = psr_ic_inflight;
+}
+
+static void init_typed_source(CPUIA64State *env)
+{
+    memset(env, 0, sizeof(*env));
+    env->instruction_group_start = false;
+    env->issue_group.typed_active = true;
+    env->rse.invalid = IA64_GR_COUNT - IA64_STATIC_GR_COUNT;
+}
+
+static void init_destination(CPUIA64State *env)
+{
+    memset(env, 0xa5, sizeof(*env));
+    ia64_env_begin_source_visibility_epoch(env);
+}
+
+static void assert_issue_group_equal(const IA64IssueGroupState *actual,
+                                     const IA64IssueGroupState *expected)
+{
+    g_assert_cmpmem(actual->saved_gr, sizeof(actual->saved_gr),
+                    expected->saved_gr, sizeof(expected->saved_gr));
+    g_assert_cmpmem(actual->saved_nat, sizeof(actual->saved_nat),
+                    expected->saved_nat, sizeof(expected->saved_nat));
+    g_assert_cmpmem(actual->saved_gr_mask, sizeof(actual->saved_gr_mask),
+                    expected->saved_gr_mask,
+                    sizeof(expected->saved_gr_mask));
+    g_assert_cmpmem(actual->saved_br, sizeof(actual->saved_br),
+                    expected->saved_br, sizeof(expected->saved_br));
+    g_assert_cmpuint(actual->saved_pr, ==, expected->saved_pr);
+    g_assert_cmpuint(actual->saved_pfs, ==, expected->saved_pfs);
+    g_assert_cmpuint(actual->branch_pr_forward_mask, ==,
+                     expected->branch_pr_forward_mask);
+    g_assert_cmpuint(actual->saved_br_mask, ==, expected->saved_br_mask);
+    g_assert_cmpuint(actual->branch_br_forward_mask, ==,
+                     expected->branch_br_forward_mask);
+    g_assert_cmpint(actual->pr_saved, ==, expected->pr_saved);
+    g_assert_cmpint(actual->pfs_saved, ==, expected->pfs_saved);
+    g_assert_cmpint(actual->branch_pfs_forwarded, ==,
+                    expected->branch_pfs_forwarded);
+    g_assert_cmpint(actual->typed_active, ==, expected->typed_active);
+}
+
+static void assert_round_trip(const CPUIA64State *source)
+{
+    CPUIA64State destination;
+
+    g_assert_cmpint(save_issue_group(source), ==, 0);
+    init_destination(&destination);
+    destination.issue_group.branch_pr_forward_mask = UINT64_MAX;
+    g_assert_cmpint(load_issue_group(&destination), ==, 0);
+
+    g_assert_false(destination.instruction_group_start);
+    assert_issue_group_equal(&destination.issue_group, &source->issue_group);
+}
+
+static void test_empty_typed_continuation(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    g_assert_true(ia64_issue_group_overlay_needed(&source));
+    assert_round_trip(&source);
+}
+
+static void test_gr_nat_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.saved_gr_mask[0] = UINT64_C(1) << 5;
+    source.issue_group.saved_gr_mask[1] = UINT64_C(1) << (70 - 64);
+    source.issue_group.saved_gr[5] = UINT64_C(0x0123456789abcdef);
+    source.issue_group.saved_nat[5] = 1;
+    source.issue_group.saved_gr[70] = UINT64_C(0xfedcba9876543210);
+    source.issue_group.saved_nat[70] = 0;
+    assert_round_trip(&source);
+}
+
+static void test_pr_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.saved_pr = UINT64_C(0x8000000000000021);
+    source.issue_group.pr_saved = true;
+    assert_round_trip(&source);
+}
+
+static void test_br_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.saved_br_mask =
+        (1u << 0) | (1u << 3) | (1u << 7);
+    source.issue_group.saved_br[0] = UINT64_C(0x0123456789abcdef);
+    source.issue_group.saved_br[3] = UINT64_C(0x8877665544332211);
+    source.issue_group.saved_br[7] = UINT64_C(0xfedcba9876543210);
+    assert_round_trip(&source);
+}
+
+static void test_pfs_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.saved_pfs = UINT64_C(0x123456789abcdef0);
+    source.issue_group.pfs_saved = true;
+    source.issue_group.branch_pfs_forwarded = true;
+    assert_round_trip(&source);
+}
+
+static void test_branch_br_forward_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.branch_br_forward_mask =
+        (1u << 0) | (1u << 4) | (1u << 7);
+    assert_round_trip(&source);
+}
+
+static void test_branch_pr_forward_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.branch_pr_forward_mask =
+        (UINT64_C(1) << 1) | (UINT64_C(1) << 17) | (UINT64_C(1) << 63);
+    assert_round_trip(&source);
+}
+
+static void test_branch_pr_forward_needed(void)
+{
+    CPUIA64State env = { 0 };
+
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.branch_pr_forward_mask = UINT64_C(1) << 42;
+    g_assert_true(ia64_issue_group_overlay_needed(&env));
+}
+
+static void test_pfs_overlay_needed(void)
+{
+    CPUIA64State env = { 0 };
+
+    env.issue_group.saved_pfs = UINT64_C(0xfeedfacecafebeef);
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.pfs_saved = true;
+    g_assert_true(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.pfs_saved = false;
+    env.issue_group.branch_pfs_forwarded = true;
+    g_assert_true(ia64_issue_group_overlay_needed(&env));
+}
+
+static void test_br_overlay_needed(void)
+{
+    CPUIA64State env = { 0 };
+
+    /* Backing values without validity bits are deliberately inert. */
+    env.issue_group.saved_br[2] = UINT64_C(0xdeadbeefcafebabe);
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+
+    env.issue_group.saved_br_mask = 1u << 2;
+    g_assert_true(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.saved_br_mask = 0;
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+
+    env.issue_group.branch_br_forward_mask = 1u << 6;
+    g_assert_true(ia64_issue_group_overlay_needed(&env));
+}
+
+static void test_combined_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.saved_gr_mask[0] = UINT64_C(1) << 63;
+    source.issue_group.saved_gr_mask[1] = UINT64_C(1) << (127 - 64);
+    source.issue_group.saved_gr[63] = UINT64_C(0x1111222233334444);
+    source.issue_group.saved_nat[63] = 0;
+    source.issue_group.saved_gr[127] = UINT64_C(0xaaaabbbbccccdddd);
+    source.issue_group.saved_nat[127] = 1;
+    source.issue_group.saved_pr = UINT64_C(0x4000000000000401);
+    source.issue_group.pr_saved = true;
+    source.issue_group.branch_pr_forward_mask =
+        (UINT64_C(1) << 10) | (UINT64_C(1) << 62);
+    source.issue_group.saved_br_mask = (1u << 1) | (1u << 6);
+    source.issue_group.saved_br[1] = UINT64_C(0x13579bdf2468ace0);
+    source.issue_group.saved_br[6] = UINT64_C(0x0f1e2d3c4b5a6978);
+    source.issue_group.branch_br_forward_mask = (1u << 2) | (1u << 6);
+    assert_round_trip(&source);
+}
+
+static void test_overlay_v3_defaults_br_state(void)
+{
+    CPUIA64State source;
+    CPUIA64State destination;
+
+    init_typed_source(&source);
+    source.pr = UINT64_C(0x45);
+    source.issue_group.saved_pr = UINT64_C(0x5);
+    source.issue_group.pr_saved = true;
+    source.issue_group.branch_pr_forward_mask = UINT64_C(0x40);
+    g_assert_cmpint(save_issue_group_with_vmsd(
+                        &source, &vmstate_issue_group_v3_test_root), ==, 0);
+
+    init_destination(&destination);
+    destination.issue_group.saved_br_mask = UINT8_MAX;
+    destination.issue_group.branch_br_forward_mask = UINT8_MAX;
+    g_assert_cmpint(load_issue_group(&destination), ==, 0);
+    g_assert_false(destination.instruction_group_start);
+    g_assert_true(destination.issue_group.typed_active);
+    g_assert_true(destination.issue_group.pr_saved);
+    g_assert_cmphex(destination.issue_group.saved_pr, ==, UINT64_C(0x5));
+    g_assert_cmphex(destination.issue_group.branch_pr_forward_mask, ==,
+                    UINT64_C(0x40));
+    g_assert_cmpuint(destination.issue_group.saved_br_mask, ==, 0);
+    g_assert_cmpuint(destination.issue_group.branch_br_forward_mask, ==, 0);
+}
+
+static void test_overlay_v1_v3_post_load_defaults_br_state(void)
+{
+    for (int version = 1; version <= 3; version++) {
+        CPUIA64State env;
+
+        init_typed_source(&env);
+        env.issue_group.saved_br_mask = UINT8_MAX;
+        env.issue_group.branch_br_forward_mask = UINT8_MAX;
+        g_assert_cmpint(ia64_issue_group_overlay_post_load(&env, version),
+                        ==, 0);
+        g_assert_cmpuint(env.issue_group.saved_br_mask, ==, 0);
+        g_assert_cmpuint(env.issue_group.branch_br_forward_mask, ==, 0);
+    }
+}
+
+static void test_overlay_v1_v4_post_load_defaults_pfs_state(void)
+{
+    for (int version = 1; version <= 4; version++) {
+        CPUIA64State env;
+
+        init_typed_source(&env);
+        env.issue_group.saved_pfs = UINT64_MAX;
+        env.issue_group.pfs_saved = true;
+        env.issue_group.branch_pfs_forwarded = true;
+        g_assert_cmpint(ia64_issue_group_overlay_post_load(&env, version),
+                        ==, 0);
+        g_assert_cmphex(env.issue_group.saved_pfs, ==, 0);
+        g_assert_false(env.issue_group.pfs_saved);
+        g_assert_false(env.issue_group.branch_pfs_forwarded);
+    }
+}
+
+static void test_overlay_v2_reconstructs_branch_pr_forward(void)
+{
+    CPUIA64State source;
+    CPUIA64State destination;
+
+    init_typed_source(&source);
+    source.pr = UINT64_C(0x3);
+    source.issue_group.saved_pr = UINT64_C(0x1);
+    source.issue_group.pr_saved = true;
+    g_assert_cmpint(save_issue_group_with_vmsd(
+                        &source, &vmstate_issue_group_v2_test_root), ==, 0);
+
+    init_destination(&destination);
+    destination.issue_group.branch_pr_forward_mask = UINT64_MAX;
+    g_assert_cmpint(load_issue_group(&destination), ==, 0);
+    g_assert_false(destination.instruction_group_start);
+    g_assert_true(destination.issue_group.typed_active);
+    g_assert_true(destination.issue_group.pr_saved);
+    g_assert_cmphex(destination.issue_group.saved_pr, ==,
+                    UINT64_C(0x1));
+    g_assert_cmphex(destination.issue_group.branch_pr_forward_mask, ==,
+                    UINT64_C(0x2));
+    g_assert_cmpuint(destination.issue_group.saved_br_mask, ==, 0);
+    g_assert_cmpuint(destination.issue_group.branch_br_forward_mask, ==, 0);
+}
+
+static void test_overlay_v1_reconstructs_owner_and_forwarding(void)
+{
+    CPUIA64State source;
+    CPUIA64State destination;
+
+    init_typed_source(&source);
+    source.pr = UINT64_C(0x3);
+    source.issue_group.saved_pr = UINT64_C(0x1);
+    source.issue_group.pr_saved = true;
+    source.issue_group.saved_gr_mask[0] = UINT64_C(1) << 4;
+    source.issue_group.saved_gr[4] = UINT64_C(0x1122334455667788);
+    g_assert_cmpint(save_issue_group_with_vmsd(
+                        &source, &vmstate_issue_group_v1_test_root), ==, 0);
+
+    init_destination(&destination);
+    g_assert_cmpint(load_issue_group(&destination), ==, 0);
+    g_assert_false(destination.instruction_group_start);
+    g_assert_true(destination.issue_group.typed_active);
+    g_assert_true(destination.issue_group.pr_saved);
+    g_assert_cmphex(destination.issue_group.branch_pr_forward_mask, ==,
+                    UINT64_C(0x2));
+    g_assert_cmphex(destination.issue_group.saved_gr_mask[0], ==,
+                    UINT64_C(1) << 4);
+    g_assert_cmphex(destination.issue_group.saved_gr[4], ==,
+                    UINT64_C(0x1122334455667788));
+    g_assert_cmpuint(destination.issue_group.saved_br_mask, ==, 0);
+    g_assert_cmpuint(destination.issue_group.branch_br_forward_mask, ==, 0);
+}
+
+typedef void (*CorruptState)(CPUIA64State *env);
+
+static void assert_load_rejected(CorruptState corrupt)
+{
+    CPUIA64State source;
+    CPUIA64State destination;
+
+    init_typed_source(&source);
+    corrupt(&source);
+    g_assert_cmpint(save_issue_group(&source), ==, 0);
+
+    init_destination(&destination);
+    g_assert_cmpint(load_issue_group(&destination), !=, 0);
+}
+
+static void corrupt_fresh_frontier(CPUIA64State *env)
+{
+    env->instruction_group_start = true;
+}
+
+static void corrupt_missing_typed_owner(CPUIA64State *env)
+{
+    env->issue_group.typed_active = false;
+    env->issue_group.saved_gr_mask[0] = UINT64_C(1) << 2;
+}
+
+static void corrupt_forward_at_fresh_frontier(CPUIA64State *env)
+{
+    env->instruction_group_start = true;
+    env->issue_group.branch_pr_forward_mask = UINT64_C(1) << 9;
+}
+
+static void corrupt_forward_without_typed_owner(CPUIA64State *env)
+{
+    env->issue_group.typed_active = false;
+    env->issue_group.branch_pr_forward_mask = UINT64_C(1) << 31;
+}
+
+static void corrupt_forward_p0(CPUIA64State *env)
+{
+    env->issue_group.branch_pr_forward_mask = UINT64_C(1);
+}
+
+static void corrupt_br_at_fresh_frontier(CPUIA64State *env)
+{
+    env->instruction_group_start = true;
+    env->issue_group.saved_br_mask = 1u << 3;
+    env->issue_group.saved_br[3] = UINT64_C(0xabcdef0123456789);
+}
+
+static void corrupt_br_without_typed_owner(CPUIA64State *env)
+{
+    env->issue_group.typed_active = false;
+    env->issue_group.saved_br_mask = 1u << 5;
+    env->issue_group.saved_br[5] = UINT64_C(0x0123456789abcdef);
+}
+
+static void corrupt_br_forward_at_fresh_frontier(CPUIA64State *env)
+{
+    env->instruction_group_start = true;
+    env->issue_group.branch_br_forward_mask = 1u << 1;
+}
+
+static void corrupt_br_forward_without_typed_owner(CPUIA64State *env)
+{
+    env->issue_group.typed_active = false;
+    env->issue_group.branch_br_forward_mask = 1u << 7;
+}
+
+static void corrupt_pfs_without_typed_owner(CPUIA64State *env)
+{
+    env->issue_group.typed_active = false;
+    env->issue_group.pfs_saved = true;
+    env->issue_group.saved_pfs = UINT64_C(0x1234);
+}
+
+static void corrupt_pfs_forward_without_saved_source(CPUIA64State *env)
+{
+    env->issue_group.branch_pfs_forwarded = true;
+}
+
+static void corrupt_gr0(CPUIA64State *env)
+{
+    env->issue_group.saved_gr_mask[0] = 1;
+}
+
+static void corrupt_nat(CPUIA64State *env)
+{
+    env->issue_group.saved_gr_mask[0] = UINT64_C(1) << 3;
+    env->issue_group.saved_nat[3] = 2;
+}
+
+static void corrupt_pr(CPUIA64State *env)
+{
+    env->issue_group.pr_saved = true;
+    env->issue_group.saved_pr = UINT64_C(0x20);
+}
+
+static void test_reject_fresh_frontier(void)
+{
+    assert_load_rejected(corrupt_fresh_frontier);
+}
+
+static void test_reject_missing_typed_owner(void)
+{
+    assert_load_rejected(corrupt_missing_typed_owner);
+}
+
+static void test_reject_forward_at_fresh_frontier(void)
+{
+    assert_load_rejected(corrupt_forward_at_fresh_frontier);
+}
+
+static void test_reject_forward_without_typed_owner(void)
+{
+    assert_load_rejected(corrupt_forward_without_typed_owner);
+}
+
+static void test_reject_forward_p0(void)
+{
+    assert_load_rejected(corrupt_forward_p0);
+}
+
+static void test_reject_br_at_fresh_frontier(void)
+{
+    assert_load_rejected(corrupt_br_at_fresh_frontier);
+}
+
+static void test_reject_br_without_typed_owner(void)
+{
+    assert_load_rejected(corrupt_br_without_typed_owner);
+}
+
+static void test_reject_br_forward_at_fresh_frontier(void)
+{
+    assert_load_rejected(corrupt_br_forward_at_fresh_frontier);
+}
+
+static void test_reject_br_forward_without_typed_owner(void)
+{
+    assert_load_rejected(corrupt_br_forward_without_typed_owner);
+}
+
+static void test_reject_gr0(void)
+{
+    assert_load_rejected(corrupt_gr0);
+}
+
+static void test_reject_non_boolean_nat(void)
+{
+    assert_load_rejected(corrupt_nat);
+}
+
+static void test_reject_pr_without_p0(void)
+{
+    assert_load_rejected(corrupt_pr);
+}
+
+static void test_reject_pfs_without_typed_owner(void)
+{
+    assert_load_rejected(corrupt_pfs_without_typed_owner);
+}
+
+static void test_reject_pfs_forward_without_saved_source(void)
+{
+    assert_load_rejected(corrupt_pfs_forward_without_saved_source);
+}
+
+static void test_pre_save_valid_typed(void)
+{
+    CPUIA64State env;
+
+    init_typed_source(&env);
+    env.issue_group.saved_gr_mask[0] = UINT64_C(1) << 4;
+    env.issue_group.saved_gr[4] = UINT64_C(0x76543210fedcba98);
+    env.issue_group.saved_nat[4] = 1;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
+}
+
+static void test_pre_save_reject_fresh_typed(void)
+{
+    CPUIA64State env;
+
+    init_typed_source(&env);
+    env.instruction_group_start = true;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+}
+
+static void test_pre_save_reject_orphan_overlay(void)
+{
+    CPUIA64State env;
+
+    init_typed_source(&env);
+    env.issue_group.typed_active = false;
+    env.issue_group.saved_gr_mask[1] = UINT64_C(1) << 7;
+    env.issue_group.saved_gr[71] = UINT64_C(0xabcdef0123456789);
+    env.issue_group.saved_nat[71] = 0;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+}
+
+static void test_pre_save_reject_dirty_breadcrumb(void)
+{
+    CPUIA64State env;
+
+    init_typed_source(&env);
+    env.instruction_group_dirty = true;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+}
+
+static void test_pre_save_canonicalizes_ri(void)
+{
+    CPUIA64State env = { 0 };
+    uint64_t expected_psr;
+
+    env.instruction_group_start = true;
+    env.rse.invalid = IA64_GR_COUNT - IA64_STATIC_GR_COUNT;
+    env.psr = UINT64_C(0x123456789abcdef0);
+    env.ri = 2;
+    env.ri_dirty = true;
+    expected_psr = ia64_psr_with_ri(env.psr, env.ri);
+
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
+    g_assert_cmpuint(env.psr, ==, expected_psr);
+    g_assert_cmpuint(ia64_psr_ri(env.psr), ==, 2);
+    g_assert_cmpuint(env.ri, ==, 2);
+    g_assert_false(env.ri_dirty);
+}
+
+static void test_pre_save_flushes_only_dirty_logical_names(void)
+{
+    static const unsigned dirty_names[] = { 0, 1, 15, 16, 63, 64, 95 };
+    CPUIA64State env = { 0 };
+    uint64_t clean_physical_value;
+    bool clean_physical_nat;
+    uint32_t clean_slot;
+
+    env.instruction_group_start = true;
+    env.pr = 1;
+    env.rse.invalid = IA64_GR_COUNT - IA64_STATIC_GR_COUNT;
+    env.rse.current_frame_base = IA64_STACKED_GR_COUNT - 6;
+    env.rse.sor = 2;
+    env.rse.rrb_gr = 5;
+    for (unsigned slot = 0; slot < IA64_STACKED_GR_COUNT; slot++) {
+        env.rse.stacked_gr[slot] =
+            UINT64_C(0xd000000000000000) | slot;
+        test_set_physical_nat(&env, slot, (slot & 1) != 0);
+    }
+    for (unsigned logical = 0;
+         logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT; logical++) {
+        env.gr[IA64_STATIC_GR_COUNT + logical] =
+            UINT64_C(0xa100000000000000) | logical;
+        test_set_word_bit(env.rse.logical_nat, logical,
+                          (logical % 3) == 1);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(dirty_names); i++) {
+        test_set_word_bit(env.rse.logical_dirty, dirty_names[i], true);
+    }
+
+    /* A clean mismatch must remain physical-authoritative at sync-out. */
+    clean_slot = test_logical_stacked_slot(&env, 2);
+    clean_physical_value = env.rse.stacked_gr[clean_slot];
+    clean_physical_nat = test_physical_nat(&env, clean_slot);
+
+    rse_hook_sequence = 0;
+    rse_sync_out_order = 0;
+    rse_sync_out_count = 0;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
+    g_assert_cmpuint(rse_sync_out_count, ==, 1);
+    g_assert_cmpuint(rse_sync_out_order, >, 0);
+    g_assert_cmphex(env.rse.logical_dirty[0], ==, 0);
+    g_assert_cmphex(env.rse.logical_dirty[1], ==, 0);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(dirty_names); i++) {
+        unsigned logical = dirty_names[i];
+        uint32_t slot = test_logical_stacked_slot(&env, logical);
+
+        g_assert_cmphex(env.rse.stacked_gr[slot], ==,
+                        env.gr[IA64_STATIC_GR_COUNT + logical]);
+        g_assert_cmpint(test_physical_nat(&env, slot), ==,
+                        test_word_bit(env.rse.logical_nat, logical));
+    }
+    g_assert_cmphex(env.rse.stacked_gr[clean_slot], ==,
+                    clean_physical_value);
+    g_assert_cmpint(test_physical_nat(&env, clean_slot), ==,
+                    clean_physical_nat);
+}
+
+static void seed_physical_logical_mapping(CPUIA64State *env,
+                                          uint32_t frame_base,
+                                          uint32_t sor,
+                                          uint32_t rrb_gr)
+{
+    env->rse.current_frame_base = frame_base;
+    env->rse.sor = sor;
+    env->rse.rrb_gr = rrb_gr;
+    memset(env->rse.stacked_gr, 0, sizeof(env->rse.stacked_gr));
+    memset(env->rse.stacked_nat, 0, sizeof(env->rse.stacked_nat));
+    for (unsigned logical = 0;
+         logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT; logical++) {
+        uint32_t slot = test_logical_stacked_slot(env, logical);
+
+        env->rse.stacked_gr[slot] =
+            UINT64_C(0x5100000000000000) |
+            ((uint64_t)frame_base << 16) | logical;
+        test_set_physical_nat(env, slot, (logical % 5) == 2);
+        env->gr[IA64_STATIC_GR_COUNT + logical] =
+            UINT64_C(0xbad0000000000000) | logical;
+    }
+    env->rse.logical_nat[0] = UINT64_MAX;
+    env->rse.logical_nat[1] = UINT64_MAX;
+    env->rse.logical_dirty[0] = UINT64_MAX;
+    env->rse.logical_dirty[1] = UINT64_MAX;
+}
+
+static void assert_logical_mirror_matches_physical(const CPUIA64State *env)
+{
+    for (unsigned logical = 0;
+         logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT; logical++) {
+        uint32_t slot = test_logical_stacked_slot(env, logical);
+
+        g_assert_cmphex(env->gr[IA64_STATIC_GR_COUNT + logical], ==,
+                        env->rse.stacked_gr[slot]);
+        g_assert_cmpint(test_word_bit(env->rse.logical_nat, logical), ==,
+                        test_physical_nat(env, slot));
+    }
+    g_assert_cmphex(env->rse.logical_dirty[0], ==, 0);
+    g_assert_cmphex(env->rse.logical_dirty[1], ==, 0);
+    /* Only 96 architectural logical names exist. */
+    g_assert_cmphex(env->rse.logical_nat[1] >> 32, ==, 0);
+}
+
+static void test_post_load_reconstructs_wrapped_rotating_mirror(void)
+{
+    CPUIA64State env = { 0 };
+
+    env.instruction_group_start = true;
+    env.pr = 1;
+    seed_physical_logical_mapping(&env, IA64_STACKED_GR_COUNT - 7, 3, 19);
+    g_assert_cmpint(ia64_env_pre_load(&env), ==, 0);
+    g_assert_cmphex(env.rse.logical_nat[0], ==, 0);
+    g_assert_cmphex(env.rse.logical_nat[1], ==, 0);
+    g_assert_cmphex(env.rse.logical_dirty[0], ==, 0);
+    g_assert_cmphex(env.rse.logical_dirty[1], ==, 0);
+    rse_hook_sequence = 0;
+    rse_reconstruct_order = 0;
+    rse_sync_in_order = 0;
+    rse_sync_in_count = 0;
+
+    g_assert_cmpint(ia64_env_post_load(&env, 4), ==, 0);
+    g_assert_cmpuint(rse_sync_in_count, ==, 1);
+    g_assert_cmpuint(rse_reconstruct_order, >, 0);
+    g_assert_cmpuint(rse_sync_in_order, >, rse_reconstruct_order);
+    assert_logical_mirror_matches_physical(&env);
+}
+
+static void test_pre_load_clears_transient_mirror_metadata(void)
+{
+    CPUIA64State env = { 0 };
+
+    env.rse.logical_nat[0] = UINT64_MAX;
+    env.rse.logical_nat[1] = UINT64_MAX;
+    env.rse.logical_dirty[0] = UINT64_MAX;
+    env.rse.logical_dirty[1] = UINT64_MAX;
+    env.rse.cfle = true;
+    env.rse.reference = true;
+    g_assert_cmpint(ia64_env_pre_load(&env), ==, 0);
+    g_assert_cmphex(env.rse.logical_nat[0], ==, 0);
+    g_assert_cmphex(env.rse.logical_nat[1], ==, 0);
+    g_assert_cmphex(env.rse.logical_dirty[0], ==, 0);
+    g_assert_cmphex(env.rse.logical_dirty[1], ==, 0);
+    g_assert_false(env.rse.cfle);
+    g_assert_false(env.rse.reference);
+}
+
+static void test_post_load_v1_v5_reconstructs_logical_mirror(void)
+{
+    for (int version = 1; version <= 5; version++) {
+        CPUIA64State env = { 0 };
+
+        env.instruction_group_start = true;
+        env.pr = 1;
+        seed_physical_logical_mapping(
+            &env, IA64_STACKED_GR_COUNT - 8 + version, 2,
+            (unsigned)(version * 3));
+        g_assert_cmpint(ia64_env_pre_load(&env), ==, 0);
+        g_assert_cmphex(env.rse.logical_dirty[0], ==, 0);
+        g_assert_cmphex(env.rse.logical_dirty[1], ==, 0);
+        rse_hook_sequence = 0;
+        rse_reconstruct_order = 0;
+        rse_sync_in_order = 0;
+        rse_sync_in_count = 0;
+
+        g_assert_cmpint(ia64_env_post_load(&env, version), ==, 0);
+        g_assert_cmpuint(rse_sync_in_count, ==, 1);
+        g_assert_cmpuint(rse_sync_in_order, >, rse_reconstruct_order);
+        assert_logical_mirror_matches_physical(&env);
+    }
+}
+
+static void test_stream_ignores_stale_serialized_logical_gr(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+    uint64_t stale_gr32;
+
+    /* The transient mirror must not manufacture a new wire generation. */
+    g_assert_cmpint(vmstate_rse.version_id, ==, 4);
+    g_assert_cmpint(vmstate_issue_group_overlay.version_id, ==, 5);
+    g_assert_cmpint(vmstate_env.version_id, ==, 5);
+    g_assert_cmpint(vmstate_ia64_cpu.version_id, ==, 3);
+    init_cpu_stream(&source, 0, false);
+    seed_physical_logical_mapping(
+        &source.env, IA64_STACKED_GR_COUNT - 9, 4, 27);
+    /* Model an old stream: gr[32..127] is stale and no mirror is dirty. */
+    source.env.rse.logical_dirty[0] = 0;
+    source.env.rse.logical_dirty[1] = 0;
+    stale_gr32 = source.env.gr[32];
+    g_assert_cmphex(stale_gr32, !=,
+                    source.env.rse.stacked_gr[
+                        test_logical_stacked_slot(&source.env, 0)]);
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_collection_test_root), ==, 0);
+
+    init_cpu_stream(&destination, 0, false);
+    destination.env.rse.logical_nat[0] = UINT64_MAX;
+    destination.env.rse.logical_nat[1] = UINT64_MAX;
+    destination.env.rse.logical_dirty[0] = UINT64_MAX;
+    destination.env.rse.logical_dirty[1] = UINT64_MAX;
+    g_assert_cmpint(load_cpu_with_current_root(&destination, 3), ==, 0);
+
+    assert_logical_mirror_matches_physical(&destination.env);
+    g_assert_cmphex(destination.env.gr[32], !=, stale_gr32);
+}
+
+static void test_collection_state_subsection_round_trip(void)
+{
+    static const struct {
+        uint64_t last_successful_bundle;
+        bool psr_ic_inflight;
+    } rows[] = {
+        { 0, false },
+        { 0, true },
+        { UINT64_C(0x123456789abcde0), false },
+        { UINT64_C(0xfedcba987654320), true },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
+        IA64CPU source;
+        IA64CPU destination;
+
+        init_cpu_stream(&source, rows[i].last_successful_bundle,
+                        rows[i].psr_ic_inflight);
+        source.env.rse.bsp_load = UINT64_C(0x8877665544332211);
+        g_assert_cmpint(save_cpu_with_vmsd(
+                            &source, &vmstate_collection_test_root), ==, 0);
+
+        init_cpu_stream(&destination, UINT64_MAX,
+                        !rows[i].psr_ic_inflight);
+        g_assert_cmpint(load_cpu_with_current_root(&destination, 3), ==, 0);
+        g_assert_cmphex(destination.env.last_successful_bundle, ==,
+                        rows[i].last_successful_bundle);
+        g_assert_cmpint(destination.env.psr_ic_inflight, ==,
+                        rows[i].psr_ic_inflight);
+        g_assert_cmphex(destination.env.rse.bsp_load, ==,
+                        UINT64_C(0x8877665544332211));
+    }
+}
+
+static void test_legacy_cpu_v2_defaults_collection_state(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+
+    init_cpu_stream(&source, 0, false);
+    source.env.psr = UINT64_C(0x123456789abcdef0);
+    source.env.cfm = UINT64_C(0x23456789abcdef01);
+    source.env.firmware_identity_tlb = true;
+    source.env.rse.rsc = UINT64_C(0x3456789abcdef012);
+    source.env.rse.bsp_load = UINT64_C(0x456789abcdef0123);
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_legacy_cpu_v2_test_root), ==, 0);
+
+    init_cpu_stream(&destination, UINT64_MAX, true);
+    g_assert_cmpint(load_cpu_with_current_root(&destination, 2), ==, 0);
+    g_assert_cmphex(destination.env.psr, ==,
+                    UINT64_C(0x123456789abcdef0));
+    g_assert_cmphex(destination.env.cfm, ==,
+                    UINT64_C(0x23456789abcdef01));
+    g_assert_true(destination.env.firmware_identity_tlb);
+    g_assert_cmphex(destination.env.rse.rsc, ==,
+                    UINT64_C(0x3456789abcdef012));
+    g_assert_cmphex(destination.env.rse.bsp_load, ==,
+                    UINT64_C(0x456789abcdef0123));
+    g_assert_cmphex(destination.env.last_successful_bundle, ==, 0);
+    g_assert_false(destination.env.psr_ic_inflight);
+}
+
+static void test_legacy_cpu_v1_selects_env_v3_rse_v1(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+
+    init_cpu_stream(&source, 0, false);
+    source.env.rse.bspstore = UINT64_C(0x1000);
+    source.env.rse.bsp = UINT64_C(0x1030);
+    source.env.rse.sof = 12;
+    source.env.rse.current_frame_base = 3;
+    source.env.rse.bol = 6;
+    source.env.rse.dirty = 6;
+    source.env.rse.invalid = 78;
+    source.env.rse.stacked_gr[IA64_STACKED_GR_COUNT - 1] =
+        UINT64_C(0x123456789abcdef0);
+    source.env.rse.stacked_nat[IA64_RSE_NAT_WORDS - 1] = UINT64_MAX;
+    source.env.rse.bsp_load = UINT64_C(0xfeedface);
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_legacy_cpu_v1_test_root), ==, 0);
+
+    init_cpu_stream(&destination, UINT64_MAX, true);
+    g_assert_cmpint(load_cpu_with_current_root(&destination, 1), ==, 0);
+    g_assert_cmphex(destination.env.rse.bspstore, ==, UINT64_C(0x1000));
+    g_assert_cmphex(destination.env.rse.bsp, ==, UINT64_C(0x1030));
+    g_assert_cmpint(destination.env.rse.dirty, ==, 6);
+    g_assert_cmpint(destination.env.rse.dirty_nat, ==, 0);
+    g_assert_cmpint(destination.env.rse.clean, ==, 0);
+    g_assert_cmpint(destination.env.rse.invalid, ==, 78);
+    g_assert_cmpuint(destination.env.rse.bol, ==, 6);
+    g_assert_cmphex(destination.env.rse.stacked_gr[
+                        IA64_STACKED_GR_COUNT - 1], ==,
+                    UINT64_C(0x123456789abcdef0));
+    /* RSE v1 and CPU v1 predate both fields. */
+    g_assert_cmphex(destination.env.rse.stacked_nat[
+                        IA64_RSE_NAT_WORDS - 1], ==, 0);
+    g_assert_cmphex(destination.env.rse.bsp_load, ==, 0);
+    g_assert_cmphex(destination.env.last_successful_bundle, ==, 0);
+    g_assert_false(destination.env.psr_ic_inflight);
+}
+
+static void test_outer_version_selection_matrix(void)
+{
+    /*
+     * CPU v1/v2 did not encode their moving nested versions.  The only
+     * deterministic compatibility policy is the latest layout at each outer
+     * boundary; older payload variants sharing that outer version are
+     * irreducibly ambiguous.  CPU v3 is the first unambiguous chain.
+     */
+    g_assert_true(ia64_cpu_uses_env_v3(NULL, 1));
+    g_assert_true(ia64_cpu_uses_env_v4(NULL, 2));
+    g_assert_true(ia64_cpu_uses_env_v5(NULL, 3));
+    g_assert_true(ia64_env_uses_rse_v1(NULL, 3));
+    g_assert_true(ia64_env_uses_rse_v3(NULL, 4));
+    g_assert_true(ia64_env_uses_rse_v4(NULL, 5));
+
+    g_assert_false(ia64_cpu_uses_env_v4(NULL, 1));
+    g_assert_false(ia64_cpu_uses_env_v5(NULL, 2));
+    g_assert_false(ia64_env_uses_rse_v3(NULL, 3));
+    g_assert_false(ia64_env_uses_rse_v4(NULL, 4));
+    g_assert_cmpint(vmstate_ia64_cpu.version_id, ==, 3);
+    g_assert_cmpint(vmstate_env.version_id, ==, 5);
+}
+
+static void seed_complete_rse_vmstate(IA64RSEState *rse)
+{
+    memset(rse, 0, sizeof(*rse));
+    rse->rsc = UINT64_C(0x1122334455667788);
+    rse->bsp = UINT64_C(0x1050);
+    rse->bspstore = UINT64_C(0x1000);
+    rse->rnat = UINT64_C(0x0123456789abcdef);
+    rse->loadrs = UINT64_C(0x80);
+    rse->sof = 20;
+    rse->sol = 7;
+    rse->sor = 2;
+    rse->rrb_gr = 5;
+    rse->rrb_fr = 9;
+    rse->rrb_pr = 11;
+    rse->current_frame_base = IA64_STACKED_GR_COUNT - 6;
+    rse->bol = 7;
+    rse->dirty = 10;
+    rse->dirty_nat = 0;
+    rse->clean = 30;
+    rse->clean_nat = 1;
+    rse->invalid = 36;
+    rse->stacked_gr[0] = UINT64_C(0xfeedfacecafebeef);
+    rse->stacked_gr[IA64_STACKED_GR_COUNT - 1] =
+        UINT64_C(0x8877665544332211);
+    rse->stacked_nat[0] = UINT64_C(0x8000000000000001);
+    rse->stacked_nat[IA64_RSE_NAT_WORDS - 1] =
+        UINT64_C(0x4000000000000002);
+}
+
+static void seed_incomplete_rse_vmstate(IA64RSEState *rse)
+{
+    memset(rse, 0, sizeof(*rse));
+    rse->bsp = UINT64_C(0x1000);
+    rse->bspstore = UINT64_C(0x1018);
+    rse->rnat = UINT64_C(0x5555aaaa0000ffff);
+    rse->sof = 20;
+    rse->sol = 4;
+    rse->current_frame_base = 3;
+    rse->bol = 95;
+    rse->dirty = -2;
+    rse->dirty_nat = -1;
+    rse->clean = 10;
+    rse->clean_nat = 1;
+    rse->invalid = 68;
+    rse->stacked_gr[3] = UINT64_C(0x123456789abcdef0);
+    rse->stacked_nat[0] = UINT64_C(1) << 3;
+}
+
+static void assert_rse_canonical_equal(const IA64RSEState *actual,
+                                       const IA64RSEState *expected)
+{
+    g_assert_cmphex(actual->rsc, ==, expected->rsc);
+    g_assert_cmphex(actual->bsp, ==, expected->bsp);
+    g_assert_cmphex(actual->bspstore, ==, expected->bspstore);
+    g_assert_cmphex(actual->rnat, ==, expected->rnat);
+    g_assert_cmphex(actual->loadrs, ==, expected->loadrs);
+    g_assert_cmpuint(actual->sof, ==, expected->sof);
+    g_assert_cmpuint(actual->sol, ==, expected->sol);
+    g_assert_cmpuint(actual->sor, ==, expected->sor);
+    g_assert_cmpuint(actual->rrb_gr, ==, expected->rrb_gr);
+    g_assert_cmpuint(actual->rrb_fr, ==, expected->rrb_fr);
+    g_assert_cmpuint(actual->rrb_pr, ==, expected->rrb_pr);
+    g_assert_cmpuint(actual->current_frame_base, ==,
+                     expected->current_frame_base);
+    g_assert_cmpuint(actual->bol, ==, expected->bol);
+    g_assert_cmpint(actual->dirty, ==, expected->dirty);
+    g_assert_cmpint(actual->dirty_nat, ==, expected->dirty_nat);
+    g_assert_cmpint(actual->clean, ==, expected->clean);
+    g_assert_cmpint(actual->clean_nat, ==, expected->clean_nat);
+    g_assert_cmpint(actual->invalid, ==, expected->invalid);
+    g_assert_cmpmem(actual->stacked_gr, sizeof(actual->stacked_gr),
+                    expected->stacked_gr, sizeof(expected->stacked_gr));
+    g_assert_cmpmem(actual->stacked_nat, sizeof(actual->stacked_nat),
+                    expected->stacked_nat, sizeof(expected->stacked_nat));
+    g_assert_false(actual->cfle);
+    g_assert_false(actual->reference);
+    g_assert_cmpuint(actual->pending_fill_count, ==, 0);
+    g_assert_cmphex(actual->pending_fill_ip, ==, 0);
+}
+
+static void test_rse_v4_complete_and_incomplete_round_trip(void)
+{
+    for (unsigned incomplete = 0; incomplete < 2; incomplete++) {
+        IA64RSEState source;
+        IA64RSEState destination;
+
+        if (incomplete) {
+            seed_incomplete_rse_vmstate(&source);
+        } else {
+            seed_complete_rse_vmstate(&source);
+        }
+        g_assert_cmpint(save_rse_with_vmsd(&source, &vmstate_rse), ==, 0);
+        memset(&destination, 0xa5, sizeof(destination));
+        g_assert_cmpint(load_rse_with_current_vmsd(&destination, 4), ==, 0);
+        assert_rse_canonical_equal(&destination, &source);
+    }
+}
+
+static void test_rse_v1_v3_legacy_partition_defaults(void)
+{
+    for (int version = 1; version <= 3; version++) {
+        IA64RSEState rse;
+
+        memset(&rse, 0xa5, sizeof(rse));
+        rse.bspstore = UINT64_C(0x1000);
+        rse.bsp = UINT64_C(0x1030);
+        rse.sof = 12;
+        rse.current_frame_base = 3;
+        rse.pending_fill_count = 17;
+        rse.pending_fill_ip = UINT64_C(0xdeadbeef);
+        rse.reference = true;
+        rse.cfle = true;
+
+        g_assert_cmpint(ia64_rse_vmstate_post_load(&rse, version), ==, 0);
+        g_assert_cmpint(rse.dirty, ==, 6);
+        g_assert_cmpint(rse.dirty_nat, ==, 0);
+        g_assert_cmpint(rse.clean, ==, 0);
+        g_assert_cmpint(rse.clean_nat, ==, 0);
+        g_assert_cmpint(rse.invalid, ==, 78);
+        g_assert_cmpuint(rse.bol, ==, 6);
+        g_assert_cmpuint(ia64_rse_wrap_slot(rse.current_frame_base - rse.bol),
+                         ==, IA64_STACKED_GR_COUNT - 3);
+        g_assert_false(rse.cfle);
+        g_assert_false(rse.reference);
+        g_assert_cmpuint(rse.pending_fill_count, ==, 0);
+        g_assert_cmphex(rse.pending_fill_ip, ==, 0);
+    }
+}
+
+static void test_rse_v3_wire_load_synthesizes_partitions(void)
+{
+    IA64RSEState source = { 0 };
+    IA64RSEState destination;
+
+    source.bspstore = UINT64_C(0x1000);
+    source.bsp = UINT64_C(0x1030);
+    source.sof = 12;
+    source.current_frame_base = 3;
+    source.pending_fill_count = 9;
+    source.pending_fill_ip = UINT64_C(0xabc0);
+    source.stacked_gr[IA64_STACKED_GR_COUNT - 1] = UINT64_C(0xabcdef);
+    source.stacked_nat[IA64_RSE_NAT_WORDS - 1] = UINT64_C(0x80);
+
+    g_assert_cmpint(save_rse_with_vmsd(&source, &vmstate_rse_v3_test), ==, 0);
+    memset(&destination, 0xa5, sizeof(destination));
+    g_assert_cmpint(load_rse_with_current_vmsd(&destination, 3), ==, 0);
+    g_assert_cmpint(destination.dirty, ==, 6);
+    g_assert_cmpint(destination.dirty_nat, ==, 0);
+    g_assert_cmpint(destination.clean, ==, 0);
+    g_assert_cmpint(destination.clean_nat, ==, 0);
+    g_assert_cmpint(destination.invalid, ==, 78);
+    g_assert_cmpuint(destination.bol, ==, 6);
+    g_assert_cmpuint(destination.pending_fill_count, ==, 0);
+    g_assert_cmphex(destination.pending_fill_ip, ==, 0);
+    g_assert_cmphex(destination.stacked_gr[IA64_STACKED_GR_COUNT - 1], ==,
+                    UINT64_C(0xabcdef));
+    g_assert_cmphex(destination.stacked_nat[IA64_RSE_NAT_WORDS - 1], ==,
+                    UINT64_C(0x80));
+}
+
+typedef void (*CorruptRSEState)(IA64RSEState *rse);
+
+static void assert_rse_v4_load_rejected(CorruptRSEState corrupt)
+{
+    IA64RSEState source;
+    IA64RSEState destination;
+
+    seed_complete_rse_vmstate(&source);
+    corrupt(&source);
+    g_assert_cmpint(save_rse_with_vmsd(&source, &vmstate_rse), ==, 0);
+    memset(&destination, 0, sizeof(destination));
+    g_assert_cmpint(load_rse_with_current_vmsd(&destination, 4), !=, 0);
+}
+
+static void corrupt_rse_bol(IA64RSEState *rse)
+{
+    rse->bol = IA64_GR_COUNT - IA64_STATIC_GR_COUNT;
+}
+
+static void corrupt_rse_partition_sum(IA64RSEState *rse)
+{
+    rse->invalid--;
+}
+
+static void corrupt_rse_bsp_relation(IA64RSEState *rse)
+{
+    rse->bspstore += 8;
+}
+
+static void corrupt_rse_dirty_nat_count(IA64RSEState *rse)
+{
+    rse->bsp = UINT64_C(0x1058);
+    rse->dirty_nat = 1;
+}
+
+static void corrupt_rse_clean_nat_count(IA64RSEState *rse)
+{
+    rse->clean_nat = 0;
+}
+
+static void corrupt_rse_cfle(IA64RSEState *rse)
+{
+    rse->cfle = true;
+}
+
+static void corrupt_rse_pending_fill(IA64RSEState *rse)
+{
+    rse->pending_fill_count = 1;
+    rse->pending_fill_ip = UINT64_C(0x1000);
+}
+
+static void test_rse_v4_malformed_rejection(void)
+{
+    assert_rse_v4_load_rejected(corrupt_rse_bol);
+    assert_rse_v4_load_rejected(corrupt_rse_partition_sum);
+    assert_rse_v4_load_rejected(corrupt_rse_bsp_relation);
+    assert_rse_v4_load_rejected(corrupt_rse_dirty_nat_count);
+    assert_rse_v4_load_rejected(corrupt_rse_clean_nat_count);
+    assert_rse_v4_load_rejected(corrupt_rse_cfle);
+    assert_rse_v4_load_rejected(corrupt_rse_pending_fill);
+}
+
+static void test_rse_pre_save_boundaries(void)
+{
+    CPUIA64State env = { 0 };
+
+    env.instruction_group_start = true;
+    env.pr = 1;
+    seed_complete_rse_vmstate(&env.rse);
+    env.rse.cfle = true;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+
+    env.rse.cfle = false;
+    env.rse.reference = true;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+
+    env.rse.reference = false;
+    env.rse.pending_fill_count = 1;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+
+    seed_incomplete_rse_vmstate(&env.rse);
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
+}
+
+int main(int argc, char **argv)
+{
+    g_autofree char *temp_file = g_strdup_printf("%s/ia64-vmstate.XXXXXX",
+                                                 g_get_tmp_dir());
+    int ret;
+
+    temp_fd = mkstemp(temp_file);
+    g_assert_cmpint(temp_fd, >=, 0);
+    module_call_init(MODULE_INIT_QOM);
+    g_setenv("QTEST_SILENT_ERRORS", "1", 1);
+
+    g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/ia64/vmstate/round-trip/empty-typed",
+                    test_empty_typed_continuation);
+    g_test_add_func("/ia64/vmstate/round-trip/gr-nat", test_gr_nat_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/pr", test_pr_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/br", test_br_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/pfs", test_pfs_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/branch-pr-forward",
+                    test_branch_pr_forward_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/branch-br-forward",
+                    test_branch_br_forward_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/combined",
+                    test_combined_overlay);
+    g_test_add_func("/ia64/vmstate/needed/branch-pr-forward",
+                    test_branch_pr_forward_needed);
+    g_test_add_func("/ia64/vmstate/needed/br-state",
+                    test_br_overlay_needed);
+    g_test_add_func("/ia64/vmstate/needed/pfs-state",
+                    test_pfs_overlay_needed);
+    g_test_add_func("/ia64/vmstate/compat/overlay-v3-default-br-state",
+                    test_overlay_v3_defaults_br_state);
+    g_test_add_func("/ia64/vmstate/compat/v1-v3-post-load-default-br-state",
+                    test_overlay_v1_v3_post_load_defaults_br_state);
+    g_test_add_func("/ia64/vmstate/compat/v1-v4-post-load-default-pfs-state",
+                    test_overlay_v1_v4_post_load_defaults_pfs_state);
+    g_test_add_func("/ia64/vmstate/compat/overlay-v2-reconstruct-forward-mask",
+                    test_overlay_v2_reconstructs_branch_pr_forward);
+    g_test_add_func("/ia64/vmstate/compat/overlay-v1-reconstruct-owner-forward",
+                    test_overlay_v1_reconstructs_owner_and_forwarding);
+    g_test_add_func("/ia64/vmstate/reject/fresh-frontier",
+                    test_reject_fresh_frontier);
+    g_test_add_func("/ia64/vmstate/reject/missing-typed-owner",
+                    test_reject_missing_typed_owner);
+    g_test_add_func("/ia64/vmstate/reject/forward-at-fresh-frontier",
+                    test_reject_forward_at_fresh_frontier);
+    g_test_add_func("/ia64/vmstate/reject/forward-without-typed-owner",
+                    test_reject_forward_without_typed_owner);
+    g_test_add_func("/ia64/vmstate/reject/forward-p0",
+                    test_reject_forward_p0);
+    g_test_add_func("/ia64/vmstate/reject/br-at-fresh-frontier",
+                    test_reject_br_at_fresh_frontier);
+    g_test_add_func("/ia64/vmstate/reject/br-without-typed-owner",
+                    test_reject_br_without_typed_owner);
+    g_test_add_func("/ia64/vmstate/reject/br-forward-at-fresh-frontier",
+                    test_reject_br_forward_at_fresh_frontier);
+    g_test_add_func("/ia64/vmstate/reject/br-forward-without-typed-owner",
+                    test_reject_br_forward_without_typed_owner);
+    g_test_add_func("/ia64/vmstate/reject/gr0", test_reject_gr0);
+    g_test_add_func("/ia64/vmstate/reject/non-boolean-nat",
+                    test_reject_non_boolean_nat);
+    g_test_add_func("/ia64/vmstate/reject/pr-without-p0",
+                    test_reject_pr_without_p0);
+    g_test_add_func("/ia64/vmstate/reject/pfs-without-typed-owner",
+                    test_reject_pfs_without_typed_owner);
+    g_test_add_func("/ia64/vmstate/reject/pfs-forward-without-saved-source",
+                    test_reject_pfs_forward_without_saved_source);
+    g_test_add_func("/ia64/vmstate/pre-save/valid-typed",
+                    test_pre_save_valid_typed);
+    g_test_add_func("/ia64/vmstate/pre-save/reject-fresh-typed",
+                    test_pre_save_reject_fresh_typed);
+    g_test_add_func("/ia64/vmstate/pre-save/reject-orphan-overlay",
+                    test_pre_save_reject_orphan_overlay);
+    g_test_add_func("/ia64/vmstate/pre-save/reject-dirty-breadcrumb",
+                    test_pre_save_reject_dirty_breadcrumb);
+    g_test_add_func("/ia64/vmstate/pre-save/canonicalize-ri",
+                    test_pre_save_canonicalizes_ri);
+    g_test_add_func("/ia64/vmstate/logical-mirror/pre-save-dirty-only",
+                    test_pre_save_flushes_only_dirty_logical_names);
+    g_test_add_func("/ia64/vmstate/logical-mirror/post-load-wrapped-rotating",
+                    test_post_load_reconstructs_wrapped_rotating_mirror);
+    g_test_add_func("/ia64/vmstate/logical-mirror/pre-load-clears-transients",
+                    test_pre_load_clears_transient_mirror_metadata);
+    g_test_add_func("/ia64/vmstate/logical-mirror/post-load-v1-v5",
+                    test_post_load_v1_v5_reconstructs_logical_mirror);
+    g_test_add_func("/ia64/vmstate/logical-mirror/stale-stream-gr-ignored",
+                    test_stream_ignores_stale_serialized_logical_gr);
+    g_test_add_func("/ia64/vmstate/collection-state/subsection-round-trip",
+                    test_collection_state_subsection_round_trip);
+    g_test_add_func("/ia64/vmstate/collection-state/legacy-cpu-v2-default",
+                    test_legacy_cpu_v2_defaults_collection_state);
+    g_test_add_func("/ia64/vmstate/compat/cpu-v1-env-v3-rse-v1",
+                    test_legacy_cpu_v1_selects_env_v3_rse_v1);
+    g_test_add_func("/ia64/vmstate/compat/outer-version-selection-matrix",
+                    test_outer_version_selection_matrix);
+    g_test_add_func("/ia64/vmstate/rse/v4-complete-incomplete-round-trip",
+                    test_rse_v4_complete_and_incomplete_round_trip);
+    g_test_add_func("/ia64/vmstate/rse/v1-v3-default-partitions",
+                    test_rse_v1_v3_legacy_partition_defaults);
+    g_test_add_func("/ia64/vmstate/rse/v3-wire-synthesis",
+                    test_rse_v3_wire_load_synthesizes_partitions);
+    g_test_add_func("/ia64/vmstate/rse/v4-malformed-rejection",
+                    test_rse_v4_malformed_rejection);
+    g_test_add_func("/ia64/vmstate/rse/pre-save-boundaries",
+                    test_rse_pre_save_boundaries);
+    ret = g_test_run();
+
+    close(temp_fd);
+    unlink(temp_file);
+    return ret;
+}

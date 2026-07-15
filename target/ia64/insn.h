@@ -247,6 +247,8 @@ typedef struct IA64IntegerExtendInstruction {
 
 void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env);
 void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env);
+void ia64_note_successful_instruction(CPUIA64State *env, uint64_t bundle_ip,
+                                      uint64_t pre_instruction_psr);
 void ia64_deliver_break_interruption(CPUIA64State *env, uint64_t iim,
                                      uint64_t *next_ip, const char *detail);
 bool ia64_try_platform_break(CPUIA64State *env, uint64_t iim);
@@ -278,14 +280,52 @@ void ia64_rse_write_physical_nat(CPUIA64State *env, uint32_t slot, bool nat);
 void ia64_rse_sync_rnat(CPUIA64State *env);
 void ia64_rse_write_rnat(CPUIA64State *env, uint64_t value);
 void ia64_rse_clear_rnat(CPUIA64State *env);
+void ia64_rse_sync_logical_out(CPUIA64State *env);
+void ia64_rse_sync_logical_in(CPUIA64State *env);
+void ia64_rotate_modulo_scheduled_registers(CPUIA64State *env);
 /* Physical stacked register file capacity (r32-r127 on real hardware). */
 #define IA64_RSE_PHYS_STACKED_REGS 96
+#ifndef IA64_PSR_DA_BIT
+#define IA64_PSR_DA_BIT (UINT64_C(1) << 38)
+#define IA64_PSR_DD_BIT (UINT64_C(1) << 39)
+#endif
+
+/*
+ * The migration-compatible backing arrays are larger than the architectural
+ * physical file.  These helpers are the only supported conversion between an
+ * architectural physical-register number and its storage slot.
+ */
+uint32_t ia64_rse_wrap_physical(int32_t physical);
+uint32_t ia64_rse_physical_to_storage(const CPUIA64State *env,
+                                      uint32_t physical);
+uint32_t ia64_rse_bof_offset_to_storage(const CPUIA64State *env,
+                                        int32_t offset);
+
+bool ia64_rse_partitions_valid(const CPUIA64State *env);
+void ia64_rse_check_partitions(const CPUIA64State *env, const char *site);
+void ia64_rse_reconstruct_partitions(CPUIA64State *env);
 
 typedef uint64_t (*IA64RSEReadRegisterFn)(CPUIA64State *env,
                                           uint64_t address,
                                           void *opaque);
 typedef void (*IA64RSEWriteRegisterFn)(CPUIA64State *env, uint64_t address,
                                        uint64_t value, void *opaque);
+typedef bool (*IA64RSEReadWordFn)(CPUIA64State *env, uint64_t address,
+                                  uint64_t *value, void *opaque);
+
+typedef enum IA64RSEStepResult {
+    IA64_RSE_STEP_DONE,
+    IA64_RSE_STEP_PROGRESS,
+    IA64_RSE_STEP_FAULT,
+} IA64RSEStepResult;
+
+IA64RSEStepResult ia64_rse_mandatory_load_step(
+    CPUIA64State *env, IA64RSEReadWordFn read_word, void *opaque);
+IA64RSEStepResult ia64_rse_complete_mandatory_loads(
+    CPUIA64State *env, IA64RSEReadWordFn read_word, void *opaque);
+bool ia64_rse_mandatory_store_step(CPUIA64State *env,
+                                   IA64RSEWriteRegisterFn write_word,
+                                   void *opaque, bool *stored_register);
 uint32_t ia64_rse_spill_excess_dirty(CPUIA64State *env, uint32_t new_sof,
                                      IA64RSEWriteRegisterFn write_register,
                                      void *opaque);
@@ -320,6 +360,8 @@ uint64_t ia64_read_control_register(CPUIA64State *env, uint32_t reg);
 void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
                                  uint64_t value);
 bool ia64_return_from_call_frame(CPUIA64State *env, uint64_t target_ip);
+void ia64_enter_call_frame(CPUIA64State *env);
+bool ia64_rse_return_frame_from_pfs(CPUIA64State *env, uint64_t pfs);
 bool ia64_slot_is_m34_alloc(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m34_alloc(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_nop_or_hint(IA64SlotType type, uint64_t raw);
@@ -359,10 +401,11 @@ bool ia64_slot_is_check_speculative(IA64SlotType type, uint64_t raw);
 int64_t ia64_check_speculative_displacement(uint64_t raw);
 bool ia64_exec_check_speculative(CPUIA64State *env, IA64SlotType type,
                                  uint64_t raw, uint64_t bundle_ip,
-                                 uint64_t *target_ip);
+                                 uint64_t *target_ip, bool *branch_taken);
 bool ia64_slot_is_m_check_advanced(IA64SlotType type, uint64_t raw);
 bool ia64_exec_m_check_advanced(CPUIA64State *env, uint64_t raw,
-                                uint64_t bundle_ip, uint64_t *target_ip);
+                                uint64_t bundle_ip, uint64_t *target_ip,
+                                bool *branch_taken);
 bool ia64_slot_is_m_processor_mask(IA64SlotType type, uint64_t raw);
 uint64_t ia64_processor_mask_immediate(uint64_t raw);
 bool ia64_exec_m_processor_mask(CPUIA64State *env, uint64_t raw);
@@ -418,6 +461,8 @@ void ia64_alat_record_gr(CPUIA64State *env, uint32_t target,
                          uint64_t address, uint8_t width, bool physical);
 bool ia64_alat_check_gr(CPUIA64State *env, uint32_t reg, uint64_t address,
                         uint8_t width, bool physical, bool clear);
+bool ia64_slot_is_m_serialization(IA64SlotType type, uint64_t raw);
+bool ia64_exec_m_serialization(CPUIA64State *env, uint64_t raw);
 bool ia64_slot_is_m_system_noop(IA64SlotType type, uint64_t raw);
 bool ia64_slot_pair_is_lx_movl(uint64_t l_raw, uint64_t x_raw);
 uint64_t ia64_lx_movl_imm64(uint64_t l_raw, uint64_t x_raw);
@@ -540,6 +585,8 @@ bool ia64_slot_is_b_call_relative(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_b_indirect_branch(IA64SlotType type, uint64_t raw);
 bool ia64_slot_is_b_predict_or_nop(IA64SlotType type, uint64_t raw);
 int64_t ia64_branch_displacement(uint64_t raw);
+bool ia64_b_loop_branch_is_legal(IA64SlotType type, uint64_t raw,
+                                 unsigned slot);
 bool ia64_exec_b_branch_relative_decoded(CPUIA64State *env,
                                          uint8_t branch_type,
                                          uint8_t predicate,

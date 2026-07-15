@@ -601,6 +601,8 @@ static inline TCGOp *tcg_last_op(void)
     return QTAILQ_LAST(&tcg_ctx->ops);
 }
 
+#define TCG_OP_BUF_SOFT_LIMIT 4000
+
 /* Test for whether to terminate the TB for using too many opcodes.  */
 static inline bool tcg_op_buf_full(void)
 {
@@ -611,7 +613,17 @@ static inline bool tcg_op_buf_full(void)
      * 16-bit unsigned offsets, TranslationBlock.jmp_reset_offset[]
      * and TCGContext.gen_insn_end_off[].
      */
-    return tcg_ctx->nb_ops >= 4000;
+    return tcg_ctx->nb_ops >= TCG_OP_BUF_SOFT_LIMIT;
+}
+
+/*
+ * Targets that must translate an architecturally atomic region over several
+ * translator-loop iterations can reserve a proven upper bound up front.
+ */
+static inline bool tcg_op_buf_has_space(size_t reserve)
+{
+    return reserve < TCG_OP_BUF_SOFT_LIMIT &&
+           tcg_ctx->nb_ops < TCG_OP_BUF_SOFT_LIMIT - reserve;
 }
 
 /* pool based memory allocation */

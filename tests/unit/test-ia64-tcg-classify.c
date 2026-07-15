@@ -55,6 +55,36 @@ static void assert_boundary(IA64TcgTbBoundary expected,
     g_assert_cmpstr(ia64_tcg_tb_boundary_name(actual), !=, "unknown");
 }
 
+static void test_memory_group_frontier_restore(void)
+{
+    CPUIA64State env = { 0 };
+
+    env.instruction_group_start = true;
+    env.issue_group.typed_active = true;
+    env.instruction_group_dirty = true;
+    ia64_env_restore_source_visibility(&env, 0);
+    g_assert_true(env.instruction_group_start);
+    g_assert_true(env.issue_group.typed_active);
+    g_assert_false(env.instruction_group_dirty);
+
+    env.instruction_group_start = false;
+    env.issue_group.typed_active = false;
+    env.instruction_group_dirty = true;
+    ia64_env_restore_source_visibility(
+        &env, IA64_INSN_START_GROUP_START | IA64_INSN_START_TYPED_GROUP);
+    g_assert_false(env.instruction_group_start);
+    g_assert_false(env.issue_group.typed_active);
+    g_assert_false(env.instruction_group_dirty);
+
+    ia64_env_restore_source_visibility(&env, IA64_INSN_START_GROUP_START);
+    g_assert_true(env.instruction_group_start);
+    g_assert_false(env.issue_group.typed_active);
+
+    ia64_env_restore_source_visibility(&env, IA64_INSN_START_TYPED_GROUP);
+    g_assert_false(env.instruction_group_start);
+    g_assert_true(env.issue_group.typed_active);
+}
+
 typedef struct IA64HelperFlagInfo {
     const char *name;
     unsigned flags;
@@ -68,6 +98,7 @@ static const IA64HelperFlagInfo helper_flag_info[] = {
 #define DEF_HELPER_4(name, ret, t1, t2, t3, t4) { #name, 0 },
 #define DEF_HELPER_5(name, ret, t1, t2, t3, t4, t5) { #name, 0 },
 #define DEF_HELPER_6(name, ret, t1, t2, t3, t4, t5, t6) { #name, 0 },
+#define DEF_HELPER_7(name, ret, t1, t2, t3, t4, t5, t6, t7) { #name, 0 },
 #define DEF_HELPER_FLAGS_0(name, flags, ret) { #name, flags },
 #define DEF_HELPER_FLAGS_1(name, flags, ret, t1) { #name, flags },
 #define DEF_HELPER_FLAGS_2(name, flags, ret, t1, t2) { #name, flags },
@@ -85,6 +116,7 @@ static const IA64HelperFlagInfo helper_flag_info[] = {
 #undef DEF_HELPER_FLAGS_2
 #undef DEF_HELPER_FLAGS_1
 #undef DEF_HELPER_FLAGS_0
+#undef DEF_HELPER_7
 #undef DEF_HELPER_6
 #undef DEF_HELPER_5
 #undef DEF_HELPER_4
@@ -259,6 +291,9 @@ static void test_state_changing_slots_end_tb(void)
     const uint64_t clrrrb_raw = 0x04ULL << 27;
     const uint64_t bsw_1_raw = 0x0dULL << 27;
     const uint64_t epc_raw = 0x10ULL << 27;
+    const uint64_t srlz_d_raw = UINT64_C(0x00180000000);
+    const uint64_t srlz_i_raw = UINT64_C(0x00188000000);
+    const uint64_t sync_i_raw = UINT64_C(0x00198000000);
     IA64DecodedBundle bundle;
 
     bundle = make_bundle(0x00, chk_s_m_r22_raw, 0, 0);
@@ -266,6 +301,28 @@ static void test_state_changing_slots_end_tb(void)
 
     bundle = make_bundle(0x00, kernel_rsm_0x6000_raw, 0, 0);
     assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
+
+    bundle = make_bundle(0x00, srlz_d_raw, 0, 0);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_SERIALIZATION, &bundle, 0x1000);
+
+    bundle = make_bundle(0x00, srlz_i_raw, 0, 0);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_SERIALIZATION, &bundle, 0x1000);
+
+    bundle = make_bundle(0x00, sync_i_raw,
+                         IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_SERIALIZATION, &bundle, 0x1000);
+    g_assert_cmpint(
+        ia64_tcg_tb_boundary_for_bundle_from_slot_with_physical(
+            &bundle, 0x1000, 0, false, 1),
+        ==, IA64_TCG_TB_BOUNDARY_NONE);
+
+    bundle = make_bundle(0x09, IA64_INSN_NOP_RAW,
+                         kernel_rsm_0x6000_raw, IA64_INSN_NOP_RAW);
+    assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
+    g_assert_cmpint(
+        ia64_tcg_tb_boundary_for_bundle_from_slot_with_physical(
+            &bundle, 0x1000, 0, false, 2),
+        ==, IA64_TCG_TB_BOUNDARY_NONE);
 
     bundle = make_bundle(0x00, mov_rr_r41_r40_raw, 0, 0);
     assert_boundary(IA64_TCG_TB_BOUNDARY_TRANSLATION_STATE, &bundle, 0x1000);
@@ -293,6 +350,28 @@ static void test_state_changing_slots_end_tb(void)
 
     bundle = make_bundle(0x16, epc_raw, 0, 0);
     assert_boundary(IA64_TCG_TB_BOUNDARY_CPU_STATE, &bundle, 0x1000);
+}
+
+static void test_m24_serialization_reserved_fields_do_not_end_tb(void)
+{
+    static const uint64_t serialization[] = {
+        UINT64_C(0x00180000000),
+        UINT64_C(0x00188000000),
+        UINT64_C(0x00198000000),
+    };
+    static const unsigned reserved_bits[] = { 6, 26, 36 };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(serialization); i++) {
+        for (unsigned j = 0; j < ARRAY_SIZE(reserved_bits); j++) {
+            uint64_t raw = serialization[i] |
+                           (UINT64_C(1) << reserved_bits[j]);
+            IA64DecodedBundle bundle =
+                make_bundle(0x00, raw,
+                            IA64_INSN_NOP_RAW, IA64_INSN_NOP_RAW);
+
+            assert_boundary(IA64_TCG_TB_BOUNDARY_NONE, &bundle, 0x1000);
+        }
+    }
 }
 
 static void test_speculation_check_plan(void)
@@ -842,6 +921,7 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpuint(fast.slot[0].width, ==, 8);
     g_assert_cmpuint(fast.slot[0].slot_index, ==, 0);
     g_assert_cmpuint(fast.slot[0].slot_type, ==, IA64_SLOT_TYPE_M);
+    g_assert_false(fast.slot[0].starts_group);
     g_assert_cmphex(fast.slot[0].raw, ==, ld8_r2_r3_raw);
     g_assert_false(fast.slot[0].base_update);
     g_assert_cmphex(fast.dest_mask, ==, 1ULL << 2);
@@ -901,8 +981,14 @@ static void test_fast_bundle_accepts_ldst_slot0(void)
     g_assert_cmpuint(fast.slot[1].base, ==, 3);
     g_assert_cmpuint(fast.slot[1].slot_index, ==, 1);
     g_assert_cmpuint(fast.slot[1].slot_type, ==, IA64_SLOT_TYPE_M);
+    g_assert_false(fast.slot[1].starts_group);
     g_assert_cmphex(fast.slot[1].raw, ==, ld8_r2_r3_raw);
     g_assert_cmphex(fast.dest_mask, ==, 1ULL << 2);
+
+    bundle = make_bundle(0x0a, IA64_INSN_NOP_RAW,
+                         ld8_r2_r3_raw, IA64_INSN_NOP_RAW);
+    g_assert_true(ia64_tcg_build_fast_bundle(&bundle, &fast));
+    g_assert_true(fast.slot[1].starts_group);
 
     bundle = make_bundle(0x08, IA64_INSN_NOP_RAW,
                          st8_rel_r6_r7_raw, IA64_INSN_NOP_RAW);
@@ -1473,6 +1559,8 @@ int main(int argc, char **argv)
 
     g_test_add_func("/ia64-tcg-classify/helper-flags-conservative",
                     test_helper_flags_are_conservative);
+    g_test_add_func("/ia64-tcg-classify/memory-group-frontier-restore",
+                    test_memory_group_frontier_restore);
     g_test_add_func("/ia64-tcg-classify/fallthrough",
                     test_fallthrough_bundle_does_not_end_tb);
     g_test_add_func("/ia64-tcg-classify/invalid-template",
@@ -1483,6 +1571,8 @@ int main(int argc, char **argv)
                     test_break_and_branch_end_tb);
     g_test_add_func("/ia64-tcg-classify/state-changing-slots",
                     test_state_changing_slots_end_tb);
+    g_test_add_func("/ia64-tcg-classify/m24-serialization-reserved-fields",
+                    test_m24_serialization_reserved_fields_do_not_end_tb);
     g_test_add_func("/ia64-tcg-classify/speculation-check-plan",
                     test_speculation_check_plan);
     g_test_add_func("/ia64-tcg-classify/fast-bundle-hot-integer-subset",

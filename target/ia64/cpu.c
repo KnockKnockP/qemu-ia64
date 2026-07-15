@@ -27,6 +27,7 @@ static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
     IA64CPU *cpu = IA64_CPU(cs);
 
     cpu->env.ip = value;
+    ia64_env_begin_source_visibility_epoch(&cpu->env);
 }
 
 static vaddr ia64_cpu_get_pc(CPUState *cs)
@@ -44,6 +45,10 @@ static void ia64_cpu_synchronize_from_tb(CPUState *cs,
 
     tcg_debug_assert(!tcg_cflags_has(cs, CF_PCREL));
     cpu->env.ip = tb->pc;
+    ia64_env_set_source_visibility_frontier(
+        &cpu->env, (tb->flags & IA64_TB_FLAG_GROUP_START) != 0);
+    cpu->env.issue_group.typed_active =
+        (tb->flags & IA64_TB_FLAG_TYPED_GROUP) != 0;
     ia64_env_set_psr(&cpu->env, ia64_psr_with_ri(cpu->env.psr, ri));
 }
 
@@ -55,6 +60,7 @@ static void ia64_restore_state_to_opc(CPUState *cs,
     unsigned ri = ia64_env_restore_ri(&cpu->env, data[1] & 3);
 
     cpu->env.ip = data[0];
+    ia64_env_restore_source_visibility(&cpu->env, data[2]);
     ia64_env_set_psr(&cpu->env, ia64_psr_with_ri(cpu->env.psr, ri));
 }
 
@@ -68,6 +74,12 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     }
     if (cpu->production_profile.collecting) {
         flags |= IA64_TB_FLAG_PROFILE;
+    }
+    if (cpu->env.instruction_group_start) {
+        flags |= IA64_TB_FLAG_GROUP_START;
+    }
+    if (cpu->env.issue_group.typed_active) {
+        flags |= IA64_TB_FLAG_TYPED_GROUP;
     }
 
     return (TCGTBCPUState) {
@@ -161,6 +173,16 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         return false;
     }
 
+    /*
+     * An asynchronous interruption cannot overtake mandatory loads for the
+     * current frame.  Leave the SAPIC/CPU request latched so the ordinary
+     * execution loop accepts it immediately after the frame is complete.
+     */
+    if (env->rse.cfle || env->rse.dirty < 0 || env->rse.dirty_nat < 0) {
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
+        return false;
+    }
+
     if (!ia64_external_interrupt_enabled(env)) {
         IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
         return false;
@@ -183,6 +205,7 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
     qemu_fprintf(f, "PSR %016" PRIx64 "  PR %016" PRIx64
                     "  CFM %016" PRIx64 "\n",
                  ia64_env_psr(env), env->pr, env->cfm);
+    qemu_fprintf(f, "PSR.IC-INFLIGHT %u\n", env->psr_ic_inflight);
     qemu_fprintf(f, "RSE RSC %016" PRIx64 "  BSP %016" PRIx64
                     "  BSPSTORE %016" PRIx64 "  BSPLOAD %016" PRIx64
                     "  RNAT %016" PRIx64
@@ -195,9 +218,23 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  env->nat.gr_nat[1], env->nat.gr_nat[0],
                  env->nat.unat, env->nat.rnat);
     qemu_fprintf(f, "CR.IVA %016" PRIx64 "  CR.IIP %016" PRIx64
-                    "  CR.ISR %016" PRIx64 "  CR.IFA %016" PRIx64 "\n",
+                    "  CR.ISR %016" PRIx64 "  CR.IFA %016" PRIx64
+                    "  CR.IIPA %016" PRIx64 "  CR.IPSR %016" PRIx64 "\n",
                  env->cr[IA64_CR_IVA], env->cr[IA64_CR_IIP],
-                 env->cr[IA64_CR_ISR], env->cr[IA64_CR_IFA]);
+                 env->cr[IA64_CR_ISR], env->cr[IA64_CR_IFA],
+                 env->cr[IA64_CR_IIPA], env->cr[IA64_CR_IPSR]);
+    qemu_fprintf(f, "EXC PENDING %u KIND %s VECTOR %04" PRIx64
+                    " SOURCE %016" PRIx64 " ADDRESS %016" PRIx64 "\n",
+                 env->exception.pending, ia64_exception_name(env->exception.kind),
+                 env->exception.vector, env->exception.ip,
+                 env->exception.address);
+    qemu_fprintf(f, "SLOT VALID %u IP %016" PRIx64
+                    " RI %u TYPE %u RAW %011" PRIx64 "\n",
+                 env->current_slot_valid, env->current_slot_ip,
+                 env->current_slot_ri, env->current_slot_type,
+                 env->current_slot_raw);
+    qemu_fprintf(f, "RETIRE LAST-BUNDLE %016" PRIx64 "\n",
+                 env->last_successful_bundle);
 
     for (int i = 0; i < IA64_GR_COUNT; i++) {
         qemu_fprintf(f, "r%-2d %016" PRIx64 "%s",
@@ -232,6 +269,10 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     IA64TranslateResult result;
     IA64VHPTWalkStatus vhpt_status = IA64_VHPT_WALK_MISS;
     IA64ExceptionKind exception_kind = IA64_EXCEPTION_NONE;
+    bool rse_access = ia64_mmu_index_is_rse(mmu_idx);
+    bool translated;
+
+    g_assert(!rse_access || access_type != MMU_INST_FETCH);
 
     IA64_PERF_INC(IA64_PERF_QEMU_TLB_FILL);
     switch (access_type) {
@@ -248,18 +289,38 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         break;
     }
 
-    if (!ia64_translate_address_no_detail(&cpu->env, address, access_type,
-                                          mmu_idx, false, &result) &&
+    translated = rse_access ?
+        ia64_translate_rse_address_no_detail(&cpu->env, address, access_type,
+                                              mmu_idx, false, &result) :
+        ia64_translate_address_no_detail(&cpu->env, address, access_type,
+                                         mmu_idx, false, &result);
+    if (!translated &&
         !probe && result.status == IA64_TRANSLATE_TLB_MISS) {
-        if (!ia64_firmware_identity_tlb_fill(&cpu->env, address, access_type,
+        IA64ExceptionKind initial_kind =
+            ia64_exception_for_translate_result(&result);
+        bool data_nested = ia64_data_tlb_miss_is_nested(
+            ia64_env_psr(&cpu->env), cpu->env.psr_ic_inflight,
+            initial_kind, access_type);
+
+        /* A serialized IC=0 data miss is delivered before any walk/install. */
+        if (!data_nested &&
+            !ia64_firmware_identity_tlb_fill(&cpu->env, address, access_type,
                                              mmu_idx, &result) &&
             ia64_vhpt_walk_runtime_enabled()) {
-            vhpt_status = ia64_try_vhpt_walk(&cpu->env, cs->as, address,
-                                             access_type);
+            vhpt_status = rse_access ?
+                ia64_try_rse_vhpt_walk(&cpu->env, cs->as, address,
+                                       access_type) :
+                ia64_try_vhpt_walk(&cpu->env, cs->as, address, access_type);
             if (vhpt_status == IA64_VHPT_WALK_INSTALLED) {
-                ia64_translate_address_no_detail(&cpu->env, address,
-                                                 access_type, mmu_idx, false,
-                                                 &result);
+                if (rse_access) {
+                    ia64_translate_rse_address_no_detail(
+                        &cpu->env, address, access_type, mmu_idx, false,
+                        &result);
+                } else {
+                    ia64_translate_address_no_detail(
+                        &cpu->env, address, access_type, mmu_idx, false,
+                        &result);
+                }
             } else if (vhpt_status == IA64_VHPT_WALK_FAULT) {
                 exception_kind = IA64_EXCEPTION_VHPT_TRANSLATION;
             }
@@ -345,18 +406,26 @@ int ia64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
 
     if (n < IA64_GR_COUNT) {
         ia64_write_gr(env, n, ldq_le_p(mem_buf));
+        ia64_env_begin_source_visibility_epoch(env);
         return 8;
     }
 
     switch (n) {
     case 128:
         env->ip = ldq_le_p(mem_buf);
+        ia64_env_begin_source_visibility_epoch(env);
         return 8;
     case 129:
-        ia64_env_set_psr(env, ldq_le_p(mem_buf));
+    {
+        uint64_t new_psr = ldq_le_p(mem_buf);
+
+        ia64_env_replace_psr(env, new_psr);
+        ia64_env_begin_source_visibility_epoch(env);
         return 8;
+    }
     case 130:
         env->pr = ldq_le_p(mem_buf);
+        ia64_env_begin_source_visibility_epoch(env);
         return 8;
     default:
         return 0;
@@ -376,6 +445,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     switch (cpu->model) {
     case IA64_CPU_MODEL_ITANIUM2:
         ia64_cpu_reset_synthetic_itanium2(&cpu->env);
+        cpu->env.rse.bol = 0;
+        cpu->env.rse.dirty = 0;
+        cpu->env.rse.dirty_nat = 0;
+        cpu->env.rse.clean = 0;
+        cpu->env.rse.clean_nat = 0;
+        cpu->env.rse.invalid = IA64_MAX_STACKED_REGS;
+        cpu->env.rse.cfle = false;
+        cpu->env.rse.reference = false;
         break;
     default:
         g_assert_not_reached();

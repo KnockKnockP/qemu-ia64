@@ -768,6 +768,7 @@ static void firmware_write_result(CPUIA64State *env,
     } else {
         env->ip = env->br[0] & ~0xfULL;
         env->cr[IA64_CR_IIP] = env->ip;
+        ia64_env_begin_source_visibility_epoch(env);
     }
 }
 
