@@ -79,7 +79,28 @@ static int ia64_validate_rse_vmstate(const IA64RSEState *rse)
         return -EINVAL;
     }
 
-    if (rse->dirty >= 0 && rse->dirty_nat >= 0) {
+    if (rse->dirty < 0 || rse->dirty_nat < 0) {
+        uint64_t span_slots;
+        uint32_t missing_regs;
+        uint32_t missing_nats;
+
+        if (rse->dirty > 0 || rse->dirty_nat > 0 ||
+            rse->clean != 0 || rse->clean_nat != 0 ||
+            rse->bspstore <= rse->bsp) {
+            error_report("IA-64 migration stream has a non-canonical "
+                         "incomplete RSE partition state");
+            return -EINVAL;
+        }
+        span_slots = (rse->bspstore - rse->bsp) >> 3;
+        missing_regs = ia64_vmstate_rse_num_regs(rse->bsp, rse->bspstore);
+        missing_nats = span_slots - missing_regs;
+        if (rse->dirty != -(int32_t)missing_regs ||
+            rse->dirty_nat != -(int32_t)missing_nats) {
+            error_report("IA-64 migration stream incomplete RSE counters "
+                         "do not describe its BSP/BSPSTORE span");
+            return -EINVAL;
+        }
+    } else {
         uint64_t lower_clean = rse->bspstore -
             (uint64_t)((int64_t)rse->clean + rse->clean_nat) * 8;
 
@@ -109,6 +130,10 @@ static int ia64_rse_vmstate_pre_load(void *opaque)
     rse->reference = false;
     rse->pending_fill_count = 0;
     rse->pending_fill_ip = 0;
+    rse->bsp_load = 0;
+    rse->clean_count = 0;
+    memset(rse->logical_nat, 0, sizeof(rse->logical_nat));
+    memset(rse->logical_dirty, 0, sizeof(rse->logical_dirty));
     memset(rse->stacked_nat, 0, sizeof(rse->stacked_nat));
     return 0;
 }
@@ -342,6 +367,12 @@ static int ia64_env_pre_save(void *opaque)
     if (ret < 0) {
         return ret;
     }
+    if ((env->rse.dirty < 0 || env->rse.dirty_nat < 0) &&
+        env->rse.bsp_load != env->rse.bspstore) {
+        error_report("IA-64 migration reached an incomplete RSE frame with "
+                     "inconsistent BSPLOAD");
+        return -EINVAL;
+    }
     /* ri/ri_dirty is a runtime cache; migrate its canonical PSR image. */
     ia64_env_sync_psr_ri(env);
     ret = ia64_validate_issue_group_overlay(env);
@@ -369,6 +400,11 @@ static int ia64_env_pre_load(void *opaque)
     memset(env->rse.logical_dirty, 0, sizeof(env->rse.logical_dirty));
     env->rse.reference = false;
     env->rse.cfle = false;
+    env->current_slot_valid = false;
+    env->current_slot_ri = 0;
+    env->current_slot_type = 0;
+    env->current_slot_ip = 0;
+    env->current_slot_raw = 0;
     /* Older streams predate issue-group frontier tracking. */
     ia64_env_begin_source_visibility_epoch(env);
     /* An absent outer collection-state subsection means reset defaults. */
@@ -664,6 +700,14 @@ static const VMStateDescription vmstate_env = {
 static int ia64_cpu_post_load(void *opaque, int version_id)
 {
     IA64CPU *cpu = opaque;
+
+    if (version_id >= 3 &&
+        (cpu->env.rse.dirty < 0 || cpu->env.rse.dirty_nat < 0) &&
+        cpu->env.rse.bsp_load != cpu->env.rse.bspstore) {
+        error_report("IA-64 migration stream has inconsistent BSPLOAD for "
+                     "an incomplete RSE frame");
+        return -EINVAL;
+    }
 
     cpu->env.gr[0] = 0;
     cpu->env.pr |= 1;

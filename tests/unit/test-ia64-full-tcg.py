@@ -28,9 +28,16 @@ IA64_DATA_NESTED_TLB_VECTOR = 0x1400
 IA64_GENERAL_EXCEPTION_VECTOR = 0x5400
 IA64_REGISTER_NAT_CONSUMPTION_VECTOR = 0x5600
 IA64_UNALIGNED_DATA_REFERENCE_VECTOR = 0x5A00
+IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR = 0x5E00
+IA64_TAKEN_BRANCH_TRAP_VECTOR = 0x5F00
 IA64_PSR_IC = 1 << 13
 IA64_PSR_DT = 1 << 17
+IA64_PSR_LP = 1 << 25
+IA64_PSR_TB = 1 << 26
+IA64_PSR_RT = 1 << 27
 IA64_ISR_R = 1 << 34
+IA64_ISR_RS = 1 << 37
+IA64_ISR_IR = 1 << 38
 IA64_PSR_RI_SHIFT = 41
 IA64_ISR_NI = 1 << 39
 IA64_ISR_EI_SHIFT = 41
@@ -38,6 +45,13 @@ IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION = 0x10
 IA64_SLOT_TYPE_M = 1
 IA64_SLOT_TYPE_I = 2
 IA64_AR_PFS = 64
+IA64_CR_IPSR = 16
+IA64_CR_ISR = 17
+IA64_CR_IIP = 19
+IA64_CR_IFA = 20
+IA64_CR_ITIR = 21
+IA64_CR_IIPA = 22
+IA64_CR_IFS = 23
 IA64_GDB_IP_REGNUM = 128
 IA64_GDB_PSR_REGNUM = 129
 MONITOR_CONNECT_TIMEOUT = 5.0
@@ -174,6 +188,64 @@ def ssm(mask: int, qp: int = 0) -> int:
 
 def rsm(mask: int, qp: int = 0) -> int:
     return _processor_mask(0x07, mask, qp)
+
+
+def mov_gr_to_psr_l(r2: int, qp: int = 0) -> int:
+    """Encode M35 ``mov psr.l = r2`` for branch-trap setup."""
+    if not 0 <= r2 < 128:
+        raise ValueError("PSR.l source must be a GR")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(1)
+        | bitfield(0x2d, 27, 6)
+        | bitfield(r2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def mov_crgr(r1: int, cr: int, qp: int = 0) -> int:
+    """Encode M32 ``mov r1 = cr``."""
+    if not 0 <= r1 < 128 or not 0 <= cr < 128:
+        raise ValueError("control-register move operands must fit in seven bits")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(1)
+        | bitfield(0x24, 27, 6)
+        | bitfield(cr, 20, 7)
+        | bitfield(r1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def mov_grcr(cr: int, r2: int, qp: int = 0) -> int:
+    """Encode M33 ``mov cr = r2``."""
+    if not 0 <= cr < 128 or not 0 <= r2 < 128:
+        raise ValueError("control-register move operands must fit in seven bits")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(1)
+        | bitfield(0x2c, 27, 6)
+        | bitfield(cr, 20, 7)
+        | bitfield(r2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def itc_d(r2: int, qp: int = 0) -> int:
+    """Encode M42 ``itc.d r2`` for a data-translation-cache entry."""
+    if not 0 <= r2 < 128:
+        raise ValueError("translation source must fit in seven bits")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(1)
+        | bitfield(0x2e, 27, 6)
+        | bitfield(r2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
 
 
 def _serialization_m(x6: int, qp: int = 0) -> int:
@@ -737,6 +809,32 @@ def mov_grbr(b1: int, r2: int, qp: int = 0) -> int:
         bitfield(7, 33, 3)
         | bitfield(r2, 13, 7)
         | bitfield(b1, 6, 3)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def ld8(r1: int, r3: int, qp: int = 0) -> int:
+    """Encode the ordinary M1 ``ld8 r1 = [r3]`` form."""
+    return (
+        op(4)
+        | bitfield(0x03, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(r1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def st8(r2: int, r3: int, qp: int = 0) -> int:
+    """Encode the ordinary M4 ``st8 [r3] = r2`` form."""
+    if not 0 <= r2 < 128 or not 0 <= r3 < 128:
+        raise ValueError("store GR operands must fit in seven bits")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(4)
+        | bitfield(0x33, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(r2, 13, 7)
         | bitfield(qp, 0, 6)
     )
 
@@ -2008,6 +2106,416 @@ def pfs_register_migration_program() -> Program:
             spin_bundle(0x60),
         ),
         terminal_ip=0x60,
+    )
+
+
+def typed_return_clean_program(mode: str) -> Tuple[Program, int]:
+    """Return through same-group BR/PFS forwarding without a frame fill."""
+    predicate = {"p0": 0, "true": 6, "false": 7}.get(mode)
+    if predicate is None:
+        raise ValueError("return mode must be p0/true/false")
+
+    data_address = 0x1000
+    restored_cfm = 4
+    restored_pfs = restored_cfm | (0x2a << 52)
+    raw_target = 0x107
+    taken = mode != "false"
+    terminal_ip = 0x110 if taken else 0xb0
+    observation = Bundle(
+        0x100 if taken else 0xa0,
+        0x01,
+        nop_m(),
+        mov_argr(22, 66),
+        mov_pfs_to_gr(23),
+    )
+    poison = spin_bundle(0xa0 if taken else 0x100)
+
+    return (
+        Program(
+            name="typed BR_RET clean-frame {} predicate".format(mode),
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(9, data_address, 0),
+                       adds(8, data_address + 8, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9), nop_i(), nop_i()),
+                Bundle(0x30, 0x01, ld8(13, 8), nop_i(), nop_i()),
+                Bundle(0x40, 0x01, nop_m(), adds(11, 0x111, 0),
+                       adds(12, 0x187, 0)),
+                Bundle(0x50, 0x01, nop_m(), mov_gr_to_pfs(11),
+                       mov_grbr(6, 12)),
+                Bundle(0x60, 0x01, nop_m(),
+                       cmp_rr(6, 7, 0, 0, "eq"), nop_i()),
+
+                # Ordinary reads retain the stopped values while BR_RET is
+                # the designated same-group consumer of both live writes.
+                Bundle(0x70, 0x00, nop_m(), mov_gr_to_pfs(10),
+                       mov_pfs_to_gr(20)),
+                Bundle(0x80, 0x00, nop_m(), mov_grbr(6, 13),
+                       mov_brgr(21, 6)),
+                Bundle(0x90, 0x11, nop_m(), nop_i(),
+                       br_ret(6, qp=predicate)),
+                poison,
+                observation,
+                spin_bundle(terminal_ip),
+            ),
+            terminal_ip=terminal_ip,
+            data=(
+                DataWord(data_address, restored_pfs, 8),
+                DataWord(data_address + 8, raw_target, 8),
+            ),
+        ),
+        restored_pfs,
+    )
+
+
+def typed_return_trap_program(psr_bits: int, vector: int) \
+        -> Tuple[Program, int]:
+    """Return to CPL3 with an enabled architectural branch trap."""
+    if vector not in (IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR,
+                      IA64_TAKEN_BRANCH_TRAP_VECTOR):
+        raise ValueError("unsupported return trap vector")
+
+    data_address = 0x1000
+    restored_pfs = 4 | (0x2a << 52) | (3 << 62)
+    raw_target = 0x107
+    return (
+        Program(
+            name="typed BR_RET trap-priority vector 0x{:x}".format(vector),
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(9, data_address, 0),
+                       adds(8, data_address + 8, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9), nop_i(), nop_i()),
+                Bundle(0x30, 0x01, ld8(11, 8), nop_i(), nop_i()),
+                Bundle(0x40, 0x01, nop_m(), adds(12, 0x111, 0),
+                       adds(13, 0x187, 0)),
+                Bundle(0x50, 0x01, nop_m(), mov_gr_to_pfs(12),
+                       mov_grbr(6, 13)),
+                Bundle(0x60, 0x01, mov_gr_to_psr_l(11),
+                       nop_i(), nop_i()),
+                Bundle(0x70, 0x01, srlz_i(), adds(14, raw_target, 0),
+                       nop_i()),
+
+                # Retain ordinary old-value witnesses while the return uses
+                # both eligible same-group live values.
+                Bundle(0x80, 0x00, nop_m(), mov_gr_to_pfs(10),
+                       mov_pfs_to_gr(20)),
+                Bundle(0x90, 0x00, nop_m(), mov_grbr(6, 14),
+                       mov_brgr(21, 6)),
+                Bundle(0xa0, 0x11, nop_m(), nop_i(), br_ret(6)),
+                spin_bundle(0xb0),
+                spin_bundle(0x100),
+                Bundle(IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR, 0x01,
+                       nop_m(), mov_argr(22, 66), mov_pfs_to_gr(23)),
+                spin_bundle(IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR + 0x10),
+                Bundle(IA64_TAKEN_BRANCH_TRAP_VECTOR, 0x01,
+                       nop_m(), mov_argr(22, 66), mov_pfs_to_gr(23)),
+                spin_bundle(IA64_TAKEN_BRANCH_TRAP_VECTOR + 0x10),
+            ),
+            terminal_ip=vector + 0x10,
+            data=(
+                DataWord(data_address, restored_pfs, 8),
+                DataWord(data_address + 8, psr_bits, 8),
+            ),
+        ),
+        restored_pfs,
+    )
+
+
+def _typed_return_backing_values() -> Tuple[int, ...]:
+    return (
+        0xa100000000000001,
+        0xb200000000000002,
+        0xc300000000000003,
+        0xd400000000000004,
+    )
+
+
+def _typed_return_incomplete_handler(vector: int) -> Tuple[Bundle, ...]:
+    """Observe the still-unconsumed backing words after a branch trap."""
+    return (
+        Bundle(vector, 0x01, ld8(24, 15), mov_argr(22, 66),
+               mov_pfs_to_gr(23)),
+        Bundle(vector + 0x10, 0x01, ld8(25, 16), nop_i(), nop_i()),
+        Bundle(vector + 0x20, 0x01, ld8(26, 17), nop_i(), nop_i()),
+        Bundle(vector + 0x30, 0x01, ld8(27, 18), nop_i(), nop_i()),
+        spin_bundle(vector + 0x40),
+    )
+
+
+def typed_return_incomplete_fill_program() \
+        -> Tuple[Program, int, Tuple[int, ...]]:
+    """Restore four non-resident locals and complete their mandatory fills."""
+    config_address = 0x1800
+    backing_start = 0xfd8
+    restored_cfm = 4 | (4 << 7)
+    restored_pfs = restored_cfm | (0x2a << 52)
+    backing = _typed_return_backing_values()
+    return (
+        Program(
+            name="typed BR_RET mandatory four-register frame fill",
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(2, 0x1000, 0),
+                       adds(9, config_address, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9), mov_i_grar(18, 2),
+                       adds(14, 0x107, 0)),
+                Bundle(0x30, 0x01, nop_m(), mov_gr_to_pfs(10),
+                       mov_grbr(6, 14)),
+                Bundle(0x40, 0x11, nop_m(), nop_i(), br_ret(6)),
+                spin_bundle(0x50),
+                Bundle(0x100, 0x01, nop_m(), mov_argr(22, 66),
+                       mov_pfs_to_gr(23)),
+                spin_bundle(0x110),
+            ),
+            terminal_ip=0x110,
+            data=(
+                DataWord(config_address, restored_pfs, 8),
+                *(DataWord(backing_start + index * 8, value, 8)
+                  for index, value in enumerate(backing)),
+                DataWord(0xff8, 0, 8),
+            ),
+        ),
+        restored_pfs,
+        backing,
+    )
+
+
+def typed_return_incomplete_trap_program(psr_bits: int, vector: int) \
+        -> Tuple[Program, int, Tuple[int, ...]]:
+    """Trap after restoring an incomplete SOL4 frame but before any fill."""
+    if vector not in (IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR,
+                      IA64_TAKEN_BRANCH_TRAP_VECTOR):
+        raise ValueError("unsupported incomplete-return trap vector")
+
+    config_address = 0x1800
+    backing_start = 0xfd8
+    restored_cfm = 4 | (4 << 7)
+    restored_pfs = restored_cfm | (0x2a << 52) | (3 << 62)
+    backing = _typed_return_backing_values()
+    return (
+        Program(
+            name="typed incomplete BR_RET trap vector 0x{:x}".format(
+                vector
+            ),
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(2, 0x1000, 0),
+                       adds(9, config_address, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9), mov_i_grar(18, 2),
+                       adds(8, config_address + 8, 0)),
+                Bundle(0x30, 0x01, ld8(11, 8), adds(14, 0x107, 0),
+                       adds(15, backing_start, 0)),
+                Bundle(0x40, 0x01, nop_m(), adds(16, backing_start + 8, 0),
+                       adds(17, backing_start + 16, 0)),
+                Bundle(0x50, 0x01, nop_m(),
+                       adds(18, backing_start + 24, 0),
+                       mov_gr_to_pfs(10)),
+                Bundle(0x60, 0x01, mov_gr_to_psr_l(11),
+                       mov_grbr(6, 14), nop_i()),
+                Bundle(0x70, 0x01, srlz_i(), nop_i(), nop_i()),
+                Bundle(0x80, 0x11, nop_m(), nop_i(), br_ret(6)),
+                spin_bundle(0x90),
+                spin_bundle(0x100),
+                *_typed_return_incomplete_handler(
+                    IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR
+                ),
+                *_typed_return_incomplete_handler(
+                    IA64_TAKEN_BRANCH_TRAP_VECTOR
+                ),
+            ),
+            terminal_ip=vector + 0x40,
+            data=(
+                DataWord(config_address, restored_pfs, 8),
+                DataWord(config_address + 8, psr_bits, 8),
+                *(DataWord(backing_start + index * 8, value, 8)
+                  for index, value in enumerate(backing)),
+                DataWord(0xff8, 0, 8),
+            ),
+        ),
+        restored_pfs,
+        backing,
+    )
+
+
+def typed_return_register_fill_fault_program() \
+        -> Tuple[Program, int, Tuple[int, ...], int]:
+    """Fault the first mandatory register read and resume it through RFI.
+
+    The Alternate Data TLB handler changes the faulting backing word before
+    returning.  The completed frame must consume that replacement, proving
+    the failed read committed neither a value nor an RSE partition step.  The
+    handler clears only saved PSR.rt; CR.IFS remains invalid so RFI resumes the
+    already-restored frame instead of uncovering it a second time.
+    """
+    config_address = 0x1800
+    backing_start = 0x8000
+    backing_end = 0x8020
+    fault_address = 0x8018
+    replacement = 0x4d4
+    restored_cfm = 4 | (4 << 7)
+    restored_pfs = restored_cfm | (0x2a << 52)
+    backing = _typed_return_backing_values()
+
+    return (
+        Program(
+            name="typed BR_RET first-register SoftMMU fault/RFI resume",
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(15, 1, 0),
+                       adds(9, config_address, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9),
+                       shl_imm(15, 15, 15), adds(14, 0x107, 0)),
+                Bundle(0x30, 0x01, nop_m(),
+                       adds(2, backing_end - backing_start, 15),
+                       adds(3, fault_address - backing_start, 15)),
+                Bundle(0x40, 0x01, nop_m(), adds(4, replacement, 0),
+                       adds(13, 1, 0)),
+                Bundle(0x50, 0x01, nop_m(), mov_i_grar(18, 2),
+                       mov_gr_to_pfs(10)),
+                Bundle(0x60, 0x01, nop_m(), shl_imm(13, 13, 27), nop_i()),
+                Bundle(0x70, 0x01, nop_m(),
+                       dep_imm(13, 1, 13, 13, 1), mov_grbr(6, 14)),
+                Bundle(0x80, 0x01, mov_gr_to_psr_l(13), nop_i(), nop_i()),
+                Bundle(0x90, 0x01, srlz_i(), nop_i(), nop_i()),
+                Bundle(0xa0, 0x11, nop_m(), nop_i(), br_ret(6)),
+                spin_bundle(0xb0),
+                Bundle(0x100, 0x01, ld8(25, 3), mov_argr(22, 66),
+                       mov_pfs_to_gr(23)),
+                spin_bundle(0x110),
+
+                # Capture the interruption resources in unbanked registers,
+                # retain the original IPSR separately, and clear only RT in
+                # the value written back for IFS.v=0 RFI continuation.
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR, 0x01,
+                       mov_crgr(7, IA64_CR_IPSR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x10, 0x01,
+                       mov_crgr(5, IA64_CR_IFS), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x20, 0x01,
+                       mov_crgr(6, IA64_CR_ISR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x30, 0x01,
+                       nop_m(), adds(12, 0, 7),
+                       dep_imm(7, 0, 7, 27, 1)),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x40, 0x01,
+                       mov_grcr(IA64_CR_IPSR, 7), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x50, 0x01,
+                       st8(4, 3), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60, 0x11,
+                       nop_m(), nop_i(), rfi()),
+            ),
+            terminal_ip=0x110,
+            data=(
+                DataWord(config_address, restored_pfs, 8),
+                *(DataWord(backing_start + index * 8, value, 8)
+                  for index, value in enumerate(backing)),
+            ),
+        ),
+        restored_pfs,
+        backing,
+        replacement,
+    )
+
+
+def typed_return_rnat_fill_fault_program() \
+        -> Tuple[Program, int, Tuple[int, ...], Tuple[int, ...]]:
+    """Fault an RNAT read after a three-register committed fill prefix.
+
+    A 4 KiB identity DTC mapping admits the high-page prefix at 0x8010,
+    0x8008 and 0x8000.  The following RNAT access at 0x7ff8 misses.  The
+    physical handler poisons those three already-consumed words and supplies
+    a new RNAT value before clearing saved RT and executing RFI.  A correct
+    prefix-resume keeps the original r33-r35 values, consumes the new RNAT for
+    r32, and loads the final low-page word exactly once.
+    """
+    config_address = 0x1800
+    page_base = 0x8000
+    backing_start = 0x7ff0
+    rnat_address = 0x7ff8
+    backing_end = 0x8018
+    restored_cfm = 4 | (4 << 7)
+    restored_pfs = restored_cfm | (0x2a << 52)
+    backing = _typed_return_backing_values()
+    poison = (0x611, 0x722, 0x833)
+    translation = page_base | 0x661
+    itir = 12 << 2
+
+    return (
+        Program(
+            name="typed BR_RET RNAT SoftMMU prefix fault/RFI resume",
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(15, 1, 0),
+                       adds(9, config_address, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9),
+                       shl_imm(15, 15, 15), adds(14, 0x207, 0)),
+                Bundle(0x30, 0x01, nop_m(),
+                       adds(2, backing_end - page_base, 15),
+                       adds(3, 0x10, 15)),
+                Bundle(0x40, 0x01, nop_m(), adds(4, 8, 15),
+                       adds(5, 0, 15)),
+                Bundle(0x50, 0x01, nop_m(), adds(6, poison[0], 0),
+                       adds(7, poison[1], 0)),
+                Bundle(0x60, 0x01, nop_m(), adds(8, poison[2], 0),
+                       adds(12, itir, 0)),
+                Bundle(0x70, 0x01, nop_m(),
+                       adds(13, translation - page_base, 15),
+                       mov_grbr(6, 14)),
+                Bundle(0x80, 0x01, nop_m(), mov_i_grar(18, 2),
+                       mov_gr_to_pfs(10)),
+                Bundle(0x90, 0x01, mov_grcr(IA64_CR_IFA, 15),
+                       adds(2, rnat_address - page_base, 15),
+                       adds(9, 1, 0)),
+                Bundle(0xa0, 0x01, mov_grcr(IA64_CR_ITIR, 12),
+                       shl_imm(9, 9, 62), nop_i()),
+                Bundle(0xb0, 0x01, itc_d(13), nop_i(), nop_i()),
+                Bundle(0xc0, 0x01, srlz_d(), nop_i(), nop_i()),
+                Bundle(0xd0, 0x01, nop_m(), adds(13, 1, 0), nop_i()),
+                Bundle(0xe0, 0x01, nop_m(), shl_imm(13, 13, 27), nop_i()),
+                Bundle(0xf0, 0x01, nop_m(),
+                       dep_imm(13, 1, 13, 13, 1), nop_i()),
+                Bundle(0x100, 0x01, mov_gr_to_psr_l(13), nop_i(), nop_i()),
+                Bundle(0x110, 0x01, srlz_i(), nop_i(), nop_i()),
+                Bundle(0x120, 0x11, nop_m(), nop_i(), br_ret(6)),
+                spin_bundle(0x130),
+                Bundle(0x200, 0x01, ld8(25, 3), mov_argr(22, 66),
+                       mov_pfs_to_gr(23)),
+                Bundle(0x210, 0x01, ld8(26, 4),
+                       predicate_test("tnat", 6, 7, relation="z",
+                                      update="normal", r3=32),
+                       nop_i()),
+                Bundle(0x220, 0x01, ld8(27, 5), nop_i(), nop_i()),
+                Bundle(0x230, 0x01, ld8(28, 2), nop_i(), nop_i()),
+                spin_bundle(0x240),
+
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR, 0x01,
+                       mov_crgr(1, IA64_CR_IPSR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x10, 0x01,
+                       mov_crgr(10, IA64_CR_IFS), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x20, 0x01,
+                       mov_crgr(11, IA64_CR_ISR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x30, 0x01,
+                       nop_m(), adds(12, 0, 1),
+                       dep_imm(1, 0, 1, 27, 1)),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x40, 0x01,
+                       mov_grcr(IA64_CR_IPSR, 1), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x50, 0x01,
+                       st8(6, 3), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60, 0x01,
+                       st8(7, 4), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x70, 0x01,
+                       st8(8, 5), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x80, 0x01,
+                       st8(9, 2), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90, 0x11,
+                       nop_m(), nop_i(), rfi()),
+            ),
+            terminal_ip=0x240,
+            data=(
+                DataWord(config_address, restored_pfs, 8),
+                DataWord(backing_start, backing[0], 8),
+                DataWord(rnat_address, 0, 8),
+                DataWord(page_base, backing[1], 8),
+                DataWord(page_base + 8, backing[2], 8),
+                DataWord(page_base + 16, backing[3], 8),
+            ),
+        ),
+        restored_pfs,
+        backing,
+        poison,
     )
 
 
@@ -3957,6 +4465,122 @@ def _require_typed_call_trace(trace: str, bundle_ip: int,
             )
 
 
+def _require_typed_return_trace(trace: str, bundle_ip: int,
+                                minimum_predicate_splits: int) -> None:
+    """Require direct BR_RET selection plus its ordered focused helpers."""
+    for trace_section in _tcg_op_sections(trace, bundle_ip):
+        marker = re.search(
+            r"(?m)^ ---- [0-9a-fA-F]{16} [0-9a-fA-F]{16} "
+            r"([0-9a-fA-F]{16})\b",
+            trace_section,
+        )
+        if marker is None or not (int(marker.group(1), 16) & 2):
+            raise HarnessError(
+                "return bundle 0x{:x} lacks the typed-owner marker".format(
+                    bundle_ip
+                )
+            )
+
+        forbidden = re.search(
+            r"(?m)^\s*call (?:exec_bundle(?:_lookup_ptr)?|exec_slot|"
+            r"finish_fast_bundle|finish_direct_branch_bundle|"
+            r"finish_indirect_branch_bundle|return_from_call_frame|"
+            r"rse_sync_logical_in|rse_sync_logical_out),",
+            trace_section,
+        )
+        if forbidden is not None:
+            raise HarnessError(
+                "return bundle 0x{:x} used a generic/full-sync helper: {}"
+                .format(bundle_ip, forbidden.group(0).strip())
+            )
+
+        helper_names = (
+            "return_frame_from_pfs",
+            "raise_lower_privilege_transfer_trap",
+            "raise_taken_branch_trap",
+            "complete_rse_frame_loads",
+            "return_chain_ok",
+        )
+        helper_sites = []
+        for name in helper_names:
+            sites = list(re.finditer(
+                r"(?m)^\s*call {},".format(name), trace_section
+            ))
+            if len(sites) != 1:
+                raise HarnessError(
+                    "return bundle 0x{:x} has {} {} sites, expected one"
+                    .format(bundle_ip, len(sites), name)
+                )
+            helper_sites.append(sites[0].start())
+        if helper_sites != sorted(helper_sites):
+            raise HarnessError(
+                "return bundle 0x{:x} does not order frame restore, LP, TB, "
+                "mandatory-fill, and chain-authorization helpers".format(
+                    bundle_ip
+                )
+            )
+
+        frame_site = helper_sites[0]
+        alignment = re.search(
+            r"(?m)^\s*and_i64\s+[^,\s]+,[^,\s]+,"
+            r"\$0xfffffffffffffff0\s*$",
+            trace_section[:frame_site],
+        )
+        if alignment is None:
+            raise HarnessError(
+                "return bundle 0x{:x} lacks direct low-bit target alignment"
+                .format(bundle_ip)
+            )
+        commit = re.search(
+            r"(?m)^\s*mov_i64\s+ip,loc[0-9]+\s*$",
+            trace_section[:frame_site],
+        )
+        if commit is None:
+            raise HarnessError(
+                "return bundle 0x{:x} does not commit its dynamic target "
+                "before frame restoration".format(bundle_ip)
+            )
+        late_fast_finish = next((
+            site for site in re.finditer(
+                r"(?m)^\s*call finish_fast_tb,", trace_section
+            ) if site.start() >= commit.start()
+        ), None)
+        if late_fast_finish is not None:
+            raise HarnessError(
+                "return bundle 0x{:x} polls the generic fast-TB finisher "
+                "on or after its taken-arm target commit".format(bundle_ip)
+            )
+
+        selectors = re.findall(
+            r"(?m)^\s*movcond_i64\b", trace_section[:frame_site]
+        )
+        if len(selectors) < 2:
+            raise HarnessError(
+                "return bundle 0x{:x} has {} live/ordinary selectors, "
+                "expected BR and AR.PFS selection".format(
+                    bundle_ip, len(selectors)
+                )
+            )
+        splits = re.findall(r"(?m)^\s*brcond_i(?:32|64)\b", trace_section)
+        if len(splits) < minimum_predicate_splits:
+            raise HarnessError(
+                "return bundle 0x{:x} has {} predicate/trap splits, "
+                "expected at least {}".format(
+                    bundle_ip, len(splits), minimum_predicate_splits
+                )
+            )
+
+        lookup = re.search(
+            r"(?m)^\s*(?:goto_ptr|lookup_and_goto_ptr)\b",
+            trace_section[helper_sites[-1]:],
+        )
+        if lookup is None:
+            raise HarnessError(
+                "return bundle 0x{:x} lacks a dynamic exit after mandatory "
+                "frame loads".format(bundle_ip)
+            )
+
+
 def _require_branch_forward_savevm_trace(source_trace: str,
                                          destination_trace: str,
                                          producer_ip: int, branch_ip: int,
@@ -4606,6 +5230,7 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
                 typed_call_traces: Sequence[
                     Tuple[int, Optional[int], bool, int]
                 ] = (),
+                typed_return_traces: Sequence[Tuple[int, int]] = (),
                 typed_pfs_move_traces: Sequence[
                     Tuple[int, bool, bool, bool, bool]
                 ] = (),
@@ -4650,6 +5275,7 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
             typed_indirect_traces or
             typed_loop_traces or
             typed_call_traces or
+            typed_return_traces or
             typed_pfs_move_traces or
             typed_visibility_states or internal_stop_handoffs or
             automatic_segment_trace_ips or
@@ -4756,6 +5382,10 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
                     typed_call_traces:
                 _require_typed_call_trace(
                     trace, bundle_ip, target, indirect, predicate_splits
+                )
+            for bundle_ip, predicate_splits in typed_return_traces:
+                _require_typed_return_trace(
+                    trace, bundle_ip, predicate_splits
                 )
             for (bundle_ip, require_read, require_write,
                  require_overlay_select, require_nat_fault_path) in \
@@ -7910,6 +8540,494 @@ def test_typed_call_branches(qemu: Path) -> str:
     )
 
 
+def test_typed_return_branches(qemu: Path) -> str:
+    """Architectural and IR goldens for typed B4 BR_RET lowering."""
+    program_count = 0
+    return_encodings = 0
+
+    for mode in ("p0", "true", "false"):
+        program, restored_pfs = typed_return_clean_program(mode)
+        snapshot = run_program(
+            qemu,
+            program,
+            rewrite=True,
+            typed_return_traces=((0x90, 3 if mode == "p0" else 4),),
+            one_bundle_per_tb=True,
+        )
+        taken = mode != "false"
+        _require(not snapshot.exception_pending and
+                 snapshot.exception_kind == "none",
+                 "{} clean BR_RET raised an exception".format(mode))
+        _require(snapshot.ip == program.terminal_ip,
+                 "{} BR_RET missed its {} path terminal".format(
+                     mode, "taken" if taken else "fallthrough"
+                 ))
+        _require(
+            snapshot.gr[20] == 0x111 and snapshot.gr[21] == 0x187,
+            "{} BR_RET lost ordinary AR.PFS/BR group-entry values: "
+            "r20=0x{:x} r21=0x{:x}".format(
+                mode, snapshot.gr[20], snapshot.gr[21]
+            ),
+        )
+        _require(
+            snapshot.br[6] == 0x107 and snapshot.gr[23] == restored_pfs,
+            "{} BR_RET did not retain live forwarded b6/PFS: "
+            "b6=0x{:x} PFS=0x{:x}".format(
+                mode, snapshot.br[6], snapshot.gr[23]
+            ),
+        )
+        _require(
+            snapshot.cfm == (4 if taken else 0) and
+            snapshot.gr[22] == (0x2a if taken else 0),
+            "{} BR_RET frame result expected CFM/EC (0x{:x},0x{:x}), "
+            "got (0x{:x},0x{:x})".format(
+                mode, 4 if taken else 0, 0x2a if taken else 0,
+                snapshot.cfm, snapshot.gr[22]
+            ),
+        )
+        _require(
+            snapshot.rse_base == 0 and snapshot.rse_bsp == 0 and
+            snapshot.rse_bspstore == 0 and snapshot.rse_bspload == 0,
+            "{} clean return unexpectedly moved or filled the RSE: "
+            "base={} BSP=0x{:x}/0x{:x}/0x{:x}".format(
+                mode, snapshot.rse_base, snapshot.rse_bsp,
+                snapshot.rse_bspstore, snapshot.rse_bspload
+            ),
+        )
+        _require(snapshot.pr == 0x41,
+                 "{} return predicate setup expected PR=0x41, got 0x{:x}"
+                 .format(mode, snapshot.pr))
+        program_count += 1
+        return_encodings += 1
+
+    trap_rows = (
+        (
+            "LP-over-TB",
+            IA64_PSR_IC | IA64_PSR_LP | IA64_PSR_TB,
+            IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR,
+            "lower-privilege-transfer",
+            6,
+        ),
+        (
+            "TB-only",
+            IA64_PSR_IC | IA64_PSR_TB,
+            IA64_TAKEN_BRANCH_TRAP_VECTOR,
+            "taken-branch-trap",
+            4,
+        ),
+    )
+    for label, psr_bits, vector, kind, isr_code in trap_rows:
+        program, restored_pfs = typed_return_trap_program(psr_bits, vector)
+        snapshot = run_program(
+            qemu,
+            program,
+            rewrite=True,
+            typed_return_traces=((0xa0, 3),),
+            one_bundle_per_tb=True,
+        )
+        _require(snapshot.ip == program.terminal_ip,
+                 "{} BR_RET did not enter its handler".format(label))
+        _require(snapshot.exception_pending and
+                 snapshot.exception_kind == kind and
+                 snapshot.exception_vector == vector,
+                 "{} expected {} at vector 0x{:x}, got {}/0x{:x}".format(
+                     label, kind, vector, snapshot.exception_kind,
+                     snapshot.exception_vector
+                 ))
+        _require(
+            snapshot.exception_source == 0x100 and
+            snapshot.exception_address == 0x100 and
+            snapshot.cr_iip == 0x100 and snapshot.cr_iipa == 0xa0,
+            "{} trap was not attributed to committed target/source: "
+            "EXC=0x{:x}/0x{:x} IIP=0x{:x} IIPA=0x{:x}".format(
+                label, snapshot.exception_source,
+                snapshot.exception_address, snapshot.cr_iip,
+                snapshot.cr_iipa
+            ),
+        )
+        expected_isr = (2 << IA64_ISR_EI_SHIFT) | isr_code
+        _require(
+            snapshot.cr_isr == expected_isr,
+            "{} expected ISR=0x{:x}, got 0x{:x}".format(
+                label, expected_isr, snapshot.cr_isr
+            ),
+        )
+        _require(
+            (snapshot.cr_ipsr & IA64_PSR_IC) != 0 and
+            ((snapshot.cr_ipsr >> 32) & 3) == 3 and
+            (snapshot.cr_ipsr & (IA64_PSR_LP | IA64_PSR_TB)) ==
+            (psr_bits & (IA64_PSR_LP | IA64_PSR_TB)),
+            "{} trap did not collect post-return CPL/LP/TB state: "
+            "IPSR=0x{:x}".format(label, snapshot.cr_ipsr),
+        )
+        _require(
+            snapshot.cfm == 4 and snapshot.gr[22] == 0x2a and
+            snapshot.gr[23] == restored_pfs,
+            "{} trap preceded frame restoration: CFM=0x{:x} EC=0x{:x} "
+            "PFS=0x{:x}".format(
+                label, snapshot.cfm, snapshot.gr[22], snapshot.gr[23]
+            ),
+        )
+        _require(
+            snapshot.gr[20] == 0x111 and snapshot.gr[21] == 0x187 and
+            snapshot.br[6] == 0x107,
+            "{} trap lost ordinary/forwarded PFS-BR selection: "
+            "r20=0x{:x} r21=0x{:x} b6=0x{:x}".format(
+                label, snapshot.gr[20], snapshot.gr[21], snapshot.br[6]
+            ),
+        )
+        _require(
+            snapshot.rse_base == 0 and snapshot.rse_bsp == 0 and
+            snapshot.rse_bspstore == 0 and snapshot.rse_bspload == 0,
+            "{} trap path performed an unexpected clean-frame load".format(
+                label
+            ),
+        )
+        program_count += 1
+        return_encodings += 1
+
+    fill_program, fill_pfs, backing = \
+        typed_return_incomplete_fill_program()
+    filled = run_program(
+        qemu,
+        fill_program,
+        rewrite=True,
+        typed_return_traces=((0x40, 3),),
+        one_bundle_per_tb=True,
+    )
+    _require(not filled.exception_pending and
+             filled.exception_kind == "none" and
+             filled.ip == fill_program.terminal_ip,
+             "SOL4 mandatory-fill BR_RET did not reach its target cleanly")
+    _require(
+        filled.cfm == (4 | (4 << 7)) and filled.gr[22] == 0x2a and
+        filled.gr[23] == fill_pfs and filled.br[6] == 0x107,
+        "SOL4 fill lost restored CFM/EC/PFS or aligned BR target: "
+        "CFM=0x{:x} EC=0x{:x} PFS=0x{:x} b6=0x{:x}".format(
+            filled.cfm, filled.gr[22], filled.gr[23], filled.br[6]
+        ),
+    )
+    _require(
+        filled.gr[32:36] == backing,
+        "SOL4 fill expected r32-r35 {}, got {}".format(
+            tuple("0x{:x}".format(value) for value in backing),
+            tuple("0x{:x}".format(value) for value in filled.gr[32:36]),
+        ),
+    )
+    _require(
+        (filled.nat_low & (0xf << 32)) == 0,
+        "zero RNAT collection word left a NaT on filled r32-r35: "
+        "NaT=0x{:x}:0x{:x}".format(filled.nat_high, filled.nat_low),
+    )
+    _require(
+        filled.rse_base == 92 and filled.rse_bsp == 0xfd8 and
+        filled.rse_bspstore == 0xfd8 and filled.rse_bspload == 0xfd8,
+        "SOL4 mandatory fills did not complete the 0x1000 backing span: "
+        "base={} BSP=0x{:x}/0x{:x}/0x{:x}".format(
+            filled.rse_base, filled.rse_bsp, filled.rse_bspstore,
+            filled.rse_bspload
+        ),
+    )
+    program_count += 1
+    return_encodings += 1
+
+    for label, psr_bits, vector, kind, isr_code in trap_rows:
+        program, restored_pfs, backing = \
+            typed_return_incomplete_trap_program(psr_bits, vector)
+        snapshot = run_program(
+            qemu,
+            program,
+            rewrite=True,
+            typed_return_traces=((0x80, 3),),
+            one_bundle_per_tb=True,
+        )
+        incomplete_label = "incomplete-{}".format(label)
+        _require(snapshot.ip == program.terminal_ip,
+                 "{} BR_RET did not enter its handler".format(
+                     incomplete_label
+                 ))
+        _require(snapshot.exception_pending and
+                 snapshot.exception_kind == kind and
+                 snapshot.exception_vector == vector,
+                 "{} expected {} at vector 0x{:x}, got {}/0x{:x}".format(
+                     incomplete_label, kind, vector,
+                     snapshot.exception_kind, snapshot.exception_vector
+                 ))
+        _require(
+            snapshot.exception_source == 0x100 and
+            snapshot.exception_address == 0x100 and
+            snapshot.cr_iip == 0x100 and snapshot.cr_iipa == 0x80 and
+            ((snapshot.cr_ipsr >> IA64_PSR_RI_SHIFT) & 3) == 0,
+            "{} trap lacks target IIP/RI0 or source bundle attribution: "
+            "EXC=0x{:x}/0x{:x} IIP=0x{:x} IIPA=0x{:x} IPSR=0x{:x}"
+            .format(
+                incomplete_label, snapshot.exception_source,
+                snapshot.exception_address, snapshot.cr_iip,
+                snapshot.cr_iipa, snapshot.cr_ipsr
+            ),
+        )
+        expected_isr = (2 << IA64_ISR_EI_SHIFT) | IA64_ISR_IR | isr_code
+        _require(
+            snapshot.cr_isr == expected_isr and
+            (snapshot.cr_isr & (IA64_ISR_RS | IA64_ISR_IR)) == IA64_ISR_IR,
+            "{} expected EI2/IR1/RS0 ISR=0x{:x}, got 0x{:x}".format(
+                incomplete_label, expected_isr, snapshot.cr_isr
+            ),
+        )
+        _require(
+            (snapshot.cr_ipsr & IA64_PSR_IC) != 0 and
+            ((snapshot.cr_ipsr >> 32) & 3) == 3 and
+            (snapshot.cr_ipsr & (IA64_PSR_LP | IA64_PSR_TB)) ==
+            (psr_bits & (IA64_PSR_LP | IA64_PSR_TB)),
+            "{} trap did not collect restored CPL/LP/TB state: "
+            "IPSR=0x{:x}".format(incomplete_label, snapshot.cr_ipsr),
+        )
+        _require(
+            snapshot.cfm == (4 | (4 << 7)) and
+            snapshot.gr[22] == 0x2a and snapshot.gr[23] == restored_pfs and
+            snapshot.br[6] == 0x107,
+            "{} trap preceded frame/EC/CPL target restoration: "
+            "CFM=0x{:x} EC=0x{:x} PFS=0x{:x} b6=0x{:x}".format(
+                incomplete_label, snapshot.cfm, snapshot.gr[22],
+                snapshot.gr[23], snapshot.br[6]
+            ),
+        )
+        _require(
+            snapshot.rse_base == 92 and snapshot.rse_bsp == 0xfd8 and
+            snapshot.rse_bspstore == 0x1000 and
+            snapshot.rse_bspload == 0x1000,
+            "{} trap did not preserve the exact pre-fill backing gap: "
+            "base={} BSP=0x{:x}/0x{:x}/0x{:x}".format(
+                incomplete_label, snapshot.rse_base, snapshot.rse_bsp,
+                snapshot.rse_bspstore, snapshot.rse_bspload
+            ),
+        )
+        _require(
+            snapshot.gr[32:36] == (0, 0, 0, 0) and
+            (snapshot.nat_low & (0xf << 32)) == 0,
+            "{} trap executed a mandatory fill before delivery: "
+            "r32-r35={} NaT=0x{:x}:0x{:x}".format(
+                incomplete_label,
+                tuple("0x{:x}".format(value)
+                      for value in snapshot.gr[32:36]),
+                snapshot.nat_high, snapshot.nat_low
+            ),
+        )
+        _require(
+            snapshot.gr[24:28] == backing,
+            "{} handler found changed backing payload: expected {}, got {}"
+            .format(
+                incomplete_label,
+                tuple("0x{:x}".format(value) for value in backing),
+                tuple("0x{:x}".format(value)
+                      for value in snapshot.gr[24:28]),
+            ),
+        )
+        program_count += 1
+        return_encodings += 1
+
+    # All four restored registers plus an RNAT word fit inside one 4 KiB
+    # translation page, and every downward page crossing reaches the RNAT slot
+    # at page_base-8 before a lower-page register.  Real SoftMMU can therefore
+    # select the first register or the post-prefix RNAT boundary, but cannot
+    # select arbitrary middle/last register reads without a test-only sub-page
+    # fault injector.  The step-reader unit matrix separately covers register
+    # callback failures at indices 0, 2 and 4; these rows add the two genuinely
+    # realizable guest-MMU/RFI paths.
+    fill_fault_isr = IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR
+
+    fault_program, fault_pfs, backing, replacement = \
+        typed_return_register_fill_fault_program()
+    faulted = run_program(
+        qemu,
+        fault_program,
+        rewrite=True,
+        typed_return_traces=((0xa0, 3),),
+        one_bundle_per_tb=True,
+    )
+    _require(
+        faulted.ip == fault_program.terminal_ip and
+        faulted.exception_pending and
+        faulted.exception_kind == "alternate-data-tlb-miss" and
+        faulted.exception_vector == IA64_ALTERNATE_DATA_TLB_VECTOR,
+        "first-register fill fault did not RFI-resume to its terminal: "
+        "IP=0x{:x} EXC={}/0x{:x}".format(
+            faulted.ip, faulted.exception_kind, faulted.exception_vector
+        ),
+    )
+    _require(
+        faulted.exception_source == 0x100 and
+        faulted.exception_address == 0x8018 and
+        faulted.cr_iip == 0x100 and faulted.cr_ifa == 0x8018 and
+        faulted.cr_iipa == 0xa0,
+        "first-register fault lacks committed target/IFA/source state: "
+        "EXC=0x{:x}/0x{:x} IIP=0x{:x} IFA=0x{:x} IIPA=0x{:x}"
+        .format(
+            faulted.exception_source, faulted.exception_address,
+            faulted.cr_iip, faulted.cr_ifa, faulted.cr_iipa
+        ),
+    )
+    _require(
+        faulted.cr_isr == fill_fault_isr and
+        faulted.gr[6] == fill_fault_isr,
+        "first-register fault expected exact R/RS/IR ISR=0x{:x}, got "
+        "CR/gr=0x{:x}/0x{:x}".format(
+            fill_fault_isr, faulted.cr_isr, faulted.gr[6]
+        ),
+    )
+    _require(
+        faulted.gr[5] == 0 and
+        faulted.gr[12] == (IA64_PSR_IC | IA64_PSR_RT) and
+        ((faulted.gr[12] >> IA64_PSR_RI_SHIFT) & 3) == 0 and
+        faulted.cr_ipsr == IA64_PSR_IC and
+        (faulted.psr & (IA64_PSR_IC | IA64_PSR_RT)) == IA64_PSR_IC,
+        "first-register handler did not observe IFS.v=0 or clear only saved "
+        "RT: IFS=0x{:x} saved-IPSR=0x{:x} CR.IPSR=0x{:x} PSR=0x{:x}"
+        .format(
+            faulted.gr[5], faulted.gr[12], faulted.cr_ipsr, faulted.psr
+        ),
+    )
+    _require(
+        faulted.cfm == (4 | (4 << 7)) and
+        faulted.gr[22] == 0x2a and faulted.gr[23] == fault_pfs and
+        faulted.br[6] == 0x107,
+        "first-register RFI path lost the restored return frame: "
+        "CFM=0x{:x} EC=0x{:x} PFS=0x{:x} b6=0x{:x}".format(
+            faulted.cfm, faulted.gr[22], faulted.gr[23], faulted.br[6]
+        ),
+    )
+    _require(
+        faulted.rse_base == 92 and faulted.rse_bsp == 0x8000 and
+        faulted.rse_bspstore == 0x8000 and
+        faulted.rse_bspload == 0x8000,
+        "first-register RFI did not finish the exact backing span: "
+        "base={} BSP=0x{:x}/0x{:x}/0x{:x}".format(
+            faulted.rse_base, faulted.rse_bsp, faulted.rse_bspstore,
+            faulted.rse_bspload
+        ),
+    )
+    _require(
+        faulted.gr[32:36] == backing[:3] + (replacement,) and
+        faulted.gr[25] == replacement,
+        "faulting register read committed before the miss or did not retry: "
+        "frame={} memory=0x{:x}".format(
+            tuple("0x{:x}".format(value) for value in faulted.gr[32:36]),
+            faulted.gr[25]
+        ),
+    )
+    program_count += 1
+    return_encodings += 1
+
+    rnat_program, rnat_pfs, backing, poison = \
+        typed_return_rnat_fill_fault_program()
+    rnat_faulted = run_program(
+        qemu,
+        rnat_program,
+        rewrite=True,
+        typed_return_traces=((0x120, 3),),
+        one_bundle_per_tb=True,
+    )
+    _require(
+        rnat_faulted.ip == rnat_program.terminal_ip and
+        rnat_faulted.exception_pending and
+        rnat_faulted.exception_kind == "alternate-data-tlb-miss" and
+        rnat_faulted.exception_vector == IA64_ALTERNATE_DATA_TLB_VECTOR,
+        "RNAT prefix fault did not RFI-resume to its terminal: "
+        "IP=0x{:x} EXC={}/0x{:x}".format(
+            rnat_faulted.ip, rnat_faulted.exception_kind,
+            rnat_faulted.exception_vector
+        ),
+    )
+    _require(
+        rnat_faulted.exception_source == 0x200 and
+        rnat_faulted.exception_address == 0x7ff8 and
+        rnat_faulted.cr_iip == 0x200 and rnat_faulted.cr_ifa == 0x7ff8 and
+        rnat_faulted.cr_iipa == 0x120,
+        "RNAT fault lacks committed target/IFA/source state: "
+        "EXC=0x{:x}/0x{:x} IIP=0x{:x} IFA=0x{:x} IIPA=0x{:x}"
+        .format(
+            rnat_faulted.exception_source, rnat_faulted.exception_address,
+            rnat_faulted.cr_iip, rnat_faulted.cr_ifa,
+            rnat_faulted.cr_iipa
+        ),
+    )
+    _require(
+        rnat_faulted.cr_isr == fill_fault_isr and
+        rnat_faulted.gr[11] == fill_fault_isr,
+        "RNAT fault expected exact R/RS/IR ISR=0x{:x}, got "
+        "CR/gr=0x{:x}/0x{:x}".format(
+            fill_fault_isr, rnat_faulted.cr_isr, rnat_faulted.gr[11]
+        ),
+    )
+    _require(
+        rnat_faulted.gr[10] == 0 and
+        rnat_faulted.gr[12] == (IA64_PSR_IC | IA64_PSR_RT) and
+        ((rnat_faulted.gr[12] >> IA64_PSR_RI_SHIFT) & 3) == 0 and
+        rnat_faulted.cr_ipsr == IA64_PSR_IC and
+        (rnat_faulted.psr & (IA64_PSR_IC | IA64_PSR_RT)) == IA64_PSR_IC,
+        "RNAT handler did not observe IFS.v=0 or clear only saved RT: "
+        "IFS=0x{:x} saved-IPSR=0x{:x} CR.IPSR=0x{:x} PSR=0x{:x}"
+        .format(
+            rnat_faulted.gr[10], rnat_faulted.gr[12],
+            rnat_faulted.cr_ipsr, rnat_faulted.psr
+        ),
+    )
+    _require(
+        rnat_faulted.cfm == (4 | (4 << 7)) and
+        rnat_faulted.gr[22] == 0x2a and
+        rnat_faulted.gr[23] == rnat_pfs and rnat_faulted.br[6] == 0x207,
+        "RNAT RFI path lost the restored return frame: "
+        "CFM=0x{:x} EC=0x{:x} PFS=0x{:x} b6=0x{:x}".format(
+            rnat_faulted.cfm, rnat_faulted.gr[22],
+            rnat_faulted.gr[23], rnat_faulted.br[6]
+        ),
+    )
+    _require(
+        rnat_faulted.rse_base == 92 and rnat_faulted.rse_bsp == 0x7ff0 and
+        rnat_faulted.rse_bspstore == 0x7ff0 and
+        rnat_faulted.rse_bspload == 0x7ff0 and
+        rnat_faulted.rse_rnat == (1 << 62),
+        "RNAT RFI did not finish the exact cross-page backing span: "
+        "base={} BSP=0x{:x}/0x{:x}/0x{:x} RNAT=0x{:x}".format(
+            rnat_faulted.rse_base, rnat_faulted.rse_bsp,
+            rnat_faulted.rse_bspstore, rnat_faulted.rse_bspload,
+            rnat_faulted.rse_rnat
+        ),
+    )
+    _require(
+        rnat_faulted.gr[32:36] == backing and
+        (rnat_faulted.pr & ((1 << 6) | (1 << 7))) == (1 << 7),
+        "RNAT retry lost the final frame values or r32 NaT: frame={} "
+        "PR=0x{:x}".format(
+            tuple("0x{:x}".format(value)
+                  for value in rnat_faulted.gr[32:36]),
+            rnat_faulted.pr
+        ),
+    )
+    _require(
+        rnat_faulted.gr[25:29] == poison + (1 << 62,),
+        "RNAT handler did not poison the committed prefix/RNAT memory: {}"
+        .format(tuple("0x{:x}".format(value)
+                      for value in rnat_faulted.gr[25:29])),
+    )
+    program_count += 1
+    return_encodings += 1
+
+    _require(program_count == 10 and return_encodings == 10,
+             "typed return corpus drifted from ten programs/returns")
+    return (
+        "ten forced-one-bundle-TB BR_RET programs cover p0/true/false, "
+        "aligned dynamic targets, same-group BR and AR.PFS forwarding versus "
+        "ordinary overlay reads, clean and four-word incomplete SOL4 frame "
+        "restoration across an RNAT slot, post-target trap state, pre-fill "
+        "IR1/RS0 evidence, lower-privilege-over-taken-branch priority, and "
+        "real SoftMMU first-register/RNAT R/RS/IR faults resumed by IFS.v=0 "
+        "RFI with fault-word retry and committed-prefix idempotence; every "
+        "return has direct typed ownership and one ordered focused-helper "
+        "chain"
+    )
+
+
 def test_predicate_test_conformance(qemu: Path) -> str:
     matrix_program, observations = predicate_test_conformance_program()
     matrix = run_program(
@@ -8026,7 +9144,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..24")
+    print("1..25")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -8052,6 +9170,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 22 - typed loop branches")
         print("not ok 23 - typed call branches")
         print("not ok 24 - typed AR.PFS register moves")
+        print("not ok 25 - typed return branches")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -8091,6 +9210,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("typed loop branches", test_typed_loop_branches),
         ("typed call branches", test_typed_call_branches),
         ("typed AR.PFS register moves", test_pfs_register_moves),
+        ("typed return branches", test_typed_return_branches),
     )
     failures = 0
     for index, (name, test) in enumerate(tests, start=1):

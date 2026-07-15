@@ -174,11 +174,17 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     }
 
     /*
-     * An asynchronous interruption cannot overtake mandatory loads for the
-     * current frame.  Leave the SAPIC/CPU request latched so the ordinary
-     * execution loop accepts it immediately after the frame is complete.
+     * Mandatory current-frame loads yield to cpu_exec only between memory
+     * references.  CFLE deliberately remains set at such a boundary so an
+     * external interruption records ISR.ir=1.  Delivery then clears CFLE and
+     * lets the interruption handler execute with the interrupted frame still
+     * incomplete, but another external interruption must not nest until the
+     * handler executes cover or rfi completes that frame: interruption entry
+     * could otherwise spill registers which have not yet been loaded.
      */
-    if (env->rse.cfle || env->rse.dirty < 0 || env->rse.dirty_nat < 0) {
+    if (env->rse.reference ||
+        (!env->rse.cfle &&
+         (env->rse.dirty < 0 || env->rse.dirty_nat < 0))) {
         IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
         return false;
     }

@@ -327,14 +327,20 @@ static uint64_t ia64_interruption_isr(CPUIA64State *env, uint64_t psr,
     if (ia64_interruption_sets_ni(psr, psr_ic_inflight)) {
         isr |= UINT64_C(1) << IA64_ISR_NI_BIT;
     }
+    /*
+     * ISR.ir snapshots RSE.CFLE for every interruption.  It is independent of
+     * ISR.rs: a branch trap may interrupt an incomplete br.ret frame before
+     * the mandatory-load sequence starts, while a later ordinary handler
+     * memory fault must not infer IR merely from the retained negative
+     * partition counts after interruption entry has cleared CFLE.
+     */
+    if (env->rse.cfle) {
+        isr |= UINT64_C(1) << IA64_ISR_IR_BIT;
+    }
     if (env->rse.reference && ia64_exception_is_data_memory_fault(kind) &&
         (interruption_access == IA64_INTERRUPTION_ACCESS_READ ||
          interruption_access == IA64_INTERRUPTION_ACCESS_WRITE)) {
         isr |= UINT64_C(1) << IA64_ISR_RS_BIT;
-        if (env->rse.cfle || env->rse.dirty < 0 ||
-            env->rse.dirty_nat < 0) {
-            isr |= UINT64_C(1) << IA64_ISR_IR_BIT;
-        }
     }
 
     return isr;
@@ -696,9 +702,18 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
     env->cr[IA64_CR_IIP] &= ~0xfULL;
 
 trace:
-    /* ISR.rs/ir have sampled the RSE state; delivery now clears RSE.CFLE. */
+    /*
+     * ISR.rs/ir have sampled the RSE state; delivery now clears RSE.CFLE.
+     * A legacy pending-fill marker is only an execution breadcrumb.  The
+     * negative partition counts and BSP/BSPSTORE gap are the canonical
+     * incomplete-frame state, and a later rfi reconstructs completion from
+     * them.  Do not carry the breadcrumb into an interruption handler or a
+     * migration boundary.
+     */
     env->rse.cfle = false;
     env->rse.reference = false;
+    env->rse.pending_fill_count = 0;
+    env->rse.pending_fill_ip = 0;
     ia64_env_begin_source_visibility_epoch(env);
     ia64_diag_record_exception(env, ia64_exception_name(kind), source_ip,
                                address, env->exception.vector, old_psr);

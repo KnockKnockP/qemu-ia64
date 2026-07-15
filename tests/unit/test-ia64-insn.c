@@ -729,6 +729,12 @@ static void test_rse_loadrs_preserves_dirty_frame_uncovered_by_rfi(void)
     uint64_t target = 0;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+    /*
+     * Model the covered eight-register interruption frame immediately below
+     * the handler's empty frame.  In the 96-register physical file BOF is p8;
+     * current_frame_base alone is not enough to describe that mapping.
+     */
+    env.rse.bol = G_N_ELEMENTS(expected);
     env.rse.current_frame_base = 19;
     ia64_set_cfm(&env, 0);
     for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
@@ -790,6 +796,8 @@ static void test_rse_loadrs_reads_clean_prefix_only(void)
     uint64_t end = ia64_rse_skip_regs(start, 8);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+    /* Four clean plus four dirty registers precede the empty frame. */
+    env.rse.bol = 8;
     env.rse.current_frame_base = 12;
     ia64_set_cfm(&env, 0);
     for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
@@ -834,6 +842,8 @@ static void test_rse_load_restores_nat_from_rnat_collection(void)
     uint64_t end = ia64_rse_skip_regs(start, 5);
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+    /* The five loaded registers occupy the physical slots below BOF. */
+    env.rse.bol = 5;
     env.rse.current_frame_base = 20;
     env.rse.rnat = UINT64_C(1);
     ia64_rse_sync_rnat(&env);
@@ -1102,6 +1112,61 @@ static void test_rse_init_complete(CPUIA64State *env, uint32_t sof,
     g_assert_true(ia64_rse_partitions_valid(env));
 }
 
+typedef struct TestRSEPristineReturnRow {
+    const char *path;
+    uint32_t sol;
+    uint32_t expected_bol;
+    int32_t expected_dirty;
+    int32_t expected_invalid;
+    uint64_t expected_bsp;
+    bool expected_cfle;
+} TestRSEPristineReturnRow;
+
+static const TestRSEPristineReturnRow pristine_return_rows[] = {
+    {
+        .path = "/ia64-insn/rse-pristine-return/growth",
+        .sol = 0,
+        .expected_bol = 0,
+        .expected_dirty = 0,
+        .expected_invalid = IA64_RSE_PHYS_STACKED_REGS - 4,
+        .expected_bsp = 0x1240,
+        .expected_cfle = false,
+    },
+    {
+        .path = "/ia64-insn/rse-pristine-return/missing-preserved",
+        .sol = 4,
+        .expected_bol = IA64_RSE_PHYS_STACKED_REGS - 4,
+        .expected_dirty = -4,
+        .expected_invalid = IA64_RSE_PHYS_STACKED_REGS,
+        .expected_bsp = 0x1220,
+        .expected_cfle = true,
+    },
+};
+
+static void test_rse_pristine_return_row(gconstpointer opaque)
+{
+    const TestRSEPristineReturnRow *row = opaque;
+    const uint64_t cfm = ia64_make_cfm(4, row->sol, 0);
+    CPUIA64State env;
+
+    test_rse_init_complete(&env, 0, 0, 0, 0x1240, 0, 0);
+
+    g_assert_false(ia64_rse_return_frame_from_pfs(
+        &env, ia64_make_pfs(cfm, 0x2a, 0)));
+
+    g_assert_cmphex(env.cfm, ==, cfm);
+    g_assert_cmpuint(env.rse.bol, ==, row->expected_bol);
+    g_assert_cmpuint(env.rse.current_frame_base, ==, row->expected_bol);
+    g_assert_cmpint(env.rse.dirty, ==, row->expected_dirty);
+    g_assert_cmpint(env.rse.clean, ==, 0);
+    g_assert_cmpint(env.rse.invalid, ==, row->expected_invalid);
+    g_assert_cmphex(env.rse.bsp, ==, row->expected_bsp);
+    g_assert_cmphex(env.rse.bspstore, ==, 0x1240);
+    g_assert_cmphex(env.ar[IA64_AR_EC], ==, 0x2a);
+    g_assert_cmpint(env.rse.cfle, ==, row->expected_cfle);
+    g_assert_true(ia64_rse_partitions_valid(&env));
+}
+
 static void test_rse_return_partition_rows(void)
 {
     CPUIA64State env;
@@ -1141,8 +1206,10 @@ static void test_rse_return_partition_rows(void)
     g_assert_cmpuint((env.psr >> IA64_PSR_CPL_SHIFT) & 3, ==, 3);
     g_assert_false(env.rse.cfle);
     g_assert_true(ia64_rse_partitions_valid(&env));
+    /* Restored SOR=1 and RRB.GR=5 rename logical r32 to BOF+5. */
     g_assert_cmphex(ia64_read_gr(&env, 32), ==,
-                    UINT64_C(0x5100000000000000) | expected_bol);
+                    UINT64_C(0x5100000000000000) |
+                    ia64_rse_wrap_physical(expected_bol + 5));
 
     test_rse_init_complete(&env, 40, 7, 100, 0x5000, 20, 0);
     old_bspstore = env.rse.bspstore;
@@ -1178,12 +1245,162 @@ static void test_rse_return_cpl_demotion_matrix(void)
     }
 }
 
+typedef struct TestRSEBadPFSReturnRow {
+    const char *path;
+    uint32_t current_cpl;
+    uint32_t restored_ppl;
+    uint32_t restored_ec;
+    uint64_t trap_bits;
+    IA64ExceptionKind expected_trap;
+    uint64_t expected_vector;
+    uint64_t expected_isr_code;
+} TestRSEBadPFSReturnRow;
+
+static const TestRSEBadPFSReturnRow bad_pfs_return_rows[] = {
+    {
+        .path = "/ia64-insn/rse-bad-pfs-return/lp-demotion",
+        .current_cpl = 0,
+        .restored_ppl = 3,
+        .restored_ec = 0x2a,
+        .trap_bits = IA64_PSR_LP_BIT,
+        .expected_trap = IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER,
+        .expected_vector = 0x5e00,
+        .expected_isr_code = UINT64_C(1) << 1,
+    },
+    {
+        .path = "/ia64-insn/rse-bad-pfs-return/lp-priority-over-tb",
+        .current_cpl = 1,
+        .restored_ppl = 3,
+        .restored_ec = 0x15,
+        .trap_bits = IA64_PSR_LP_BIT | IA64_PSR_TB_BIT,
+        .expected_trap = IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER,
+        .expected_vector = 0x5e00,
+        .expected_isr_code = (UINT64_C(1) << 1) | (UINT64_C(1) << 2),
+    },
+    {
+        .path = "/ia64-insn/rse-bad-pfs-return/tb-with-lp-disabled",
+        .current_cpl = 0,
+        .restored_ppl = 3,
+        .restored_ec = 0x3f,
+        .trap_bits = IA64_PSR_TB_BIT,
+        .expected_trap = IA64_EXCEPTION_TAKEN_BRANCH_TRAP,
+        .expected_vector = 0x5f00,
+        .expected_isr_code = UINT64_C(1) << 2,
+    },
+    {
+        .path = "/ia64-insn/rse-bad-pfs-return/tb-without-demotion",
+        .current_cpl = 2,
+        .restored_ppl = 1,
+        .restored_ec = 0x08,
+        .trap_bits = IA64_PSR_LP_BIT | IA64_PSR_TB_BIT,
+        .expected_trap = IA64_EXCEPTION_TAKEN_BRANCH_TRAP,
+        .expected_vector = 0x5f00,
+        .expected_isr_code = UINT64_C(1) << 2,
+    },
+    {
+        .path = "/ia64-insn/rse-bad-pfs-return/lp-without-demotion",
+        .current_cpl = 3,
+        .restored_ppl = 0,
+        .restored_ec = 0x01,
+        .trap_bits = IA64_PSR_LP_BIT,
+        .expected_trap = IA64_EXCEPTION_NONE,
+    },
+};
+
+static void test_rse_bad_pfs_return_row(gconstpointer opaque)
+{
+    const TestRSEBadPFSReturnRow *row = opaque;
+    const uint64_t source_bundle = UINT64_C(0xa000000100100000);
+    const uint64_t requested_target = UINT64_C(0xa00000010020000f);
+    const uint64_t committed_target = requested_target & ~UINT64_C(0xf);
+    const uint32_t source_slot = row - bad_pfs_return_rows;
+    const uint32_t expected_cpl = MAX(row->current_cpl, row->restored_ppl);
+    const bool demoted = expected_cpl > row->current_cpl;
+    const bool lower_privilege_eligible =
+        demoted && (row->trap_bits & IA64_PSR_LP_BIT) != 0;
+    const bool taken_branch_eligible =
+        (row->trap_bits & IA64_PSR_TB_BIT) != 0;
+    CPUIA64State env;
+    uint64_t target_psr;
+
+    /*
+     * old SOF=40 leaves 36 invalid registers.  Restoring SOF=96/SOL=10
+     * requires growth by 46, which cannot fit in invalid+clean and therefore
+     * deterministically selects the SDM 6.5.5 bad-PFS return path.
+     */
+    test_rse_init_complete(&env, 40, 7, 100, 0x5000, 20, 0);
+    env.ip = source_bundle;
+    env.psr = IA64_PSR_IC_BIT | row->trap_bits |
+              ((uint64_t)row->current_cpl << IA64_PSR_CPL_SHIFT);
+    env.cr[IA64_CR_IVA] = UINT64_C(0xa000000000000000);
+    env.last_successful_bundle = source_bundle;
+    env.current_slot_valid = true;
+    env.current_slot_ip = source_bundle;
+    env.current_slot_ri = source_slot % 3;
+    env.current_slot_type = IA64_SLOT_TYPE_B;
+    env.current_slot_raw = UINT64_C(0x00108000100); /* br.ret b0 */
+    env.ar[IA64_AR_PFS] = ia64_make_pfs(
+        ia64_make_cfm(96, 10, 0), row->restored_ec, row->restored_ppl);
+
+    /* Bad PFS changes the restored CFM to zero; it is not a fault. */
+    g_assert_true(ia64_return_from_call_frame(&env, requested_target));
+    g_assert_cmpint(env.exception.kind, ==, IA64_EXCEPTION_NONE);
+    g_assert_false(env.exception.pending);
+    g_assert_cmphex(env.ip, ==, committed_target);
+    g_assert_cmphex(env.cfm, ==, 0);
+    g_assert_cmphex(env.ar[IA64_AR_EC], ==, row->restored_ec);
+    g_assert_cmpuint((env.psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT,
+                     ==, expected_cpl);
+    g_assert_cmphex(env.psr & (IA64_PSR_LP_BIT | IA64_PSR_TB_BIT), ==,
+                    row->trap_bits);
+    g_assert_false(env.rse.cfle);
+    g_assert_true(ia64_rse_partitions_valid(&env));
+
+    /*
+     * TCG implements this arbitration around the core return helper.  Keep
+     * the helper/exception composition covered here: LP requires both an
+     * actual CPL demotion and PSR.lp; otherwise PSR.tb remains eligible.
+     */
+    if (lower_privilege_eligible) {
+        g_assert_cmpint(row->expected_trap, ==,
+                        IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER);
+    } else if (taken_branch_eligible) {
+        g_assert_cmpint(row->expected_trap, ==,
+                        IA64_EXCEPTION_TAKEN_BRANCH_TRAP);
+    } else {
+        g_assert_cmpint(row->expected_trap, ==, IA64_EXCEPTION_NONE);
+    }
+
+    if (row->expected_trap == IA64_EXCEPTION_NONE) {
+        return;
+    }
+
+    target_psr = ia64_env_psr(&env);
+    ia64_deliver_branch_trap(&env, row->expected_trap);
+
+    g_assert_cmpint(env.exception.kind, ==, row->expected_trap);
+    g_assert_cmphex(env.exception.vector, ==, row->expected_vector);
+    g_assert_cmphex(env.exception.ip, ==, committed_target);
+    g_assert_cmphex(env.exception.address, ==, committed_target);
+    g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, target_psr);
+    g_assert_cmphex(env.cr[IA64_CR_IIP], ==, committed_target);
+    g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, source_bundle);
+    g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK, ==,
+                    row->expected_isr_code);
+    g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                    IA64_ISR_EI_SHIFT, ==, source_slot % 3);
+    g_assert_cmphex(env.ip, ==,
+                    UINT64_C(0xa000000000000000) + row->expected_vector);
+}
+
 typedef struct TestRSEStepReader {
     uint64_t address[16];
     uint32_t word_count;
     uint32_t cursor;
     int32_t fail_at;
+    int32_t interrupt_at;
     bool failed;
+    bool interrupted;
     uint64_t rnat_value;
 } TestRSEStepReader;
 
@@ -1209,6 +1426,20 @@ static bool test_rse_step_read(CPUIA64State *env, uint64_t address,
     *value = test_rse_step_value(reader, address);
     reader->cursor++;
     return true;
+}
+
+static bool test_rse_step_interruption_pending(CPUIA64State *env,
+                                               void *opaque)
+{
+    TestRSEStepReader *reader = opaque;
+
+    g_assert_nonnull(env);
+    if (!reader->interrupted && reader->interrupt_at >= 0 &&
+        reader->cursor == (uint32_t)reader->interrupt_at) {
+        reader->interrupted = true;
+        return true;
+    }
+    return false;
 }
 
 static void test_rse_init_incomplete(CPUIA64State *env,
@@ -1239,6 +1470,7 @@ static void test_rse_init_incomplete(CPUIA64State *env,
 
     memset(reader, 0, sizeof(*reader));
     reader->fail_at = -1;
+    reader->interrupt_at = -1;
     reader->rnat_value = (UINT64_C(1) << 61) | (UINT64_C(1) << 62);
     reader->word_count = words;
     for (uint32_t i = 0; i < words; i++) {
@@ -1378,6 +1610,125 @@ static void test_rse_fault_resume_rnat_rows(void)
                          IA64_STACKED_GR_COUNT - 6);
         g_assert_true(ia64_rse_partitions_valid(&resumed));
     }
+}
+
+static void test_rse_interruption_boundaries_for_frame(
+    uint64_t bsp, uint32_t missing, uint32_t bol, uint32_t origin)
+{
+    TestRSEStepReader shape_reader;
+    CPUIA64State shape;
+
+    test_rse_init_incomplete(&shape, &shape_reader, bsp, missing, bol,
+                             origin);
+    for (uint32_t boundary = 0;
+         boundary <= shape_reader.word_count; boundary++) {
+        CPUIA64State clean;
+        CPUIA64State interrupted;
+        TestRSEStepReader clean_reader;
+        TestRSEStepReader interrupted_reader;
+        uint64_t prefix_bspstore;
+        int32_t prefix_dirty;
+        int32_t prefix_dirty_nat;
+
+        test_rse_init_incomplete(&clean, &clean_reader, bsp, missing, bol,
+                                 origin);
+        test_rse_init_incomplete(&interrupted, &interrupted_reader,
+                                 bsp, missing, bol, origin);
+        clean.psr |= IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
+        interrupted.psr |= IA64_PSR_IC_BIT | IA64_PSR_I_BIT;
+        clean.ip = interrupted.ip = UINT64_C(0x1230);
+        g_assert_cmpint(ia64_rse_complete_mandatory_loads(
+                            &clean, test_rse_step_read, &clean_reader),
+                        ==, IA64_RSE_STEP_DONE);
+
+        interrupted_reader.interrupt_at = boundary;
+        g_assert_cmpint(
+            ia64_rse_complete_mandatory_loads_interruptible(
+                &interrupted, test_rse_step_read,
+                test_rse_step_interruption_pending, &interrupted_reader),
+            ==, IA64_RSE_STEP_INTERRUPTION);
+        g_assert_true(interrupted_reader.interrupted);
+        g_assert_cmpuint(interrupted_reader.cursor, ==, boundary);
+        g_assert_true(interrupted.rse.cfle);
+        g_assert_true(ia64_rse_partitions_valid(&interrupted));
+
+        prefix_bspstore = interrupted.rse.bspstore;
+        prefix_dirty = interrupted.rse.dirty;
+        prefix_dirty_nat = interrupted.rse.dirty_nat;
+        interrupted.rse.pending_fill_count = 1;
+        interrupted.rse.pending_fill_ip = interrupted.ip;
+        ia64_deliver_exception(&interrupted, IA64_EXCEPTION_EXTERNAL_INTERRUPT,
+                               interrupted.ip, MMU_DATA_LOAD,
+                               "mandatory RSE load boundary");
+        g_assert_cmphex(interrupted.cr[IA64_CR_ISR] &
+                        (UINT64_C(1) << IA64_ISR_IR_BIT), !=, 0);
+        g_assert_cmphex(interrupted.cr[IA64_CR_ISR] &
+                        (UINT64_C(1) << IA64_ISR_RS_BIT), ==, 0);
+        g_assert_false(interrupted.rse.cfle);
+        g_assert_false(interrupted.rse.reference);
+        g_assert_cmpuint(interrupted.rse.pending_fill_count, ==, 0);
+        g_assert_cmphex(interrupted.rse.pending_fill_ip, ==, 0);
+        g_assert_cmphex(interrupted.rse.bspstore, ==, prefix_bspstore);
+        g_assert_cmpint(interrupted.rse.dirty, ==, prefix_dirty);
+        g_assert_cmpint(interrupted.rse.dirty_nat, ==, prefix_dirty_nat);
+
+        g_assert_cmpint(ia64_rse_complete_mandatory_loads(
+                            &interrupted, test_rse_step_read,
+                            &interrupted_reader),
+                        ==, IA64_RSE_STEP_DONE);
+        g_assert_cmpuint(interrupted_reader.cursor, ==,
+                         interrupted_reader.word_count);
+        test_rse_assert_same_completed_frame(&clean, &interrupted);
+        g_assert_true(ia64_rse_partitions_valid(&interrupted));
+    }
+}
+
+static void test_rse_mandatory_load_interruption_boundaries(void)
+{
+    /* Five register-only loads, including before-first and after-final. */
+    test_rse_interruption_boundaries_for_frame(0x3000, 5, 13, 200);
+    /* Four registers plus the RNAT word at the 0x1f8 collection slot. */
+    test_rse_interruption_boundaries_for_frame(
+        0x1e8, 4, 94, IA64_STACKED_GR_COUNT - 6);
+}
+
+static void test_rse_incomplete_partition_validation(void)
+{
+    TestRSEStepReader reader;
+    CPUIA64State valid;
+    CPUIA64State corrupt;
+
+    /* The unloaded span contains four registers and the 0x1f8 RNAT word. */
+    test_rse_init_incomplete(&valid, &reader, 0x1e8, 4, 94,
+                             IA64_STACKED_GR_COUNT - 6);
+    g_assert_cmpint(valid.rse.dirty, ==, -4);
+    g_assert_cmpint(valid.rse.dirty_nat, ==, -1);
+    g_assert_true(ia64_rse_partitions_valid(&valid));
+
+    /* Preserve the partition sum and byte span but misclassify the RNAT. */
+    corrupt = valid;
+    corrupt.rse.dirty = -5;
+    corrupt.rse.dirty_nat = 0;
+    corrupt.rse.invalid++;
+    g_assert_false(ia64_rse_partitions_valid(&corrupt));
+
+    /* A positive RNAT partition cannot coexist with missing registers. */
+    corrupt = valid;
+    corrupt.rse.dirty = -6;
+    corrupt.rse.dirty_nat = 1;
+    corrupt.rse.invalid += 2;
+    g_assert_false(ia64_rse_partitions_valid(&corrupt));
+
+    /* Returning makes the clean partition empty before counts go negative. */
+    corrupt = valid;
+    corrupt.rse.clean = 1;
+    corrupt.rse.invalid--;
+    g_assert_false(ia64_rse_partitions_valid(&corrupt));
+
+    corrupt = valid;
+    corrupt.rse.bsp++;
+    corrupt.rse.bspstore++;
+    g_assert_false(ia64_rse_partitions_valid(&corrupt));
 }
 
 typedef struct TestRSELargeLoad {
@@ -5257,9 +5608,8 @@ static void test_b_unit_indirect_return(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
-    ia64_set_cfm(&env, ia64_make_cfm(2, 0, 0));
-    env.rse.current_frame_base = 4;
+    /* A caller with SOL=4 leaves four dirty registers below the callee. */
+    test_rse_init_complete(&env, 2, 4, 0, 0x1240, 4, 0);
     env.ar[IA64_AR_PFS] = ia64_make_cfm(6, 4, 0);
     env.br[0] = 0x1001047;
 
@@ -5271,6 +5621,8 @@ static void test_b_unit_indirect_return(void)
     g_assert_cmphex(target, ==, 0x1001040);
     g_assert_cmphex(env.cfm, ==, ia64_make_cfm(6, 4, 0));
     g_assert_cmpuint(env.rse.current_frame_base, ==, 0);
+    g_assert_cmpuint(env.rse.bol, ==, 0);
+    g_assert_true(ia64_rse_partitions_valid(&env));
     g_assert_cmpuint(env.rse.sof, ==, 6);
     g_assert_cmpuint(env.rse.sol, ==, 4);
 }
@@ -5281,13 +5633,13 @@ static void test_b_unit_indirect_return_wraps_frame_base(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
-    ia64_set_cfm(&env, ia64_make_cfm(2, 0, 0));
-    env.rse.current_frame_base = 1;
+    test_rse_init_complete(&env, 2, 4,
+                           IA64_STACKED_GR_COUNT - 3,
+                           0x1240, 4, 0);
     env.ar[IA64_AR_PFS] = ia64_make_cfm(6, 4, 0);
     env.br[0] = 0x1001047;
+    /* Physical p5 is caller r37 after the wrapped BOF retreat. */
     env.rse.stacked_gr[2] = 0x2222;
-    env.rse.stacked_gr[3] = 0x3333;
 
     g_assert_true(ia64_exec_b_indirect_branch(&env, br_ret_b0_raw, 0x2000,
                                               &target));
@@ -5296,8 +5648,9 @@ static void test_b_unit_indirect_return_wraps_frame_base(void)
     g_assert_cmphex(env.cfm, ==, ia64_make_cfm(6, 4, 0));
     g_assert_cmpuint(env.rse.current_frame_base, ==,
                      IA64_STACKED_GR_COUNT - 3);
-    g_assert_cmphex(env.rse.stacked_gr[2], ==, 0x2222);
-    g_assert_cmphex(env.rse.stacked_gr[3], ==, 0);
+    g_assert_cmpuint(env.rse.bol, ==, 0);
+    g_assert_cmphex(ia64_read_gr(&env, 37), ==, 0x2222);
+    g_assert_true(ia64_rse_partitions_valid(&env));
 }
 
 static void test_b_unit_indirect_return_invalidates_contiguous_window(void)
@@ -5306,9 +5659,7 @@ static void test_b_unit_indirect_return_invalidates_contiguous_window(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
-    ia64_set_cfm(&env, ia64_make_cfm(1, 0, 0));
-    env.rse.current_frame_base = 20;
+    test_rse_init_complete(&env, 1, 4, 16, 0x1240, 4, 0);
     env.ar[IA64_AR_PFS] = ia64_make_cfm(4, 4, 0);
     env.br[0] = 0x1001047;
     for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
@@ -5319,13 +5670,14 @@ static void test_b_unit_indirect_return_invalidates_contiguous_window(void)
                                               &target));
 
     g_assert_cmpuint(env.rse.current_frame_base, ==, 16);
-    g_assert_cmphex(env.rse.stacked_gr[19], ==,
+    g_assert_cmpuint(env.rse.bol, ==, 0);
+    g_assert_cmpint(env.rse.dirty, ==, 0);
+    g_assert_cmpint(env.rse.invalid, ==, 92);
+    g_assert_cmphex(ia64_read_gr(&env, 32), ==,
+                    0xfeed000000000000ULL | 16);
+    g_assert_cmphex(ia64_read_gr(&env, 35), ==,
                     0xfeed000000000000ULL | 19);
-    for (uint32_t i = 20; i < 116; i++) {
-        g_assert_cmphex(env.rse.stacked_gr[i], ==, 0);
-    }
-    g_assert_cmphex(env.rse.stacked_gr[116], ==,
-                    0xfeed000000000000ULL | 116);
+    g_assert_true(ia64_rse_partitions_valid(&env));
 }
 
 static void test_b_unit_indirect_return_invalidates_wrapped_window(void)
@@ -5334,9 +5686,9 @@ static void test_b_unit_indirect_return_invalidates_wrapped_window(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
-    ia64_set_cfm(&env, ia64_make_cfm(1, 0, 0));
-    env.rse.current_frame_base = IA64_STACKED_GR_COUNT - 4;
+    test_rse_init_complete(&env, 1, 4,
+                           IA64_STACKED_GR_COUNT - 8,
+                           0x1240, 4, 0);
     env.ar[IA64_AR_PFS] = ia64_make_cfm(4, 4, 0);
     env.br[0] = 0x1001047;
     for (uint32_t i = 0; i < IA64_STACKED_GR_COUNT; i++) {
@@ -5348,18 +5700,14 @@ static void test_b_unit_indirect_return_invalidates_wrapped_window(void)
 
     g_assert_cmpuint(env.rse.current_frame_base, ==,
                      IA64_STACKED_GR_COUNT - 8);
-    g_assert_cmphex(env.rse.stacked_gr[IA64_STACKED_GR_COUNT - 5], ==,
+    g_assert_cmpuint(env.rse.bol, ==, 0);
+    g_assert_cmpint(env.rse.dirty, ==, 0);
+    g_assert_cmpint(env.rse.invalid, ==, 92);
+    g_assert_cmphex(ia64_read_gr(&env, 32), ==,
                     0xbeef000000000000ULL |
-                    (IA64_STACKED_GR_COUNT - 5));
-    for (uint32_t i = IA64_STACKED_GR_COUNT - 4;
-         i < IA64_STACKED_GR_COUNT; i++) {
-        g_assert_cmphex(env.rse.stacked_gr[i], ==, 0);
-    }
-    for (uint32_t i = 0; i < 92; i++) {
-        g_assert_cmphex(env.rse.stacked_gr[i], ==, 0);
-    }
-    g_assert_cmphex(env.rse.stacked_gr[92], ==,
-                    0xbeef000000000000ULL | 92);
+                    (IA64_STACKED_GR_COUNT - 8));
+    g_assert_cmpuint(ia64_rse_physical_to_storage(&env, 95), ==, 87);
+    g_assert_true(ia64_rse_partitions_valid(&env));
 }
 
 static void test_b_unit_indirect_return_retreats_clean_bsp(void)
@@ -5368,13 +5716,8 @@ static void test_b_unit_indirect_return_retreats_clean_bsp(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
-    ia64_set_cfm(&env, ia64_make_cfm(2, 0, 0));
-    env.rse.current_frame_base = 4;
-    env.rse.bspstore = 0x1200;
-    env.rse.bsp = 0x1200;
-    env.ar[IA64_AR_BSPSTORE] = env.rse.bspstore;
-    env.ar[IA64_AR_BSP] = env.rse.bsp;
+    /* No resident caller registers: return creates an incomplete frame. */
+    test_rse_init_complete(&env, 2, 4, 0, 0x1240, 0, 0);
     env.ar[IA64_AR_PFS] = ia64_make_cfm(6, 4, 0);
     env.br[0] = 0x1001047;
 
@@ -5382,9 +5725,12 @@ static void test_b_unit_indirect_return_retreats_clean_bsp(void)
                                               &target));
 
     g_assert_cmphex(target, ==, 0x1001040);
-    g_assert_cmphex(env.rse.bsp, ==, ia64_rse_skip_regs(0x1200, -4));
+    g_assert_cmphex(env.rse.bsp, ==, ia64_rse_skip_regs(0x1240, -4));
     g_assert_cmphex(env.ar[IA64_AR_BSP], ==, env.rse.bsp);
-    g_assert_cmphex(env.rse.bspstore, ==, 0x1200);
+    g_assert_cmphex(env.rse.bspstore, ==, 0x1240);
+    g_assert_cmpint(env.rse.dirty, ==, -4);
+    g_assert_true(env.rse.cfle);
+    g_assert_true(ia64_rse_partitions_valid(&env));
 }
 
 static void test_b_unit_indirect_return_clamps_clean_boundary(void)
@@ -5393,10 +5739,8 @@ static void test_b_unit_indirect_return_clamps_clean_boundary(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
-    ia64_set_cfm(&env, ia64_make_cfm(2, 0, 0));
-    env.rse.current_frame_base = 4;
-    env.rse.clean_count = 2321;
+    /* The caller can be restored from four resident clean registers. */
+    test_rse_init_complete(&env, 2, 4, 0, 0x1240, 0, 4);
     env.ar[IA64_AR_PFS] = ia64_make_cfm(6, 4, 0);
     env.br[0] = 0x1001047;
 
@@ -5406,6 +5750,10 @@ static void test_b_unit_indirect_return_clamps_clean_boundary(void)
     g_assert_cmphex(target, ==, 0x1001040);
     g_assert_cmpuint(env.rse.current_frame_base, ==, 0);
     g_assert_cmpuint(env.rse.clean_count, ==, 0);
+    g_assert_cmpint(env.rse.clean, ==, 0);
+    g_assert_cmphex(env.rse.bspstore, ==, env.rse.bsp);
+    g_assert_false(env.rse.cfle);
+    g_assert_true(ia64_rse_partitions_valid(&env));
 }
 
 static void test_b_unit_return_from_interruption(void)
@@ -5415,7 +5763,7 @@ static void test_b_unit_return_from_interruption(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
+    test_rse_init_complete(&env, 0, 8, 0, 0x1240, 8, 0);
     env.cr[IA64_CR_IPSR] = ipsr;
     env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
     env.cr[IA64_CR_IFS] = ia64_make_cfm(8, 3, 0) | IA64_IFS_VALID_BIT;
@@ -5444,7 +5792,8 @@ static void test_rfi_staged_control_registers(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
+    /* The handler allocated two registers above the covered frame. */
+    test_rse_init_complete(&env, 2, 8, 0, 0x1240, 8, 0);
     env.ip = 0x47f7e40;
     env.psr = 0;
     ia64_set_cfm(&env, old_cfm);
@@ -5476,11 +5825,9 @@ static void test_rfi_uncovers_valid_interruption_frame(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
+    test_rse_init_complete(&env, 0, 8, 11, 0x1240, 8, 0);
     env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
     env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
-    env.rse.current_frame_base = 19;
-    ia64_set_cfm(&env, 0);
     env.cr[IA64_CR_IFS] = interrupted_cfm | IA64_IFS_VALID_BIT;
 
     g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
@@ -5496,12 +5843,9 @@ static void test_rfi_uncovers_valid_frame_clamps_clean_boundary(void)
     CPUIA64State env;
     uint64_t target = 0;
 
-    ia64_cpu_reset_synthetic_itanium2(&env);
+    test_rse_init_complete(&env, 0, 8, 11, 0x1240, 0, 8);
     env.cr[IA64_CR_IPSR] = 0x001010084a2008ULL;
     env.cr[IA64_CR_IIP] = 0xa0000001007f7e57ULL;
-    env.rse.current_frame_base = 19;
-    env.rse.clean_count = 2321;
-    ia64_set_cfm(&env, 0);
     env.cr[IA64_CR_IFS] = interrupted_cfm | IA64_IFS_VALID_BIT;
 
     g_assert_true(ia64_exec_b_indirect_branch(&env, rfi_raw, 0x47f7e40,
@@ -5509,7 +5853,9 @@ static void test_rfi_uncovers_valid_frame_clamps_clean_boundary(void)
     g_assert_cmphex(target, ==, 0xa0000001007f7e50ULL);
     g_assert_cmphex(env.cfm, ==, interrupted_cfm);
     g_assert_cmpuint(env.rse.current_frame_base, ==, 11);
-    g_assert_cmpuint(env.rse.clean_count, ==, 11);
+    g_assert_cmpuint(env.rse.clean_count, ==, 0);
+    g_assert_cmpint(env.rse.clean, ==, 0);
+    g_assert_true(ia64_rse_partitions_valid(&env));
 }
 
 static void test_rfi_ignores_invalid_ifs(void)
@@ -5916,14 +6262,28 @@ int main(int argc, char **argv)
                     test_rse_alloc_spill_keeps_physical_bound);
     g_test_add_func("/ia64-insn/rse-alloc-spill-noop-paths",
                     test_rse_alloc_spill_noop_paths);
+    for (uint32_t i = 0; i < G_N_ELEMENTS(pristine_return_rows); i++) {
+        g_test_add_data_func(pristine_return_rows[i].path,
+                             &pristine_return_rows[i],
+                             test_rse_pristine_return_row);
+    }
     g_test_add_func("/ia64-insn/rse-return-partition-rows",
                     test_rse_return_partition_rows);
     g_test_add_func("/ia64-insn/rse-return-cpl-demotion-matrix",
                     test_rse_return_cpl_demotion_matrix);
+    for (uint32_t i = 0; i < G_N_ELEMENTS(bad_pfs_return_rows); i++) {
+        g_test_add_data_func(bad_pfs_return_rows[i].path,
+                             &bad_pfs_return_rows[i],
+                             test_rse_bad_pfs_return_row);
+    }
     g_test_add_func("/ia64-insn/rse-mandatory-load-register-fault-resume",
                     test_rse_fault_resume_register_rows);
     g_test_add_func("/ia64-insn/rse-mandatory-load-rnat-fault-resume-wrap",
                     test_rse_fault_resume_rnat_rows);
+    g_test_add_func("/ia64-insn/rse-mandatory-load-interrupt-boundaries",
+                    test_rse_mandatory_load_interruption_boundaries);
+    g_test_add_func("/ia64-insn/rse-incomplete-partition-validation",
+                    test_rse_incomplete_partition_validation);
     g_test_add_func("/ia64-insn/rse-load-partition-physical-window-cap",
                     test_rse_load_partition_caps_at_physical_window);
     g_test_add_func("/ia64-insn/i-unit-mov-ip-and-nop",

@@ -844,6 +844,7 @@ static void test_rse_translation_uses_rt_and_rsc_pl(void)
     env.cr[IA64_CR_IVA] = UINT64_C(0x100000);
     env.rse.rsc = 0;
     env.rse.dirty = -1;
+    env.rse.cfle = true;
     env.rr[5] = test_rr(0x505, 26, false);
     g_assert_true(ia64_install_translation(&env, false, false, 0, base,
                                            not_present_translation, itir));
@@ -914,9 +915,9 @@ static void test_rse_reference_isr_and_delivery_cleanup(void)
         { IA64_EXCEPTION_DATA_ACCESS_RIGHTS, MMU_DATA_STORE,
           0, 0, true, true },
         { IA64_EXCEPTION_DATA_TLB_MISS, MMU_DATA_LOAD,
-          -1, 0, false, true },
+          -1, 0, false, false },
         { IA64_EXCEPTION_PAGE_FAULT, MMU_DATA_LOAD,
-          0, -1, false, true },
+          0, -1, false, false },
     };
 
     for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
@@ -974,49 +975,66 @@ static void test_branch_traps_collect_committed_target(void)
         uint64_t vector;
         uint64_t target_psr;
         uint64_t code;
+        bool cfle;
     } rows[] = {
         { IA64_EXCEPTION_TAKEN_BRANCH_TRAP, 0x5f00,
-          IA64_PSR_IC_BIT | IA64_PSR_TB_BIT, UINT64_C(1) << 2 },
+          IA64_PSR_IC_BIT | IA64_PSR_TB_BIT, UINT64_C(1) << 2, false },
         { IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER, 0x5e00,
           IA64_PSR_IC_BIT | IA64_PSR_LP_BIT | IA64_PSR_TB_BIT |
           IA64_PSR_CPL_MASK,
-          (UINT64_C(1) << 1) | (UINT64_C(1) << 2) },
+          (UINT64_C(1) << 1) | (UINT64_C(1) << 2), false },
+        { IA64_EXCEPTION_TAKEN_BRANCH_TRAP, 0x5f00,
+          IA64_PSR_IC_BIT | IA64_PSR_TB_BIT, UINT64_C(1) << 2, true },
+        { IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER, 0x5e00,
+          IA64_PSR_IC_BIT | IA64_PSR_LP_BIT | IA64_PSR_TB_BIT |
+          IA64_PSR_CPL_MASK,
+          (UINT64_C(1) << 1) | (UINT64_C(1) << 2), true },
     };
 
     for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
-        const uint64_t target = UINT64_C(0xa000000100200000) + i * 0x100;
-        const uint64_t source_bundle = UINT64_C(0xa000000100100000);
-        CPUIA64State env;
+        for (unsigned source_slot = 0; source_slot < 3; source_slot++) {
+            const uint64_t target = UINT64_C(0xa000000100200000) +
+                                    i * 0x100 + source_slot * 0x10;
+            const uint64_t source_bundle = UINT64_C(0xa000000100100000);
+            CPUIA64State env;
 
-        ia64_cpu_reset_synthetic_itanium2(&env);
-        env.ip = target;
-        env.psr = rows[i].target_psr;
-        env.cfm = UINT64_C(0x123456789abcdef0);
-        env.cr[IA64_CR_IVA] = UINT64_C(0xa000000000000000);
-        env.last_successful_bundle = source_bundle;
-        env.current_slot_valid = true;
-        env.current_slot_ip = source_bundle;
-        env.current_slot_ri = 2;
+            ia64_cpu_reset_synthetic_itanium2(&env);
+            env.ip = target;
+            env.psr = rows[i].target_psr;
+            env.cfm = UINT64_C(0x123456789abcdef0);
+            env.cr[IA64_CR_IVA] = UINT64_C(0xa000000000000000);
+            env.last_successful_bundle = source_bundle;
+            env.current_slot_valid = true;
+            env.current_slot_ip = source_bundle;
+            env.current_slot_ri = source_slot;
+            env.rse.cfle = rows[i].cfle;
 
-        ia64_deliver_branch_trap(&env, rows[i].kind);
+            ia64_deliver_branch_trap(&env, rows[i].kind);
 
-        g_assert_cmpint(env.exception.kind, ==, rows[i].kind);
-        g_assert_cmphex(env.exception.vector, ==, rows[i].vector);
-        g_assert_cmphex(env.exception.ip, ==, target);
-        g_assert_cmphex(env.exception.address, ==, target);
-        g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, rows[i].target_psr);
-        g_assert_cmphex(env.cr[IA64_CR_IIP], ==, target);
-        g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, source_bundle);
-        g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK, ==,
-                        rows[i].code);
-        g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
-                        IA64_ISR_EI_SHIFT, ==, 2);
-        g_assert_cmphex(env.cr[IA64_CR_ISR] &
-                        ((UINT64_C(1) << IA64_ISR_X_BIT) |
-                         (UINT64_C(1) << IA64_ISR_W_BIT) |
-                         (UINT64_C(1) << IA64_ISR_R_BIT)), ==, 0);
-        g_assert_cmphex(env.ip, ==,
-                        UINT64_C(0xa000000000000000) + rows[i].vector);
+            g_assert_cmpint(env.exception.kind, ==, rows[i].kind);
+            g_assert_cmphex(env.exception.vector, ==, rows[i].vector);
+            g_assert_cmphex(env.exception.ip, ==, target);
+            g_assert_cmphex(env.exception.address, ==, target);
+            g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, rows[i].target_psr);
+            g_assert_cmphex(env.cr[IA64_CR_IIP], ==, target);
+            g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, source_bundle);
+            g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK, ==,
+                            rows[i].code);
+            g_assert_cmphex((env.cr[IA64_CR_ISR] & IA64_ISR_EI_MASK) >>
+                            IA64_ISR_EI_SHIFT, ==, source_slot);
+            g_assert_cmphex(env.cr[IA64_CR_ISR] &
+                            ((UINT64_C(1) << IA64_ISR_RS_BIT) |
+                             (UINT64_C(1) << IA64_ISR_IR_BIT)), ==,
+                            rows[i].cfle ?
+                            UINT64_C(1) << IA64_ISR_IR_BIT : 0);
+            g_assert_cmphex(env.cr[IA64_CR_ISR] &
+                            ((UINT64_C(1) << IA64_ISR_X_BIT) |
+                             (UINT64_C(1) << IA64_ISR_W_BIT) |
+                             (UINT64_C(1) << IA64_ISR_R_BIT)), ==, 0);
+            g_assert_cmphex(env.ip, ==,
+                            UINT64_C(0xa000000000000000) + rows[i].vector);
+            g_assert_false(env.rse.cfle);
+        }
     }
 }
 

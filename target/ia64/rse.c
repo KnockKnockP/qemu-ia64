@@ -127,6 +127,13 @@ static bool ia64_rse_read_mandatory_word(CPUIA64State *env,
     return true;
 }
 
+static bool ia64_rse_mandatory_load_interruption_pending(
+    CPUIA64State *env, void *opaque)
+{
+    (void)opaque;
+    return ia64_external_interrupt_enabled(env);
+}
+
 static void ia64_rse_complete_frame_loads(CPUIA64State *env)
 {
     uint64_t old_bspstore = env->rse.bspstore;
@@ -139,8 +146,19 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env)
         return;
     }
 
-    result = ia64_rse_complete_mandatory_loads(
-        env, ia64_rse_read_mandatory_word, NULL);
+    result = ia64_rse_complete_mandatory_loads_interruptible(
+        env, ia64_rse_read_mandatory_word,
+        ia64_rse_mandatory_load_interruption_pending, NULL);
+    if (result == IA64_RSE_STEP_INTERRUPTION) {
+        /*
+         * Return to cpu_exec before fetching the committed target.  CFLE is
+         * intentionally still set, so the ordinary external-interruption
+         * path records ISR.ir and interruption delivery then exposes the
+         * incomplete frame to its handler.
+         */
+        IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+        cpu_loop_exit(env_cpu(env));
+    }
     g_assert(result == IA64_RSE_STEP_DONE);
     IA64_PERF_INC(IA64_PERF_OP_RSE_FILL_RESTORED_MEM);
     IA64_PERF_ADD(IA64_PERF_OP_RSE_FILL_RESTORED_REG, missing);

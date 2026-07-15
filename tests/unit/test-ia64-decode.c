@@ -992,6 +992,17 @@ static uint64_t encode_test_b3_br_call(int64_t displacement, unsigned qp,
     return raw | ((uint64_t)b1 << 6) | (UINT64_C(5) << 37);
 }
 
+static uint64_t encode_test_b4_br_ret(unsigned qp, unsigned b2)
+{
+    g_assert_cmpuint(qp, <, 64);
+    g_assert_cmpuint(b2, <, 8);
+
+    return (UINT64_C(0x21) << 27) |
+           ((uint64_t)b2 << 13) |
+           (UINT64_C(4) << 6) |
+           qp;
+}
+
 static IA64TestX3BranchEncoding encode_test_x4_brl_call(
     int64_t displacement, unsigned qp, unsigned b1)
 {
@@ -1639,6 +1650,211 @@ static void test_b4_ignored_field_matrix(void)
     }
 }
 
+static void assert_b4_br_ret_metadata(const IA64Instruction *insn,
+                                      uint64_t raw, uint64_t address,
+                                      unsigned slot, unsigned qp,
+                                      unsigned b2, bool starts_group,
+                                      bool stop_after)
+{
+    g_assert_true(insn->valid);
+    g_assert_cmpint(insn->opcode, ==, IA64_OP_BR_RET);
+    g_assert_cmpint(insn->unit, ==, IA64_INSN_UNIT_B);
+    g_assert_cmphex(insn->raw, ==, raw);
+    g_assert_cmphex(insn->address, ==, address);
+    g_assert_cmpuint(insn->slot, ==, slot);
+    g_assert_cmpuint(insn->qp, ==, qp);
+    g_assert_cmpuint(insn->b1, ==, 0);
+    g_assert_cmpuint(insn->b2, ==, b2);
+    g_assert_cmpuint(insn->slot_span, ==, 1);
+    g_assert_cmpint(insn->starts_group, ==, starts_group);
+    g_assert_cmpint(insn->stop_after, ==, stop_after);
+    g_assert_false(insn->must_start_group);
+    g_assert_false(insn->must_end_group);
+    g_assert_false(insn->requires_slot2);
+    g_assert_cmpuint(insn->placement, ==, IA64_PLACE_NONE);
+    g_assert_cmpint(insn->status, ==, IA64_DECODE_OK);
+    g_assert_false(insn->placement_illegal);
+    g_assert_false(insn->reserved_field);
+}
+
+static void test_b4_br_ret_qp_b2_matrix(void)
+{
+    static const uint64_t ignored_masks[] = {
+        UINT64_C(7) << 9,
+        UINT64_C(0x7ff) << 16,
+        UINT64_C(1) << 36,
+        (UINT64_C(7) << 9) |
+        (UINT64_C(0x7ff) << 16) |
+        (UINT64_C(1) << 36),
+    };
+    const uint64_t address = UINT64_C(0x1234567800001380);
+
+    /*
+     * Cross the complete predicate and target-BR domains.  The exhaustive B4
+     * test above closes each ignored field for one br.ret encoding; here one
+     * maximal value per field plus their interaction proves that those bits
+     * remain metadata-inert for every architectural qp/b2 combination.
+     */
+    for (unsigned qp = 0; qp < 64; qp++) {
+        for (unsigned b2 = 0; b2 < 8; b2++) {
+            const uint64_t control_raw = encode_test_b4_br_ret(qp, b2);
+            const unsigned slot = (qp + b2) % IA64_SLOT_COUNT;
+            IA64Instruction control = ia64_decode_instruction_raw(
+                IA64_INSN_UNIT_B, control_raw, address, slot);
+
+            g_assert_true(control.valid);
+            g_assert_cmpint(control.opcode, ==, IA64_OP_BR_RET);
+            g_assert_cmpint(control.unit, ==, IA64_INSN_UNIT_B);
+            g_assert_cmphex(control.raw, ==, control_raw);
+            g_assert_cmphex(control.address, ==, address);
+            g_assert_cmpuint(control.slot, ==, slot);
+            g_assert_cmpuint(control.qp, ==, qp);
+            g_assert_cmpuint(control.b1, ==, 0);
+            g_assert_cmpuint(control.b2, ==, b2);
+
+            for (size_t i = 0; i < G_N_ELEMENTS(ignored_masks); i++) {
+                const uint64_t raw = control_raw | ignored_masks[i];
+                IA64Instruction insn = ia64_decode_instruction_raw(
+                    IA64_INSN_UNIT_B, raw, address, slot);
+
+                assert_instruction_metadata_invariant(&insn, &control);
+                g_assert_cmphex(insn.raw, ==, raw);
+            }
+        }
+    }
+}
+
+static void test_b4_br_ret_bundle_placement_matrix(void)
+{
+    static const struct {
+        uint8_t template_code;
+        unsigned b_slot_mask;
+        bool final_stop;
+    } cases[] = {
+        { 0x10, 1U << 2, false }, /* MIB  */
+        { 0x11, 1U << 2, true  }, /* MIB; */
+        { 0x12, (1U << 1) | (1U << 2), false }, /* MBB  */
+        { 0x13, (1U << 1) | (1U << 2), true  }, /* MBB; */
+        { 0x16, (1U << 0) | (1U << 1) | (1U << 2), false }, /* BBB  */
+        { 0x17, (1U << 0) | (1U << 1) | (1U << 2), true  }, /* BBB; */
+        { 0x18, 1U << 2, false }, /* MMB  */
+        { 0x19, 1U << 2, true  }, /* MMB; */
+        { 0x1c, 1U << 2, false }, /* MFB  */
+        { 0x1d, 1U << 2, true  }, /* MFB; */
+    };
+    const uint64_t address = UINT64_C(0x1234567800001390);
+
+    /* br.ret has no slot-2 restriction: cover every B slot in every template. */
+    for (size_t i = 0; i < G_N_ELEMENTS(cases); i++) {
+        const IA64TemplateInfo *info =
+            ia64_template_info(cases[i].template_code);
+        unsigned actual_b_slot_mask = 0;
+
+        g_assert_true(info->valid);
+        g_assert_false(info->long_immediate);
+        for (unsigned slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+            if (info->slot_type[slot] == IA64_SLOT_TYPE_B) {
+                actual_b_slot_mask |= 1U << slot;
+            }
+        }
+        g_assert_cmphex(actual_b_slot_mask, ==, cases[i].b_slot_mask);
+        g_assert_false(info->stop_after_slot[0]);
+        g_assert_false(info->stop_after_slot[1]);
+        g_assert_cmpint(info->stop_after_slot[2], ==, cases[i].final_stop);
+
+        for (unsigned branch_slot = 0; branch_slot < IA64_SLOT_COUNT;
+             branch_slot++) {
+            uint64_t slots[IA64_SLOT_COUNT];
+            IA64DecodedInstructionBundle decoded;
+            IA64DecodedBundle bundle;
+            uint64_t raw;
+            unsigned qp;
+            unsigned b2;
+
+            if (!(cases[i].b_slot_mask & (1U << branch_slot))) {
+                continue;
+            }
+
+            for (unsigned slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+                slots[slot] = info->slot_type[slot] == IA64_SLOT_TYPE_B ?
+                    IA64_TEST_B_NOP_RAW : IA64_TEST_NOP_RAW;
+            }
+            qp = (unsigned)(i * 13 + branch_slot) & 0x3f;
+            b2 = ((unsigned)i + branch_slot) & 7;
+            raw = encode_test_b4_br_ret(qp, b2);
+            slots[branch_slot] = raw;
+            bundle = make_bundle(cases[i].template_code,
+                                 slots[0], slots[1], slots[2]);
+
+            g_assert_true(ia64_decode_instruction_bundle(
+                &bundle, address, true, 0, &decoded));
+            g_assert_true(decoded.valid_template);
+            g_assert_cmpuint(decoded.template_code, ==,
+                             cases[i].template_code);
+            g_assert_cmpuint(decoded.start_slot, ==, 0);
+            g_assert_cmphex(decoded.instruction_mask, ==, 0x7);
+            g_assert_cmpint(decoded.status, ==, IA64_DECODE_OK);
+            g_assert_cmpint(decoded.error_slot, ==, -1);
+            g_assert_true(decoded.starts_at_group_boundary);
+            g_assert_cmpint(decoded.ends_at_group_boundary, ==,
+                            cases[i].final_stop);
+            assert_b4_br_ret_metadata(
+                &decoded.instruction[branch_slot], raw, address,
+                branch_slot, qp, b2, branch_slot == 0,
+                cases[i].final_stop && branch_slot == 2);
+        }
+    }
+}
+
+static void test_b4_br_ret_unit_placement_gate(void)
+{
+    const uint64_t address = UINT64_C(0x12345678000013a0);
+    const uint64_t raw = encode_test_b4_br_ret(0x2d, 5);
+
+    for (IA64InstructionUnit unit = IA64_INSN_UNIT_RESERVED;
+         unit <= IA64_INSN_UNIT_X; unit++) {
+        IA64Instruction insn;
+
+        if (unit == IA64_INSN_UNIT_B) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(unit, raw, address, 1);
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_BR_RET);
+        g_assert_cmpint(insn.unit, ==, unit);
+        g_assert_cmphex(insn.raw, ==, raw);
+        g_assert_cmphex(insn.address, ==, address);
+        g_assert_cmpuint(insn.slot, ==, 1);
+    }
+
+    /*
+     * A B4 bit pattern placed in either non-B slot of MIB must likewise not
+     * acquire br.ret semantics through bundle decoding.  There is no illegal
+     * B-slot placement to test: the complete legal B-slot set is closed above.
+     */
+    for (unsigned wrong_slot = 0; wrong_slot < 2; wrong_slot++) {
+        uint64_t slots[IA64_SLOT_COUNT] = {
+            IA64_TEST_NOP_RAW,
+            IA64_TEST_NOP_RAW,
+            IA64_TEST_B_NOP_RAW,
+        };
+        IA64DecodedBundle bundle;
+        IA64DecodedInstructionBundle decoded;
+        const IA64Instruction *insn;
+
+        slots[wrong_slot] = raw;
+        bundle = make_bundle(0x10, slots[0], slots[1], slots[2]);
+        g_assert_true(ia64_decode_instruction_bundle(
+            &bundle, address, true, 0, &decoded));
+        insn = &decoded.instruction[wrong_slot];
+        g_assert_cmpint(insn->opcode, !=, IA64_OP_BR_RET);
+        g_assert_cmpint(insn->unit, ==,
+                        wrong_slot == 0 ? IA64_INSN_UNIT_M :
+                        IA64_INSN_UNIT_I);
+        g_assert_cmphex(insn->raw, ==, raw);
+        g_assert_cmpuint(insn->slot, ==, wrong_slot);
+    }
+}
+
 static void test_b5_ignored_field_matrix(void)
 {
     const uint64_t address = UINT64_C(0x1234567800001400);
@@ -2163,6 +2379,12 @@ int main(int argc, char **argv)
                     test_b2_counted_branch_qp_matrix);
     g_test_add_func("/ia64-decode/b4-ignored-field-matrix",
                     test_b4_ignored_field_matrix);
+    g_test_add_func("/ia64-decode/b4-br-ret-qp-b2-matrix",
+                    test_b4_br_ret_qp_b2_matrix);
+    g_test_add_func("/ia64-decode/b4-br-ret-bundle-placement-matrix",
+                    test_b4_br_ret_bundle_placement_matrix);
+    g_test_add_func("/ia64-decode/b4-br-ret-unit-placement-gate",
+                    test_b4_br_ret_unit_placement_gate);
     g_test_add_func("/ia64-decode/b5-ignored-field-matrix",
                     test_b5_ignored_field_matrix);
     g_test_add_func("/ia64-decode/b1-br-cond-non-b-unit-gate",

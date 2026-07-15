@@ -37,7 +37,12 @@ def main() -> int:
     source = path.read_text(encoding="utf-8")
     interp_source = path.with_name("interp.c").read_text(encoding="utf-8")
     insn_source = path.with_name("insn.c").read_text(encoding="utf-8")
+    insn_header = path.with_name("insn.h").read_text(encoding="utf-8")
+    rse_source = path.with_name("rse.c").read_text(encoding="utf-8")
     helper_source = path.with_name("helper.h").read_text(encoding="utf-8")
+    exception_source = path.with_name("exception.c").read_text(
+        encoding="utf-8"
+    )
     cpu_source = path.with_name("cpu.c").read_text(encoding="utf-8")
     cpu_header = path.with_name("cpu.h").read_text(encoding="utf-8")
     machine_source = path.with_name("machine.c").read_text(encoding="utf-8")
@@ -126,7 +131,17 @@ def main() -> int:
     typed_indirect_branch_exit = section(
         source,
         "static void ia64_tr_emit_typed_indirect_branch_exit",
+        "static void ia64_tr_emit_typed_return_exit",
+    )
+    typed_return_exit = section(
+        source,
+        "static void ia64_tr_emit_typed_return_exit",
         "static void ia64_tr_split_state_cache_at_typed_branch",
+    )
+    deferred_return_retire = section(
+        source,
+        "static void ia64_tr_retire_fast_bundle_ticks_deferred_interrupt",
+        "static void ia64_tr_commit_ip",
     )
     loop_classifier = section(
         source,
@@ -136,6 +151,11 @@ def main() -> int:
     call_classifier = section(
         source,
         "static bool ia64_tr_decoded_is_call_branch",
+        "static bool ia64_tr_decoded_is_return_branch",
+    )
+    return_classifier = section(
+        source,
+        "static bool ia64_tr_decoded_is_return_branch",
         "static bool ia64_tr_decoded_is_conditional_branch",
     )
     call_admission = section(
@@ -164,6 +184,18 @@ def main() -> int:
         source,
         "static void ia64_tr_assert_call_branch_resources",
         "static bool ia64_tr_emit_decoded_call_split",
+    )
+    return_resource_assert = section(
+        source,
+        "static void ia64_tr_assert_return_branch_resources",
+        "static bool ia64_tr_emit_decoded_return_split",
+    )
+    return_lower = section(
+        source,
+        "static bool ia64_tr_emit_decoded_return_split(\n"
+        "    DisasContext *ctx, const IA64Instruction *insn,\n"
+        "    IA64TrDecodedBranchArm *arm)\n{",
+        "static void ia64_tr_assert_call_branch_resources",
     )
     call_lower = section(
         source,
@@ -227,6 +259,66 @@ def main() -> int:
         interp_source,
         "void HELPER(enter_call_frame)(CPUIA64State *env)\n{",
         "typedef enum IA64PlannedSlotResult",
+    )
+    return_frame_core = section(
+        insn_source,
+        "bool ia64_rse_return_frame_from_pfs(CPUIA64State *env, uint64_t pfs)\n{",
+        "bool ia64_return_from_call_frame",
+    )
+    return_partition_core = section(
+        insn_source,
+        "static bool ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,",
+        "static uint32_t ia64_stacked_gr_slot",
+    )
+    return_partition_adjust = section(
+        insn_source,
+        "static bool ia64_rse_restore_frame_partitions",
+        "static bool ia64_rse_return_to_frame",
+    )
+    return_frame_helper = section(
+        interp_source,
+        "uint32_t HELPER(return_frame_from_pfs)(CPUIA64State *env, uint64_t pfs)\n{",
+        "void HELPER(complete_rse_frame_loads)",
+    )
+    return_fill_helper = section(
+        interp_source,
+        "void HELPER(complete_rse_frame_loads)(CPUIA64State *env)\n{",
+        "uint32_t HELPER(return_chain_ok)",
+    )
+    return_chain_helper = section(
+        interp_source,
+        "uint32_t HELPER(return_chain_ok)(CPUIA64State *env)\n{",
+        "static G_NORETURN void ia64_raise_branch_trap",
+    )
+    return_trap_helpers = section(
+        interp_source,
+        "static G_NORETURN void ia64_raise_branch_trap",
+        "typedef enum IA64PlannedSlotResult",
+    )
+    interruption_isr = section(
+        exception_source,
+        "static uint64_t ia64_interruption_isr",
+        "const char *ia64_exception_name",
+    )
+    interruption_delivery = section(
+        exception_source,
+        "static void ia64_deliver_exception_common",
+        "void ia64_deliver_exception(CPUIA64State *env",
+    )
+    cpu_exec_interrupt = section(
+        cpu_source,
+        "static bool ia64_cpu_exec_interrupt",
+        "void ia64_cpu_dump_state",
+    )
+    mandatory_load_completion = section(
+        insn_source,
+        "IA64RSEStepResult ia64_rse_complete_mandatory_loads_interruptible",
+        "typedef struct IA64RSELegacyReadBridge",
+    )
+    runtime_frame_load = section(
+        rse_source,
+        "static bool ia64_rse_mandatory_load_interruption_pending",
+        "static void ia64_rse_schedule_pending_fill",
     )
     transaction = section(source,
                           "static void ia64_tr_group_reserve",
@@ -989,6 +1081,431 @@ def main() -> int:
         "finish_indirect_branch_bundle", "ia64_branch_call_effects",
         "ia64_rse_sync_logical_in", "ia64_rse_sync_logical_out",
     ), "focused call-frame helper wrapper")
+
+    return_opcodes = {"IA64_OP_BR_RET"}
+    classified_return_opcodes = set(re.findall(
+        r"IA64_OP_[A-Z0-9_]+", return_classifier
+    ))
+    if classified_return_opcodes != return_opcodes:
+        raise AssertionError(
+            "typed return classifier is not exactly B4 br.ret: "
+            f"got={sorted(classified_return_opcodes)}"
+        )
+    require(call_admission, (
+        "insn->opcode == IA64_OP_BR_RET",
+        "insn->unit == IA64_INSN_UNIT_B",
+        "insn->slot_span == 1",
+        "insn->b2 < IA64_BR_COUNT",
+    ), "typed B4 return shape admission")
+    require(rewrite_plan, (
+        "ia64_tr_decoded_is_return_branch(insn->opcode)",
+        "plan->branch_source_br = 1u << insn->b2",
+        "plan->branch_source_pfs = true",
+        "ia64_tr_plan_ar_resource(plan->source_ar, IA64_AR_PFS)",
+        "ia64_tr_plan_ar_resource(plan->dest_ar, IA64_AR_EC)",
+        "plan->source_cfm = true",
+        "plan->dest_cfm = true",
+        "plan->branch_source_pr = UINT64_C(1) << insn->qp",
+        "plan->unconditional_noreturn = true",
+    ), "typed return ordered-resource planning")
+    require(return_resource_assert, (
+        "ia64_tr_decoded_is_return_branch(insn->opcode)",
+        "instruction->source_ar[0] == 0",
+        "instruction->source_ar[1] == pfs",
+        "instruction->dest_ar[0] == 0",
+        "instruction->dest_ar[1] == ec",
+        "instruction->dest_pr == 0",
+        "instruction->must_pr == 0",
+        "instruction->forward_pr == 0",
+        "instruction->branch_source_pr == expected_branch_pr",
+        "instruction->source_br == 0",
+        "instruction->dest_br == 0",
+        "instruction->must_br == 0",
+        "instruction->forward_br == 0",
+        "instruction->branch_source_br == (1u << insn->b2)",
+        "instruction->source_cfm && instruction->dest_cfm",
+        "!instruction->forward_pfs",
+        "instruction->branch_source_pfs",
+        "!instruction->must_pfs",
+    ), "typed return transaction-resource audit")
+    require(return_lower, (
+        "ia64_tr_assert_return_branch_resources(instruction, insn)",
+        "arm->indirect = true",
+        "arm->ret = true",
+        "arm->indirect_target = tcg_temp_new_i64()",
+        "arm->return_pfs = tcg_temp_new_i64()",
+        "ia64_tr_group_load_branch_predicate(ctx, predicate, insn->qp)",
+        "tcg_gen_brcondi_i64(TCG_COND_EQ, predicate, 0, skip_return)",
+        "ia64_tr_group_load_branch_br(ctx, arm->indirect_target, insn->b2)",
+        "tcg_gen_andi_i64(arm->indirect_target, arm->indirect_target",
+        "~UINT64_C(0xf)",
+        "ia64_tr_group_load_branch_pfs(ctx, arm->return_pfs)",
+        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "ia64_tr_group_finish_instruction_success(ctx, insn)",
+        "if (insn->stop_after || unconditional)",
+        "ia64_tr_group_close(ctx)",
+        "ia64_tr_split_state_cache_at_typed_branch(ctx)",
+        "tcg_gen_br(arm->taken)",
+        "tcg_gen_brcondi_i64(TCG_COND_NE, predicate, 0, arm->taken)",
+    ), "direct-TCG return predicate/BR/PFS split")
+    forbid(return_lower, (
+        "gen_helper_", "gen_helper_exec_bundle", "gen_helper_exec_slot",
+        "gen_helper_finish_direct_branch_bundle",
+        "gen_helper_finish_indirect_branch_bundle",
+        "ia64_rse_return_frame_from_pfs", "ia64_return_from_call_frame",
+        "insn->raw >>", "fallback",
+    ), "direct-TCG return predicate/BR/PFS split")
+    return_predicate = return_lower.find(
+        "ia64_tr_group_load_branch_predicate(ctx, predicate, insn->qp)"
+    )
+    return_guard = return_lower.find(
+        "tcg_gen_brcondi_i64(TCG_COND_EQ, predicate, 0, skip_return)",
+        return_predicate,
+    )
+    return_target_load = return_lower.find(
+        "ia64_tr_group_load_branch_br(", return_guard
+    )
+    return_target_align = return_lower.find(
+        "tcg_gen_andi_i64(arm->indirect_target", return_target_load
+    )
+    return_pfs_load = return_lower.find(
+        "ia64_tr_group_load_branch_pfs(ctx, arm->return_pfs)",
+        return_target_align,
+    )
+    return_fault_state = return_lower.find(
+        "ia64_tr_publish_fault_state", return_pfs_load
+    )
+    return_skip = return_lower.find(
+        "gen_set_label(skip_return)", return_fault_state
+    )
+    return_finish = return_lower.find(
+        "ia64_tr_group_finish_instruction_success", return_skip
+    )
+    return_close = return_lower.find("ia64_tr_group_close(ctx)", return_finish)
+    return_cache_split = return_lower.find(
+        "ia64_tr_split_state_cache_at_typed_branch(ctx)", return_close
+    )
+    return_taken_split = return_lower.find(
+        "tcg_gen_brcondi_i64(TCG_COND_NE, predicate, 0, arm->taken)",
+        return_cache_split,
+    )
+    if not (0 <= return_predicate < return_guard < return_target_load <
+            return_target_align < return_pfs_load < return_fault_state <
+            return_skip < return_finish < return_close < return_cache_split <
+            return_taken_split):
+        raise AssertionError(
+            "typed return must guard, capture/align B4 target and branch-visible "
+            "PFS, publish the fault slot, retire/close, split the cache, then "
+            "select the taken arm"
+        )
+    if return_lower.count("ia64_tr_group_load_branch_predicate") != 1 or \
+            return_lower.count("ia64_tr_group_load_branch_br") != 1 or \
+            return_lower.count("ia64_tr_group_load_branch_pfs") != 1:
+        raise AssertionError("typed return must capture each branch-visible "
+                             "input exactly once")
+
+    require(deferred_return_retire, (
+        "ctx->fast_bundle_ticks_used",
+        "ctx->base.tb->flags & IA64_TB_FLAG_BENCHMARK",
+        "ia64_tr_emit_benchmark_retire(ctx->fast_bundle_ticks)",
+        "tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0)",
+    ), "return retirement with deferred interrupt observation")
+    forbid(deferred_return_retire, (
+        "gen_helper_finish_fast_tb", "ia64_tr_flush_fast_bundle_ticks",
+        "ia64_tr_emit_exit_request_guard", "cpu_loop_exit",
+    ), "return retirement with deferred interrupt observation")
+    require(typed_return_exit, (
+        "ia64_tr_store_typed_taken_visibility_state()",
+        "ia64_tr_clear_restart_ri()",
+        "ia64_tr_commit_ip_value(target)",
+        "ia64_tr_retire_fast_bundle_ticks_deferred_interrupt(ctx)",
+        "gen_helper_return_frame_from_pfs(lower_privilege, tcg_env, pfs)",
+        "tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr))",
+        "IA64_PSR_LP_BIT",
+        "gen_helper_raise_lower_privilege_transfer_trap(tcg_env)",
+        "IA64_PSR_TB_BIT",
+        "gen_helper_raise_taken_branch_trap(tcg_env)",
+        "gen_helper_complete_rse_frame_loads(tcg_env)",
+        "gen_helper_return_chain_ok(chain_ok, tcg_env)",
+        "tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit)",
+        "ia64_tr_emit_exit_request_guard(main_loop_exit)",
+        "tcg_gen_lookup_and_goto_ptr()",
+    ), "architecturally ordered typed return taken exit")
+    forbid(typed_return_exit, (
+        "gen_helper_exec_bundle", "gen_helper_exec_slot",
+        "gen_helper_finish_fast_tb", "ia64_tr_flush_fast_bundle_ticks",
+        "finish_direct_branch_bundle", "finish_indirect_branch_bundle",
+        "ia64_return_from_call_frame", "tcg_gen_goto_tb",
+        "insn->raw", "fallback",
+    ), "architecturally ordered typed return taken exit")
+    return_visibility = typed_return_exit.find(
+        "ia64_tr_store_typed_taken_visibility_state()"
+    )
+    return_ri = typed_return_exit.find(
+        "ia64_tr_clear_restart_ri()", return_visibility
+    )
+    return_ip = typed_return_exit.find(
+        "ia64_tr_commit_ip_value(target)", return_ri
+    )
+    return_retire = typed_return_exit.find(
+        "ia64_tr_retire_fast_bundle_ticks_deferred_interrupt(ctx)", return_ip
+    )
+    return_frame = typed_return_exit.find(
+        "gen_helper_return_frame_from_pfs", return_retire
+    )
+    return_psr = typed_return_exit.find("tcg_gen_ld_i64(psr", return_frame)
+    return_demotion = typed_return_exit.find(
+        "TCG_COND_EQ, lower_privilege, 0", return_psr
+    )
+    return_lp = typed_return_exit.find("IA64_PSR_LP_BIT", return_demotion)
+    return_lp_trap = typed_return_exit.find(
+        "gen_helper_raise_lower_privilege_transfer_trap", return_lp
+    )
+    return_lp_done = typed_return_exit.find(
+        "gen_set_label(not_lower_privilege)", return_lp_trap
+    )
+    return_tb = typed_return_exit.find("IA64_PSR_TB_BIT", return_lp_done)
+    return_tb_trap = typed_return_exit.find(
+        "gen_helper_raise_taken_branch_trap", return_tb
+    )
+    return_traps_done = typed_return_exit.find(
+        "gen_set_label(not_taken_trap)", return_tb_trap
+    )
+    return_fill = typed_return_exit.find(
+        "gen_helper_complete_rse_frame_loads", return_traps_done
+    )
+    return_chain_poll = typed_return_exit.find(
+        "gen_helper_return_chain_ok", return_fill
+    )
+    return_chain_guard = typed_return_exit.find(
+        "TCG_COND_EQ, chain_ok, 0, main_loop_exit", return_chain_poll
+    )
+    return_exit_guard = typed_return_exit.find(
+        "ia64_tr_emit_exit_request_guard", return_chain_guard
+    )
+    return_lookup = typed_return_exit.find(
+        "tcg_gen_lookup_and_goto_ptr", return_exit_guard
+    )
+    if not (0 <= return_visibility < return_ri < return_ip < return_retire <
+            return_frame < return_psr < return_demotion < return_lp <
+            return_lp_trap < return_lp_done < return_tb < return_tb_trap <
+            return_traps_done < return_fill < return_chain_poll <
+            return_chain_guard < return_exit_guard < return_lookup):
+        raise AssertionError(
+            "typed return taken edge must commit fresh target state, retire "
+            "without asynchronous exit, restore its frame, arbitrate LP before "
+            "TB, complete mandatory fills, then expose exits/lookup"
+        )
+    for helper_call in (
+            "gen_helper_return_frame_from_pfs(",
+            "gen_helper_complete_rse_frame_loads(",
+            "gen_helper_return_chain_ok(",
+            "gen_helper_raise_lower_privilege_transfer_trap(",
+            "gen_helper_raise_taken_branch_trap("):
+        if source.count(helper_call) != 1:
+            raise AssertionError(f"focused return helper must have one taken-"
+                                 f"edge call site: {helper_call}")
+
+    require(typed_branch_cfg_exits, (
+        "gen_set_label(arms[i].taken)",
+        "if (arms[i].ret)",
+        "arms[i].indirect_target != NULL",
+        "arms[i].return_pfs != NULL",
+        "ia64_tr_emit_typed_return_exit(",
+        "continue;",
+    ), "taken-only typed return CFG transition")
+    return_taken_label = typed_branch_cfg_exits.find(
+        "gen_set_label(arms[i].taken)"
+    )
+    return_arm_gate = typed_branch_cfg_exits.find(
+        "if (arms[i].ret)", return_taken_label
+    )
+    return_exit = typed_branch_cfg_exits.find(
+        "ia64_tr_emit_typed_return_exit(", return_arm_gate
+    )
+    return_continue = typed_branch_cfg_exits.find("continue;", return_exit)
+    return_call_gate = typed_branch_cfg_exits.find(
+        "if (arms[i].call)", return_continue
+    )
+    if not (0 <= return_taken_label < return_arm_gate < return_exit <
+            return_continue < return_call_gate):
+        raise AssertionError("return frame/trap/fill work must remain inside "
+                             "the labeled taken arm and bypass ordinary exits")
+
+    require(helper_source, (
+        "DEF_HELPER_2(return_frame_from_pfs, i32, env, i64)",
+        "DEF_HELPER_1(complete_rse_frame_loads, void, env)",
+        "DEF_HELPER_1(return_chain_ok, i32, env)",
+        "DEF_HELPER_FLAGS_1(raise_lower_privilege_transfer_trap, "
+        "TCG_CALL_NO_RETURN",
+        "DEF_HELPER_FLAGS_1(raise_taken_branch_trap, TCG_CALL_NO_RETURN",
+    ), "focused return helper declarations")
+    require(return_frame_helper, (
+        "IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE)",
+        "ia64_rse_return_frame_from_pfs(env, pfs)",
+        "new_cpl > old_cpl",
+    ), "focused return-frame helper wrapper")
+    require(return_fill_helper, (
+        "IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_RSE)",
+        "ia64_rse_complete_frame_loads(env)",
+    ), "focused mandatory-fill helper wrapper")
+    require(return_chain_helper, (
+        "return ia64_lookup_ptr_chain_ok(env)",
+    ), "post-return interrupt/chain eligibility helper")
+    require(return_trap_helpers, (
+        "ia64_deliver_branch_trap(env, kind)",
+        "fault_exit_pending_tb_translate = true",
+        "cpu_loop_exit(cpu)",
+        "IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER",
+        "IA64_EXCEPTION_TAKEN_BRANCH_TRAP",
+    ), "focused non-returning branch-trap helpers")
+    require(interruption_isr, (
+        "if (env->rse.cfle)",
+        "isr |= UINT64_C(1) << IA64_ISR_IR_BIT",
+        "env->rse.reference && ia64_exception_is_data_memory_fault(kind)",
+        "isr |= UINT64_C(1) << IA64_ISR_RS_BIT",
+    ), "independent ISR.ir/ISR.rs collection for incomplete returns")
+    forbid(interruption_isr, (
+        "env->rse.dirty < 0", "env->rse.dirty_nat < 0",
+    ), "independent ISR.ir/ISR.rs collection for incomplete returns")
+    isr_ir_gate = interruption_isr.find("if (env->rse.cfle)")
+    isr_ir_set = interruption_isr.find("IA64_ISR_IR_BIT", isr_ir_gate)
+    isr_rs_gate = interruption_isr.find(
+        "env->rse.reference && ia64_exception_is_data_memory_fault(kind)",
+        isr_ir_set,
+    )
+    isr_rs_set = interruption_isr.find("IA64_ISR_RS_BIT", isr_rs_gate)
+    if not (0 <= isr_ir_gate < isr_ir_set < isr_rs_gate < isr_rs_set):
+        raise AssertionError("ISR.ir must snapshot CFLE independently before "
+                             "RSE-reference-only ISR.rs attribution")
+    require(insn_header, (
+        "typedef bool (*IA64RSEInterruptionPendingFn)",
+        "IA64_RSE_STEP_INTERRUPTION",
+        "ia64_rse_complete_mandatory_loads_interruptible",
+    ), "interruptible mandatory-load interface")
+    require(mandatory_load_completion, (
+        "env->rse.cfle = true",
+        "interruption_pending && interruption_pending(env, opaque)",
+        "return IA64_RSE_STEP_INTERRUPTION",
+        "ia64_rse_mandatory_load_step(env, read_word, opaque)",
+        "env->rse.cfle = false",
+        "env, read_word, NULL, opaque",
+    ), "prefix-committing interruptible mandatory loads")
+    first_boundary = mandatory_load_completion.find(
+        "interruption_pending && interruption_pending(env, opaque)"
+    )
+    load_step = mandatory_load_completion.find(
+        "ia64_rse_mandatory_load_step", first_boundary
+    )
+    final_boundary = mandatory_load_completion.find(
+        "interruption_pending && interruption_pending(env, opaque)",
+        load_step,
+    )
+    clear_cfle = mandatory_load_completion.find(
+        "env->rse.cfle = false", final_boundary
+    )
+    if not (0 <= first_boundary < load_step < final_boundary < clear_cfle):
+        raise AssertionError("mandatory return loads must poll before the "
+                             "first/each load and after the final load while "
+                             "CFLE remains set")
+    if mandatory_load_completion.count(
+            "return IA64_RSE_STEP_INTERRUPTION") != 2:
+        raise AssertionError("both pre-load and post-final interruption "
+                             "boundaries must retain incomplete state")
+    require(runtime_frame_load, (
+        "return ia64_external_interrupt_enabled(env)",
+        "ia64_rse_complete_mandatory_loads_interruptible",
+        "result == IA64_RSE_STEP_INTERRUPTION",
+        "cpu_loop_exit(env_cpu(env))",
+        "g_assert(result == IA64_RSE_STEP_DONE)",
+    ), "runtime mandatory-load interruption handoff")
+    require(cpu_exec_interrupt, (
+        "if (env->rse.reference ||",
+        "!env->rse.cfle &&",
+        "env->rse.dirty < 0 || env->rse.dirty_nat < 0",
+        "ia64_deliver_exception(env, IA64_EXCEPTION_EXTERNAL_INTERRUPT",
+    ), "safe-boundary external-interruption delivery")
+    forbid(cpu_exec_interrupt, (
+        "env->rse.cfle ||",
+    ), "safe-boundary external-interruption delivery")
+    require(interruption_delivery, (
+        "ia64_interruption_isr(",
+        "env->rse.cfle = false",
+        "env->rse.reference = false",
+        "env->rse.pending_fill_count = 0",
+        "env->rse.pending_fill_ip = 0",
+    ), "interruption exposure of canonical incomplete-frame state")
+    collect_isr = interruption_delivery.find("ia64_interruption_isr(")
+    clear_cfle = interruption_delivery.find(
+        "env->rse.cfle = false", collect_isr
+    )
+    clear_pending = interruption_delivery.find(
+        "env->rse.pending_fill_count = 0", clear_cfle
+    )
+    if not (0 <= collect_isr < clear_cfle < clear_pending):
+        raise AssertionError("interruption delivery must sample ISR.ir/rs "
+                             "before clearing CFLE and legacy fill markers")
+    forbid(return_frame_helper + return_fill_helper + return_chain_helper +
+           return_trap_helpers, (
+        "exec_bundle", "exec_slot", "finish_direct_branch_bundle",
+        "finish_indirect_branch_bundle", "ia64_exec_b_indirect_branch",
+        "ia64_return_from_call_frame",
+    ), "focused return helper wrappers")
+    require(return_frame_core, (
+        "restored_cfm = pfs & IA64_PFS_CFM_MASK",
+        "restored_ec =",
+        "restored_cpl =",
+        "restored_sol = ia64_cfm_sol(restored_cfm)",
+        "bad_pfs = ia64_rse_return_to_frame(env, restored_cfm, restored_sol)",
+        "ia64_write_ar(env, IA64_AR_EC, restored_ec)",
+        "if (current_cpl < restored_cpl)",
+        "restored_cpl << IA64_PSR_CPL_SHIFT",
+        "return bad_pfs",
+    ), "architectural PFS/CFM/EC/CPL return core")
+    return_core_frame = return_frame_core.find("ia64_rse_return_to_frame")
+    return_core_ec = return_frame_core.find("ia64_write_ar", return_core_frame)
+    return_core_cpl = return_frame_core.find(
+        "if (current_cpl < restored_cpl)", return_core_ec
+    )
+    if not (0 <= return_core_frame < return_core_ec < return_core_cpl):
+        raise AssertionError("return core must restore the RSE/CFM frame, EC, "
+                             "then demote CPL only when PPL is less privileged")
+    require(return_partition_core, (
+        "old_sof = env->rse.sof",
+        "growth = (int32_t)new_sof - (int32_t)preserved -",
+        "ia64_rse_sync_logical_out(env)",
+        "ia64_assign_cfm(env, pfm & IA64_PFS_CFM_MASK)",
+        "ia64_rse_set_bol(env, (int32_t)env->rse.bol - preserved)",
+        "ia64_rse_restore_frame_partitions(",
+        "env->rse.cfle = env->rse.dirty < 0 || env->rse.dirty_nat < 0",
+        "ia64_rse_sync_logical_in(env)",
+        "ia64_alat_invalidate_stacked_gr_range",
+    ), "partition-neutral return CFM transition")
+    forbid(return_partition_core, (
+        "ia64_set_cfm(env, pfm", "ia64_set_cfm(env, pfm &",
+    ), "partition-neutral return CFM transition")
+    require(return_partition_adjust, (
+        "if (growth > env->rse.invalid + env->rse.clean)",
+        "ia64_assign_cfm(env, 0)",
+    ), "partition-neutral bad-PFS return transition")
+    forbid(return_partition_adjust, (
+        "ia64_set_cfm(env, 0)",
+    ), "partition-neutral bad-PFS return transition")
+    return_partition_cfm = return_partition_core.find("ia64_assign_cfm")
+    return_partition_bol = return_partition_core.find(
+        "ia64_rse_set_bol", return_partition_cfm
+    )
+    return_partition_restore = return_partition_core.find(
+        "ia64_rse_restore_frame_partitions", return_partition_bol
+    )
+    return_partition_cfle = return_partition_core.find(
+        "env->rse.cfle", return_partition_restore
+    )
+    if not (0 <= return_partition_cfm < return_partition_bol <
+            return_partition_restore < return_partition_cfle):
+        raise AssertionError("return must assign decoded CFM without synthetic "
+                             "partition growth, retreat BOF, restore partitions, "
+                             "then publish CFLE")
 
     loop_opcodes = {
         "IA64_OP_BR_CLOOP",

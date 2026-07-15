@@ -312,17 +312,23 @@ typedef void (*IA64RSEWriteRegisterFn)(CPUIA64State *env, uint64_t address,
                                        uint64_t value, void *opaque);
 typedef bool (*IA64RSEReadWordFn)(CPUIA64State *env, uint64_t address,
                                   uint64_t *value, void *opaque);
+typedef bool (*IA64RSEInterruptionPendingFn)(CPUIA64State *env,
+                                             void *opaque);
 
 typedef enum IA64RSEStepResult {
     IA64_RSE_STEP_DONE,
     IA64_RSE_STEP_PROGRESS,
     IA64_RSE_STEP_FAULT,
+    IA64_RSE_STEP_INTERRUPTION,
 } IA64RSEStepResult;
 
 IA64RSEStepResult ia64_rse_mandatory_load_step(
     CPUIA64State *env, IA64RSEReadWordFn read_word, void *opaque);
 IA64RSEStepResult ia64_rse_complete_mandatory_loads(
     CPUIA64State *env, IA64RSEReadWordFn read_word, void *opaque);
+IA64RSEStepResult ia64_rse_complete_mandatory_loads_interruptible(
+    CPUIA64State *env, IA64RSEReadWordFn read_word,
+    IA64RSEInterruptionPendingFn interruption_pending, void *opaque);
 bool ia64_rse_mandatory_store_step(CPUIA64State *env,
                                    IA64RSEWriteRegisterFn write_word,
                                    void *opaque, bool *stored_register);

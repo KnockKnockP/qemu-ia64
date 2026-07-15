@@ -967,6 +967,18 @@ void HELPER(complete_rse_frame_loads)(CPUIA64State *env)
     ia64_rse_complete_frame_loads(env);
 }
 
+uint32_t HELPER(return_chain_ok)(CPUIA64State *env)
+{
+    /*
+     * This is called only after a typed return has completed every synchronous
+     * frame transition, branch trap check and mandatory RSE load.  The load
+     * helper has already offered the architecturally legal CFLE boundaries;
+     * this final poll prevents lookup chaining past the first post-completion
+     * delivery boundary.
+     */
+    return ia64_lookup_ptr_chain_ok(env);
+}
+
 static G_NORETURN void ia64_raise_branch_trap(CPUIA64State *env,
                                                IA64ExceptionKind kind)
 {

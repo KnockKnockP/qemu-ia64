@@ -1013,6 +1013,28 @@ static void ia64_tr_flush_fast_bundle_ticks(DisasContext *ctx)
     tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0);
 }
 
+/*
+ * Retire accounting without the legacy finish helper's premature asynchronous-
+ * interrupt poll.  A taken return must first commit its target/frame and
+ * arbitrate synchronous branch traps.  The mandatory-load helper then performs
+ * the architectural interrupt-priority check before each CFLE load, including
+ * before the first and after the final successful load.  The benchmark TB flag
+ * is the translation-time equivalent of ia64_benchmark_retire()'s runtime
+ * active test.
+ */
+static void ia64_tr_retire_fast_bundle_ticks_deferred_interrupt(
+    DisasContext *ctx)
+{
+    if (!ctx->fast_bundle_ticks_used) {
+        return;
+    }
+
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_BENCHMARK) != 0) {
+        ia64_tr_emit_benchmark_retire(ctx->fast_bundle_ticks);
+    }
+    tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0);
+}
+
 static void ia64_tr_commit_ip(uint64_t ip)
 {
     tcg_gen_movi_i64(cpu_ip, ip);
@@ -6721,6 +6743,64 @@ static void ia64_tr_emit_typed_indirect_branch_exit(DisasContext *ctx,
     tcg_gen_exit_tb(NULL, 0);
 }
 
+/*
+ * A return is an indirect branch whose taken edge has an architecturally
+ * ordered frame transition.  The target and fresh RI=0 issue-group state are
+ * committed before restoring PFS/CFM/CPL so every subsequent trap or mandatory
+ * RSE fill fault is attributed to the post-branch state.  A PSR.lp-enabled
+ * lower-privilege transfer has priority over the taken-branch trap; only a
+ * trap-free return may issue the mandatory loads needed to complete an older,
+ * non-resident frame.
+ *
+ * The two frame helpers are deliberately narrow architectural seams.  Ordinary
+ * branch selection, source forwarding, target alignment and TB lookup remain
+ * direct TCG operations, and no helper receives instruction bits to decode.
+ */
+static void ia64_tr_emit_typed_return_exit(DisasContext *ctx,
+                                            TCGv_i64 target,
+                                            TCGv_i64 pfs)
+{
+    TCGLabel *not_lower_privilege = gen_new_label();
+    TCGLabel *not_taken_trap = gen_new_label();
+    TCGLabel *main_loop_exit = gen_new_label();
+    TCGv_i32 lower_privilege = tcg_temp_new_i32();
+    TCGv_i32 chain_ok = tcg_temp_new_i32();
+    TCGv_i64 psr = tcg_temp_new_i64();
+    TCGv_i64 psr_lp = tcg_temp_new_i64();
+
+    ia64_tr_store_typed_taken_visibility_state();
+    ia64_tr_clear_restart_ri();
+    ia64_tr_commit_ip_value(target);
+    /* Count the retired branch without permitting asynchronous observation. */
+    ia64_tr_retire_fast_bundle_ticks_deferred_interrupt(ctx);
+
+    gen_helper_return_frame_from_pfs(lower_privilege, tcg_env, pfs);
+    tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+    tcg_gen_brcondi_i32(TCG_COND_EQ, lower_privilege, 0,
+                        not_lower_privilege);
+    tcg_gen_andi_i64(psr_lp, psr, IA64_PSR_LP_BIT);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, psr_lp, 0, not_lower_privilege);
+    gen_helper_raise_lower_privilege_transfer_trap(tcg_env);
+
+    gen_set_label(not_lower_privilege);
+    tcg_gen_andi_i64(psr, psr, IA64_PSR_TB_BIT);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, psr, 0, not_taken_trap);
+    gen_helper_raise_taken_branch_trap(tcg_env);
+
+    gen_set_label(not_taken_trap);
+    gen_helper_complete_rse_frame_loads(tcg_env);
+
+    gen_helper_return_chain_ok(chain_ok, tcg_env);
+    tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit);
+    ia64_tr_emit_exit_request_guard(main_loop_exit);
+    ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_LOOKUP);
+    tcg_gen_lookup_and_goto_ptr();
+
+    gen_set_label(main_loop_exit);
+    ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_MAIN);
+    tcg_gen_exit_tb(NULL, 0);
+}
+
 static void ia64_tr_split_state_cache_at_typed_branch(DisasContext *ctx)
 {
     if (ctx->state_cache_active) {
@@ -7157,8 +7237,16 @@ static void ia64_tr_emit_decoded_branch_cfg_exits(
     for (unsigned i = 0; i < arm_count; i++) {
         gen_set_label(arms[i].taken);
         ia64_tr_note_fast_bundle(ctx);
+        if (arms[i].ret) {
+            g_assert(arms[i].indirect && !arms[i].call &&
+                     arms[i].indirect_target != NULL &&
+                     arms[i].return_pfs != NULL);
+            ia64_tr_emit_typed_return_exit(
+                ctx, arms[i].indirect_target, arms[i].return_pfs);
+            continue;
+        }
         if (arms[i].call) {
-            /* Returning frame transition; only this taken arm may invoke it. */
+            /* Entering frame transition; only this taken arm may invoke it. */
             ia64_tr_emit_call_frame_transition(ctx);
         }
         if (arms[i].indirect) {

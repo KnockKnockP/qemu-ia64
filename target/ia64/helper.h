@@ -22,6 +22,7 @@ DEF_HELPER_1(rotate_modulo_registers, void, env)
 DEF_HELPER_1(enter_call_frame, void, env)
 DEF_HELPER_2(return_frame_from_pfs, i32, env, i64)
 DEF_HELPER_1(complete_rse_frame_loads, void, env)
+DEF_HELPER_1(return_chain_ok, i32, env)
 DEF_HELPER_FLAGS_1(raise_lower_privilege_transfer_trap, TCG_CALL_NO_RETURN,
                    noreturn, env)
 DEF_HELPER_FLAGS_1(raise_taken_branch_trap, TCG_CALL_NO_RETURN,

@@ -296,6 +296,18 @@ uint64_t ia64_make_cfm(uint32_t sof, uint32_t sol, uint32_t sor)
            ((uint64_t)(sor & 0x0f) << 14);
 }
 
+/* Assign the CFM and its decoded rename state without changing partitions. */
+static void ia64_assign_cfm(CPUIA64State *env, uint64_t cfm)
+{
+    env->cfm = cfm;
+    env->rse.sof = cfm & 0x7f;
+    env->rse.sol = (cfm >> 7) & 0x7f;
+    env->rse.sor = (cfm >> 14) & 0x0f;
+    env->rse.rrb_gr = (cfm >> 18) & 0x7f;
+    env->rse.rrb_fr = (cfm >> 25) & 0x7f;
+    env->rse.rrb_pr = (cfm >> 32) & 0x3f;
+}
+
 void ia64_set_cfm(CPUIA64State *env, uint64_t cfm)
 {
     bool pristine_partitions;
@@ -309,13 +321,7 @@ void ia64_set_cfm(CPUIA64State *env, uint64_t cfm)
         env->rse.clean_nat == 0 &&
         (env->rse.invalid == 0 ||
          env->rse.invalid == IA64_RSE_PHYS_STACKED_REGS);
-    env->cfm = cfm;
-    env->rse.sof = cfm & 0x7f;
-    env->rse.sol = (cfm >> 7) & 0x7f;
-    env->rse.sor = (cfm >> 14) & 0x0f;
-    env->rse.rrb_gr = (cfm >> 18) & 0x7f;
-    env->rse.rrb_fr = (cfm >> 25) & 0x7f;
-    env->rse.rrb_pr = (cfm >> 32) & 0x3f;
+    ia64_assign_cfm(env, cfm);
     if (pristine_partitions &&
         env->rse.sof <= IA64_RSE_PHYS_STACKED_REGS) {
         /* Unit-created and legacy zero state; reset state already has 96. */
@@ -411,6 +417,9 @@ bool ia64_rse_partitions_valid(const CPUIA64State *env)
         env->rse.invalid < 0) {
         return false;
     }
+    if ((env->rse.bsp | env->rse.bspstore) & 7) {
+        return false;
+    }
 
     total = (int64_t)env->rse.sof + env->rse.dirty +
             env->rse.clean + env->rse.invalid;
@@ -424,23 +433,45 @@ bool ia64_rse_partitions_valid(const CPUIA64State *env)
         return false;
     }
 
-    if (env->rse.dirty >= 0 && env->rse.dirty_nat >= 0) {
+    if (env->rse.dirty < 0 || env->rse.dirty_nat < 0) {
+        uint64_t span_slots;
+        uint32_t missing_regs;
+        uint32_t missing_nats;
+
+        /*
+         * An incomplete current frame is one contiguous unloaded backing-
+         * store span.  A return consumes every clean word before making a
+         * partition negative, so no clean partition can coexist with this
+         * state.  Reject mixed signs as well: the next address could select
+         * a word whose corresponding counter is already non-negative and
+         * trip a late assertion after migration.
+         */
+        if (env->rse.dirty > 0 || env->rse.dirty_nat > 0 ||
+            env->rse.clean != 0 || env->rse.clean_nat != 0 ||
+            env->rse.bspstore <= env->rse.bsp) {
+            return false;
+        }
+        span_slots = (env->rse.bspstore - env->rse.bsp) >> 3;
+        missing_regs = ia64_rse_num_regs(env->rse.bsp,
+                                         env->rse.bspstore);
+        missing_nats = span_slots - missing_regs;
+        if (env->rse.dirty != -(int32_t)missing_regs ||
+            env->rse.dirty_nat != -(int32_t)missing_nats) {
+            return false;
+        }
+    } else {
         int64_t expected_dirty_nat =
             (int64_t)(env->rse.bsp >> 9) -
             (int64_t)(env->rse.bspstore >> 9);
-
-        if (env->rse.dirty_nat != expected_dirty_nat) {
-            return false;
-        }
-    }
-
-    if (env->rse.dirty >= 0 && env->rse.dirty_nat >= 0) {
         uint64_t clean_start = env->rse.bspstore -
             ((int64_t)env->rse.clean + env->rse.clean_nat) * 8;
         int64_t expected_clean_nat =
             (int64_t)(env->rse.bspstore >> 9) -
             (int64_t)(clean_start >> 9);
 
+        if (env->rse.dirty_nat != expected_dirty_nat) {
+            return false;
+        }
         if (env->rse.clean_nat != expected_clean_nat) {
             return false;
         }
@@ -726,8 +757,9 @@ IA64RSEStepResult ia64_rse_mandatory_load_step(
     return IA64_RSE_STEP_PROGRESS;
 }
 
-IA64RSEStepResult ia64_rse_complete_mandatory_loads(
-    CPUIA64State *env, IA64RSEReadWordFn read_word, void *opaque)
+IA64RSEStepResult ia64_rse_complete_mandatory_loads_interruptible(
+    CPUIA64State *env, IA64RSEReadWordFn read_word,
+    IA64RSEInterruptionPendingFn interruption_pending, void *opaque)
 {
     IA64RSEStepResult result;
 
@@ -740,15 +772,41 @@ IA64RSEStepResult ia64_rse_complete_mandatory_loads(
     }
 
     env->rse.cfle = true;
-    do {
+    for (;;) {
+        /*
+         * SDM Vol. 2 section 5.3 restarts interruption processing before
+         * every mandatory current-frame load.  Leave CFLE set when an
+         * enabled interruption wins so ISR.ir samples one and the already
+         * committed prefix remains the sole resume authority.
+         */
+        if (interruption_pending && interruption_pending(env, opaque)) {
+            return IA64_RSE_STEP_INTERRUPTION;
+        }
         result = ia64_rse_mandatory_load_step(env, read_word, opaque);
-    } while (result == IA64_RSE_STEP_PROGRESS &&
-             (env->rse.dirty < 0 || env->rse.dirty_nat < 0));
-    if (result == IA64_RSE_STEP_FAULT) {
-        return result;
+        if (result != IA64_RSE_STEP_PROGRESS) {
+            return result;
+        }
+        if (env->rse.dirty < 0 || env->rse.dirty_nat < 0) {
+            continue;
+        }
+        /*
+         * A final successful load also restarts at the interrupt-priority
+         * check before the valid-frame check clears CFLE.
+         */
+        if (interruption_pending && interruption_pending(env, opaque)) {
+            return IA64_RSE_STEP_INTERRUPTION;
+        }
+        break;
     }
     env->rse.cfle = false;
     return IA64_RSE_STEP_DONE;
+}
+
+IA64RSEStepResult ia64_rse_complete_mandatory_loads(
+    CPUIA64State *env, IA64RSEReadWordFn read_word, void *opaque)
+{
+    return ia64_rse_complete_mandatory_loads_interruptible(
+        env, read_word, NULL, opaque);
 }
 
 typedef struct IA64RSELegacyReadBridge {
@@ -950,7 +1008,7 @@ static bool ia64_rse_restore_frame_partitions(CPUIA64State *env,
         env->rse.invalid += preserved + old_sof;
         env->rse.dirty -= preserved;
         env->rse.dirty_nat -= preserved_nats;
-        ia64_set_cfm(env, 0);
+        ia64_assign_cfm(env, 0);
         return true;
     }
 
@@ -1001,7 +1059,8 @@ static bool ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
 
     ia64_rse_check_partitions(env, "return-entry");
     ia64_rse_sync_logical_out(env);
-    ia64_set_cfm(env, pfm & IA64_PFS_CFM_MASK);
+    /* The return path below performs the corresponding partition growth. */
+    ia64_assign_cfm(env, pfm & IA64_PFS_CFM_MASK);
     ia64_rse_set_bol(env, (int32_t)env->rse.bol - preserved);
     bad_pfs = ia64_rse_restore_frame_partitions(
         env, preserved, growth, old_sof);

@@ -1204,6 +1204,11 @@ static void test_pre_load_clears_transient_mirror_metadata(void)
     env.rse.logical_dirty[1] = UINT64_MAX;
     env.rse.cfle = true;
     env.rse.reference = true;
+    env.current_slot_valid = true;
+    env.current_slot_ri = 2;
+    env.current_slot_type = 7;
+    env.current_slot_ip = UINT64_C(0x123456789abcdef0);
+    env.current_slot_raw = UINT64_C(0x1ffffffffff);
     g_assert_cmpint(ia64_env_pre_load(&env), ==, 0);
     g_assert_cmphex(env.rse.logical_nat[0], ==, 0);
     g_assert_cmphex(env.rse.logical_nat[1], ==, 0);
@@ -1211,6 +1216,11 @@ static void test_pre_load_clears_transient_mirror_metadata(void)
     g_assert_cmphex(env.rse.logical_dirty[1], ==, 0);
     g_assert_false(env.rse.cfle);
     g_assert_false(env.rse.reference);
+    g_assert_false(env.current_slot_valid);
+    g_assert_cmpuint(env.current_slot_ri, ==, 0);
+    g_assert_cmpuint(env.current_slot_type, ==, 0);
+    g_assert_cmphex(env.current_slot_ip, ==, 0);
+    g_assert_cmphex(env.current_slot_raw, ==, 0);
 }
 
 static void test_post_load_v1_v5_reconstructs_logical_mirror(void)
@@ -1431,8 +1441,9 @@ static void seed_complete_rse_vmstate(IA64RSEState *rse)
 static void seed_incomplete_rse_vmstate(IA64RSEState *rse)
 {
     memset(rse, 0, sizeof(*rse));
-    rse->bsp = UINT64_C(0x1000);
-    rse->bspstore = UINT64_C(0x1018);
+    /* Two register words followed by the 0x7ff8 RNAT collection word. */
+    rse->bsp = UINT64_C(0x7fe8);
+    rse->bspstore = UINT64_C(0x8000);
     rse->rnat = UINT64_C(0x5555aaaa0000ffff);
     rse->sof = 20;
     rse->sol = 4;
@@ -1440,9 +1451,9 @@ static void seed_incomplete_rse_vmstate(IA64RSEState *rse)
     rse->bol = 95;
     rse->dirty = -2;
     rse->dirty_nat = -1;
-    rse->clean = 10;
-    rse->clean_nat = 1;
-    rse->invalid = 68;
+    rse->clean = 0;
+    rse->clean_nat = 0;
+    rse->invalid = 78;
     rse->stacked_gr[3] = UINT64_C(0x123456789abcdef0);
     rse->stacked_nat[0] = UINT64_C(1) << 3;
 }
@@ -1495,6 +1506,32 @@ static void test_rse_v4_complete_and_incomplete_round_trip(void)
         g_assert_cmpint(load_rse_with_current_vmsd(&destination, 4), ==, 0);
         assert_rse_canonical_equal(&destination, &source);
     }
+}
+
+static void test_cpu_v3_incomplete_rse_round_trip(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+
+    init_cpu_stream(&source, UINT64_C(0x1230), false);
+    seed_incomplete_rse_vmstate(&source.env.rse);
+    source.env.rse.bsp_load = source.env.rse.bspstore;
+    source.env.ar[IA64_AR_BSP] = source.env.rse.bsp;
+    source.env.ar[IA64_AR_BSPSTORE] = source.env.rse.bspstore;
+    source.env.cr[IA64_CR_IIP] = UINT64_C(0x200);
+    source.env.cr[IA64_CR_IFS] = 0;
+
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_collection_test_root), ==, 0);
+    init_cpu_stream(&destination, 0, false);
+    destination.env.rse.bsp_load = UINT64_MAX;
+    g_assert_cmpint(load_cpu_with_current_root(&destination, 3), ==, 0);
+
+    assert_rse_canonical_equal(&destination.env.rse, &source.env.rse);
+    g_assert_cmphex(destination.env.rse.bsp_load, ==,
+                    source.env.rse.bspstore);
+    g_assert_cmphex(destination.env.cr[IA64_CR_IIP], ==, UINT64_C(0x200));
+    g_assert_cmphex(destination.env.cr[IA64_CR_IFS], ==, 0);
 }
 
 static void test_rse_v1_v3_legacy_partition_defaults(void)
@@ -1610,6 +1647,40 @@ static void corrupt_rse_pending_fill(IA64RSEState *rse)
     rse->pending_fill_ip = UINT64_C(0x1000);
 }
 
+static void assert_incomplete_rse_v4_load_rejected(CorruptRSEState corrupt)
+{
+    IA64RSEState source;
+    IA64RSEState destination;
+
+    seed_incomplete_rse_vmstate(&source);
+    corrupt(&source);
+    g_assert_cmpint(save_rse_with_vmsd(&source, &vmstate_rse), ==, 0);
+    memset(&destination, 0, sizeof(destination));
+    g_assert_cmpint(load_rse_with_current_vmsd(&destination, 4), !=, 0);
+}
+
+static void corrupt_rse_incomplete_mixed_sign(IA64RSEState *rse)
+{
+    /* Preserve both the partition total and combined backing-store words. */
+    rse->dirty = -4;
+    rse->dirty_nat = 1;
+    rse->invalid = 80;
+}
+
+static void corrupt_rse_incomplete_word_classes(IA64RSEState *rse)
+{
+    /* The span contains two registers and one RNAT, not three registers. */
+    rse->dirty = -3;
+    rse->dirty_nat = 0;
+    rse->invalid = 79;
+}
+
+static void corrupt_rse_incomplete_clean_partition(IA64RSEState *rse)
+{
+    rse->clean = 1;
+    rse->invalid--;
+}
+
 static void test_rse_v4_malformed_rejection(void)
 {
     assert_rse_v4_load_rejected(corrupt_rse_bol);
@@ -1619,6 +1690,12 @@ static void test_rse_v4_malformed_rejection(void)
     assert_rse_v4_load_rejected(corrupt_rse_clean_nat_count);
     assert_rse_v4_load_rejected(corrupt_rse_cfle);
     assert_rse_v4_load_rejected(corrupt_rse_pending_fill);
+    assert_incomplete_rse_v4_load_rejected(
+        corrupt_rse_incomplete_mixed_sign);
+    assert_incomplete_rse_v4_load_rejected(
+        corrupt_rse_incomplete_word_classes);
+    assert_incomplete_rse_v4_load_rejected(
+        corrupt_rse_incomplete_clean_partition);
 }
 
 static void test_rse_pre_save_boundaries(void)
@@ -1640,7 +1717,11 @@ static void test_rse_pre_save_boundaries(void)
     g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
 
     seed_incomplete_rse_vmstate(&env.rse);
+    env.rse.bsp_load = env.rse.bspstore;
     g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
+
+    env.rse.bsp_load += 8;
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
 }
 
 int main(int argc, char **argv)
@@ -1740,6 +1821,8 @@ int main(int argc, char **argv)
                     test_outer_version_selection_matrix);
     g_test_add_func("/ia64/vmstate/rse/v4-complete-incomplete-round-trip",
                     test_rse_v4_complete_and_incomplete_round_trip);
+    g_test_add_func("/ia64/vmstate/rse/cpu-v3-incomplete-round-trip",
+                    test_cpu_v3_incomplete_rse_round_trip);
     g_test_add_func("/ia64/vmstate/rse/v1-v3-default-partitions",
                     test_rse_v1_v3_legacy_partition_defaults);
     g_test_add_func("/ia64/vmstate/rse/v3-wire-synthesis",
