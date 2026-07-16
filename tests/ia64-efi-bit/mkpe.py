@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wrap a flat IA-64 binary into a minimal PE32+ EFI image.
 
-The guest-executed vibtanium firmware loader is intentionally small: it validates
+The vibtanium EFI loader (hw/ia64/efi.c) is intentionally small: it validates
 the MZ/PE headers, requires machine==IA-64 (0x0200) and a PE32/PE32+ optional
 header, maps each section at its VirtualAddress, and reads the entry point from
 a 16-byte IA-64 function descriptor (plabel) located at AddressOfEntryPoint:
@@ -9,9 +9,9 @@ a 16-byte IA-64 function descriptor (plabel) located at AddressOfEntryPoint:
     code_entry     = *(u64 *)(image + entry_rva + 0)
     global_pointer = *(u64 *)(image + entry_rva + 8)
 
-Both are absolute addresses. To avoid needing base relocations we use the
-firmware's conventional low-image base (FW_LOW_IMAGE_BASE = 0x02000000) and
-link the flat binary at that base + text RVA, so the plabel already holds
+Both are absolute addresses. To avoid needing base relocations we set the PE
+ImageBase equal to the -kernel load base (VIBTANIUM_EFI_APP_BASE = 0x01000000)
+and link the flat binary at that base + text RVA, so the plabel already holds
 correct absolute addresses. The Subsystem field is not checked by the loader.
 
 The flat binary is placed as a single section at RVA 0x1000, and the entry
@@ -22,7 +22,7 @@ AddressOfEntryPoint is exactly the text RVA).
 import struct
 import sys
 
-IMAGE_BASE = 0x02000000          # firmware FW_LOW_IMAGE_BASE
+IMAGE_BASE = 0x01000000          # must match VIBTANIUM_EFI_APP_BASE
 TEXT_RVA = 0x1000
 FILE_ALIGN = 0x200
 SECT_ALIGN = 0x1000

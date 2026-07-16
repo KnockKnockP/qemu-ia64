@@ -7,6 +7,7 @@
 #include "bundle.h"
 #include "decode.h"
 #include "exception.h"
+#include "firmware.h"
 #include "insn.h"
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -9986,7 +9987,7 @@ static void ia64_tr_emit_decoded_system(
         return;
     case IA64_TR_SYSTEM_MOV_PSRGR:
         tcg_gen_ld_i64(result, tcg_env, offsetof(CPUIA64State, psr));
-        /* Match the reference firmware ABI while canonicalizing restart RI. */
+        /* Firmware observes the PSR state, not the current bundle slot. */
         tcg_gen_andi_i64(result, result, ~IA64_PSR_RI_MASK);
         ia64_tr_finish_faulting_slot();
         ia64_tr_group_stage_gr(write, result, result_nat);
@@ -11613,6 +11614,17 @@ static void ia64_tr_emit_instruction_debug_guard(
     gen_set_label(resume);
 }
 
+static void ia64_tr_emit_firmware_call_gate(DisasContext *ctx, uint64_t pc)
+{
+    ia64_tr_sync_state_cache(ctx);
+    ia64_tr_flush_retired_bundles(ctx);
+    ia64_tr_publish_restart_ri(0);
+    gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc),
+                                  tcg_constant_i64(pc));
+    ia64_tr_invalidate_state_cache(ctx);
+    ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_MAIN);
+}
+
 static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
@@ -11648,6 +11660,19 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_EXECUTED, 1);
     if (ctx->state_cache_active) {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_ACTIVE_BUNDLE, 1);
+    }
+
+    /*
+     * Firmware call gates are host-owned transactions, including their
+     * region-7 runtime aliases.  Recognize them before fetching guest code so
+     * SetVirtualAddressMap does not require an artificial instruction-TLB
+     * mapping for bundles that are never executed as instructions.
+     */
+    if (ia64_firmware_is_call_gate(pc)) {
+        ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
+        ia64_tr_emit_firmware_call_gate(ctx, pc);
+        ctx->base.is_jmp = DISAS_EXIT;
+        return;
     }
 
     lo = translator_ldq_end(ctx->env, &ctx->base, pc, MO_LE);

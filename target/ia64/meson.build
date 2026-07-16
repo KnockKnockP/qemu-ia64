@@ -7,6 +7,7 @@ ia64_ss.add(files(
   'decode.c',
   'exception.c',
   'flight-recorder.c',
+  'firmware-hook.c',
   'insn.c',
   'machine.c',
   'mem.c',

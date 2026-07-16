@@ -145,6 +145,8 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_FIRMWARE_PAL_BRAND] = "firmware.pal.brand",
     [IA64_PERF_FIRMWARE_PAL_MACHINE_CHECK] = "firmware.pal.machine_check",
     [IA64_PERF_FIRMWARE_PAL_OTHER] = "firmware.pal.other",
+    [IA64_PERF_FIRMWARE_SAL] = "firmware.sal",
+    [IA64_PERF_FIRMWARE_EFI] = "firmware.efi",
 };
 
 static void ia64_perf_dump(void)

@@ -86,7 +86,6 @@ blobs = [
 ]
 
 if get_option('vibtanium_efi')
-  blobs += 'ia64-firmware.bin'
   configure_file(
     input: '../tests/ia64-efi-bit/bit.efi',
     output: 'vibtanium-bit.efi',

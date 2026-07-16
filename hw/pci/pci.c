@@ -2130,8 +2130,6 @@ PCIDevice *pci_vga_init(PCIBus *bus)
     switch (vga_interface_type) {
     case VGA_CIRRUS:
         return pci_create_simple(bus, -1, "cirrus-vga");
-    case VGA_ATI:
-        return pci_create_simple(bus, -1, "ati-vga");
     case VGA_QXL:
         return pci_create_simple(bus, -1, "qxl-vga");
     case VGA_STD:

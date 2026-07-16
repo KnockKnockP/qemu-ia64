@@ -10,6 +10,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
+repo_root="$(cd "$here/../.." && pwd)"
 
 GCC="${IA64_GCC:-/c/msys64/opt/ia64-gcc/bin/ia64-linux-gnu-gcc}"
 BINUTILS="${IA64_BINUTILS:-/c/msys64/opt/ia64-binutils/bin}"
@@ -28,10 +29,10 @@ done
 
 rm -f entry.o bit.o bit.elf bit.bin bit.efi
 
-echo "[1/5] assemble entry.S"
+echo "[1/6] assemble entry.S"
 "$AS" -o entry.o entry.S
 
-echo "[2/5] compile bit.c"
+echo "[2/6] compile bit.c"
 "$GCC" \
     -std=gnu99 \
     -ffreestanding -fno-builtin -fno-pic \
@@ -39,15 +40,18 @@ echo "[2/5] compile bit.c"
     -fno-stack-protector -O2 -Wall -Wextra \
     -c bit.c -o bit.o
 
-echo "[3/5] link"
+echo "[3/6] link"
 "$GCC" -nostdlib -T link.ld -Wl,--build-id=none \
     -o bit.elf entry.o bit.o -lgcc
 
-echo "[4/5] objcopy -> flat binary"
+echo "[4/6] objcopy -> flat binary"
 "$OBJCOPY" -O binary bit.elf bit.bin
 
-echo "[5/5] wrap PE32+ -> bit.efi"
+echo "[5/6] wrap PE32+ -> bit.efi"
 "$PYTHON" mkpe.py bit.bin bit.efi
+
+echo "[6/6] update firmware blob source"
+"$PYTHON" gen_blob.py bit.efi "$repo_root/hw/ia64/efi-bit-blob.c"
 
 echo "built $(pwd)/bit.efi ($(wc -c < bit.efi) bytes)"
 if [ "${1:-}" = "-v" ]; then

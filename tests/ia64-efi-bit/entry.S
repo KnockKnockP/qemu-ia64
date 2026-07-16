@@ -19,8 +19,8 @@ _image_start:
         .align 16
         .global _start
 _start:
-        /* Keep old PFS in the one local register; r34 is inside new SOF=5. */
-        alloc   r34 = ar.pfs, 2, 1, 2, 0
+        /* r34 is inside the new four-register frame; its PFS value is unused. */
+        alloc   r34 = ar.pfs, 2, 0, 2, 0 ;;
         mov     out0 = in0
         mov     out1 = in1 ;;
         br.call.sptk.many b0 = efi_main ;;
@@ -33,6 +33,7 @@ _start:
         .align 16
         .global ia64_chk_a_clr_fp_takes_branch
 ia64_chk_a_clr_fp_takes_branch:
+        /* This one-register frame may only name r32 as alloc's destination. */
         alloc   r32 = ar.pfs, 0, 1, 0, 0
         mov     r8 = r0 ;;
         chk.a.clr f8, .Lchk_recovery

@@ -44,15 +44,13 @@ static void test_guest_reset_request(void)
 {
     const char *firmware_dir = g_getenv("IA64_QTEST_FIRMWARE_DIR");
     QTestState *qts;
-    uint64_t reset = VIBTANIUM_GUEST_IO_PORT_BASE +
-                     VIBTANIUM_GUEST_ACPI_PM_BASE +
-                     VIBTANIUM_GUEST_ACPI_RESET_OFFSET;
+    uint64_t reset = sparse_io_address(VIBTANIUM_ACPI_RESET_PORT);
 
     g_assert_nonnull(firmware_dir);
     qts = qtest_initf("-L \"%s\" -M vibtanium,nvram=none -m 128M",
                       firmware_dir);
 
-    qtest_writeb(qts, reset, VIBTANIUM_GUEST_ACPI_RESET_VALUE);
+    qtest_writeb(qts, reset, VIBTANIUM_ACPI_RESET_VALUE);
     qtest_qmp_eventwait(qts, "RESET");
     qtest_quit(qts);
 }

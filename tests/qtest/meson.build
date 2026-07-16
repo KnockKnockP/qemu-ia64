@@ -149,7 +149,6 @@ qtests_avr = [ 'boot-serial-test' ]
 
 qtests_ia64 = [
   'ia64-acpi-test',
-  'ia64-guest-firmware-test',
   'ia64-input-test',
 ]
 

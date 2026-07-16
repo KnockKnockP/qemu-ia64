@@ -2254,6 +2254,7 @@ endif
 config_host_data = configuration_data()
 
 config_host_data.set('CONFIG_HAVE_RUST', have_rust)
+config_host_data.set('CONFIG_VIBTANIUM_BIT', get_option('vibtanium_efi'))
 audio_drivers_selected = []
 if have_system
   audio_drivers_available = {
@@ -4686,7 +4687,7 @@ summary_info += {'system-mode emulation': have_system}
 summary_info += {'user-mode emulation': have_user}
 summary_info += {'block layer':       have_block}
 summary_info += {'Install blobs':     get_option('install_blobs')}
-summary_info += {'Vibtanium EFI artifacts': get_option('vibtanium_efi')}
+summary_info += {'Vibtanium EFI BIT app': get_option('vibtanium_efi')}
 summary_info += {'module support':    enable_modules}
 if enable_modules
   summary_info += {'alternative module path': get_option('module_upgrades')}

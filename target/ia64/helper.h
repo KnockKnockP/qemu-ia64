@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+DEF_HELPER_3(firmware_call_gate, void, env, i64, i64)
 DEF_HELPER_3(memory_store_alat_invalidate, void, env, i64, i32)
 DEF_HELPER_3(gr_alat_invalidate_mask, void, env, i64, i64)
 DEF_HELPER_5(data_debug_pre_access, void, env, i64, i32, i32, i32)

@@ -13,23 +13,6 @@ static unsigned vibtanium_sparse_io_port(hwaddr offset)
     return ((unsigned)(offset >> 12) << 2) | (offset & 0x3);
 }
 
-static unsigned vibtanium_guest_io_port(hwaddr offset)
-{
-    hwaddr group = offset >> 12;
-    hwaddr low = offset & 0xfff;
-
-    /*
-     * The guest firmware uses dense addresses for its early ATA, PS/2, VGA,
-     * and ACPI accesses.  Once an OS takes over, the same aperture also has
-     * to accept the architectural IA-64 sparse encoding.  A sparse encoding
-     * is self-identifying; all other offsets retain their dense meaning.
-     */
-    if ((group & 0x3ff) == (low >> 2)) {
-        return (group << 2) | (low & 3);
-    }
-    return offset;
-}
-
 static hwaddr vibtanium_sparse_io_offset(unsigned port)
 {
     return (((hwaddr)port >> 2) << 12) | (port & 0xfff);
@@ -66,19 +49,6 @@ static bool vibtanium_sparse_io_offset_valid(hwaddr offset, unsigned size)
     }
 
     return true;
-}
-
-static bool vibtanium_guest_io_offset_valid(hwaddr offset, unsigned size,
-                                            unsigned *port)
-{
-    if (offset >= VIBTANIUM_PCI_IO_SPARSE_SIZE || size == 0 || size > 4 ||
-        size > VIBTANIUM_PCI_IO_SPARSE_SIZE - offset) {
-        return false;
-    }
-
-    *port = vibtanium_guest_io_port(offset);
-    return *port < VIBTANIUM_PCI_IO_SIZE &&
-           size <= VIBTANIUM_PCI_IO_SIZE - *port;
 }
 
 static uint64_t vibtanium_io_port_space_read(VibtaniumMachineState *vms,
@@ -193,30 +163,6 @@ static void vibtanium_io_port_write(void *opaque, hwaddr offset,
         vms, vibtanium_sparse_io_port(offset), value, size);
 }
 
-static uint64_t vibtanium_guest_io_port_read(void *opaque, hwaddr offset,
-                                             unsigned size)
-{
-    VibtaniumMachineState *vms = opaque;
-    unsigned port;
-
-    if (!vibtanium_guest_io_offset_valid(offset, size, &port)) {
-        return vibtanium_io_port_default_read(size);
-    }
-    return vibtanium_io_port_read_decoded(vms, port, size);
-}
-
-static void vibtanium_guest_io_port_write(void *opaque, hwaddr offset,
-                                          uint64_t value, unsigned size)
-{
-    VibtaniumMachineState *vms = opaque;
-    unsigned port;
-
-    if (!vibtanium_guest_io_offset_valid(offset, size, &port)) {
-        return;
-    }
-    vibtanium_io_port_write_decoded(vms, port, value, size);
-}
-
 static const MemoryRegionOps vibtanium_io_port_ops = {
     .read = vibtanium_io_port_read,
     .write = vibtanium_io_port_write,
@@ -224,21 +170,6 @@ static const MemoryRegionOps vibtanium_io_port_ops = {
     .valid = {
         .min_access_size = 1,
         .max_access_size = 4,
-    },
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-    },
-};
-
-static const MemoryRegionOps vibtanium_guest_io_port_ops = {
-    .read = vibtanium_guest_io_port_read,
-    .write = vibtanium_guest_io_port_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 4,
-        .unaligned = true,
     },
     .impl = {
         .min_access_size = 1,
@@ -256,10 +187,4 @@ void vibtanium_sparse_io_init(VibtaniumMachineState *vms,
     memory_region_add_subregion(sysmem, VIBTANIUM_IO_PORT_BASE,
                                 &vms->io_port_space);
 
-    memory_region_init_io(&vms->guest_io_port_space, OBJECT(vms),
-                          &vibtanium_guest_io_port_ops, vms,
-                          "vibtanium.guest-firmware-io-port-space",
-                          VIBTANIUM_PCI_IO_SPARSE_SIZE);
-    memory_region_add_subregion(sysmem, VIBTANIUM_GUEST_IO_PORT_BASE,
-                                &vms->guest_io_port_space);
 }

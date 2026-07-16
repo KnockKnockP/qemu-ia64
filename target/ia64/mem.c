@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "firmware.h"
 #include "mem.h"
 #include "insn.h"
 #include "exec/page-protection.h"
@@ -1353,6 +1354,21 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
             (address & IA64_PHYSICAL_MEMORY_ATTRIBUTE_BIT) != 0 ?
             IA64_MEMORY_SPECULATION_NON :
             IA64_MEMORY_SPECULATION_LIMITED;
+        /*
+         * The project EFI frontend publishes its native service gates in
+         * both region 0 and the conventional region-7 runtime alias.  They
+         * are intercepted before bundle fetch, but QEMU must first resolve
+         * the prospective instruction page while constructing the TB.  Only
+         * those exact reserved gates may bypass the ordinary physical-address
+         * bit check; guest instructions and data retain the architectural
+         * validation below.
+         */
+        if (instruction && ia64_firmware_is_call_gate(address)) {
+            result->status = IA64_TRANSLATE_OK;
+            result->prot = PAGE_READ | PAGE_EXEC;
+            result->identity = result->paddr == address;
+            goto record;
+        }
         if (address & IA64_PHYSICAL_UNIMPLEMENTED_MASK) {
             result->status = IA64_TRANSLATE_UNIMPLEMENTED;
             if (format_detail) {
