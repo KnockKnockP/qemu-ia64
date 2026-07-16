@@ -235,11 +235,56 @@ void page_init(void)
  * Isolate the portion of code gen which can setjmp/longjmp.
  * Return the size of the generated code, or negative on error.
  */
+#ifdef CONFIG_IA64_OBSERVABILITY
+static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
+                           vaddr pc, void *host_pc,
+                           int *max_insns, TCGCodegenStats *stats)
+{
+    int ret = sigsetjmp(tcg_ctx->jmp_trans, 0);
+    int64_t start_ns;
+    int64_t codegen_ns;
+
+    if (unlikely(ret != 0)) {
+        return ret;
+    }
+
+    tcg_func_start(tcg_ctx);
+
+    CPUState *cs = env_cpu(env);
+    tcg_ctx->cpu = cs;
+    if (stats != NULL) {
+        start_ns = g_get_monotonic_time() * 1000;
+    }
+    cs->cc->tcg_ops->translate_code(cs, tb, max_insns, pc, host_pc);
+    if (stats != NULL) {
+        stats->translate_ns = g_get_monotonic_time() * 1000 - start_ns;
+    }
+
+    assert(tb->size != 0);
+    tcg_ctx->cpu = NULL;
+    *max_insns = tb->icount;
+    if (stats != NULL) {
+        stats->guest_insns = tb->icount;
+    }
+
+    if (stats != NULL) {
+        start_ns = g_get_monotonic_time() * 1000;
+    }
+    ret = tcg_gen_code(tcg_ctx, tb, pc, stats);
+    if (stats != NULL) {
+        codegen_ns = g_get_monotonic_time() * 1000 - start_ns;
+        stats->host_codegen_ns = codegen_ns > stats->optimize_ns ?
+                                 codegen_ns - stats->optimize_ns : 0;
+    }
+    return ret;
+}
+#else
 static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
                            vaddr pc, void *host_pc,
                            int *max_insns, int64_t *ti)
 {
     int ret = sigsetjmp(tcg_ctx->jmp_trans, 0);
+
     if (unlikely(ret != 0)) {
         return ret;
     }
@@ -256,6 +301,7 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
 
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
+#endif
 
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
@@ -265,7 +311,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     tb_page_addr_t phys_pc, phys_p2;
     tcg_insn_unit *gen_code_buf;
     int gen_code_size, search_size, max_insns;
+#ifdef CONFIG_IA64_OBSERVABILITY
+    TCGCodegenStats codegen_stats;
+#else
     int64_t ti;
+#endif
     void *host_pc;
 
     assert_memory_lock();
@@ -321,8 +371,26 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
  restart_translate:
     trace_translate_block(tb, s.pc, tb->tc.ptr);
 
+#ifdef CONFIG_IA64_OBSERVABILITY
+    TCGCodegenStats *codegen_stats_ptr =
+        (cpu->cc->tcg_ops->tb_codegen_stats != NULL ||
+         cpu->cc->tcg_ops->tb_codegen_failure_stats != NULL) ?
+        &codegen_stats : NULL;
+
+    if (codegen_stats_ptr != NULL) {
+        memset(&codegen_stats, 0, sizeof(codegen_stats));
+    }
+    gen_code_size = setjmp_gen_code(env, tb, s.pc, host_pc, &max_insns,
+                                    codegen_stats_ptr);
+#else
     gen_code_size = setjmp_gen_code(env, tb, s.pc, host_pc, &max_insns, &ti);
+#endif
     if (unlikely(gen_code_size < 0)) {
+#ifdef CONFIG_IA64_OBSERVABILITY
+        if (cpu->cc->tcg_ops->tb_codegen_failure_stats) {
+            cpu->cc->tcg_ops->tb_codegen_failure_stats(cpu, gen_code_size);
+        }
+#endif
         switch (gen_code_size) {
         case -1:
             trace_tb_gen_code_buffer_overflow("setjmp_gen_code");
@@ -395,6 +463,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         goto buffer_overflow;
     }
     tb->tc.size = gen_code_size;
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (codegen_stats_ptr != NULL) {
+        codegen_stats.host_bytes = gen_code_size;
+    }
+#endif
 
     /*
      * For CF_PCREL, attribute all executions of the generated code
@@ -517,6 +590,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
      * to the QHT.
      */
     if (tb_page_addr0(tb) == -1) {
+#ifdef CONFIG_IA64_OBSERVABILITY
+        if (cpu->cc->tcg_ops->tb_codegen_stats) {
+            cpu->cc->tcg_ops->tb_codegen_stats(cpu, tb, &codegen_stats);
+        }
+#endif
         assert_no_pages_locked();
         return tb;
     }
@@ -537,6 +615,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         tcg_tb_remove(tb);
         return existing_tb;
     }
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (cpu->cc->tcg_ops->tb_codegen_stats) {
+        cpu->cc->tcg_ops->tb_codegen_stats(cpu, tb, &codegen_stats);
+    }
+#endif
     return tb;
 }
 

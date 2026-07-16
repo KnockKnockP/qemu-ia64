@@ -29,6 +29,8 @@
 
 typedef struct IA64ProfileTbShape {
     uint32_t counter[IA64_PROFILE_COUNTER_COUNT];
+    uint32_t group_length[IA64_PROFILE_GROUP_HIST_COUNT];
+    uint32_t group_destination[IA64_PROFILE_GROUP_HIST_COUNT];
 } IA64ProfileTbShape;
 
 /*
@@ -88,6 +90,8 @@ typedef struct IA64TrGrRef {
 
 typedef struct IA64TrInstructionPlan {
     uint64_t address;
+    uint64_t direct_target;
+    IA64Opcode opcode;
     uint64_t source_gr[2];
     uint64_t dest_gr[2];
     uint64_t preserve_gr[2];
@@ -116,6 +120,7 @@ typedef struct IA64TrInstructionPlan {
     bool must_pfs;
     bool stop_after;
     bool unconditional_noreturn;
+    bool zero_store_candidate;
 } IA64TrInstructionPlan;
 
 typedef struct IA64TrDecodedBranchArm {
@@ -257,6 +262,8 @@ typedef struct DisasContext {
     bool rewrite_control_flow_exit;
     bool source_overlay_known_clear;
     bool alat_may_active;
+    uint32_t perf_tb_id;
+    IA64ProfileTbEnd profile_end_reason;
     IA64ProfileTbShape profile_shape;
 } DisasContext;
 
@@ -416,7 +423,9 @@ static void ia64_tr_profile_emit(DisasContext *ctx, IA64ProfileExit exit)
         return;
     }
     shape_slot = ia64_profile_register_tb_shape(
-        shape->counter, ia64_tr_profile_dirty_count(ctx), exit);
+        ctx->base.pc_first, ctx->base.tb->flags,
+        shape->counter, shape->group_length, shape->group_destination,
+        ia64_tr_profile_dirty_count(ctx), exit, ctx->profile_end_reason);
     ia64_tr_profile_add_runtime_counter(
         IA64_CPU_OFFSET(production_profile.shape_exec[shape_slot]), 1);
     if (ia64_profile_sample_shift() != 0) {
@@ -623,7 +632,14 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->alat_may_active =
         !ia64_tr_alat_empty_specialization_enabled() ||
         (ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE) != 0;
+    ctx->perf_tb_id = ia64_perf_enabled() ? ia64_perf_register_tb() : 0;
+    ctx->profile_end_reason = IA64_PROFILE_TB_END_OTHER;
     memset(&ctx->profile_shape, 0, sizeof(ctx->profile_shape));
+    if (ctx->profile_enabled) {
+        ctx->profile_shape.counter[
+            (ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE) != 0 ?
+                IA64_PROFILE_ALAT_ACTIVE_TB : IA64_PROFILE_ALAT_EMPTY_TB]++;
+    }
 
     /*
      * Instruction fetch exceptions raised while translating a later bundle in
@@ -644,7 +660,7 @@ static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
     ctx->state_cache_available = ia64_tr_state_cache_enabled();
     ctx->state_cache_active = false;
     if (ia64_perf_enabled()) {
-        gen_helper_perf_tb_exec();
+        gen_helper_perf_tb_exec(tcg_constant_i32(ctx->perf_tb_id));
     }
 }
 
@@ -696,8 +712,11 @@ static TCGv_i64 ia64_tr_ensure_static_gr(DisasContext *ctx, uint8_t reg)
         tcg_gen_ld_i64(ctx->static_gr[reg], tcg_env,
                        ia64_tr_static_gr_offset(ctx, reg));
         ctx->static_gr_valid |= bit;
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
     } else {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_HIT, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_HIT, 1);
     }
     return ctx->static_gr[reg];
 }
@@ -715,8 +734,11 @@ static TCGv_i64 ia64_tr_ensure_br(DisasContext *ctx, uint8_t reg)
                        offsetof(CPUIA64State, br) +
                        reg * sizeof(uint64_t));
         ctx->br_valid |= bit;
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
     } else {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_HIT, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_HIT, 1);
     }
     return ctx->br[reg];
 }
@@ -735,8 +757,11 @@ static TCGv_i64 ia64_tr_ensure_ar(DisasContext *ctx, uint8_t reg)
                        offsetof(CPUIA64State, ar) +
                        reg * sizeof(uint64_t));
         ctx->ar_valid[word] |= bit;
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
     } else {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_HIT, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_HIT, 1);
     }
     return ctx->ar[reg];
 }
@@ -750,8 +775,11 @@ static TCGv_i64 ia64_tr_ensure_pr(DisasContext *ctx)
     if (!ctx->pr_valid) {
         tcg_gen_ld_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
         ctx->pr_valid = true;
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
     } else {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_HIT, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_HIT, 1);
     }
     return ctx->pr;
 }
@@ -766,8 +794,11 @@ static TCGv_i64 ia64_tr_ensure_gr_nat(DisasContext *ctx)
         tcg_gen_ld_i64(ctx->gr_nat, tcg_env,
                        offsetof(CPUIA64State, nat.gr_nat));
         ctx->gr_nat_valid = true;
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
     } else {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_HIT, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_HIT, 1);
     }
     return ctx->gr_nat;
 }
@@ -834,8 +865,17 @@ static void ia64_tr_sync_state_cache_dirty(
 static void ia64_tr_sync_state_cache(DisasContext *ctx)
 {
     IA64TrStateCacheDirty dirty;
+    uint32_t writebacks;
 
     ia64_tr_capture_state_cache_dirty(ctx, &dirty);
+    writebacks = ctpop32(dirty.static_gr) + ctpop32(dirty.br) +
+                 ctpop64(dirty.ar[0]) + ctpop64(dirty.ar[1]) +
+                 dirty.pr + dirty.gr_nat;
+    ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_SYNC, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_WRITEBACK, writebacks);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_DIRTY_WRITEBACK,
+                        writebacks);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, writebacks);
     ia64_tr_sync_state_cache_dirty(ctx, &dirty);
 }
 
@@ -882,6 +922,13 @@ static void ia64_tr_reload_state_cache(DisasContext *ctx)
 
 static void ia64_tr_invalidate_state_cache(DisasContext *ctx)
 {
+    uint32_t valid = ctpop32(ctx->static_gr_valid) +
+                     ctpop32(ctx->br_valid) +
+                     ctpop64(ctx->ar_valid[0]) +
+                     ctpop64(ctx->ar_valid[1]) +
+                     ctx->pr_valid + ctx->gr_nat_valid;
+
+    ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_SPILL, valid);
     ctx->static_gr_valid = 0;
     ctx->static_gr_dirty = 0;
     ctx->br_valid = 0;
@@ -1039,6 +1086,8 @@ static void ia64_tr_store_source_visibility_state(DisasContext *ctx,
                        offsetof(CPUIA64State,
                                 issue_group.saved_fr_mask) +
                        sizeof(uint64_t));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 11);
     }
     tcg_gen_st8_i32(tcg_constant_i32(typed_active), tcg_env,
                     offsetof(CPUIA64State, issue_group.typed_active));
@@ -1666,15 +1715,23 @@ static void ia64_tr_group_reserve(DisasContext *ctx,
                                   unsigned instruction_capacity)
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    uint64_t started_ns;
 
     g_assert(!group->active && group->current == NULL);
     g_assert(instruction_capacity <= UINT16_MAX);
     if (instruction_capacity <= group->instruction_capacity) {
         return;
     }
+    started_ns = ia64_perf_clock_ns();
     group->instruction = g_renew(IA64TrInstructionTransaction,
                                  group->instruction,
                                  instruction_capacity);
+    IA64_PERF_INC(IA64_PERF_PLAN_ALLOCATION);
+    IA64_PERF_ADD(IA64_PERF_PLAN_ALLOCATION_BYTES,
+                  instruction_capacity *
+                  sizeof(IA64TrInstructionTransaction));
+    IA64_PERF_ADD(IA64_PERF_PLAN_ALLOC_HOST_NS,
+                  ia64_perf_clock_ns() - started_ns);
     group->instruction_capacity = instruction_capacity;
 }
 
@@ -1711,8 +1768,11 @@ static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
     if (reg == 0) {
         tcg_gen_movi_i64(value, 0);
         tcg_gen_movi_i64(nat, 0);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_CLEAR, 1);
         return;
     }
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_UNKNOWN, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_LOAD, 1);
     g_assert(group->active);
     half = reg >= 64;
     bit = UINT64_C(1) << (reg % 64);
@@ -1725,6 +1785,7 @@ static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
                        ia64_tr_group_saved_gr_offset(reg));
         tcg_gen_ld_i64(nat, tcg_env,
                        ia64_tr_group_saved_nat_offset(reg));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 2);
         return;
     }
 
@@ -1741,6 +1802,10 @@ static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
     tcg_gen_ld_i64(mask, tcg_env,
                    offsetof(CPUIA64State, issue_group.saved_gr_mask) +
                    half * sizeof(uint64_t));
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 3);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_BRANCH, 1);
     tcg_gen_andi_i64(mask, mask, bit);
     tcg_gen_movcond_i64(TCG_COND_NE, value, mask, tcg_constant_i64(0),
                         saved_value, live_value);
@@ -2002,6 +2067,7 @@ static void ia64_tr_group_load_ordinary_pfs(DisasContext *ctx,
     } else if (group->pfs_must_saved) {
         tcg_gen_ld_i64(value, tcg_env,
                        offsetof(CPUIA64State, issue_group.saved_pfs));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
     } else {
         TCGv_i64 live = ia64_tr_scratch_i64(ctx);
         TCGv_i64 saved = ia64_tr_scratch_i64(ctx);
@@ -2012,6 +2078,9 @@ static void ia64_tr_group_load_ordinary_pfs(DisasContext *ctx,
                        offsetof(CPUIA64State, issue_group.saved_pfs));
         tcg_gen_ld8u_i64(saved_valid, tcg_env,
                          offsetof(CPUIA64State, issue_group.pfs_saved));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 2);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
         tcg_gen_movcond_i64(TCG_COND_NE, value, saved_valid,
                             tcg_constant_i64(0), saved, live);
     }
@@ -2056,6 +2125,9 @@ static void ia64_tr_group_write_pfs(DisasContext *ctx, TCGv_i64 value,
                 offsetof(CPUIA64State, issue_group.pfs_saved));
             tcg_gen_brcondi_i64(TCG_COND_NE, saved_valid, 0,
                                 already_saved);
+            ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
+            ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
+            ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
         }
         {
             TCGv_i64 old_pfs = ia64_tr_scratch_i64(ctx);
@@ -2066,6 +2138,8 @@ static void ia64_tr_group_write_pfs(DisasContext *ctx, TCGv_i64 value,
             tcg_gen_st8_i32(
                 tcg_constant_i32(1), tcg_env,
                 offsetof(CPUIA64State, issue_group.pfs_saved));
+            ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_SAVE_PFS, 1);
+            ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 2);
         }
         if (already_saved != NULL) {
             gen_set_label(already_saved);
@@ -2103,14 +2177,21 @@ static void ia64_tr_group_preserve_ordinary_gr_source(DisasContext *ctx,
     if (may_saved != 0) {
         mask = ia64_tr_scratch_i64(ctx);
         tcg_gen_ld_i64(mask, tcg_env, mask_offset);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
         if ((may_saved & bit) != 0) {
             saved = gen_new_label();
             tcg_gen_brcondi_i64(TCG_COND_TSTNE, mask, bit, saved);
+            ia64_tr_profile_add(ctx,
+                                IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
         }
     }
     ia64_tr_load_static_gr_ref_pair(ctx, live, nat, ref);
     tcg_gen_st_i64(live, tcg_env, ia64_tr_group_saved_gr_offset(reg));
     tcg_gen_st_i64(nat, tcg_env, ia64_tr_group_saved_nat_offset(reg));
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_SAVE_GR, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_SAVE_NAT, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 3);
     if (mask == NULL) {
         tcg_gen_st_i64(tcg_constant_i64(bit), tcg_env, mask_offset);
     } else {
@@ -2143,9 +2224,13 @@ static void ia64_tr_group_preserve_ordinary_br_source(
         tcg_gen_ld8u_i64(mask, tcg_env,
                          offsetof(CPUIA64State,
                                   issue_group.saved_br_mask));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
         if ((group->br_may_saved & bit) != 0) {
             saved = gen_new_label();
             tcg_gen_brcondi_i64(TCG_COND_TSTNE, mask, bit, saved);
+            ia64_tr_profile_add(ctx,
+                                IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
         }
     }
     ia64_tr_load_br(ctx, live, write->reg);
@@ -2165,6 +2250,8 @@ static void ia64_tr_group_preserve_ordinary_br_source(
     if (saved != NULL) {
         gen_set_label(saved);
     }
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_SAVE_BR, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 2);
     group->br_may_saved |= bit;
     if (write->must_write) {
         group->br_must_saved |= bit;
@@ -2186,6 +2273,9 @@ static void ia64_tr_group_preserve_ordinary_pr_source(DisasContext *ctx,
         tcg_gen_ld8u_i64(pr_saved, tcg_env,
                          offsetof(CPUIA64State, issue_group.pr_saved));
         tcg_gen_brcondi_i64(TCG_COND_NE, pr_saved, 0, saved);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
     }
     if (ctx->state_cache_active) {
         tcg_gen_mov_i64(pr, ia64_tr_ensure_pr(ctx));
@@ -2196,6 +2286,8 @@ static void ia64_tr_group_preserve_ordinary_pr_source(DisasContext *ctx,
                    offsetof(CPUIA64State, issue_group.saved_pr));
     tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
                     offsetof(CPUIA64State, issue_group.pr_saved));
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_SAVE_PR, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 2);
     if (saved != NULL) {
         gen_set_label(saved);
     }
@@ -2205,42 +2297,51 @@ static void ia64_tr_group_preserve_ordinary_pr_source(DisasContext *ctx,
 static void ia64_tr_group_clear_ordinary_source_overlay(DisasContext *ctx)
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    unsigned clears = 4;
 
     if (group->gr_may_saved[0] != 0) {
+        clears++;
         tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
                        offsetof(CPUIA64State,
                                 issue_group.saved_gr_mask));
     }
     if (group->gr_may_saved[1] != 0) {
+        clears++;
         tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
                        offsetof(CPUIA64State,
                                 issue_group.saved_gr_mask) +
                        sizeof(uint64_t));
     }
     if (group->br_may_saved != 0) {
+        clears++;
         tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                         offsetof(CPUIA64State,
                                  issue_group.saved_br_mask));
     }
     if (group->pr_may_saved) {
+        clears++;
         tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                         offsetof(CPUIA64State, issue_group.pr_saved));
     }
     if (group->branch_forward_may_nonzero) {
+        clears++;
         tcg_gen_st_i64(
             tcg_constant_i64(0), tcg_env,
             offsetof(CPUIA64State, issue_group.branch_pr_forward_mask));
     }
     if (group->branch_br_forward_may_nonzero) {
+        clears++;
         tcg_gen_st8_i32(
             tcg_constant_i32(0), tcg_env,
             offsetof(CPUIA64State, issue_group.branch_br_forward_mask));
     }
     if (group->pfs_may_saved) {
+        clears++;
         tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                         offsetof(CPUIA64State, issue_group.pfs_saved));
     }
     if (group->branch_pfs_forward_may_nonzero) {
+        clears++;
         tcg_gen_st8_i32(
             tcg_constant_i32(0), tcg_env,
             offsetof(CPUIA64State, issue_group.branch_pfs_forwarded));
@@ -2254,6 +2355,8 @@ static void ia64_tr_group_clear_ordinary_source_overlay(DisasContext *ctx)
                    sizeof(uint64_t));
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                     offsetof(CPUIA64State, issue_group.typed_active));
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, clears);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, clears);
 }
 
 static void ia64_tr_group_begin_instruction(
@@ -2656,6 +2759,12 @@ static void ia64_tr_group_retire_instruction(
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     TCGv_i64 dest_mask = NULL;
     TCGv_i64 dest_mask_hi = NULL;
+    unsigned writes = instruction->gr_count + instruction->br_count +
+                      instruction->pr_count +
+                      instruction->pr_image.active;
+
+    ia64_tr_profile_add(ctx, IA64_PROFILE_STAGED_WRITE, writes);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_FINAL_COMMIT, writes);
 
     if (instruction->gr_count != 0) {
         dest_mask = ia64_tr_scratch_i64(ctx);
@@ -2903,6 +3012,8 @@ static void ia64_tr_group_publish_prefix_for_noreturn_fault(DisasContext *ctx)
      * immediately invokes a no-return interruption helper.  A returning helper
      * boundary must preserve the overlay instead.
     */
+    ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_FAULT, 1);
     ia64_tr_sync_state_cache(ctx);
     ia64_tr_group_clear_ordinary_source_overlay(ctx);
 }
@@ -2949,6 +3060,13 @@ static void ia64_tr_group_suspend_for_typed_continuation(DisasContext *ctx)
 
     g_assert(group->active && group->current == NULL &&
              group->instruction_count != 0 && ctx->typed_group_active);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_DURABLE_MATERIALIZATION, 1);
+    ia64_tr_profile_add(
+        ctx, IA64_PROFILE_DURABLE_BYTES,
+        (ctpop64(group->gr_may_saved[0]) +
+         ctpop64(group->gr_may_saved[1])) * 16 +
+        ctpop32(group->br_may_saved) * 8 + group->pr_may_saved * 8 +
+        group->pfs_may_saved * 8);
     group->active = false;
     group->instruction_count = 0;
 }
@@ -3009,6 +3127,8 @@ static void ia64_tr_group_publish_state_for_returning_helper(
      * Export the cache, but retain the ordinary-source overlay: later slots in
      * this issue group must continue to select their group-entry images.
      */
+    ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_HELPER, 1);
     ia64_tr_sync_state_cache(ctx);
 }
 
@@ -5369,19 +5489,33 @@ static void ia64_tr_rewrite_plan_append(
     if (ctx->rewrite_plan_count == ctx->rewrite_plan_capacity) {
         unsigned capacity = MAX(16u,
                                 (unsigned)ctx->rewrite_plan_capacity * 2);
+        uint64_t started_ns = ia64_perf_clock_ns();
 
         g_assert(capacity <= UINT16_MAX);
         ctx->rewrite_plan = g_renew(IA64TrInstructionPlan,
                                     ctx->rewrite_plan, capacity);
+        IA64_PERF_INC(IA64_PERF_PLAN_ALLOCATION);
+        IA64_PERF_ADD(IA64_PERF_PLAN_ALLOCATION_BYTES,
+                      capacity * sizeof(IA64TrInstructionPlan));
+        IA64_PERF_ADD(IA64_PERF_PLAN_ALLOC_HOST_NS,
+                      ia64_perf_clock_ns() - started_ns);
         ctx->rewrite_plan_capacity = capacity;
     }
 
     plan = &ctx->rewrite_plan[ctx->rewrite_plan_count++];
     memset(plan, 0, sizeof(*plan));
     plan->address = insn->address;
+    plan->direct_target =
+        (insn->address & ~(uint64_t)(IA64_BUNDLE_SIZE - 1)) + insn->imm;
+    plan->opcode = insn->opcode;
     plan->bundle_index = bundle_index;
     plan->slot = insn->slot;
     plan->stop_after = insn->stop_after;
+    plan->zero_store_candidate = insn->opcode == IA64_OP_ST1 &&
+                                 insn->r2 == 0;
+    if (ia64_perf_enabled()) {
+        ia64_perf_max(IA64_PERF_PLAN_USE_MAX, ctx->rewrite_plan_count);
+    }
 
     {
         const IA64TrSystemDescriptor *system =
@@ -5911,6 +6045,209 @@ static void ia64_tr_rewrite_plan_append_bundle(
     }
 }
 
+/*
+ * Translation-only classification of the architecture WP0 is intended to
+ * replace.  It deliberately emits no guest code and changes no admission or
+ * lowering decision: the resulting execution weights come solely from the
+ * existing sampled-TB mechanism.
+ */
+static void ia64_tr_profile_group_census(DisasContext *ctx)
+{
+    IA64ProfileTbShape *shape = &ctx->profile_shape;
+    unsigned slots = ctx->rewrite_plan_emit_count;
+    unsigned destinations = 0;
+    bool complete;
+    bool memory = false;
+    bool helper = false;
+    bool control = false;
+    bool rse = false;
+    bool system = false;
+    bool loop = false;
+    bool loop_self = false;
+    bool zero_store = false;
+
+    if (!ctx->profile_enabled || slots == 0) {
+        return;
+    }
+
+    complete = ctx->rewrite_plan[slots - 1].stop_after ||
+               ctx->rewrite_plan[slots - 1].unconditional_noreturn;
+    for (unsigned i = 0; i < slots; i++) {
+        const IA64TrInstructionPlan *plan = &ctx->rewrite_plan[i];
+        const IA64OpcodeTraits *traits =
+            ia64_opcode_traits_for(plan->opcode);
+        uint32_t states;
+        bool slot_memory;
+
+        destinations += ctpop64(plan->dest_gr[0]) +
+                        ctpop64(plan->dest_gr[1]) +
+                        ctpop64(plan->dest_pr) + ctpop32(plan->dest_br) +
+                        ctpop64(plan->dest_ar[0]) +
+                        ctpop64(plan->dest_ar[1]) + plan->dest_cfm;
+        if (traits == NULL || traits->family == NULL) {
+            system = true;
+            continue;
+        }
+        states = traits->family->sources | traits->family->destinations;
+        slot_memory = (states & IA64_OPCODE_STATE_MEMORY) != 0 ||
+                      (traits->family->may_fault &
+                       IA64_OPCODE_FAULT_MEMORY) != 0;
+        memory |= slot_memory;
+        helper |= traits->lowering_owner == IA64_OPCODE_OWNER_FOCUSED_HELPER;
+        control |= traits->family->tb_behavior != IA64_OPCODE_TB_CONTINUE;
+        rse |= (states & IA64_OPCODE_STATE_RSE) != 0 ||
+               (traits->family->may_fault & IA64_OPCODE_FAULT_RSE) != 0;
+        system |= (states & (IA64_OPCODE_STATE_CR |
+                             IA64_OPCODE_STATE_PSR |
+                             IA64_OPCODE_STATE_TRANSLATION |
+                             IA64_OPCODE_STATE_INTERRUPT)) != 0;
+        loop |= ia64_tr_decoded_is_loop_branch(plan->opcode);
+        if (ia64_tr_decoded_is_loop_branch(plan->opcode)) {
+            loop_self |= plan->direct_target == ctx->base.pc_first;
+        }
+        zero_store |= plan->zero_store_candidate;
+        if ((states & IA64_OPCODE_STATE_GR) != 0 &&
+            (states & (IA64_OPCODE_STATE_MEMORY |
+                       IA64_OPCODE_STATE_RSE |
+                       IA64_OPCODE_STATE_CONTROL)) == 0) {
+            shape->counter[IA64_PROFILE_COMMON_INTEGER_SLOT]++;
+        }
+        if ((traits->family->destinations & IA64_OPCODE_STATE_PR) != 0) {
+            shape->counter[IA64_PROFILE_COMMON_PREDICATE_SLOT]++;
+        }
+        if (traits->family->tb_behavior != IA64_OPCODE_TB_CONTINUE ||
+            (states & IA64_OPCODE_STATE_CONTROL) != 0) {
+            shape->counter[IA64_PROFILE_COMMON_BRANCH_SLOT]++;
+        }
+        if (slot_memory) {
+            shape->counter[IA64_PROFILE_COMMON_MEMORY_SLOT]++;
+        }
+        if (ia64_tr_decoded_is_loop_branch(plan->opcode)) {
+            shape->counter[IA64_PROFILE_COMMON_LOOP_SLOT]++;
+        }
+    }
+
+    shape->counter[IA64_PROFILE_SLOT_EXECUTED] += slots;
+    shape->group_length[MIN(slots, IA64_PROFILE_GROUP_HIST_MAX)]++;
+    shape->group_destination[
+        MIN(destinations, IA64_PROFILE_GROUP_HIST_MAX)]++;
+    if (loop) {
+        if (!loop_self) {
+            shape->counter[IA64_PROFILE_LOOP_REJECT_NOT_SELF]++;
+        } else if (rse || system || helper) {
+            shape->counter[IA64_PROFILE_LOOP_REJECT_OBSERVATION]++;
+        } else if (!complete) {
+            shape->counter[IA64_PROFILE_LOOP_REJECT_BODY]++;
+        } else {
+            shape->counter[IA64_PROFILE_LOOP_RECOGNIZED]++;
+            if (zero_store) {
+                shape->counter[IA64_PROFILE_LOOP_ZERO_STORE]++;
+                shape->counter[IA64_PROFILE_LOOP_SLOW_FALLBACK]++;
+            }
+        }
+    }
+
+    if (rse || system || ctx->base.plugin_enabled) {
+        shape->counter[IA64_PROFILE_SHAPE_C_GROUP]++;
+        shape->counter[IA64_PROFILE_SHAPE_C_SLOT] += slots;
+        if (rse) {
+            shape->counter[IA64_PROFILE_SHAPE_C_RSE]++;
+        } else if (system) {
+            shape->counter[IA64_PROFILE_SHAPE_C_SYSTEM]++;
+        } else {
+            shape->counter[IA64_PROFILE_SHAPE_C_OBSERVATION]++;
+        }
+    } else if (complete && !memory && !helper) {
+        shape->counter[IA64_PROFILE_SHAPE_A_GROUP]++;
+        shape->counter[IA64_PROFILE_SHAPE_A_SLOT] += slots;
+    } else {
+        shape->counter[IA64_PROFILE_SHAPE_B_GROUP]++;
+        shape->counter[IA64_PROFILE_SHAPE_B_SLOT] += slots;
+    }
+
+    if (!complete) {
+        uint64_t next_bundle =
+            (ctx->rewrite_plan[slots - 1].address & ~UINT64_C(0xf)) +
+            IA64_BUNDLE_SIZE;
+
+        shape->counter[IA64_PROFILE_GROUP_TB_CROSSING]++;
+        if ((next_bundle & TARGET_PAGE_MASK) !=
+            (ctx->base.pc_first & TARGET_PAGE_MASK)) {
+            shape->counter[IA64_PROFILE_GROUP_PAGE_CROSSING]++;
+        }
+    }
+    if (memory) {
+        ctx->profile_end_reason = IA64_PROFILE_TB_END_MEMORY;
+    } else if (helper) {
+        ctx->profile_end_reason = IA64_PROFILE_TB_END_HELPER;
+    } else if (control) {
+        ctx->profile_end_reason = IA64_PROFILE_TB_END_BRANCH;
+    }
+}
+
+static void ia64_tr_perf_plan_census(DisasContext *ctx)
+{
+    bool memory = false;
+    bool helper = false;
+    bool control = false;
+    bool page = false;
+
+    if (!ia64_perf_enabled()) {
+        return;
+    }
+    for (unsigned i = 0; i < ctx->rewrite_plan_emit_count; i++) {
+        const IA64TrInstructionPlan *plan = &ctx->rewrite_plan[i];
+        const IA64OpcodeTraits *traits =
+            ia64_opcode_traits_for(plan->opcode);
+        uint64_t sources = ctpop64(plan->source_gr[0]) +
+                           ctpop64(plan->source_gr[1]);
+
+        ia64_perf_add(IA64_PERF_NAT_UNKNOWN, sources);
+        ia64_perf_add(IA64_PERF_NAT_DYNAMIC_LOAD, sources);
+        if (traits == NULL || traits->family == NULL) {
+            helper = true;
+            continue;
+        }
+        memory |= ((traits->family->sources |
+                    traits->family->destinations) &
+                   IA64_OPCODE_STATE_MEMORY) != 0 ||
+                  (traits->family->may_fault & IA64_OPCODE_FAULT_MEMORY) != 0;
+        helper |= traits->lowering_owner ==
+                  IA64_OPCODE_OWNER_FOCUSED_HELPER;
+        control |= traits->family->tb_behavior != IA64_OPCODE_TB_CONTINUE;
+        if (((traits->family->sources | traits->family->destinations) &
+             IA64_OPCODE_STATE_RSE) != 0) {
+            ia64_perf_count(IA64_PERF_NAT_RSE_UNKNOWN);
+            ia64_perf_count(IA64_PERF_NAT_LATTICE_INVALIDATE);
+        }
+        if (traits->family->nat_rule == IA64_OPCODE_NAT_NONE) {
+            ia64_perf_add(IA64_PERF_NAT_KNOWN_CLEAR,
+                          ctpop64(plan->dest_gr[0]) +
+                          ctpop64(plan->dest_gr[1]));
+        }
+    }
+    if (ctx->rewrite_plan_emit_count != 0 &&
+        !ctx->rewrite_plan[ctx->rewrite_plan_emit_count - 1].stop_after) {
+        uint64_t next_bundle =
+            (ctx->rewrite_plan[ctx->rewrite_plan_emit_count - 1].address &
+             ~UINT64_C(0xf)) + IA64_BUNDLE_SIZE;
+
+        page = (next_bundle & TARGET_PAGE_MASK) !=
+               (ctx->base.pc_first & TARGET_PAGE_MASK);
+    }
+    if (memory) {
+        ia64_perf_count(IA64_PERF_PLAN_END_MEMORY);
+    } else if (helper) {
+        ia64_perf_count(IA64_PERF_PLAN_END_HELPER);
+    } else if (control) {
+        ia64_perf_count(IA64_PERF_PLAN_END_BRANCH);
+    } else if (page) {
+        ia64_perf_count(IA64_PERF_PLAN_END_PAGE);
+    } else {
+        ia64_perf_count(IA64_PERF_PLAN_END_OTHER);
+    }
+}
+
 static void ia64_tr_rewrite_plan_finalize(DisasContext *ctx,
                                           unsigned segment_bundles)
 {
@@ -5927,6 +6264,7 @@ static void ia64_tr_rewrite_plan_finalize(DisasContext *ctx,
         ctx->rewrite_plan_emit_count++;
     }
     g_assert(ctx->rewrite_plan_emit_count != 0);
+    IA64_PERF_ADD(IA64_PERF_PLAN_USE, ctx->rewrite_plan_emit_count);
 
     /*
      * Lookahead is an admission proof, not a durable source-visibility
@@ -5965,6 +6303,8 @@ static void ia64_tr_rewrite_plan_finalize(DisasContext *ctx,
         live_pr |= plan->source_pr | plan->branch_source_pr;
         live_br |= plan->source_br | plan->branch_source_br;
     }
+    ia64_tr_profile_group_census(ctx);
+    ia64_tr_perf_plan_census(ctx);
 }
 
 static bool ia64_tr_preflight_decoded_bundle_through(
@@ -6164,6 +6504,9 @@ static bool ia64_tr_preflight_rewrite_region(
     bool group_start = ctx->instruction_group_start;
     unsigned validated_bundles = 0;
     unsigned segment_bundles;
+    bool shortened_for_tb_limit;
+    bool shortened_for_plugin = false;
+    bool shortened_for_op_budget = false;
     uint8_t validated_last_slot = IA64_SLOT_COUNT - 1;
     int remaining_bundles =
         ctx->base.max_insns - ctx->base.num_insns + 1;
@@ -6292,14 +6635,17 @@ static bool ia64_tr_preflight_rewrite_region(
      * are deliberately suspended and resumed with the persisted overlay.
      */
     segment_bundles = MIN(validated_bundles, (unsigned)remaining_bundles);
+    shortened_for_tb_limit = segment_bundles < validated_bundles;
     if (ctx->base.plugin_enabled) {
         /* Plugin post-insn ops are emitted after translate_insn returns. */
+        shortened_for_plugin = segment_bundles > 1;
         segment_bundles = MIN(segment_bundles, 1u);
     }
     while (segment_bundles != 0 &&
            !tcg_op_buf_has_space(
                (size_t)segment_bundles * IA64_TR_REWRITE_OPS_PER_BUNDLE +
                IA64_TR_REWRITE_EXIT_OPS)) {
+        shortened_for_op_budget = true;
         segment_bundles--;
     }
     if (segment_bundles == 0) {
@@ -6318,9 +6664,20 @@ static bool ia64_tr_preflight_rewrite_region(
     *bundle_count = segment_bundles;
     *last_slot = segment_bundles == validated_bundles ?
                  validated_last_slot : IA64_SLOT_COUNT - 1;
+    IA64_PERF_INC(IA64_PERF_PLAN_PREFLIGHT_SUCCESS);
+    if (shortened_for_tb_limit) {
+        IA64_PERF_INC(IA64_PERF_PLAN_SHORTEN_TB_LIMIT);
+    }
+    if (shortened_for_plugin) {
+        IA64_PERF_INC(IA64_PERF_PLAN_SHORTEN_PLUGIN);
+    }
+    if (shortened_for_op_budget) {
+        IA64_PERF_INC(IA64_PERF_PLAN_SHORTEN_OP_BUDGET);
+    }
     return true;
 
 reject:
+    IA64_PERF_INC(IA64_PERF_PLAN_PREFLIGHT_REJECT);
     ia64_tr_rewrite_plan_reset(ctx);
     return false;
 }
@@ -10870,6 +11227,7 @@ static bool ia64_tr_try_decoded_bundle(DisasContext *ctx,
 
 static void ia64_tr_emit_main_loop_exit(DisasContext *ctx)
 {
+    ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_EXIT, 1);
     ia64_tr_sync_state_cache(ctx);
     ia64_tr_flush_retired_bundles(ctx);
     if (ia64_perf_enabled()) {
@@ -10892,7 +11250,16 @@ static void ia64_tr_emit_exit_request_guard(TCGLabel *main_loop_exit)
 
     tcg_gen_ld8u_i32(request, tcg_env,
                      IA64_CPU_STATE_OFFSET(exit_request));
-    tcg_gen_brcondi_i32(TCG_COND_NE, request, 0, main_loop_exit);
+    if (ia64_perf_enabled()) {
+        TCGLabel *not_requested = gen_new_label();
+
+        tcg_gen_brcondi_i32(TCG_COND_EQ, request, 0, not_requested);
+        gen_helper_perf_exit_request();
+        tcg_gen_br(main_loop_exit);
+        gen_set_label(not_requested);
+    } else {
+        tcg_gen_brcondi_i32(TCG_COND_NE, request, 0, main_loop_exit);
+    }
 }
 
 static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
@@ -10902,6 +11269,7 @@ static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
     if (translator_use_goto_tb(&ctx->base, target)) {
         TCGLabel *main_loop_exit = gen_new_label();
 
+        ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_EXIT, 1);
         ia64_tr_sync_state_cache(ctx);
         ia64_tr_commit_ip(target);
         ia64_tr_flush_retired_bundles(ctx);
@@ -10973,6 +11341,8 @@ static void ia64_tr_emit_typed_direct_branch_exit(
     if (taken) {
         g_assert(instruction_group_start && !typed_group_active);
         ia64_tr_store_typed_taken_visibility_state();
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
     } else {
         ia64_tr_store_source_visibility_state(
             ctx, instruction_group_start, typed_group_active);
@@ -11025,6 +11395,8 @@ static void ia64_tr_emit_typed_indirect_branch_exit(DisasContext *ctx,
     TCGLabel *main_loop_exit = gen_new_label();
 
     ia64_tr_store_typed_taken_visibility_state();
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
     ia64_tr_clear_restart_ri();
     ia64_tr_commit_ip_value(target);
     ia64_tr_flush_retired_bundles(ctx);
@@ -11065,6 +11437,8 @@ static void ia64_tr_emit_typed_return_exit(DisasContext *ctx,
 
     ia64_tr_require_helper(opcode, IA64_OPCODE_HELPER_RETURN_FRAME);
     ia64_tr_store_typed_taken_visibility_state();
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
     ia64_tr_clear_restart_ri();
     ia64_tr_commit_ip_value(target);
     /* Count the retired branch without permitting asynchronous observation. */
@@ -11172,6 +11546,8 @@ static void ia64_tr_emit_decoded_rfi(DisasContext *ctx,
     ia64_tr_split_state_cache_at_typed_branch(ctx);
 
     ia64_tr_store_typed_taken_visibility_state();
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
         ia64_tr_note_retired_bundle(ctx);
     ia64_tr_retire_bundles_deferred_interrupt(ctx);
     gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address));
@@ -11758,6 +12134,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     uint64_t pc = ctx->base.pc_next;
     uint64_t lo;
     uint64_t hi;
+    uint64_t started_ns;
     uint8_t start_slot;
 
     /*
@@ -11783,6 +12160,11 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         ctx->state_cache_active = true;
     }
     ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_EXECUTED, 1);
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE) != 0) {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ALAT_ACTIVE_BUNDLE, 1);
+    } else {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ALAT_EMPTY_BUNDLE, 1);
+    }
     if (ctx->state_cache_active) {
         ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_ACTIVE_BUNDLE, 1);
     }
@@ -11800,6 +12182,7 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         return;
     }
 
+    started_ns = ia64_perf_clock_ns();
     lo = translator_ldq_end(ctx->env, &ctx->base, pc, MO_LE);
     hi = translator_ldq_end(ctx->env, &ctx->base, pc + 8, MO_LE);
     ia64_decode_bundle_words(lo, hi, &bundle);
@@ -11809,6 +12192,8 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     }
     ia64_format_decoded_bundle(&bundle, bundle_text, sizeof(bundle_text));
     trace_ia64_bundle_decode(pc, bundle_text);
+    IA64_PERF_ADD(IA64_PERF_DECODE_HOST_NS,
+                  ia64_perf_clock_ns() - started_ns);
 
     ctx->base.pc_next = pc + IA64_BUNDLE_SIZE;
     start_slot = pc == ctx->base.pc_first ?
@@ -11828,8 +12213,11 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         unsigned bundle_count = 0;
         uint8_t last_slot = IA64_SLOT_COUNT - 1;
 
+        started_ns = ia64_perf_clock_ns();
         ctx->typed_segment_active = ia64_tr_preflight_rewrite_region(
             ctx, &bundle, pc, start_slot, &bundle_count, &last_slot);
+        IA64_PERF_ADD(IA64_PERF_PREFLIGHT_HOST_NS,
+                      ia64_perf_clock_ns() - started_ns);
         if (!ctx->typed_segment_active) {
             ia64_tr_fail_typed_continuation(
                 pc, "closed typed preflight rejected a valid bundle");
@@ -11847,8 +12235,13 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         uint8_t last_slot = ctx->rewrite_region_bundles_left == 1 ?
                             ctx->rewrite_region_last_slot :
                             IA64_SLOT_COUNT - 1;
-        bool translated = ia64_tr_try_decoded_bundle(
+        bool translated;
+
+        started_ns = ia64_perf_clock_ns();
+        translated = ia64_tr_try_decoded_bundle(
             ctx, &bundle, pc, start_slot, last_slot);
+        IA64_PERF_ADD(IA64_PERF_TCG_EMISSION_HOST_NS,
+                      ia64_perf_clock_ns() - started_ns);
 
         if (!translated) {
             ia64_tr_fail_typed_continuation(
@@ -11954,6 +12347,11 @@ void ia64_translate_code(CPUState *cs, TranslationBlock *tb, int *max_insns,
                                     (pc >> 61)));
     translator_loop(cs, tb, max_insns, pc, host_pc, &ia64_tr_ops, &ctx.base,
                     TCG_TYPE_VA);
+    IA64_PERF_ADD(IA64_PERF_PLAN_CAPACITY, ctx.rewrite_plan_capacity);
+    if (ia64_perf_enabled()) {
+        ia64_perf_max(IA64_PERF_PLAN_CAPACITY_MAX,
+                      ctx.rewrite_plan_capacity);
+    }
     g_free(ctx.rewrite_group.instruction);
     g_free(ctx.rewrite_plan);
 }

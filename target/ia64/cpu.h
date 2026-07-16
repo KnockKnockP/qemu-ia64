@@ -727,6 +727,7 @@ struct ArchCPU {
     uint64_t benchmark_host_cycles;
     int64_t benchmark_start_ns;
     int64_t benchmark_start_host_cycles;
+    bool perf_interrupt_masked;
     IA64ProductionProfile production_profile;
 };
 

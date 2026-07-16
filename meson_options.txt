@@ -57,6 +57,8 @@ option('install_blobs', type : 'boolean', value : true,
        description: 'install provided firmware blobs')
 option('vibtanium_efi', type : 'boolean', value : true,
        description: 'build and package the Vibtanium IA-64 EFI BIT application')
+option('ia64_observability', type : 'boolean', value : true,
+       description: 'compile IA-64 performance counters and sampled production profiling')
 option('sparse', type : 'feature', value : 'auto',
        description: 'sparse checker')
 option('guest_agent', type : 'feature', value : 'auto',

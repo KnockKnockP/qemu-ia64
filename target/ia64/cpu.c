@@ -11,6 +11,7 @@
 #include "insn.h"
 #include "mem.h"
 #include "perf.h"
+#include "profile.h"
 #include "accel/tcg/cpu-loop.h"
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
@@ -170,6 +171,10 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) == 0 &&
         !ia64_external_interrupt_pending(env)) {
+        if (cpu->perf_interrupt_masked) {
+            cpu->perf_interrupt_masked = false;
+            IA64_PERF_INC(IA64_PERF_INTERRUPT_MASKED_INTERVAL_END);
+        }
         return false;
     }
 
@@ -191,15 +196,27 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         (!env->rse.cfle &&
          (env->rse.dirty < 0 || env->rse.dirty_nat < 0))) {
         IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
+        if (!cpu->perf_interrupt_masked) {
+            cpu->perf_interrupt_masked = true;
+            IA64_PERF_INC(IA64_PERF_INTERRUPT_MASKED_INTERVAL);
+        }
         return false;
     }
 
     if (!ia64_external_interrupt_enabled(env)) {
         IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED);
+        if (!cpu->perf_interrupt_masked) {
+            cpu->perf_interrupt_masked = true;
+            IA64_PERF_INC(IA64_PERF_INTERRUPT_MASKED_INTERVAL);
+        }
         return false;
     }
 
     cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+    if (cpu->perf_interrupt_masked) {
+        cpu->perf_interrupt_masked = false;
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_MASKED_INTERVAL_END);
+    }
     IA64_PERF_INC(IA64_PERF_INTERRUPT_DELIVERED);
     ia64_diag_record_external_interrupt(env, interrupt_request);
     ia64_deliver_exception(env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env->ip,
@@ -506,6 +523,9 @@ static void ia64_itm_timer_cb(void *opaque)
     IA64CPU *cpu = opaque;
     bool release_bql = false;
 
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_TIMER_CALLBACK);
+    IA64_PERF_INC(IA64_PERF_INTERRUPT_REQUEST);
+
     /*
      * Runs on the main loop thread; only kick the vCPU.  The
      * cpu_exec_interrupt hook polls the ITC/ITM compare and latches the
@@ -557,6 +577,27 @@ static const struct SysemuCPUOps ia64_sysemu_ops = {
     .get_phys_addr_debug = ia64_cpu_get_phys_addr_debug,
 };
 
+static void ia64_tb_codegen_stats(CPUState *cs, const TranslationBlock *tb,
+                                  const TCGCodegenStats *stats)
+{
+    (void)cs;
+    (void)tb;
+    ia64_perf_record_codegen(stats);
+    ia64_profile_codegen_complete(tb, stats);
+}
+
+static void ia64_tb_codegen_failure_stats(CPUState *cs, int reason)
+{
+    (void)cs;
+    ia64_perf_record_codegen_failure(reason);
+}
+
+static void ia64_tb_exec_time_stats(CPUState *cs, uint64_t elapsed_ns)
+{
+    (void)cs;
+    ia64_perf_record_exec_time(elapsed_ns);
+}
+
 #define IA64_TCG_OPS_COMMON \
     .initialize = ia64_translate_init, \
     .translate_code = ia64_translate_code, \
@@ -574,18 +615,42 @@ static const TCGCPUOps ia64_tcg_ops = {
     IA64_TCG_OPS_COMMON,
 };
 
-static const TCGCPUOps ia64_tcg_perf_ops = {
+static const TCGCPUOps ia64_tcg_profile_ops = {
+    IA64_TCG_OPS_COMMON,
+    .tb_codegen_stats = ia64_tb_codegen_stats,
+};
+
+static const TCGCPUOps ia64_tcg_tb_stats_ops = {
     IA64_TCG_OPS_COMMON,
     .tb_lookup_stats = ia64_tb_lookup_stats,
     .tb_flush_stats = ia64_tb_flush_stats,
     .tb_invalidate_stats = ia64_tb_invalidate_stats,
 };
 
+static const TCGCPUOps ia64_tcg_perf_ops = {
+    IA64_TCG_OPS_COMMON,
+    .tb_lookup_stats = ia64_tb_lookup_stats,
+    .tb_flush_stats = ia64_tb_flush_stats,
+    .tb_invalidate_stats = ia64_tb_invalidate_stats,
+    .tb_codegen_stats = ia64_tb_codegen_stats,
+    .tb_codegen_failure_stats = ia64_tb_codegen_failure_stats,
+    .tb_exec_time_stats = ia64_tb_exec_time_stats,
+};
+
 #undef IA64_TCG_OPS_COMMON
 
 static const TCGCPUOps *ia64_tcg_ops_for_process(void)
 {
-    return ia64_perf_init_enabled() ? &ia64_tcg_perf_ops : &ia64_tcg_ops;
+    if (ia64_perf_init_enabled()) {
+        return &ia64_tcg_perf_ops;
+    }
+    if (ia64_profile_init_enabled()) {
+        return &ia64_tcg_profile_ops;
+    }
+    if (ia64_perf_tb_stats_only_enabled()) {
+        return &ia64_tcg_tb_stats_ops;
+    }
+    return &ia64_tcg_ops;
 }
 
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)

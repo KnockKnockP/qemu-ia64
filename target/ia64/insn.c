@@ -1068,6 +1068,7 @@ void ia64_alat_set_valid(CPUIA64State *env, unsigned index, bool valid)
 {
     IA64AlatEntry *entry;
     unsigned target;
+    bool was_active;
 
     if (!env || index >= IA64_ALAT_COUNT) {
         return;
@@ -1077,6 +1078,7 @@ void ia64_alat_set_valid(CPUIA64State *env, unsigned index, bool valid)
     if (entry->valid == valid) {
         return;
     }
+    was_active = env->alat.valid_mask != 0;
     target = entry->target;
     entry->valid = valid;
     if (valid) {
@@ -1093,6 +1095,11 @@ void ia64_alat_set_valid(CPUIA64State *env, unsigned index, bool valid)
             --env->alat.gr_refcount[target] == 0) {
             env->alat.gr_mask[target / 64] &= ~(1ULL << (target % 64));
         }
+    }
+    if (!was_active && env->alat.valid_mask != 0) {
+        IA64_PERF_INC(IA64_PERF_ALAT_ACTIVE_ENTER);
+    } else if (was_active && env->alat.valid_mask == 0) {
+        IA64_PERF_INC(IA64_PERF_ALAT_ACTIVE_EXIT);
     }
 }
 
@@ -1133,6 +1140,8 @@ void ia64_alat_invalidate_all(CPUIA64State *env)
     if (valid_mask == 0) {
         return;
     }
+    IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_ALL);
+    IA64_PERF_INC(IA64_PERF_ALAT_ACTIVE_EXIT);
 
     env->alat.next = 0;
     env->alat.valid_mask = 0;
@@ -1156,6 +1165,7 @@ void ia64_alat_invalidate_gr(CPUIA64State *env, uint32_t reg)
     if ((env->alat.gr_mask[reg / 64] & (1ULL << (reg % 64))) == 0) {
         return;
     }
+    IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_GR);
 
     valid_mask = env->alat.valid_mask;
     while (valid_mask != 0) {
@@ -1178,6 +1188,9 @@ void ia64_alat_invalidate_fr(CPUIA64State *env, uint32_t reg)
     }
 
     valid_mask = env->alat.valid_mask;
+    if (valid_mask != 0) {
+        IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_FR);
+    }
     while (valid_mask != 0) {
         unsigned index = ctz32(valid_mask);
 
@@ -1205,6 +1218,9 @@ static void ia64_alat_invalidate_stacked_gr_range(CPUIA64State *env,
      * refcounts continue to be maintained by the single validity authority.
      */
     valid_mask = env->alat.valid_mask;
+    if (valid_mask != 0) {
+        IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_RSE);
+    }
     while (valid_mask != 0) {
         unsigned index = ctz32(valid_mask);
         uint32_t target = env->alat.entries[index].target;
@@ -1251,9 +1267,14 @@ static void ia64_alat_record_target(CPUIA64State *env, uint32_t target,
 {
     IA64AlatEntry *entry;
     unsigned index;
+    uint64_t started_ns = ia64_perf_clock_ns();
+
+    IA64_PERF_INC(IA64_PERF_ALAT_HELPER_CALL);
 
     if (!env || !ia64_alat_target_is_valid(target_type, target) ||
         !ia64_alat_width_is_valid(target_type, width)) {
+        IA64_PERF_ADD(IA64_PERF_ALAT_HELPER_HOST_NS,
+                      ia64_perf_clock_ns() - started_ns);
         return;
     }
 
@@ -1274,6 +1295,9 @@ static void ia64_alat_record_target(CPUIA64State *env, uint32_t target,
     entry->physical = physical;
     entry->address = address;
     ia64_alat_set_valid(env, index, true);
+    IA64_PERF_INC(IA64_PERF_ALAT_RECORD);
+    IA64_PERF_ADD(IA64_PERF_ALAT_HELPER_HOST_NS,
+                  ia64_perf_clock_ns() - started_ns);
 }
 
 void ia64_alat_record_gr(CPUIA64State *env, uint32_t target,
@@ -1299,8 +1323,14 @@ static bool ia64_alat_check_target(CPUIA64State *env, uint32_t reg,
     int index = ia64_alat_find_target(env, reg, target_type);
     IA64AlatEntry *entry;
     bool matches;
+    uint64_t started_ns = ia64_perf_clock_ns();
+
+    IA64_PERF_INC(IA64_PERF_ALAT_HELPER_CALL);
 
     if (index < 0) {
+        IA64_PERF_INC(IA64_PERF_ALAT_CHECK_MISS);
+        IA64_PERF_ADD(IA64_PERF_ALAT_HELPER_HOST_NS,
+                      ia64_perf_clock_ns() - started_ns);
         return false;
     }
 
@@ -1311,6 +1341,10 @@ static bool ia64_alat_check_target(CPUIA64State *env, uint32_t reg,
     if (clear) {
         ia64_alat_set_valid(env, index, false);
     }
+    IA64_PERF_INC(matches ? IA64_PERF_ALAT_CHECK_HIT :
+                            IA64_PERF_ALAT_CHECK_MISS);
+    IA64_PERF_ADD(IA64_PERF_ALAT_HELPER_HOST_NS,
+                  ia64_perf_clock_ns() - started_ns);
     return matches;
 }
 
@@ -2582,6 +2616,7 @@ void ia64_refresh_interrupt_delivery(CPUIA64State *env)
          * timer/device edge is responsible for waking a remote vCPU.
          */
         cpu_set_interrupt(cpu, CPU_INTERRUPT_HARD);
+        IA64_PERF_INC(IA64_PERF_INTERRUPT_REQUEST);
     } else if (!ia64_external_interrupt_pending(env) &&
                (qatomic_read(&cpu->interrupt_request) &
                 CPU_INTERRUPT_HARD) != 0) {

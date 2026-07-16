@@ -74,4 +74,5 @@ DEF_HELPER_FLAGS_3(raise_unaligned_data_reference, TCG_CALL_NO_RETURN,
 DEF_HELPER_FLAGS_0(perf_tb_exit_chained, TCG_CALL_NO_RWG, void)
 DEF_HELPER_FLAGS_0(perf_tb_exit_lookup_ptr, TCG_CALL_NO_RWG, void)
 DEF_HELPER_FLAGS_0(perf_tb_exit_main_loop, TCG_CALL_NO_RWG, void)
-DEF_HELPER_FLAGS_0(perf_tb_exec, TCG_CALL_NO_RWG, void)
+DEF_HELPER_FLAGS_1(perf_tb_exec, TCG_CALL_NO_RWG, void, i32)
+DEF_HELPER_FLAGS_0(perf_exit_request, TCG_CALL_NO_RWG, void)

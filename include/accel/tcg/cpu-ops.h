@@ -23,6 +23,8 @@
 #include "accel/tcg/tb-cpu-state.h"
 #include "tcg/tcg-mo.h"
 
+typedef struct TCGCodegenStats TCGCodegenStats;
+
 struct TCGCPUOps {
     /**
      * mttcg_supported: multi-threaded TCG is supported
@@ -90,6 +92,27 @@ struct TCGCPUOps {
      * one invalidated translation block.
      */
     void (*tb_invalidate_stats)(CPUState *cpu);
+    /**
+     * @tb_codegen_stats: Optional target-local translation-density hook.
+     *
+     * Called once after a newly linked TB has completed translation,
+     * optimization, and host code generation.  The hook is diagnostic only;
+     * it must not influence the generated TB or guest-visible state.
+     */
+    void (*tb_codegen_stats)(CPUState *cpu, const TranslationBlock *tb,
+                             const TCGCodegenStats *stats);
+    /**
+     * @tb_codegen_failure_stats: Optional target-local code-generation retry
+     * hook.  @reason is the negative tcg_gen_code result (-1, -2, or -3).
+     */
+    void (*tb_codegen_failure_stats)(CPUState *cpu, int reason);
+    /**
+     * @tb_exec_time_stats: Optional exact diagnostic timing hook.
+     *
+     * The elapsed interval covers one return from tcg_qemu_tb_exec, including
+     * any directly chained TBs and focused helpers executed in that interval.
+     */
+    void (*tb_exec_time_stats)(CPUState *cpu, uint64_t elapsed_ns);
     /**
      * @synchronize_from_tb: Synchronize state from a TCG #TranslationBlock
      *

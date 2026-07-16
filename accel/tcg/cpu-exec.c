@@ -442,15 +442,33 @@ static inline TranslationBlock * QEMU_DISABLE_CFI
 cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
 {
     uintptr_t ret;
+#ifdef CONFIG_IA64_OBSERVABILITY
+    int64_t exec_start_ns = 0;
+#endif
     TranslationBlock *last_tb;
     const void *tb_ptr = itb->tc.ptr;
+#ifdef CONFIG_IA64_OBSERVABILITY
+    const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+#endif
 
     if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
         log_cpu_exec(log_pc(cpu, itb), cpu, itb);
     }
 
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (unlikely(tcg_ops->tb_exec_time_stats != NULL)) {
+        exec_start_ns = g_get_monotonic_time() * 1000;
+    }
+#endif
     qemu_thread_jit_execute();
     ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (unlikely(tcg_ops->tb_exec_time_stats != NULL)) {
+        uint64_t elapsed_ns = g_get_monotonic_time() * 1000 - exec_start_ns;
+
+        tcg_ops->tb_exec_time_stats(cpu, elapsed_ns);
+    }
+#endif
     cpu->neg.can_do_io = true;
     qemu_plugin_disable_mem_helpers(cpu);
     /*
@@ -472,10 +490,10 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
          * of the start of the TB.
          */
         CPUClass *cc = cpu->cc;
-        const TCGCPUOps *tcg_ops = cc->tcg_ops;
+        const TCGCPUOps *target_tcg_ops = cc->tcg_ops;
 
-        if (tcg_ops->synchronize_from_tb) {
-            tcg_ops->synchronize_from_tb(cpu, last_tb);
+        if (target_tcg_ops->synchronize_from_tb) {
+            target_tcg_ops->synchronize_from_tb(cpu, last_tb);
         } else {
             tcg_debug_assert(!(tb_cflags(last_tb) & CF_PCREL));
             assert(cc->set_pc);

@@ -4,6 +4,7 @@
 #include "hw/core/cpu.h"
 #include "system/memory.h"
 #include "target/ia64/cpu.h"
+#include "target/ia64/firmware.h"
 
 void ia64_test_cpu_interrupt_reset(void);
 unsigned int ia64_test_cpu_interrupt_count(void);
@@ -15,6 +16,12 @@ void ia64_cpu_tlb_flush(CPUIA64State *env)
 }
 
 void cpu_interrupt(CPUState *cpu, int mask)
+{
+    cpu_interrupt_calls++;
+    qatomic_or(&cpu->interrupt_request, mask);
+}
+
+void cpu_set_interrupt(CPUState *cpu, int mask)
 {
     cpu_interrupt_calls++;
     qatomic_or(&cpu->interrupt_request, mask);
@@ -33,6 +40,11 @@ void ia64_test_cpu_interrupt_reset(void)
 unsigned int ia64_test_cpu_interrupt_count(void)
 {
     return cpu_interrupt_calls;
+}
+
+bool ia64_firmware_is_call_gate(uint64_t address)
+{
+    return false;
 }
 
 uint64_t address_space_ldq_be(AddressSpace *as, hwaddr addr,

@@ -2,6 +2,8 @@
 #ifndef IA64_PERF_H
 #define IA64_PERF_H
 
+typedef struct TCGCodegenStats TCGCodegenStats;
+
 typedef enum IA64PerfCounter {
     IA64_PERF_TB_TRANSLATED,
     IA64_PERF_TB_EXECUTED,
@@ -82,14 +84,19 @@ typedef enum IA64PerfCounter {
     IA64_PERF_QEMU_TLB_FILL_EXCEPTION_LOAD,
     IA64_PERF_QEMU_TLB_FILL_EXCEPTION_STORE,
     IA64_PERF_CPU_LOOP_EXIT,
+    IA64_PERF_EXIT_REQUEST_OBSERVED,
     IA64_PERF_INTERRUPT_TIMER_CHECK,
     IA64_PERF_INTERRUPT_TIMER_FAST_NOT_DUE,
     IA64_PERF_INTERRUPT_TIMER_DUE,
     IA64_PERF_INTERRUPT_TIMER_LATCHED,
+    IA64_PERF_INTERRUPT_TIMER_CALLBACK,
+    IA64_PERF_INTERRUPT_REQUEST,
     IA64_PERF_INTERRUPT_EXEC_CHECK,
     IA64_PERF_INTERRUPT_EXEC_PENDING_MASKED,
     IA64_PERF_INTERRUPT_UNMASK_PENDING,
     IA64_PERF_INTERRUPT_DELIVERED,
+    IA64_PERF_INTERRUPT_MASKED_INTERVAL,
+    IA64_PERF_INTERRUPT_MASKED_INTERVAL_END,
     IA64_PERF_EXCEPTION_DELIVERED,
     IA64_PERF_EXCEPTION_TLB_MISS,
     IA64_PERF_EXCEPTION_PAGE_FAULT,
@@ -135,17 +142,89 @@ typedef enum IA64PerfCounter {
     IA64_PERF_FIRMWARE_PAL_OTHER,
     IA64_PERF_FIRMWARE_SAL,
     IA64_PERF_FIRMWARE_EFI,
+    IA64_PERF_TRANSLATE_HOST_NS,
+    IA64_PERF_DECODE_HOST_NS,
+    IA64_PERF_PREFLIGHT_HOST_NS,
+    IA64_PERF_PLAN_ALLOC_HOST_NS,
+    IA64_PERF_TCG_EMISSION_HOST_NS,
+    IA64_PERF_TCG_OPTIMIZE_HOST_NS,
+    IA64_PERF_HOST_CODEGEN_NS,
+    IA64_PERF_GENERATED_EXECUTION_HOST_NS,
+    IA64_PERF_GENERATED_EXECUTION_RETURNS,
+    IA64_PERF_EVENT_OBSERVATION_LATENCY_NS_MAX,
+    IA64_PERF_TCG_OP_GENERATED,
+    IA64_PERF_TCG_OP_OPTIMIZED,
+    IA64_PERF_TCG_ENV_LOAD_GENERATED,
+    IA64_PERF_TCG_ENV_LOAD_OPTIMIZED,
+    IA64_PERF_TCG_ENV_STORE_GENERATED,
+    IA64_PERF_TCG_ENV_STORE_OPTIMIZED,
+    IA64_PERF_TCG_BRANCH_GENERATED,
+    IA64_PERF_TCG_BRANCH_OPTIMIZED,
+    IA64_PERF_TCG_HELPER_GENERATED,
+    IA64_PERF_TCG_HELPER_OPTIMIZED,
+    IA64_PERF_TCG_QEMU_LOAD_GENERATED,
+    IA64_PERF_TCG_QEMU_LOAD_OPTIMIZED,
+    IA64_PERF_TCG_QEMU_STORE_GENERATED,
+    IA64_PERF_TCG_QEMU_STORE_OPTIMIZED,
+    IA64_PERF_HOST_CODE_BYTES,
+    IA64_PERF_TB_CODEGEN_BUFFER_OVERFLOW,
+    IA64_PERF_TB_CODEGEN_TOO_LARGE,
+    IA64_PERF_TB_CODEGEN_PAGE_RELOCK,
+    IA64_PERF_PLAN_CAPACITY,
+    IA64_PERF_PLAN_USE,
+    IA64_PERF_PLAN_CAPACITY_MAX,
+    IA64_PERF_PLAN_USE_MAX,
+    IA64_PERF_PLAN_ALLOCATION,
+    IA64_PERF_PLAN_ALLOCATION_BYTES,
+    IA64_PERF_PLAN_PREFLIGHT_SUCCESS,
+    IA64_PERF_PLAN_PREFLIGHT_REJECT,
+    IA64_PERF_PLAN_SHORTEN_TB_LIMIT,
+    IA64_PERF_PLAN_SHORTEN_OP_BUDGET,
+    IA64_PERF_PLAN_SHORTEN_PLUGIN,
+    IA64_PERF_PLAN_END_MEMORY,
+    IA64_PERF_PLAN_END_BRANCH,
+    IA64_PERF_PLAN_END_PAGE,
+    IA64_PERF_PLAN_END_HELPER,
+    IA64_PERF_PLAN_END_OTHER,
+    IA64_PERF_NAT_KNOWN_CLEAR,
+    IA64_PERF_NAT_KNOWN_SET,
+    IA64_PERF_NAT_UNKNOWN,
+    IA64_PERF_NAT_DYNAMIC_LOAD,
+    IA64_PERF_NAT_DYNAMIC_BRANCH,
+    IA64_PERF_NAT_FAULT,
+    IA64_PERF_NAT_LATTICE_INVALIDATE,
+    IA64_PERF_NAT_RSE_UNKNOWN,
+    IA64_PERF_ALAT_ACTIVE_ENTER,
+    IA64_PERF_ALAT_ACTIVE_EXIT,
+    IA64_PERF_ALAT_RECORD,
+    IA64_PERF_ALAT_CHECK_HIT,
+    IA64_PERF_ALAT_CHECK_MISS,
+    IA64_PERF_ALAT_INVALIDATE_GR,
+    IA64_PERF_ALAT_INVALIDATE_FR,
+    IA64_PERF_ALAT_INVALIDATE_RSE,
+    IA64_PERF_ALAT_INVALIDATE_ALL,
+    IA64_PERF_ALAT_HELPER_CALL,
+    IA64_PERF_ALAT_HELPER_HOST_NS,
     IA64_PERF_COUNTER_COUNT,
 } IA64PerfCounter;
 
+#ifdef CONFIG_IA64_OBSERVABILITY
 extern int ia64_perf_enabled_cached;
 
 bool ia64_perf_init_enabled(void);
+bool ia64_perf_tb_stats_only_enabled(void);
 void ia64_perf_count(IA64PerfCounter counter);
 void ia64_perf_add(IA64PerfCounter counter, uint64_t value);
+void ia64_perf_max(IA64PerfCounter counter, uint64_t value);
 void ia64_perf_count_access_type(int access_type);
 void ia64_perf_count_translate_status(unsigned status);
 void ia64_perf_count_exception_kind(unsigned kind);
+uint32_t ia64_perf_register_tb(void);
+void ia64_perf_tb_exec(uint32_t id);
+void ia64_perf_record_codegen(const TCGCodegenStats *stats);
+void ia64_perf_record_codegen_failure(int reason);
+void ia64_perf_record_exec_time(uint64_t elapsed_ns);
+uint64_t ia64_perf_clock_ns(void);
 static inline bool ia64_perf_enabled(void)
 {
     if (ia64_perf_enabled_cached < 0) {
@@ -153,6 +232,70 @@ static inline bool ia64_perf_enabled(void)
     }
     return ia64_perf_enabled_cached != 0;
 }
+#else
+static inline bool ia64_perf_init_enabled(void)
+{
+    return false;
+}
+static inline bool ia64_perf_tb_stats_only_enabled(void)
+{
+    return false;
+}
+static inline bool ia64_perf_enabled(void)
+{
+    return false;
+}
+static inline void ia64_perf_count(IA64PerfCounter counter)
+{
+    (void)counter;
+}
+static inline void ia64_perf_add(IA64PerfCounter counter, uint64_t value)
+{
+    (void)counter;
+    (void)value;
+}
+static inline void ia64_perf_max(IA64PerfCounter counter, uint64_t value)
+{
+    (void)counter;
+    (void)value;
+}
+static inline void ia64_perf_count_access_type(int access_type)
+{
+    (void)access_type;
+}
+static inline void ia64_perf_count_translate_status(unsigned status)
+{
+    (void)status;
+}
+static inline void ia64_perf_count_exception_kind(unsigned kind)
+{
+    (void)kind;
+}
+static inline uint32_t ia64_perf_register_tb(void)
+{
+    return 0;
+}
+static inline void ia64_perf_tb_exec(uint32_t id)
+{
+    (void)id;
+}
+static inline void ia64_perf_record_codegen(const TCGCodegenStats *stats)
+{
+    (void)stats;
+}
+static inline void ia64_perf_record_codegen_failure(int reason)
+{
+    (void)reason;
+}
+static inline void ia64_perf_record_exec_time(uint64_t elapsed_ns)
+{
+    (void)elapsed_ns;
+}
+static inline uint64_t ia64_perf_clock_ns(void)
+{
+    return 0;
+}
+#endif
 
 /*
  * Low-overhead absolute throughput accounting.  The active flag is changed

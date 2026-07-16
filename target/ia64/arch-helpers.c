@@ -162,9 +162,14 @@ G_NORETURN void ia64_raise_arch_translation_fault(
     cpu_loop_exit(cpu);
 }
 
-void HELPER(perf_tb_exec)(void)
+void HELPER(perf_tb_exec)(uint32_t id)
 {
-    IA64_PERF_INC(IA64_PERF_TB_EXECUTED);
+    ia64_perf_tb_exec(id);
+}
+
+void HELPER(perf_exit_request)(void)
+{
+    ia64_perf_count(IA64_PERF_EXIT_REQUEST_OBSERVED);
 }
 
 void HELPER(perf_tb_exit_main_loop)(void)

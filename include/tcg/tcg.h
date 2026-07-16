@@ -706,7 +706,50 @@ static inline void *tcg_malloc(int size)
 
 void tcg_func_start(TCGContext *s);
 
+/*
+ * Translation-density metadata collected without changing generated code.
+ * Targets may consume this through TCGCPUOps::tb_codegen_stats.  Helper names
+ * point at static TCGHelperInfo storage and remain valid for the process.
+ */
+#define TCG_CODEGEN_STATS_MAX_HELPERS 64
+
+typedef struct TCGCodegenHelperStats {
+    const char *name;
+    uint32_t calls;
+} TCGCodegenHelperStats;
+
+typedef struct TCGCodegenOpStats {
+    uint32_t total;
+    uint32_t env_load;
+    uint32_t env_store;
+    uint32_t conditional_branch;
+    uint32_t helper_call;
+    uint32_t qemu_load;
+    uint32_t qemu_store;
+    uint32_t goto_tb;
+    uint32_t goto_ptr;
+    uint32_t exit_tb;
+} TCGCodegenOpStats;
+
+typedef struct TCGCodegenStats {
+    TCGCodegenOpStats generated;
+    TCGCodegenOpStats optimized;
+    TCGCodegenHelperStats helper[TCG_CODEGEN_STATS_MAX_HELPERS];
+    uint32_t helper_count;
+    uint32_t helper_overflow_calls;
+    uint32_t guest_insns;
+    uint32_t host_bytes;
+    uint64_t translate_ns;
+    uint64_t optimize_ns;
+    uint64_t host_codegen_ns;
+} TCGCodegenStats;
+
+#ifdef CONFIG_IA64_OBSERVABILITY
+int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start,
+                 TCGCodegenStats *stats);
+#else
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start);
+#endif
 
 void tb_target_set_jmp_target(const TranslationBlock *, int,
                               uintptr_t, uintptr_t);

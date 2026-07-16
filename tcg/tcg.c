@@ -6553,10 +6553,97 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
     tcg_out_helper_load_common_args(s, ldst, parm, info, next_arg);
 }
 
+#ifdef CONFIG_IA64_OBSERVABILITY
+static void tcg_codegen_record_helper(TCGCodegenStats *stats,
+                                      const char *name)
+{
+    unsigned i;
+
+    for (i = 0; i < stats->helper_count; i++) {
+        if (stats->helper[i].name == name ||
+            strcmp(stats->helper[i].name, name) == 0) {
+            stats->helper[i].calls++;
+            return;
+        }
+    }
+    if (stats->helper_count < TCG_CODEGEN_STATS_MAX_HELPERS) {
+        i = stats->helper_count++;
+        stats->helper[i].name = name;
+        stats->helper[i].calls = 1;
+    } else {
+        stats->helper_overflow_calls++;
+    }
+}
+
+static void tcg_collect_codegen_op_stats(TCGContext *s,
+                                         TCGCodegenOpStats *stats,
+                                         TCGCodegenStats *all,
+                                         bool record_helpers)
+{
+    TCGTemp *env_temp = tcgv_ptr_temp(tcg_env);
+    TCGOp *op;
+
+    memset(stats, 0, sizeof(*stats));
+    QTAILQ_FOREACH(op, &s->ops, link) {
+        const TCGOpDef *def = &tcg_op_defs[op->opc];
+        const char *name = def->name;
+
+        stats->total++;
+        if ((def->flags & TCG_OPF_COND_BRANCH) != 0) {
+            stats->conditional_branch++;
+        }
+        if (op->opc == INDEX_op_call) {
+            stats->helper_call++;
+            if (record_helpers) {
+                tcg_codegen_record_helper(all, tcg_call_info(op)->name);
+            }
+        } else if (g_str_has_prefix(name, "qemu_ld")) {
+            stats->qemu_load++;
+        } else if (g_str_has_prefix(name, "qemu_st")) {
+            stats->qemu_store++;
+        } else if (g_str_has_prefix(name, "ld") &&
+                   arg_temp(op->args[1]) == env_temp) {
+            stats->env_load++;
+        } else if (g_str_has_prefix(name, "st") &&
+                   arg_temp(op->args[1]) == env_temp) {
+            stats->env_store++;
+        }
+
+        switch (op->opc) {
+        case INDEX_op_goto_tb:
+            stats->goto_tb++;
+            break;
+        case INDEX_op_goto_ptr:
+            stats->goto_ptr++;
+            break;
+        case INDEX_op_exit_tb:
+            stats->exit_tb++;
+            break;
+        default:
+            break;
+        }
+    }
+}
+#endif
+
+#ifdef CONFIG_IA64_OBSERVABILITY
+int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start,
+                 TCGCodegenStats *stats)
+#else
 int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
+#endif
 {
     int i, num_insns;
+#ifdef CONFIG_IA64_OBSERVABILITY
+    int64_t optimize_start_ns;
+#endif
     TCGOp *op;
+
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (stats != NULL) {
+        tcg_collect_codegen_op_stats(s, &stats->generated, stats, false);
+    }
+#endif
 
     if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP)
                  && qemu_log_in_addr_range(pc_start))) {
@@ -6589,6 +6676,11 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     /* Do not reuse any EBB that may be allocated within the TB. */
     tcg_temp_ebb_reset_freed(s);
 
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (stats != NULL) {
+        optimize_start_ns = g_get_monotonic_time() * 1000;
+    }
+#endif
     tcg_optimize(s);
 
     reachable_code_pass(s);
@@ -6613,6 +6705,14 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
             liveness_pass_1(s);
         }
     }
+
+#ifdef CONFIG_IA64_OBSERVABILITY
+    if (stats != NULL) {
+        stats->optimize_ns = g_get_monotonic_time() * 1000 -
+                             optimize_start_ns;
+        tcg_collect_codegen_op_stats(s, &stats->optimized, stats, true);
+    }
+#endif
 
     if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP_OPT)
                  && qemu_log_in_addr_range(pc_start))) {
