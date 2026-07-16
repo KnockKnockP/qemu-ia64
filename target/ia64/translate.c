@@ -139,9 +139,7 @@ typedef struct IA64TrInstructionTransaction {
     IA64TrPrWrite pr[IA64_TR_PR_WRITES_PER_INSN];
     IA64TrBrWrite br[IA64_TR_BR_WRITES_PER_INSN];
     IA64TrPrImageWrite pr_image;
-    TCGv_i64 pre_ic;
-    TCGv_i64 pre_ed;
-    TCGv_i64 pre_suppression;
+    TCGv_i64 pre_psr;
     uint64_t address;
     uint64_t dest_gr[2];
     uint64_t preserve_gr[2];
@@ -189,9 +187,7 @@ typedef struct IA64TrGroupTransaction {
     TCGv_i64 br_written[IA64_TR_BR_WRITES_PER_INSN];
     TCGv_i64 pr_image_value;
     TCGv_i64 pr_image_written;
-    TCGv_i64 pre_ic;
-    TCGv_i64 pre_ed;
-    TCGv_i64 pre_suppression;
+    TCGv_i64 pre_psr;
     TCGv_i64 post_alat_address;
     TCGv_i64 post_alat_record;
     uint16_t instruction_capacity;
@@ -260,6 +256,7 @@ typedef struct DisasContext {
     bool rewrite_scratch_active;
     bool rewrite_control_flow_exit;
     bool source_overlay_known_clear;
+    bool alat_may_active;
     IA64ProfileTbShape profile_shape;
 } DisasContext;
 
@@ -292,6 +289,7 @@ typedef struct IA64TrStateCacheDirty {
      (intptr_t)offsetof(IA64CPU, env))
 
 #define IA64_TR_PSR_IC_BIT UINT64_C(0x0000000000002000)
+#define IA64_TR_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_TR_PSR_AC_BIT UINT64_C(0x0000000000000008)
 #define IA64_TR_PSR_ED_BIT UINT64_C(0x0000080000000000)
 #define IA64_TR_PSR_FAULT_SUPPRESSION_MASK \
@@ -444,6 +442,68 @@ static bool ia64_tr_state_cache_enabled(void)
     return enabled;
 }
 
+static bool ia64_tr_debug_fast_guard_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_DEBUG_FAST_GUARD");
+
+        enabled = value == NULL ||
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
+static bool ia64_tr_retire_fast_guard_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = g_getenv("VIBTANIUM_TCG_RETIRE_FAST_GUARD");
+
+        enabled = value == NULL ||
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
+static bool ia64_tr_psr_finish_specialization_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value =
+            g_getenv("VIBTANIUM_TCG_PSR_FINISH_SPECIALIZATION");
+
+        enabled = value == NULL ||
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
+static bool ia64_tr_alat_empty_specialization_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value =
+            g_getenv("VIBTANIUM_TCG_ALAT_EMPTY_SPECIALIZATION");
+
+        enabled = value == NULL ||
+                  !(strcmp(value, "0") == 0 ||
+                    g_ascii_strcasecmp(value, "off") == 0 ||
+                    g_ascii_strcasecmp(value, "false") == 0);
+    }
+    return enabled;
+}
+
 static unsigned ia64_tr_state_cache_gr_limit(void)
 {
     static int limit = -1;
@@ -560,6 +620,9 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->rewrite_scratch_active = false;
     ctx->rewrite_control_flow_exit = false;
     ctx->source_overlay_known_clear = !ctx->typed_group_active;
+    ctx->alat_may_active =
+        !ia64_tr_alat_empty_specialization_enabled() ||
+        (ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE) != 0;
     memset(&ctx->profile_shape, 0, sizeof(ctx->profile_shape));
 
     /*
@@ -846,12 +909,54 @@ static void ia64_tr_emit_benchmark_retire(TCGv_i32 bundle_count)
 
 static void ia64_tr_flush_retired_bundles(DisasContext *ctx)
 {
+    TCGLabel *retire_only;
+    TCGLabel *done;
+    TCGv_i32 pending;
+    TCGv_i64 psr;
+
     if (!ctx->retired_bundle_count_used) {
         return;
     }
 
+    if (!ia64_tr_retire_fast_guard_enabled()) {
+        gen_helper_retire_translated_bundles(tcg_env,
+                                             ctx->retired_bundle_count);
+        tcg_gen_movi_i32(ctx->retired_bundle_count, 0);
+        return;
+    }
+
+    /*
+     * retire_translated_bundles() can leave the TB only for an enabled
+     * external interrupt.  Its own first two requirements are the target's
+     * cached pending bit and PSR.i.  Keep the full helper as the authority for
+     * vector/TPR selection, but avoid a host helper call at every ordinary TB
+     * boundary when either cheap prerequisite is false.
+     *
+     * The benchmark TB flag is the translation-time equivalent of
+     * ia64_benchmark_retire()'s runtime active test.  On the bypass arm we
+     * therefore account inline; on the slow arm the unchanged helper accounts
+     * exactly once.
+     */
+    retire_only = gen_new_label();
+    done = gen_new_label();
+    pending = tcg_temp_new_i32();
+    psr = tcg_temp_new_i64();
+
+    tcg_gen_ld8u_i32(pending, tcg_env,
+                     offsetof(CPUIA64State, interrupt.pending));
+    tcg_gen_brcondi_i32(TCG_COND_EQ, pending, 0, retire_only);
+    tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+    tcg_gen_brcondi_i64(TCG_COND_TSTEQ, psr, IA64_TR_PSR_I_BIT,
+                        retire_only);
     gen_helper_retire_translated_bundles(tcg_env,
                                          ctx->retired_bundle_count);
+    tcg_gen_br(done);
+
+    gen_set_label(retire_only);
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_BENCHMARK) != 0) {
+        ia64_tr_emit_benchmark_retire(ctx->retired_bundle_count);
+    }
+    gen_set_label(done);
     tcg_gen_movi_i32(ctx->retired_bundle_count, 0);
 }
 
@@ -1535,9 +1640,16 @@ static void ia64_tr_emit_gr_alat_invalidate(DisasContext *ctx,
                                             TCGv_i64 dest_mask_hi,
                                             uint64_t pc)
 {
-    TCGLabel *done = gen_new_label();
-    TCGLabel *nonzero = gen_new_label();
-    TCGv_i32 valid = ia64_tr_scratch_i32(ctx);
+    TCGLabel *done;
+    TCGLabel *nonzero;
+    TCGv_i32 valid;
+
+    if (!ctx->alat_may_active) {
+        return;
+    }
+    done = gen_new_label();
+    nonzero = gen_new_label();
+    valid = ia64_tr_scratch_i32(ctx);
 
     tcg_gen_brcondi_i64(TCG_COND_NE, dest_mask, 0, nonzero);
     tcg_gen_brcondi_i64(TCG_COND_EQ, dest_mask_hi, 0, done);
@@ -2266,29 +2378,15 @@ static void ia64_tr_group_begin_instruction(
     instruction->forward_pfs = plan->forward_pfs;
     instruction->branch_source_pfs = plan->branch_source_pfs;
     instruction->must_pfs = plan->must_pfs;
-    if (group->pre_ic == NULL) {
-        group->pre_ic = tcg_temp_new_i64();
+    if (!ia64_tr_psr_finish_specialization_enabled() ||
+        (ctx->base.tb->flags & IA64_TB_FLAG_PSR_FINISH) != 0) {
+        if (group->pre_psr == NULL) {
+            group->pre_psr = tcg_temp_new_i64();
+        }
+        instruction->pre_psr = group->pre_psr;
+        tcg_gen_ld_i64(instruction->pre_psr, tcg_env,
+                       offsetof(CPUIA64State, psr));
     }
-    if (group->pre_ed == NULL) {
-        group->pre_ed = tcg_temp_new_i64();
-    }
-    if (group->pre_suppression == NULL) {
-        group->pre_suppression = tcg_temp_new_i64();
-    }
-    instruction->pre_ic = group->pre_ic;
-    instruction->pre_ed = group->pre_ed;
-    instruction->pre_suppression = group->pre_suppression;
-    tcg_gen_ld_i64(instruction->pre_ed, tcg_env,
-                   offsetof(CPUIA64State, psr));
-    tcg_gen_mov_i64(instruction->pre_ic, instruction->pre_ed);
-    tcg_gen_mov_i64(instruction->pre_suppression, instruction->pre_ed);
-    tcg_gen_andi_i64(instruction->pre_ic, instruction->pre_ic,
-                     IA64_TR_PSR_IC_BIT);
-    tcg_gen_andi_i64(instruction->pre_ed, instruction->pre_ed,
-                     IA64_TR_PSR_ED_BIT);
-    tcg_gen_andi_i64(instruction->pre_suppression,
-                     instruction->pre_suppression,
-                     IA64_TR_PSR_FAULT_SUPPRESSION_MASK);
     group->current = instruction;
     ctx->rewrite_i64_scratch_count = 0;
     ctx->rewrite_i32_scratch_count = 0;
@@ -2721,6 +2819,8 @@ static void ia64_tr_group_retire_instruction(
             tcg_constant_i32(instruction->post_alat_target_type),
             tcg_constant_i32(instruction->post_alat_memory_class));
         gen_set_label(skip);
+        /* A later instruction in this TB must observe a successful record. */
+        ctx->alat_may_active = true;
     }
 }
 
@@ -2729,11 +2829,6 @@ static void ia64_tr_group_finish_instruction_success(
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     IA64TrInstructionTransaction *instruction = group->current;
-    TCGLabel *skip_iipa = gen_new_label();
-    TCGLabel *skip_ed = gen_new_label();
-    TCGLabel *skip_suppression = gen_new_label();
-    TCGv_i64 psr = ia64_tr_scratch_i64(ctx);
-
     g_assert(instruction != NULL && instruction->address == insn->address &&
              instruction->slot == insn->slot);
 
@@ -2750,24 +2845,32 @@ static void ia64_tr_group_finish_instruction_success(
      * writer) may establish a fresh ED value after this retirement point.
      * Nullified instructions also retire successfully and consume the latch.
      */
-    tcg_gen_brcondi_i64(TCG_COND_EQ, instruction->pre_ed, 0, skip_ed);
-    tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
-    tcg_gen_andi_i64(psr, psr, ~IA64_TR_PSR_ED_BIT);
-    tcg_gen_st_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
-    gen_set_label(skip_ed);
-    tcg_gen_brcondi_i64(TCG_COND_EQ, instruction->pre_suppression, 0,
-                        skip_suppression);
-    gen_helper_clear_fault_suppression(tcg_env,
-                                       instruction->pre_suppression);
-    gen_set_label(skip_suppression);
-    tcg_gen_brcondi_i64(TCG_COND_EQ, instruction->pre_ic, 0, skip_iipa);
-    tcg_gen_st_i64(tcg_constant_i64(insn->address &
-                                    ~(uint64_t)(IA64_BUNDLE_SIZE - 1)),
-                   tcg_env, offsetof(CPUIA64State, last_successful_bundle));
-    gen_set_label(skip_iipa);
-    instruction->pre_ic = NULL;
-    instruction->pre_ed = NULL;
-    instruction->pre_suppression = NULL;
+    if (instruction->pre_psr != NULL) {
+        TCGLabel *skip_iipa = gen_new_label();
+        TCGLabel *skip_ed = gen_new_label();
+        TCGLabel *skip_suppression = gen_new_label();
+        TCGv_i64 psr = ia64_tr_scratch_i64(ctx);
+
+        tcg_gen_brcondi_i64(TCG_COND_TSTEQ, instruction->pre_psr,
+                            IA64_TR_PSR_ED_BIT, skip_ed);
+        tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+        tcg_gen_andi_i64(psr, psr, ~IA64_TR_PSR_ED_BIT);
+        tcg_gen_st_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+        gen_set_label(skip_ed);
+        tcg_gen_brcondi_i64(TCG_COND_TSTEQ, instruction->pre_psr,
+                            IA64_TR_PSR_FAULT_SUPPRESSION_MASK,
+                            skip_suppression);
+        gen_helper_clear_fault_suppression(tcg_env, instruction->pre_psr);
+        gen_set_label(skip_suppression);
+        tcg_gen_brcondi_i64(TCG_COND_TSTEQ, instruction->pre_psr,
+                            IA64_TR_PSR_IC_BIT, skip_iipa);
+        tcg_gen_st_i64(tcg_constant_i64(insn->address &
+                                        ~(uint64_t)(IA64_BUNDLE_SIZE - 1)),
+                       tcg_env,
+                       offsetof(CPUIA64State, last_successful_bundle));
+        gen_set_label(skip_iipa);
+    }
+    instruction->pre_psr = NULL;
     for (unsigned i = 0; i < instruction->gr_count; i++) {
         instruction->gr[i].value = NULL;
         instruction->gr[i].nat = NULL;
@@ -6489,6 +6592,16 @@ static void ia64_tr_publish_decoded_memory_access(
 static void ia64_tr_emit_decoded_data_debug_pre_access(
     DisasContext *ctx, TCGv_i64 address, uint8_t size, uint32_t access)
 {
+    /*
+     * Data breakpoints can match only while PSR.db=1 and PSR.dd=0.  Keep the
+     * complete architectural matcher as the active TB shape, but emit no
+     * debug work in the normal inactive shape.  Every guest PSR writer is an
+     * existing TB endpoint, so the TB key is authoritative for all slots.
+     */
+    if (ia64_tr_debug_fast_guard_enabled() &&
+        (ctx->base.tb->flags & IA64_TB_FLAG_DATA_DEBUG_ACTIVE) == 0) {
+        return;
+    }
     gen_helper_data_debug_pre_access(
         tcg_env, address, tcg_constant_i32(size),
         tcg_constant_i32(access),
@@ -11590,8 +11703,8 @@ static void ia64_tr_emit_instruction_debug_guard(
     DisasContext *ctx, const IA64DecodedBundle *bundle,
     uint64_t pc, uint8_t start_slot)
 {
-    TCGv_i32 matched = tcg_temp_new_i32();
-    TCGLabel *resume = gen_new_label();
+    TCGv_i32 matched;
+    TCGLabel *resume;
     uint8_t slot_type = bundle->valid ?
                         bundle->info->slot_type[start_slot] :
                         IA64_SLOT_TYPE_INVALID;
@@ -11602,6 +11715,18 @@ static void ia64_tr_emit_instruction_debug_guard(
      * predication and every decode legality/admission path, including a
      * bundle which will ultimately be rejected by the typed decoder.
      */
+    /*
+     * Instruction breakpoints can match only while PSR.db=1 and PSR.id=0.
+     * The TB key selects the inactive no-code shape or the complete active
+     * matcher.  Every guest PSR writer is already a TB endpoint, so no earlier
+     * slot can silently change this shape.
+     */
+    if (ia64_tr_debug_fast_guard_enabled() &&
+        (ctx->base.tb->flags & IA64_TB_FLAG_INSN_DEBUG_ACTIVE) == 0) {
+        return;
+    }
+    matched = tcg_temp_new_i32();
+    resume = gen_new_label();
     ia64_tr_sync_state_cache(ctx);
     gen_helper_instruction_debug_match(matched, tcg_env,
                                        tcg_constant_i64(pc));

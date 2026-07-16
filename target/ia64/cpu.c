@@ -90,6 +90,9 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     if (cpu->env.rse.cfle) {
         flags |= IA64_TB_FLAG_CFLE_RESUME;
     }
+    if (cpu->env.alat.valid_mask != 0) {
+        flags |= IA64_TB_FLAG_ALAT_ACTIVE;
+    }
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,

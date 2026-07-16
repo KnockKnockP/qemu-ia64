@@ -95,6 +95,10 @@
 #define IA64_TB_FLAG_TYPED_GROUP (1u << 10)
 #define IA64_TB_FLAG_BE (1u << 11)
 #define IA64_TB_FLAG_CFLE_RESUME (1u << 12)
+#define IA64_TB_FLAG_PSR_FINISH (1u << 13)
+#define IA64_TB_FLAG_ALAT_ACTIVE (1u << 14)
+#define IA64_TB_FLAG_INSN_DEBUG_ACTIVE (1u << 15)
+#define IA64_TB_FLAG_DATA_DEBUG_ACTIVE (1u << 16)
 
 #define IA64_INSN_START_GROUP_START (UINT64_C(1) << 0)
 #define IA64_INSN_START_TYPED_GROUP (UINT64_C(1) << 1)
@@ -188,6 +192,16 @@ static inline uint32_t ia64_tcg_tb_flags_from_psr(uint64_t psr)
     }
     if (psr & IA64_TB_PSR_BE_BIT) {
         flags |= IA64_TB_FLAG_BE;
+    }
+    if (psr & (IA64_PSR_IC_BIT | IA64_PSR_ED_BIT |
+               IA64_PSR_FAULT_SUPPRESSION_MASK)) {
+        flags |= IA64_TB_FLAG_PSR_FINISH;
+    }
+    if ((psr & (IA64_PSR_DB_BIT | IA64_PSR_ID_BIT)) == IA64_PSR_DB_BIT) {
+        flags |= IA64_TB_FLAG_INSN_DEBUG_ACTIVE;
+    }
+    if ((psr & (IA64_PSR_DB_BIT | IA64_PSR_DD_BIT)) == IA64_PSR_DB_BIT) {
+        flags |= IA64_TB_FLAG_DATA_DEBUG_ACTIVE;
     }
     flags |= ia64_psr_ri(psr) << IA64_TB_FLAG_RI_SHIFT;
     return flags;

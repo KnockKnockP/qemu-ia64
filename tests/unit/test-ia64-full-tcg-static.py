@@ -227,6 +227,11 @@ def main() -> int:
         "static void ia64_tr_retire_bundles_deferred_interrupt",
         "static void ia64_tr_commit_ip",
     )
+    retire_flush = section(
+        source,
+        "static void ia64_tr_flush_retired_bundles",
+        "static void ia64_tr_retire_bundles_deferred_interrupt",
+    )
     sequential_ip_commit = section(
         source,
         "static void ia64_tr_commit_ip",
@@ -476,6 +481,11 @@ def main() -> int:
         source,
         "static void ia64_tr_group_begin_instruction",
         "static IA64TrGrWrite *ia64_tr_group_prepare_gr",
+    )
+    transaction_finish = section(
+        source,
+        "static void ia64_tr_group_finish_instruction_success",
+        "static void ia64_tr_group_close",
     )
     optional_gr_prepare = section(
         source,
@@ -1353,6 +1363,34 @@ def main() -> int:
         "gen_helper_finish_fast_tb", "ia64_tr_flush_retired_bundles",
         "ia64_tr_emit_exit_request_guard", "cpu_loop_exit",
     ), "return retirement with deferred interrupt observation")
+    require(retire_flush, (
+        "if (!ia64_tr_retire_fast_guard_enabled())",
+        "offsetof(CPUIA64State, interrupt.pending)",
+        "TCG_COND_EQ, pending, 0, retire_only",
+        "offsetof(CPUIA64State, psr)",
+        "TCG_COND_TSTEQ, psr, IA64_TR_PSR_I_BIT",
+        "gen_helper_retire_translated_bundles(tcg_env",
+        "ctx->base.tb->flags & IA64_TB_FLAG_BENCHMARK",
+        "ia64_tr_emit_benchmark_retire(ctx->retired_bundle_count)",
+    ), "retirement interrupt fast guard")
+    retire_pending = retire_flush.find(
+        "offsetof(CPUIA64State, interrupt.pending)"
+    )
+    retire_psr = retire_flush.find(
+        "offsetof(CPUIA64State, psr)", retire_pending
+    )
+    retire_helper = retire_flush.rfind(
+        "gen_helper_retire_translated_bundles(tcg_env"
+    )
+    retire_inline = retire_flush.find(
+        "ia64_tr_emit_benchmark_retire(ctx->retired_bundle_count)",
+        retire_helper,
+    )
+    if not (0 <= retire_pending < retire_psr < retire_helper < retire_inline):
+        raise AssertionError(
+            "retirement must check pending/PSR.i before the unchanged helper "
+            "and account benchmark-only bypasses afterward"
+        )
     if sequential_ip_commit.count("ia64_tr_clear_restart_ri();") != 2:
         raise AssertionError(
             "sequential constant/dynamic IP commits must canonicalize both "
@@ -2496,12 +2534,46 @@ def main() -> int:
         "ia64_tr_group_prepare_pr",
         "ia64_tr_group_stage_pr_bool",
         "last_successful_bundle",
-        "instruction->pre_ic",
+        "instruction->pre_psr",
         "ia64_tr_sync_state_cache(ctx);",
     ), "instruction-group transaction")
     forbid(transaction, ("gen_helper_exec_bundle", "gen_helper_exec_slot",
                          "IA64TcgFastSlot"),
            "instruction-group transaction")
+    require(cpu_header, (
+        "IA64_TB_FLAG_PSR_FINISH (1u << 13)",
+        "IA64_PSR_IC_BIT | IA64_PSR_ED_BIT",
+        "IA64_PSR_FAULT_SUPPRESSION_MASK",
+        "flags |= IA64_TB_FLAG_PSR_FINISH",
+    ), "PSR finish-state translation-block keying")
+    require(cpu_header + tb_cpu_state + source, (
+        "IA64_TB_FLAG_ALAT_ACTIVE (1u << 14)",
+        "if (cpu->env.alat.valid_mask != 0)",
+        "flags |= IA64_TB_FLAG_ALAT_ACTIVE",
+        "ia64_tr_alat_empty_specialization_enabled()",
+        "ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE",
+        "if (!ctx->alat_may_active)",
+        "ctx->alat_may_active = true",
+    ), "empty-ALAT translation-block specialization")
+    require(cpu_header, (
+        "IA64_TB_FLAG_INSN_DEBUG_ACTIVE (1u << 15)",
+        "IA64_TB_FLAG_DATA_DEBUG_ACTIVE (1u << 16)",
+        "IA64_PSR_DB_BIT | IA64_PSR_ID_BIT",
+        "flags |= IA64_TB_FLAG_INSN_DEBUG_ACTIVE",
+        "IA64_PSR_DB_BIT | IA64_PSR_DD_BIT",
+        "flags |= IA64_TB_FLAG_DATA_DEBUG_ACTIVE",
+    ), "architectural-debug translation-block keying")
+    require(transaction_begin, (
+        "ia64_tr_psr_finish_specialization_enabled()",
+        "ctx->base.tb->flags & IA64_TB_FLAG_PSR_FINISH",
+        "tcg_gen_ld_i64(instruction->pre_psr, tcg_env",
+    ), "PSR finish-state specialized instruction entry")
+    require(transaction_finish, (
+        "if (instruction->pre_psr != NULL)",
+        "IA64_TR_PSR_ED_BIT",
+        "IA64_TR_PSR_FAULT_SUPPRESSION_MASK",
+        "IA64_TR_PSR_IC_BIT",
+    ), "PSR finish-state specialized instruction retirement")
     gr_preserve = transaction_retire.find(
         "ia64_tr_group_preserve_ordinary_gr_source"
     )
@@ -3166,12 +3238,19 @@ def main() -> int:
         )
 
     require(instruction_debug, (
+        "if (ia64_tr_debug_fast_guard_enabled() &&",
+        "ctx->base.tb->flags & IA64_TB_FLAG_INSN_DEBUG_ACTIVE",
+        "return;",
         "gen_helper_instruction_debug_match(matched, tcg_env",
         "tcg_gen_brcondi_i32(TCG_COND_EQ, matched, 0, resume)",
         "tcg_gen_movi_i64(cpu_ip, pc)",
         "ia64_tr_publish_fault_state(",
         "gen_helper_raise_instruction_debug(tcg_env)",
     ), "typed instruction-debug predecode guard")
+    debug_fast_guard = instruction_debug.find("return;")
+    debug_sync = instruction_debug.find(
+        "ia64_tr_sync_state_cache", debug_fast_guard
+    )
     debug_match = instruction_debug.find(
         "gen_helper_instruction_debug_match"
     )
@@ -3181,9 +3260,11 @@ def main() -> int:
     debug_raise = instruction_debug.find(
         "gen_helper_raise_instruction_debug", debug_publish
     )
-    if not (0 <= debug_match < debug_publish < debug_raise):
-        raise AssertionError("instruction debug must match, publish the exact "
-                             "fetch slot, then raise before typed admission")
+    if not (0 <= debug_fast_guard < debug_sync < debug_match <
+            debug_publish < debug_raise):
+        raise AssertionError("inactive instruction-debug TBs must emit no "
+                             "synchronization or matcher, then active TBs publish the "
+                             "exact fetch slot before raising when enabled")
 
     require(instruction_main, (
         "ia64_tcg_tb_flags_ri(ctx->base.tb->flags)",

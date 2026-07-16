@@ -341,6 +341,23 @@ def check_sources(root: Path) -> None:
         require(all(debug_pos < alignment_pos
                     for debug_pos, alignment_pos in zip(debug, alignment)),
                 label + ": Data Debug must precede Unaligned")
+
+    data_debug_guard = lowering(
+        "static void ia64_tr_emit_decoded_data_debug_pre_access",
+        "static void ia64_tr_emit_decoded_store_alat_invalidate",
+    )
+    for token in (
+        "if (ia64_tr_debug_fast_guard_enabled() &&",
+        "ctx->base.tb->flags & IA64_TB_FLAG_DATA_DEBUG_ACTIVE",
+        "return;",
+        "gen_helper_data_debug_pre_access(",
+    ):
+        require(token in data_debug_guard,
+                "typed Data Debug fast guard lost " + token)
+    require(data_debug_guard.index("return;") <
+            data_debug_guard.index("gen_helper_data_debug_pre_access"),
+            "inactive Data Debug TBs must emit no helper")
+
     reserved = {
         spec.opcode for spec in DATA_PLANE_OPCODE_SPECS
         if spec.isa_status == "decoder-reserved-width"
