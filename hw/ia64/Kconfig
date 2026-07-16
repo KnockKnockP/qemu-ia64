@@ -3,10 +3,13 @@ config VIBTANIUM
     default y
     depends on IA64
     select ACPI
+    select AHCI_ICH9
+    select ATI_VGA
+    select IDE_CMD646
     select ISA_BUS
+    select LSI_SCSI_PCI
     select PCI
-    select E1000_PCI
-    select IDE_PIIX
     select PCKBD
     select SERIAL_MM
-    select VGA_ISA
+    select USB_OHCI_PCI
+    select USB_UHCI

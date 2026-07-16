@@ -149,6 +149,7 @@ qtests_avr = [ 'boot-serial-test' ]
 
 qtests_ia64 = [
   'ia64-acpi-test',
+  'ia64-guest-firmware-test',
   'ia64-input-test',
 ]
 
@@ -458,6 +459,10 @@ foreach dir : target_dirs
   endif
   qtest_env.set('G_TEST_DBUS_DAEMON', meson.project_source_root() / 'tests/dbus-daemon.sh')
   qtest_env.set('QTEST_QEMU_BINARY', './qemu-system-' + target_base)
+  if target_base == 'ia64'
+    qtest_env.set('IA64_QTEST_FIRMWARE_DIR',
+                  meson.project_source_root() / 'pc-bios')
+  endif
   if have_tools and have_vhost_user_blk_server
     qtest_env.set('QTEST_QEMU_STORAGE_DAEMON_BINARY', './storage-daemon/qemu-storage-daemon')
     test_deps += [qsd]

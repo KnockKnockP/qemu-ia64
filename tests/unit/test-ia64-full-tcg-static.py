@@ -35,23 +35,77 @@ def main() -> int:
 
     path = pathlib.Path(sys.argv[1])
     source = path.read_text(encoding="utf-8")
-    interp_source = path.with_name("interp.c").read_text(encoding="utf-8")
+    target_dir = path.parent
+    retired_engine_files = (
+        "interp.c",
+        "interp-ldst.c",
+        "tcg-classify.c",
+        "tcg-classify.h",
+        "debug-trace.c",
+        "debug-trace.h",
+        "oracle-helper.h",
+        "oracle-perf.c",
+        "oracle-perf.h",
+    )
+    retained = [name for name in retired_engine_files
+                if (target_dir / name).exists()]
+    if retained:
+        raise AssertionError("retired interpreter/oracle engine files remain: "
+                             + ", ".join(retained))
     insn_source = path.with_name("insn.c").read_text(encoding="utf-8")
     insn_header = path.with_name("insn.h").read_text(encoding="utf-8")
+    forbid(insn_source + insn_header, (
+        "IA64InsnReport",
+        "ia64_insn_exec_bundle",
+        "ia64_insn_exec_slot",
+        "ia64_exec_bundle_impl",
+        "ia64_exec_slot",
+    ), "raw instruction engine API")
     rse_source = path.with_name("rse.c").read_text(encoding="utf-8")
     helper_source = path.with_name("helper.h").read_text(encoding="utf-8")
+    arch_helper_source = path.with_name("arch-helpers.c").read_text(
+        encoding="utf-8"
+    )
+    traits_source = path.with_name("opcode-traits.def").read_text(
+        encoding="utf-8"
+    )
     exception_source = path.with_name("exception.c").read_text(
         encoding="utf-8"
     )
     cpu_source = path.with_name("cpu.c").read_text(encoding="utf-8")
     cpu_header = path.with_name("cpu.h").read_text(encoding="utf-8")
     machine_source = path.with_name("machine.c").read_text(encoding="utf-8")
-    classifier_source = path.with_name("tcg-classify.c").read_text(
-        encoding="utf-8"
+    rse_vmstate = section(
+        machine_source,
+        "static const VMStateDescription vmstate_rse =",
+        "static const VMStateDescription vmstate_nat =",
     )
+    rse_vmstate_post_load = section(
+        machine_source,
+        "static int ia64_rse_vmstate_post_load",
+        "static const VMStateDescription vmstate_rse =",
+    )
+    env_pre_save = section(
+        machine_source,
+        "static int ia64_env_pre_save",
+        "static int ia64_env_pre_load",
+    )
+    env_pre_load = section(
+        machine_source,
+        "static int ia64_env_pre_load",
+        "static bool ia64_instruction_group_state_needed",
+    )
+    env_vmstate = section(
+        machine_source,
+        "static const VMStateDescription vmstate_env =",
+        "static int ia64_cpu_post_load",
+    )
+    cpu_vmstate = machine_source[machine_source.index(
+        "const VMStateDescription vmstate_ia64_cpu ="
+    ):]
     rewrite = section(source,
-                      "static bool ia64_tr_decoded_is_noop",
-                      "static bool ia64_tr_translate_fast_bundle")
+                      "static void ia64_tr_group_reserve",
+                      "static bool ia64_tr_try_decoded_bundle")
     supported = section(source,
                         "static bool ia64_tr_decoded_opcode_supported",
                         "static unsigned ia64_tr_decoded_sources")
@@ -61,7 +115,7 @@ def main() -> int:
     predicate_lower = section(
         source,
         "static void ia64_tr_emit_decoded_integer_compare",
-        "static void ia64_tr_emit_decoded_instruction",
+        "static void ia64_tr_emit_decoded_predicate_test",
     )
     compare_admission = section(
         source,
@@ -76,17 +130,47 @@ def main() -> int:
     predicate_test_lower = section(
         source,
         "static void ia64_tr_emit_decoded_predicate_test",
-        "static void ia64_tr_emit_decoded_instruction",
+        "static void ia64_tr_packed_extract_lane",
     )
     illegal_lower = section(
         source,
         "static void ia64_tr_emit_decoded_illegal_operation",
         "static bool ia64_tr_decoded_is_noop",
     )
+    memory_classifiers = section(
+        source,
+        "static bool ia64_tr_decoded_is_ordinary_integer_load",
+        "typedef enum IA64TrDecodedCompareSource",
+    )
+    memory_memop = section(
+        source,
+        "static MemOp ia64_tr_ldst_memop",
+        "static int ia64_tr_data_mmu_index",
+    )
+    memory_fault_lower = section(
+        source,
+        "static void ia64_tr_emit_decoded_data_nat_consumption",
+        "static void ia64_tr_publish_decoded_memory_access",
+    )
+    memory_publish = section(
+        source,
+        "static void ia64_tr_publish_decoded_memory_access",
+        "static void ia64_tr_emit_decoded_store_alat_invalidate",
+    )
+    memory_lower = section(
+        source,
+        "static void ia64_tr_emit_decoded_ordinary_integer_memory",
+        "static void ia64_tr_emit_decoded_data_plane_integer_load",
+    )
     pr_move_lower = section(
         source,
-        "static void ia64_tr_emit_decoded_register_nat_consumption",
-        "static unsigned ia64_tr_decoded_bitfield_pos",
+        "static void ia64_tr_emit_decoded_pr_move",
+        "static void ia64_tr_emit_decoded_br_move",
+    )
+    register_nat_lower = section(
+        source,
+        "static void ia64_tr_emit_decoded_register_nat_consumption_isr",
+        "static void ia64_tr_emit_decoded_data_nat_consumption",
     )
     pr_image_load = section(
         source,
@@ -140,8 +224,13 @@ def main() -> int:
     )
     deferred_return_retire = section(
         source,
-        "static void ia64_tr_retire_fast_bundle_ticks_deferred_interrupt",
+        "static void ia64_tr_retire_bundles_deferred_interrupt",
         "static void ia64_tr_commit_ip",
+    )
+    sequential_ip_commit = section(
+        source,
+        "static void ia64_tr_commit_ip",
+        "static void ia64_tr_store_source_visibility_state",
     )
     loop_classifier = section(
         source,
@@ -156,7 +245,12 @@ def main() -> int:
     return_classifier = section(
         source,
         "static bool ia64_tr_decoded_is_return_branch",
-        "static bool ia64_tr_decoded_is_conditional_branch",
+        "static bool ia64_tr_decoded_is_fp_status_branch",
+    )
+    rfi_classifier = section(
+        source,
+        "static bool ia64_tr_decoded_is_rfi",
+        "static bool ia64_tr_decoded_is_rse_spine",
     )
     call_admission = section(
         source,
@@ -197,6 +291,27 @@ def main() -> int:
         "    IA64TrDecodedBranchArm *arm)\n{",
         "static void ia64_tr_assert_call_branch_resources",
     )
+    rfi_resource_assert = section(
+        source,
+        "static void ia64_tr_assert_rfi_resources",
+        "static void ia64_tr_emit_decoded_rfi",
+    )
+    rfi_lower = section(
+        source,
+        "static void ia64_tr_emit_decoded_rfi(DisasContext *ctx,\n"
+        "                                     const IA64Instruction *insn)\n{",
+        "static void ia64_tr_emit_call_frame_transition",
+    )
+    rfi_privilege_fault = section(
+        source,
+        "static void ia64_tr_emit_decoded_privileged_operation",
+        "static bool ia64_tr_decoded_is_noop",
+    )
+    rfi_privilege_helper = section(
+        arch_helper_source,
+        "static G_NORETURN void ia64_arch_raise_privileged",
+        "G_NORETURN void HELPER(raise_register_nat_consumption)",
+    )
     call_lower = section(
         source,
         "static bool ia64_tr_emit_decoded_call_split(\n"
@@ -217,13 +332,14 @@ def main() -> int:
         "static void ia64_tr_emit_decoded_branch_cfg_exits(\n"
         "    DisasContext *ctx, IA64TrDecodedBranchArm arms[IA64_SLOT_COUNT],\n"
         "    unsigned arm_count, bool has_fallthrough, uint64_t fallthrough_target,\n"
-        "    bool fallthrough_group_start, bool fallthrough_typed_active)\n{",
-        "static void ia64_tr_emit_inline_indirect_branch_exit",
+        "    bool fallthrough_group_start, bool fallthrough_typed_active,\n"
+        "    bool suppress_direct_chaining)\n{",
+        "static void ia64_tr_emit_instruction_debug_guard",
     )
     branch_cfg_preflight = section(
         source,
         "static bool ia64_tr_preflight_branch_cfg",
-        "static bool ia64_tr_preflight_to_first_stop",
+        "static IA64TrSystemTbEnd ia64_tr_first_system_tb_end",
     )
     rewrite_plan = section(
         source,
@@ -236,19 +352,19 @@ def main() -> int:
         "static bool ia64_tr_preflight_decoded_bundle_through",
     )
     nat_helper = section(
-        interp_source,
+        arch_helper_source,
         "G_NORETURN void HELPER(raise_register_nat_consumption)",
         "void HELPER(perf_tb_exec)",
     )
     rotation_helper = section(
-        interp_source,
+        arch_helper_source,
         "void HELPER(rotate_modulo_registers)",
-        "typedef enum IA64PlannedSlotResult",
+        "void HELPER(enter_call_frame)",
     )
     rotation_core = section(
         insn_source,
         "void ia64_rotate_modulo_scheduled_registers",
-        "static void ia64_cover_stack_frame",
+        "void ia64_rse_cover_frame",
     )
     call_frame_core = section(
         insn_source,
@@ -256,13 +372,23 @@ def main() -> int:
         "bool ia64_rse_return_frame_from_pfs",
     )
     call_frame_helper = section(
-        interp_source,
+        arch_helper_source,
         "void HELPER(enter_call_frame)(CPUIA64State *env)\n{",
-        "typedef enum IA64PlannedSlotResult",
+        "uint32_t HELPER(return_frame_from_pfs)",
     )
     return_frame_core = section(
         insn_source,
         "bool ia64_rse_return_frame_from_pfs(CPUIA64State *env, uint64_t pfs)\n{",
+        "bool ia64_return_from_call_frame",
+    )
+    rfi_frame_core = section(
+        insn_source,
+        "bool ia64_rse_return_frame_from_ifs(CPUIA64State *env, uint64_t ifs)\n{",
+        "void ia64_rfi_restore_state",
+    )
+    rfi_restore_core = section(
+        insn_source,
+        "void ia64_rfi_restore_state(CPUIA64State *env, uint64_t source_ip)\n{",
         "bool ia64_return_from_call_frame",
     )
     return_partition_core = section(
@@ -276,25 +402,38 @@ def main() -> int:
         "static bool ia64_rse_return_to_frame",
     )
     return_frame_helper = section(
-        interp_source,
+        arch_helper_source,
         "uint32_t HELPER(return_frame_from_pfs)(CPUIA64State *env, uint64_t pfs)\n{",
         "void HELPER(complete_rse_frame_loads)",
     )
     return_fill_helper = section(
-        interp_source,
+        arch_helper_source,
         "void HELPER(complete_rse_frame_loads)(CPUIA64State *env)\n{",
-        "uint32_t HELPER(return_chain_ok)",
+        "void HELPER(rfi)",
     )
     return_chain_helper = section(
-        interp_source,
+        arch_helper_source,
         "uint32_t HELPER(return_chain_ok)(CPUIA64State *env)\n{",
-        "static G_NORETURN void ia64_raise_branch_trap",
+        "static G_NORETURN void ia64_arch_raise_branch_trap",
     )
-    return_trap_helpers = section(
-        interp_source,
-        "static G_NORETURN void ia64_raise_branch_trap",
-        "typedef enum IA64PlannedSlotResult",
+    rfi_refresh_helper = section(
+        insn_source,
+        "void ia64_refresh_interrupt_delivery(CPUIA64State *env)\n{",
+        "void ia64_reconcile_interrupt_state",
     )
+    rfi_helper = section(
+        arch_helper_source,
+        "void HELPER(rfi)(CPUIA64State *env, uint64_t source_ip)\n{",
+        "uint64_t HELPER(rse_alloc)",
+    )
+    tcg_chain_core = section(
+        arch_helper_source,
+        "static bool ia64_arch_can_chain(CPUIA64State *env)\n{",
+        "void HELPER(rotate_modulo_registers)",
+    )
+    return_trap_helpers = arch_helper_source[arch_helper_source.find(
+        "static G_NORETURN void ia64_arch_raise_branch_trap"
+    ):]
     interruption_isr = section(
         exception_source,
         "static uint64_t ia64_interruption_isr",
@@ -313,12 +452,17 @@ def main() -> int:
     mandatory_load_completion = section(
         insn_source,
         "IA64RSEStepResult ia64_rse_complete_mandatory_loads_interruptible",
-        "typedef struct IA64RSELegacyReadBridge",
+        "void ia64_rse_reconstruct_partitions",
     )
     runtime_frame_load = section(
         rse_source,
-        "static bool ia64_rse_mandatory_load_interruption_pending",
-        "static void ia64_rse_schedule_pending_fill",
+        "static bool ia64_rse_mandatory_word_interruption_pending",
+        "static bool ia64_rse_read_loadrs_word",
+    )
+    runtime_frame_completion = section(
+        rse_source,
+        "void ia64_rse_complete_frame_loads",
+        "static bool ia64_rse_read_loadrs_word",
     )
     transaction = section(source,
                           "static void ia64_tr_group_reserve",
@@ -356,7 +500,7 @@ def main() -> int:
     br_move_lower = section(
         source,
         "static void ia64_tr_emit_decoded_br_move",
-        "static unsigned ia64_tr_decoded_bitfield_pos",
+        "static void ia64_tr_publish_application_helper_state",
     )
     pfs_ordinary_load = section(
         source,
@@ -380,21 +524,26 @@ def main() -> int:
     )
     pfs_move_lower = section(
         source,
-        "static void ia64_tr_emit_decoded_pfs_move",
+        "static void ia64_tr_emit_decoded_application_move",
         "static unsigned ia64_tr_decoded_bitfield_pos",
     )
     typed_bundle = section(
         source,
         "static bool ia64_tr_try_decoded_bundle",
-        "static bool ia64_tr_translate_fast_bundle",
+        "static void ia64_tr_emit_main_loop_exit",
     )
     group_preflight = section(source,
                               "static bool ia64_tr_preflight_rewrite_region",
                               "static void ia64_tr_prime_decoded_instruction_state")
+    rse_static_noreturn = section(
+        source,
+        "static bool ia64_tr_rse_spine_is_static_noreturn",
+        "static void ia64_tr_rewrite_plan_reset",
+    )
     logical_globals = section(
         source,
         "static TCGv_i64 cpu_logical_gr",
-        "static bool ia64_tr_use_zero_helper_path",
+        "void ia64_translate_init(void)",
     )
     logical_init = section(
         source,
@@ -409,51 +558,38 @@ def main() -> int:
     logical_pair = section(
         source,
         "static void ia64_tr_read_static_gr_nat",
-        "static void ia64_tr_emit_fill_nat",
+        "static MemOp ia64_tr_ldst_memop",
     )
-    logical_nat_guards = section(
+    rse_spine_lower = section(
         source,
-        "static void ia64_tr_emit_fast_nat_guards",
-        "static void ia64_tr_emit_gr_alat_invalidate",
-    )
-    focused_alloc = section(
-        source,
-        "static void ia64_tr_emit_fast_alloc",
-        "static void ia64_tr_emit_fast_slot",
+        "static bool ia64_tr_emit_decoded_rse_spine",
+        "static void ia64_tr_emit_system_main_loop_exit",
     )
     decoded_prime = section(
         source,
         "static void ia64_tr_prime_decoded_instruction_state",
         "static TCGLabel *ia64_tr_emit_decoded_predicate_guard",
     )
-    legacy_branch = section(
+    instruction_debug = section(
         source,
-        "static IA64TrBranchResult ia64_tr_translate_direct_branch",
+        "static void ia64_tr_emit_instruction_debug_guard",
         "static void ia64_tr_translate_insn",
     )
-    helper_frontier = section(
+    instruction_main = section(
         source,
-        "static void ia64_tr_prepare_helper_ip",
-        "static void ia64_tr_emit_can_do_io",
+        "static void ia64_tr_translate_insn",
+        "static void ia64_tr_tb_stop",
     )
-    partial_helper = section(
-        source,
-        "static void ia64_tr_emit_exec_slot",
-        "static bool ia64_tr_partial_slot_needs_guard",
+    cfle_resume = section(
+        instruction_main,
+        "if (ctx->cfle_resume)",
+        "if (ctx->state_cache_available",
     )
-    execution_epoch = section(
-        source,
-        "static bool ia64_tr_slot_ends_execution_epoch",
-        "static bool ia64_tr_partial_slot_needs_guard",
+    tb_cpu_state = section(
+        cpu_source,
+        "static TCGTBCPUState ia64_get_tb_cpu_state",
+        "static void ia64_tb_lookup_stats",
     )
-    legacy_impl = section(
-        interp_source,
-        "static bool ia64_exec_bundle_impl",
-        "void HELPER(exec_bundle)",
-    )
-    legacy_wrappers = interp_source[interp_source.find(
-        "void HELPER(exec_bundle)"
-    ):]
     restore_opc = section(
         cpu_source,
         "static void ia64_restore_state_to_opc",
@@ -974,6 +1110,7 @@ def main() -> int:
 
     require(call_transition, (
         "g_assert(!ctx->state_cache_active)",
+        "ia64_tr_require_helper(opcode, IA64_OPCODE_HELPER_CALL_FRAME)",
         "gen_helper_enter_call_frame(tcg_env)",
     ), "focused typed call-frame transition")
     forbid(call_transition, (
@@ -984,7 +1121,8 @@ def main() -> int:
     if source.count("gen_helper_enter_call_frame(tcg_env)") != 1:
         raise AssertionError("translator must have exactly one focused call-"
                              "frame helper site")
-    if source.count("ia64_tr_emit_call_frame_transition(ctx)") != 1:
+    if source.count(
+            "ia64_tr_emit_call_frame_transition(ctx, arms[i].opcode)") != 1:
         raise AssertionError("focused call-frame transition must be invoked "
                              "from exactly one translated CFG seam")
 
@@ -996,7 +1134,7 @@ def main() -> int:
     require(typed_branch_cfg_exits, (
         "gen_set_label(arms[i].taken)",
         "if (arms[i].call)",
-        "ia64_tr_emit_call_frame_transition(ctx)",
+        "ia64_tr_emit_call_frame_transition(ctx, arms[i].opcode)",
         "ia64_tr_emit_typed_indirect_branch_exit",
         "ia64_tr_emit_typed_direct_branch_exit",
     ), "taken-only call-frame CFG transition")
@@ -1007,7 +1145,8 @@ def main() -> int:
         "if (arms[i].call)", taken_label
     )
     frame_transition = typed_branch_cfg_exits.find(
-        "ia64_tr_emit_call_frame_transition(ctx)", call_arm_gate
+        "ia64_tr_emit_call_frame_transition(ctx, arms[i].opcode)",
+        call_arm_gate
     )
     indirect_taken_exit = typed_branch_cfg_exits.find(
         "ia64_tr_emit_typed_indirect_branch_exit", frame_transition
@@ -1029,7 +1168,7 @@ def main() -> int:
     ), "architectural PFS field layout")
     require(call_frame_core, (
         "caller_cfm = env->cfm",
-        "caller_ec = ia64_read_ar(env, IA64_AR_EC) & 0x3f",
+        "caller_ec = ia64_read_application_register(env, IA64_AR_EC) & 0x3f",
         "(ia64_env_psr(env) & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT",
         "caller_sof = ia64_cfm_sof(caller_cfm)",
         "caller_sol = ia64_cfm_sol(caller_cfm)",
@@ -1205,20 +1344,29 @@ def main() -> int:
                              "input exactly once")
 
     require(deferred_return_retire, (
-        "ctx->fast_bundle_ticks_used",
+        "ctx->retired_bundle_count_used",
         "ctx->base.tb->flags & IA64_TB_FLAG_BENCHMARK",
-        "ia64_tr_emit_benchmark_retire(ctx->fast_bundle_ticks)",
-        "tcg_gen_movi_i32(ctx->fast_bundle_ticks, 0)",
+        "ia64_tr_emit_benchmark_retire(ctx->retired_bundle_count)",
+        "tcg_gen_movi_i32(ctx->retired_bundle_count, 0)",
     ), "return retirement with deferred interrupt observation")
     forbid(deferred_return_retire, (
-        "gen_helper_finish_fast_tb", "ia64_tr_flush_fast_bundle_ticks",
+        "gen_helper_finish_fast_tb", "ia64_tr_flush_retired_bundles",
         "ia64_tr_emit_exit_request_guard", "cpu_loop_exit",
     ), "return retirement with deferred interrupt observation")
+    if sequential_ip_commit.count("ia64_tr_clear_restart_ri();") != 2:
+        raise AssertionError(
+            "sequential constant/dynamic IP commits must canonicalize both "
+            "PSR.ri and its transient cache before a forced TB boundary"
+        )
+    forbid(sequential_ip_commit, (
+        "offsetof(CPUIA64State, ri)",
+        "offsetof(CPUIA64State, ri_dirty)",
+    ), "sequential RI commit canonicalization")
     require(typed_return_exit, (
         "ia64_tr_store_typed_taken_visibility_state()",
         "ia64_tr_clear_restart_ri()",
         "ia64_tr_commit_ip_value(target)",
-        "ia64_tr_retire_fast_bundle_ticks_deferred_interrupt(ctx)",
+        "ia64_tr_retire_bundles_deferred_interrupt(ctx)",
         "gen_helper_return_frame_from_pfs(lower_privilege, tcg_env, pfs)",
         "tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr))",
         "IA64_PSR_LP_BIT",
@@ -1233,7 +1381,7 @@ def main() -> int:
     ), "architecturally ordered typed return taken exit")
     forbid(typed_return_exit, (
         "gen_helper_exec_bundle", "gen_helper_exec_slot",
-        "gen_helper_finish_fast_tb", "ia64_tr_flush_fast_bundle_ticks",
+        "gen_helper_finish_fast_tb", "ia64_tr_flush_retired_bundles",
         "finish_direct_branch_bundle", "finish_indirect_branch_bundle",
         "ia64_return_from_call_frame", "tcg_gen_goto_tb",
         "insn->raw", "fallback",
@@ -1248,7 +1396,7 @@ def main() -> int:
         "ia64_tr_commit_ip_value(target)", return_ri
     )
     return_retire = typed_return_exit.find(
-        "ia64_tr_retire_fast_bundle_ticks_deferred_interrupt(ctx)", return_ip
+        "ia64_tr_retire_bundles_deferred_interrupt(ctx)", return_ip
     )
     return_frame = typed_return_exit.find(
         "gen_helper_return_frame_from_pfs", return_retire
@@ -1299,10 +1447,9 @@ def main() -> int:
     for helper_call in (
             "gen_helper_return_frame_from_pfs(",
             "gen_helper_complete_rse_frame_loads(",
-            "gen_helper_return_chain_ok(",
             "gen_helper_raise_lower_privilege_transfer_trap(",
             "gen_helper_raise_taken_branch_trap("):
-        if source.count(helper_call) != 1:
+        if typed_return_exit.count(helper_call) != 1:
             raise AssertionError(f"focused return helper must have one taken-"
                                  f"edge call site: {helper_call}")
 
@@ -1332,6 +1479,276 @@ def main() -> int:
         raise AssertionError("return frame/trap/fill work must remain inside "
                              "the labeled taken arm and bypass ordinary exits")
 
+    classified_rfi_opcodes = set(re.findall(
+        r"IA64_OP_[A-Z0-9_]+", rfi_classifier
+    ))
+    if classified_rfi_opcodes != {"IA64_OP_RFI"}:
+        raise AssertionError(
+            "typed RFI classifier must contain exactly IA64_OP_RFI: "
+            f"got={sorted(classified_rfi_opcodes)}"
+        )
+    require(supported, (
+        "ia64_opcode_traits_for(opcode)",
+        "traits->decoder_live",
+        "traits->admission == IA64_OPCODE_ADMISSION_FULL",
+        "traits->admission == IA64_OPCODE_ADMISSION_PARTIAL",
+        "traits->lowering_owner == IA64_OPCODE_OWNER_DIRECT_TCG",
+        "traits->lowering_owner == IA64_OPCODE_OWNER_FOCUSED_HELPER",
+    ), "traits-table typed opcode admission")
+    require(call_admission, (
+        "ia64_tr_decoded_is_rfi(insn->opcode)",
+        "insn->unit == IA64_INSN_UNIT_B",
+        "insn->slot_span == 1 && insn->qp == 0",
+        "insn->stop_after",
+    ), "typed RFI normalized-shape admission")
+    require(branch_cfg_preflight, (
+        "!ia64_tr_decoded_is_rfi(insn->opcode)",
+        "if (ia64_tr_decoded_is_rfi(insn->opcode))",
+        "*last_slot = slot + insn->slot_span - 1",
+        "ia64_tr_preflight_decoded_bundle_through(decoded,",
+    ), "terminal typed RFI preflight")
+    require(rewrite_plan, (
+        "if (ia64_tr_decoded_is_rfi(insn->opcode))",
+        "plan->unconditional_noreturn = true",
+        "return;",
+    ), "source-free typed RFI resource planning")
+    require(rfi_resource_assert, (
+        "ia64_tr_decoded_is_rfi(insn->opcode)",
+        "instruction->dest_gr[0] == 0",
+        "instruction->dest_gr[1] == 0",
+        "instruction->must_gr[0] == 0",
+        "instruction->must_gr[1] == 0",
+        "instruction->source_ar[0] == 0",
+        "instruction->source_ar[1] == 0",
+        "instruction->dest_ar[0] == 0",
+        "instruction->dest_ar[1] == 0",
+        "instruction->dest_pr == 0",
+        "instruction->must_pr == 0",
+        "instruction->forward_pr == 0",
+        "instruction->branch_source_pr == 0",
+        "instruction->source_br == 0",
+        "instruction->dest_br == 0",
+        "instruction->must_br == 0",
+        "instruction->forward_br == 0",
+        "instruction->branch_source_br == 0",
+        "!instruction->source_cfm && !instruction->dest_cfm",
+        "!instruction->forward_pfs",
+        "!instruction->branch_source_pfs",
+        "!instruction->must_pfs",
+    ), "typed RFI transaction-resource audit")
+    require(typed_bundle, (
+        "if (ia64_tr_decoded_is_rfi(insn->opcode))",
+        "ia64_tr_emit_decoded_rfi(ctx, insn)",
+        "ctx->instruction_group_start = true",
+        "ctx->rewrite_control_flow_exit = true",
+        "ctx->base.is_jmp = DISAS_NORETURN",
+        "return true",
+    ), "direct typed RFI dispatch")
+    require(rfi_lower, (
+        "ia64_tr_assert_rfi_resources(instruction, insn)",
+        "tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr))",
+        "TCG_COND_TSTEQ, psr, IA64_PSR_CPL_MASK, cpl_zero",
+        "ia64_tr_emit_decoded_privileged_operation(ctx, insn)",
+        "gen_set_label(cpl_zero)",
+        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "ia64_tr_group_finish_instruction_success(ctx, insn)",
+        "ia64_tr_group_close(ctx)",
+        "ia64_tr_split_state_cache_at_typed_branch(ctx)",
+        "ia64_tr_store_typed_taken_visibility_state()",
+        "ia64_tr_note_retired_bundle(ctx)",
+        "ia64_tr_retire_bundles_deferred_interrupt(ctx)",
+        "gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address))",
+        "gen_helper_return_chain_ok(chain_ok, tcg_env)",
+        "tcg_gen_brcondi_i32(TCG_COND_EQ, chain_ok, 0, main_loop_exit)",
+        "ia64_tr_emit_exit_request_guard(main_loop_exit)",
+        "tcg_gen_lookup_and_goto_ptr()",
+    ), "architecturally ordered typed RFI exit")
+    require(rfi_privilege_fault, (
+        "ia64_tr_group_publish_prefix_for_noreturn_fault(ctx)",
+        "tcg_gen_movi_i64(cpu_ip, insn->address)",
+        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "gen_helper_raise_privileged_operation(tcg_env)",
+    ), "precise pre-retirement RFI privilege fault")
+    require(rfi_privilege_helper, (
+        "IA64_EXCEPTION_GENERAL_EXCEPTION",
+        "env->exception.isr_code = 0x10",
+        "IA64_ISR_CODE_MASK",
+        "env->fault_exit_pending_tb_translate = true",
+        "cpu_loop_exit(cpu)",
+    ), "focused no-return privileged-operation helper")
+    forbid(rfi_lower, (
+        "gen_helper_exec_bundle", "gen_helper_exec_slot",
+        "gen_helper_finish_fast_tb", "ia64_tr_flush_retired_bundles",
+        "finish_direct_branch_bundle", "finish_indirect_branch_bundle",
+        "ia64_exec_b_indirect_branch", "tcg_gen_goto_tb",
+        "ia64_rse_schedule_pending_fill",
+        "ia64_rse_complete_pending_fill", "insn->raw >>", "fallback",
+    ), "architecturally ordered typed RFI exit")
+    rfi_psr_load = rfi_lower.find("tcg_gen_ld_i64(psr")
+    rfi_cpl_guard = rfi_lower.find("TCG_COND_TSTEQ", rfi_psr_load)
+    rfi_privilege = rfi_lower.find(
+        "ia64_tr_emit_decoded_privileged_operation", rfi_cpl_guard
+    )
+    rfi_cpl_zero = rfi_lower.find("gen_set_label(cpl_zero)", rfi_privilege)
+    rfi_fault_state = rfi_lower.find(
+        "ia64_tr_publish_fault_state", rfi_cpl_zero
+    )
+    rfi_finish = rfi_lower.find(
+        "ia64_tr_group_finish_instruction_success", rfi_fault_state
+    )
+    rfi_close = rfi_lower.find("ia64_tr_group_close(ctx)", rfi_finish)
+    rfi_cache_split = rfi_lower.find(
+        "ia64_tr_split_state_cache_at_typed_branch(ctx)", rfi_close
+    )
+    rfi_visibility = rfi_lower.find(
+        "ia64_tr_store_typed_taken_visibility_state()", rfi_cache_split
+    )
+    rfi_note_bundle = rfi_lower.find(
+        "ia64_tr_note_retired_bundle(ctx)", rfi_visibility
+    )
+    rfi_retire = rfi_lower.find(
+        "ia64_tr_retire_bundles_deferred_interrupt(ctx)",
+        rfi_note_bundle,
+    )
+    rfi_restore = rfi_lower.find(
+        "gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address))",
+        rfi_retire,
+    )
+    rfi_chain_poll = rfi_lower.find(
+        "gen_helper_return_chain_ok", rfi_restore
+    )
+    rfi_chain_guard = rfi_lower.find(
+        "TCG_COND_EQ, chain_ok, 0, main_loop_exit", rfi_chain_poll
+    )
+    rfi_exit_guard = rfi_lower.find(
+        "ia64_tr_emit_exit_request_guard", rfi_chain_guard
+    )
+    rfi_lookup = rfi_lower.find(
+        "tcg_gen_lookup_and_goto_ptr", rfi_exit_guard
+    )
+    if not (0 <= rfi_psr_load < rfi_cpl_guard < rfi_privilege <
+            rfi_cpl_zero < rfi_fault_state < rfi_finish < rfi_close <
+            rfi_cache_split < rfi_visibility < rfi_note_bundle < rfi_retire <
+            rfi_restore < rfi_chain_poll < rfi_chain_guard < rfi_exit_guard <
+            rfi_lookup):
+        raise AssertionError(
+            "typed RFI must fault nonzero current CPL before retirement, then "
+            "on CPL0 publish its slot, retire/close the transaction, "
+            "publish fresh visibility, defer asynchronous retirement, restore "
+            "interruption state, then authorize lookup chaining"
+        )
+    if source.count("gen_helper_rfi(tcg_env, tcg_constant_i64(") != 1 or \
+            source.count("gen_helper_return_chain_ok(") != 2:
+        raise AssertionError("typed RFI must have exactly one focused restore "
+                             "and share the two return/RFI chain helper sites")
+
+    require(helper_source, (
+        "DEF_HELPER_2(rfi, void, env, i64)",
+        "DEF_HELPER_FLAGS_1(raise_privileged_operation, TCG_CALL_NO_RETURN",
+    ), "focused typed RFI helper declarations")
+    require(arch_helper_source, (
+        "G_NORETURN void HELPER(raise_privileged_operation)",
+        "ia64_arch_raise_privileged(env)",
+    ), "focused typed RFI privileged-operation wrapper")
+    forbid(helper_source, (
+        "rfi_chain_ok",
+    ), "duplicate post-RFI chain helper declaration")
+    require(rfi_frame_core, (
+        "if (!env || (ifs & IA64_IFS_VALID_BIT) == 0)",
+        "return false",
+        "restored_cfm = ifs & IA64_CFM_MASK",
+        "restored_sof = ia64_cfm_sof(restored_cfm)",
+        "ia64_rse_return_to_frame(env, restored_cfm, restored_sof)",
+    ), "IFS.v-valid RFI frame reconstruction")
+    require(rfi_restore_core, (
+        "target = env->cr[IA64_CR_IIP] & ~UINT64_C(0xf)",
+        "ifs = env->cr[IA64_CR_IFS]",
+        "ia64_env_replace_psr(env, env->cr[IA64_CR_IPSR])",
+        "if (ifs & IA64_IFS_VALID_BIT)",
+        "ia64_rse_return_frame_from_ifs(env, ifs)",
+        "env->ip = target",
+        "ia64_env_begin_source_visibility_epoch(env)",
+    ), "focused RFI PSR/RI, IFS, and target restoration")
+    restore_psr = rfi_restore_core.find("ia64_env_replace_psr")
+    restore_ifs_gate = rfi_restore_core.find(
+        "if (ifs & IA64_IFS_VALID_BIT)", restore_psr
+    )
+    restore_frame = rfi_restore_core.find(
+        "ia64_rse_return_frame_from_ifs", restore_ifs_gate
+    )
+    restore_ip = rfi_restore_core.find("env->ip = target", restore_frame)
+    restore_epoch = rfi_restore_core.find(
+        "ia64_env_begin_source_visibility_epoch", restore_ip
+    )
+    if not (0 <= restore_psr < restore_ifs_gate < restore_frame <
+            restore_ip < restore_epoch):
+        raise AssertionError("RFI must restore full IPSR (including RI), "
+                             "conditionally reconstruct valid IFS, commit its "
+                             "aligned target, then open a fresh source epoch")
+    require(cpu_header, (
+        "env->ri = ia64_psr_ri(psr)",
+        "env->ri_dirty = false",
+        "ia64_env_set_psr(env, psr)",
+        "ia64_env_serialize_psr_ic(env)",
+    ), "full-PSR replacement restores the restart slot")
+    if rfi_restore_core.count("ia64_rse_return_frame_from_ifs(env, ifs)") != 1:
+        raise AssertionError("RFI valid IFS must have one conditional frame "
+                             "reconstruction site")
+    forbid(rfi_lower + rfi_helper + rfi_restore_core, (
+        "ia64_rse_schedule_pending_fill",
+        "ia64_rse_complete_pending_fill",
+        "ia64_exec_b_indirect_branch",
+        "finish_indirect_branch_bundle",
+        "exec_bundle", "exec_slot",
+    ), "typed RFI independence from generic dispatch/pending-fill replay")
+
+    require(rfi_refresh_helper, (
+        "ia64_itc_timer_update(env)",
+        "ia64_itc_timer_poll(env)",
+        "ia64_latch_timer_interrupt(env)",
+        "ia64_external_interrupt_pending(env)",
+        "qatomic_read(&cpu->interrupt_request) & CPU_INTERRUPT_HARD",
+        "cpu_set_interrupt(cpu, CPU_INTERRUPT_HARD)",
+    ), "RFI timer/HARD refresh")
+    require(rfi_helper, (
+        "ia64_rfi_restore_state(env, source_ip)",
+        "ia64_refresh_interrupt_delivery(env)",
+        "ia64_rse_complete_frame_loads(env)",
+    ), "focused RFI helper wrapper")
+    helper_restore = rfi_helper.find("ia64_rfi_restore_state")
+    helper_first_refresh = rfi_helper.find(
+        "ia64_refresh_interrupt_delivery", helper_restore
+    )
+    helper_fill = rfi_helper.find(
+        "ia64_rse_complete_frame_loads", helper_first_refresh
+    )
+    helper_second_refresh = rfi_helper.find(
+        "ia64_refresh_interrupt_delivery", helper_fill
+    )
+    if not (0 <= helper_restore < helper_first_refresh < helper_fill <
+            helper_second_refresh):
+        raise AssertionError("focused RFI helper must restore state, refresh "
+                             "newly deliverable interrupts, finish restartable "
+                             "frame loads, then refresh delivery again")
+    if rfi_helper.count("ia64_refresh_interrupt_delivery(env)") != 2:
+        raise AssertionError("focused RFI helper must refresh interrupt "
+                             "delivery on both sides of mandatory loads")
+    require(runtime_frame_load, (
+        "ia64_refresh_interrupt_delivery(env)",
+        "return ia64_external_interrupt_enabled(env)",
+        "ia64_rse_complete_mandatory_loads_interruptible",
+    ), "timer/HARD refresh at every mandatory-load boundary")
+    require(tcg_chain_core, (
+        "ia64_refresh_interrupt_delivery(env)",
+        "qatomic_read(&cpu->interrupt_request)",
+        "ia64_external_interrupt_pending(env)",
+        "ia64_external_interrupt_enabled(env)",
+    ), "timer/HARD refresh before every lookup-chain decision")
+    require(return_chain_helper, (
+        "bool chain_ok = ia64_arch_can_chain(env)",
+        "return chain_ok ? 1 : 0",
+    ), "shared post-return/RFI interrupt-chain eligibility helper")
+
     require(helper_source, (
         "DEF_HELPER_2(return_frame_from_pfs, i32, env, i64)",
         "DEF_HELPER_1(complete_rse_frame_loads, void, env)",
@@ -1350,7 +1767,8 @@ def main() -> int:
         "ia64_rse_complete_frame_loads(env)",
     ), "focused mandatory-fill helper wrapper")
     require(return_chain_helper, (
-        "return ia64_lookup_ptr_chain_ok(env)",
+        "bool chain_ok = ia64_arch_can_chain(env)",
+        "return chain_ok ? 1 : 0",
     ), "post-return interrupt/chain eligibility helper")
     require(return_trap_helpers, (
         "ia64_deliver_branch_trap(env, kind)",
@@ -1412,6 +1830,40 @@ def main() -> int:
             "return IA64_RSE_STEP_INTERRUPTION") != 2:
         raise AssertionError("both pre-load and post-final interruption "
                              "boundaries must retain incomplete state")
+    require(cpu_header + tb_cpu_state + instruction_main, (
+        "IA64_TB_FLAG_CFLE_RESUME",
+        "if (cpu->env.rse.cfle)",
+        "flags |= IA64_TB_FLAG_CFLE_RESUME",
+        "if (ctx->cfle_resume)",
+        "ctx->base.pc_next = ctx->base.pc_first + IA64_BUNDLE_SIZE",
+        "gen_helper_complete_rse_frame_loads(tcg_env)",
+        "ctx->base.is_jmp = DISAS_EXIT",
+    ), "active-CFLE resume-only TB")
+    forbid(cfle_resume, (
+        "translator_ldq", "ia64_decode_bundle_words",
+        "ia64_tr_note_retired_bundle", "ia64_tr_group_begin_instruction",
+    ), "active-CFLE no-fetch resume path")
+    resume_guard = instruction_main.find("if (ctx->cfle_resume)")
+    resume_helper = instruction_main.find(
+        "gen_helper_complete_rse_frame_loads", resume_guard
+    )
+    resume_exit = instruction_main.find(
+        "ctx->base.is_jmp = DISAS_EXIT", resume_helper
+    )
+    first_fetch = instruction_main.find("translator_ldq_end")
+    if not (0 <= resume_guard < resume_helper < resume_exit < first_fetch):
+        raise AssertionError("active CFLE must resume and exit before the "
+                             "first guest bundle fetch")
+    completed_fast_path = section(
+        runtime_frame_completion,
+        "if (env->rse.dirty >= 0 && env->rse.dirty_nat >= 0)",
+        "result = ia64_rse_complete_mandatory_loads_interruptible",
+    )
+    clear_complete_cfle = completed_fast_path.find("env->rse.cfle = false")
+    return_complete = completed_fast_path.find("return;", clear_complete_cfle)
+    if not (0 <= clear_complete_cfle < return_complete):
+        raise AssertionError("an already-complete CFLE resume must clear "
+                             "CFLE before returning")
     require(runtime_frame_load, (
         "return ia64_external_interrupt_enabled(env)",
         "ia64_rse_complete_mandatory_loads_interruptible",
@@ -1432,19 +1884,17 @@ def main() -> int:
         "ia64_interruption_isr(",
         "env->rse.cfle = false",
         "env->rse.reference = false",
-        "env->rse.pending_fill_count = 0",
-        "env->rse.pending_fill_ip = 0",
     ), "interruption exposure of canonical incomplete-frame state")
     collect_isr = interruption_delivery.find("ia64_interruption_isr(")
     clear_cfle = interruption_delivery.find(
         "env->rse.cfle = false", collect_isr
     )
-    clear_pending = interruption_delivery.find(
-        "env->rse.pending_fill_count = 0", clear_cfle
+    clear_reference = interruption_delivery.find(
+        "env->rse.reference = false", clear_cfle
     )
-    if not (0 <= collect_isr < clear_cfle < clear_pending):
+    if not (0 <= collect_isr < clear_cfle < clear_reference):
         raise AssertionError("interruption delivery must sample ISR.ir/rs "
-                             "before clearing CFLE and legacy fill markers")
+                             "before clearing canonical RSE restart state")
     forbid(return_frame_helper + return_fill_helper + return_chain_helper +
            return_trap_helpers, (
         "exec_bundle", "exec_slot", "finish_direct_branch_bundle",
@@ -1457,13 +1907,15 @@ def main() -> int:
         "restored_cpl =",
         "restored_sol = ia64_cfm_sol(restored_cfm)",
         "bad_pfs = ia64_rse_return_to_frame(env, restored_cfm, restored_sol)",
-        "ia64_write_ar(env, IA64_AR_EC, restored_ec)",
+        "ia64_write_application_register(env, IA64_AR_EC, restored_ec)",
         "if (current_cpl < restored_cpl)",
         "restored_cpl << IA64_PSR_CPL_SHIFT",
         "return bad_pfs",
     ), "architectural PFS/CFM/EC/CPL return core")
     return_core_frame = return_frame_core.find("ia64_rse_return_to_frame")
-    return_core_ec = return_frame_core.find("ia64_write_ar", return_core_frame)
+    return_core_ec = return_frame_core.find(
+        "ia64_write_application_register", return_core_frame
+    )
     return_core_cpl = return_frame_core.find(
         "if (current_cpl < restored_cpl)", return_core_ec
     )
@@ -1522,9 +1974,6 @@ def main() -> int:
             "typed loop classifier is not exactly the five architectural "
             f"forms: got={sorted(classified_loop_opcodes)}"
         )
-    require(supported, (
-        "ia64_tr_decoded_is_conditional_branch(opcode)",
-    ), "typed loop opcode admission")
     require(rewrite_plan, (
         "ia64_tr_decoded_is_loop_branch(insn->opcode)",
         "insn->opcode != IA64_OP_BR_CLOOP",
@@ -1754,7 +2203,7 @@ def main() -> int:
         "ia64_tr_store_typed_taken_visibility_state",
         "ia64_tr_store_source_visibility_state",
         "ia64_tr_commit_ip(target)",
-        "ia64_tr_flush_fast_bundle_ticks(ctx)",
+        "ia64_tr_flush_retired_bundles(ctx)",
         "ia64_tr_emit_exit_request_guard",
         "tcg_gen_goto_tb",
         "tcg_gen_lookup_and_goto_ptr",
@@ -1763,7 +2212,7 @@ def main() -> int:
         "ia64_tr_commit_ip(target)"
     )
     branch_flush = typed_direct_branch_exit.find(
-        "ia64_tr_flush_fast_bundle_ticks(ctx)"
+        "ia64_tr_flush_retired_bundles(ctx)"
     )
     branch_guard = typed_direct_branch_exit.find(
         "ia64_tr_emit_exit_request_guard"
@@ -1775,7 +2224,7 @@ def main() -> int:
     require(typed_indirect_branch_exit, (
         "ia64_tr_store_typed_taken_visibility_state",
         "ia64_tr_commit_ip_value(target)",
-        "ia64_tr_flush_fast_bundle_ticks(ctx)",
+        "ia64_tr_flush_retired_bundles(ctx)",
         "ia64_tr_emit_exit_request_guard",
         "tcg_gen_lookup_and_goto_ptr",
     ), "typed indirect-branch exit arm")
@@ -1787,7 +2236,7 @@ def main() -> int:
         "ia64_tr_commit_ip_value(target)"
     )
     indirect_flush = typed_indirect_branch_exit.find(
-        "ia64_tr_flush_fast_bundle_ticks(ctx)", indirect_publish
+        "ia64_tr_flush_retired_bundles(ctx)", indirect_publish
     )
     indirect_guard = typed_indirect_branch_exit.find(
         "ia64_tr_emit_exit_request_guard", indirect_flush
@@ -1836,7 +2285,7 @@ def main() -> int:
         "gen_helper_exec_bundle",
         "gen_helper_exec_slot",
         "insn->raw >>",
-        "ia64_tr_flush_fast_bundle_ticks(ctx)",
+        "ia64_tr_flush_retired_bundles(ctx)",
     ), "typed branch runtime split")
     branch_load = typed_branch_split.find(
         "ia64_tr_group_load_branch_predicate"
@@ -1895,28 +2344,15 @@ def main() -> int:
     ), "branch-aware reverse liveness")
 
     require(machine_source, (
-        ".version_id = 4",
         "VMSTATE_UINT64_ARRAY_V(issue_group.saved_br",
         "VMSTATE_UINT64_V(issue_group.branch_pr_forward_mask",
         "VMSTATE_UINT8_V(issue_group.saved_br_mask",
         "VMSTATE_UINT8_V(issue_group.branch_br_forward_mask",
-        "ia64_issue_group_overlay_post_load",
-        "env->pr ^ env->issue_group.saved_pr",
-        "version_id < 2",
-        "version_id < 3",
-        "version_id < 4",
-        "env->issue_group.saved_br_mask = 0",
-        "env->issue_group.branch_br_forward_mask = 0",
         "env->issue_group.saved_br_mask != 0",
         "env->issue_group.branch_br_forward_mask != 0",
         "branch_pr_forward_mask & 1",
-    ), "migrated branch-forward state")
+    ), "current migrated branch-forward state")
     require(machine_source, (
-        ".version_id = 5",
-        "if (version_id < 5)",
-        "env->issue_group.saved_pfs = 0",
-        "env->issue_group.pfs_saved = false",
-        "env->issue_group.branch_pfs_forwarded = false",
         "VMSTATE_UINT64_V(issue_group.saved_pfs, CPUIA64State, 5)",
         "VMSTATE_BOOL_V(issue_group.pfs_saved, CPUIA64State, 5)",
         "VMSTATE_BOOL_V(issue_group.branch_pfs_forwarded",
@@ -1924,7 +2360,53 @@ def main() -> int:
         "env->issue_group.branch_pfs_forwarded ||",
         "env->issue_group.branch_pfs_forwarded &&",
         "!env->issue_group.pfs_saved",
-    ), "versioned migrated AR.PFS overlay state")
+    ), "current migrated AR.PFS overlay state")
+    require(rse_vmstate, (
+        ".version_id = 5",
+        ".minimum_version_id = 5",
+        ".pre_load = ia64_rse_vmstate_pre_load",
+        ".post_load = ia64_rse_vmstate_post_load",
+        "VMSTATE_UINT32_V(bol, IA64RSEState, 4)",
+        "VMSTATE_BOOL_V(cfle, IA64RSEState, 4)",
+    ), "typed-only RSE VMState v5 boundary")
+    forbid(rse_vmstate_post_load, (
+        "if (rse->cfle)",
+        "in-flight RSE memory completion",
+    ), "active-CFLE RSE VMState restore")
+    require(env_pre_save, (
+        "if (env->rse.reference)",
+        "middle of an issued",
+        "ia64_validate_rse_vmstate(&env->rse)",
+    ), "active-CFLE migration save boundary")
+    forbid(env_pre_save, (
+        "env->rse.cfle ||",
+        "if (env->rse.cfle)",
+    ), "active-CFLE migration save boundary")
+    require(env_vmstate, (
+        ".version_id = 8",
+        ".minimum_version_id = 8",
+        ".pre_load = ia64_env_pre_load",
+        ".post_load = ia64_env_post_load",
+        "ia64_env_uses_rse_v5",
+        "vmstate_rse, IA64RSEState, 5",
+        "vmstate_interrupt, IA64InterruptState, 3",
+    ), "typed-only environment VMState v8 boundary")
+    require(cpu_vmstate, (
+        ".version_id = 6",
+        ".minimum_version_id = 6",
+        ".post_load = ia64_cpu_post_load",
+        "ia64_cpu_uses_env_v8",
+        "vmstate_env, CPUIA64State, 8",
+    ), "typed-only CPU VMState v6 boundary")
+    require(cpu_header + env_pre_load, (
+        "bool current_slot_speculative_load",
+        "env->current_slot_speculative_load = false",
+    ), "transient speculative-load slot classification")
+    forbid(machine_source + cpu_header + rse_source, (
+        "pending_fill",
+        "ia64_rse_schedule_pending_fill",
+        "ia64_rse_complete_pending_fill",
+    ), "retired pending-fill compatibility state")
     require(cpu_header, (
         "uint64_t saved_br[IA64_BR_COUNT]",
         "uint64_t branch_pr_forward_mask",
@@ -1939,36 +2421,48 @@ def main() -> int:
         "env->issue_group.pfs_saved = false",
         "env->issue_group.branch_pfs_forwarded = false",
     ), "branch-forward reset state")
-    require(legacy_impl, (
-        "env->issue_group.saved_br_mask != 0",
-        "env->issue_group.branch_br_forward_mask != 0",
-        "env->issue_group.branch_pr_forward_mask != 0",
-        "env->issue_group.pfs_saved",
-        "env->issue_group.branch_pfs_forwarded",
-    ), "legacy runtime forwarding-owner guard")
+    forbid(instruction_main, (
+        "ia64_exec_bundle_impl",
+        "gen_helper_exec_bundle",
+        "gen_helper_exec_slot",
+        "ia64_tr_translate_fast_bundle",
+    ), "typed-only production translator")
 
-    continuation_gate = group_preflight.find("if (continuation_only)")
-    continuation_scan_bound = group_preflight.find(
-        "branch_cfg ? branch_last_slot : IA64_SLOT_COUNT - 1",
-        continuation_gate,
+    branch_scan = group_preflight.find("ia64_tr_preflight_branch_cfg(")
+    system_scan = group_preflight.find(
+        "ia64_tr_first_system_tb_end(", branch_scan
     )
-    continuation_p0_bound = group_preflight.find(
-        "if (branch_cfg && branch_last_slot < accepted_last_slot)",
-        continuation_scan_bound,
+    rse_scan = group_preflight.find(
+        "ia64_tr_first_rse_static_noreturn(", system_scan
     )
-    fresh_branch_gate = group_preflight.find(
-        "else if (branch_cfg)", continuation_p0_bound
+    terminal_gate = group_preflight.find(
+        "if (system_tb_end != IA64_TR_SYSTEM_TB_CONTINUE || branch_cfg ||",
+        rse_scan,
     )
-    if not (0 <= continuation_gate < continuation_scan_bound <
-            continuation_p0_bound < fresh_branch_gate):
-        raise AssertionError("continuation-only ownership must scan no later "
-                             "than the first p0 edge and truncate the accepted "
-                             "suffix before fresh branch-CFG admission")
+    system_bound = group_preflight.find(
+        "system_last_slot);", terminal_gate
+    )
+    branch_bound = group_preflight.find(
+        "branch_last_slot);", system_bound
+    )
+    rse_bound = group_preflight.find(
+        "accepted_last_slot = MIN(accepted_last_slot, rse_last_slot)",
+        branch_bound,
+    )
+    prefix_validate = group_preflight.find(
+        "ia64_tr_preflight_decoded_bundle_through(", rse_bound
+    )
+    plan_append = group_preflight.find(
+        "ia64_tr_rewrite_plan_append_bundle(", prefix_validate
+    )
+    if not (0 <= branch_scan < system_scan < rse_scan < terminal_gate <
+            system_bound < branch_bound < rse_bound < prefix_validate <
+            plan_append):
+        raise AssertionError("typed preflight must classify branch, system, "
+                             "and static RSE endpoints, select the earliest "
+                             "exact terminal prefix, then append only its "
+                             "admitted physical slots")
 
-    require(classifier_source, (
-        "IA64_TCG_TB_BOUNDARY_BRANCH",
-        "major == 0xc || major == 0xd",
-    ), "long-branch TB boundary classification")
     forbid(supported, ("case IA64_OP_MUX:", "case IA64_OP_MPYSH:",
                        "case IA64_OP_MPYUH:", "case IA64_OP_SHL_IMM:",
                        "case IA64_OP_SHR_IMM:",
@@ -2050,10 +2544,14 @@ def main() -> int:
         "ia64_tr_group_stage_gr(gr_write, image, tcg_constant_i64(0))",
         "ia64_tr_group_prepare_pr_image",
         "ia64_tr_group_load_ordinary_gr_pair",
-        "gen_helper_raise_register_nat_consumption",
+        "ia64_tr_emit_decoded_register_nat_consumption",
         "ia64_tr_group_stage_pr_image",
         "IA64_TR_PR_ROTATING_MASK",
     ), "typed packed PR-move lowering")
+    require(register_nat_lower, (
+        "ia64_tr_group_publish_prefix_for_noreturn_fault",
+        "gen_helper_raise_register_nat_consumption",
+    ), "typed Register NaT Consumption lowering")
     forbid(pr_move_lower, (
         "gen_helper_exec_bundle",
         "gen_helper_exec_slot",
@@ -2122,19 +2620,22 @@ def main() -> int:
         "plan->preserve_br = plan->dest_br & live_br",
         "live_br |= plan->source_br",
     ), "BR-move liveness and first-write preservation")
-    require(call_admission, (
+    require(source, (
+        "static bool ia64_tr_decoded_is_supported_application_move",
         "insn->opcode == IA64_OP_MOV_ARGR",
         "insn->opcode == IA64_OP_MOV_GRAR",
-        "insn->unit == IA64_INSN_UNIT_I",
+        "insn->unit != IA64_INSN_UNIT_M",
+        "insn->unit != IA64_INSN_UNIT_I",
         "insn->slot_span == 1",
-        "insn->r2 == IA64_AR_PFS",
-    ), "exact I-unit AR.PFS move admission")
+        "insn->status == IA64_DECODE_OK",
+        "insn->status == IA64_DECODE_ILLEGAL_REGISTER",
+    ), "exact M/I application-register move admission")
     require(rewrite_plan, (
         "if (insn->opcode == IA64_OP_MOV_ARGR)",
-        "ia64_tr_plan_ar_resource(plan->source_ar, IA64_AR_PFS)",
+        "ia64_tr_plan_ar_resource(plan->source_ar, insn->r2)",
         "if (insn->opcode == IA64_OP_MOV_GRAR)",
         "plan->source_gr[half] =",
-        "ia64_tr_plan_ar_resource(plan->dest_ar, IA64_AR_PFS)",
+        "ia64_tr_plan_ar_write_resources(plan->dest_ar, insn->r2)",
         "plan->forward_pfs = true",
         "plan->must_pfs = insn->qp == 0",
     ), "AR.PFS move resource planning")
@@ -2184,9 +2685,11 @@ def main() -> int:
                              "value, publish validity, retire live PFS, then "
                              "publish branch-forward provenance")
     require(pfs_move_lower, (
-        "insn->unit == IA64_INSN_UNIT_I",
-        "insn->slot_span == 1",
-        "insn->r2 == IA64_AR_PFS",
+        "insn->opcode == IA64_OP_MOV_ARGR",
+        "insn->opcode == IA64_OP_MOV_GRAR",
+        "gen_helper_application_register_preflight",
+        "gen_helper_application_register_read",
+        "gen_helper_application_register_write",
         "ia64_tr_group_load_ordinary_pfs",
         "ia64_tr_group_stage_gr",
         "ia64_tr_group_load_ordinary_gr_pair",
@@ -2224,7 +2727,7 @@ def main() -> int:
         "ia64_tr_group_write_pfs", grar_fault
     )
     grar_guard_end = pfs_move_lower.find(
-        "ia64_tr_finish_fast_slot_predicate_guard(skip)", grar_write
+        "ia64_tr_finish_predicate_guard(skip)", grar_write
     )
     if not (0 <= argr_guard < argr_read < argr_stage < grar_block <
             grar_guard < grar_read < grar_nat_branch < grar_fault <
@@ -2288,15 +2791,20 @@ def main() -> int:
         "ia64_deliver_exception_fast",
         "IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION",
         "IA64_EXCEPTION_ACCESS_NONE",
+        "env->exception.isr_code |= isr_extra",
+        "env->cr[IA64_CR_ISR] |= isr_extra",
         "fault_exit_pending_tb_translate",
         "cpu_loop_exit(cpu)",
     ), "typed Register NaT Consumption helper")
     require(helper_source, (
-        "DEF_HELPER_FLAGS_1(raise_register_nat_consumption, "
+        "DEF_HELPER_FLAGS_2(raise_register_nat_consumption, "
         "TCG_CALL_NO_RETURN",
     ), "Register NaT Consumption helper declaration")
 
     require(transaction_begin, (
+        "if (!ctx->source_overlay_known_clear)",
+        "ia64_tr_store_source_visibility_state(ctx, true, false)",
+        "ctx->source_overlay_known_clear = true",
         "tcg_get_insn_start_param",
         "tcg_set_insn_start_param",
         "IA64_INSN_START_TYPED_GROUP",
@@ -2358,11 +2866,19 @@ def main() -> int:
         "tcg_op_buf_has_space",
         "IA64_TR_REWRITE_OPS_PER_BUNDLE",
         "translator_is_same_page",
-        "ia64_tcg_tb_boundary_ends_tb",
         "ia64_decode_instruction_bundle",
         "ia64_tr_preflight_decoded_bundle",
+        "ia64_tr_preflight_branch_cfg",
+        "ia64_tr_first_system_tb_end",
+        "ia64_tr_first_rse_static_noreturn",
+        "ia64_tr_decoded_bundle_requires_io_boundary",
         "decoded.ends_at_group_boundary",
     ), "rewrite-region preflight")
+    require(group_preflight, (
+        "accepted_last_slot = MIN(accepted_last_slot, rse_last_slot)",
+        "ia64_tr_preflight_decoded_bundle_through(\n"
+        "                    &decoded, accepted_last_slot)",
+    ), "static RSE no-return plan boundary")
     forbid(group_preflight, ("gen_helper_", "ia64_tr_emit_"),
            "rewrite-region preflight")
 
@@ -2393,6 +2909,8 @@ def main() -> int:
         "ia64_tr_write_logical_gr_nat",
     ), "fixed logical stacked-GR lowering")
     require(logical_pair, (
+        "if (ia64_tr_gr_is_stacked(ref->reg))",
+        "cpu_logical_gr[ia64_tr_logical_gr_index(ref->reg)]",
         "ia64_tr_read_logical_gr_nat(nat, ref->reg)",
         "ia64_tr_write_logical_gr_nat(ctx, ref->reg, nat_value)",
         "ia64_tr_mark_logical_gr_dirty(ref->reg)",
@@ -2410,107 +2928,300 @@ def main() -> int:
         "TCGv_ptr",
         "tcg_gen_remu_i64",
     ), "ordinary physical stacked-GR lowering")
-    require(logical_nat_guards, (
-        "uint64_t logical_mask[2]",
-        "cpu_logical_nat[word]",
-        "source_mask_hi >> IA64_STATIC_GR_COUNT",
-    ), "logical stacked-NaT guards")
-    forbid(logical_nat_guards, (
-        "uses_stacked_gr",
-        "rse.sor",
+    forbid(logical_pair, (
         "gen_helper_fast_gr_nat_any",
-    ), "logical stacked-NaT guards")
-    require(focused_alloc, (
-        "ia64_tr_publish_faulting_slot(ctx, slot)",
-        "gen_helper_fast_alloc(tcg_env, tcg_constant_i64(raw))",
+        "uses_stacked_gr",
+    ), "logical stacked-GR/NaT pair lowering")
+    require(rse_spine_lower, (
+        "ia64_tr_assert_rse_spine_resources(instruction, insn)",
+        "ia64_tr_rse_spine_is_static_noreturn(insn)",
+        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "gen_helper_rse_alloc(old_pfs, tcg_env, tcg_constant_i32(packed))",
         "ia64_tr_finish_faulting_slot()",
-    ), "focused alloc transition")
-    forbid(focused_alloc, (
+        "ia64_tr_group_stage_gr(write, old_pfs, tcg_constant_i64(0))",
+    ), "typed alloc/RSE-spine transition")
+    require(rse_static_noreturn, (
+        "insn->r1 == 0",
+        "insn->r1 >= IA64_STATIC_GR_COUNT + sof",
+        "insn->qp != 0",
+        "sof > IA64_RSE_PHYS_STACKED_REGS",
+        "sol > sof",
+        "sor * 8 > sof",
+    ), "shared static alloc/RSE no-return classification")
+    forbid(rse_spine_lower, (
+        "gen_helper_fast_alloc",
+        "gen_helper_exec_bundle",
+        "gen_helper_exec_slot",
         "ia64_make_cfm",
         "offsetof(CPUIA64State, cfm)",
         "offsetof(CPUIA64State, rse.sof)",
         "offsetof(CPUIA64State, rse.sor)",
-    ), "focused alloc transition")
+    ), "typed alloc/RSE-spine transition")
     require(helper_source, (
-        "DEF_HELPER_2(fast_alloc, void, env, i64)",
-    ), "alloc read/write-global helper declaration")
+        "DEF_HELPER_2(rse_alloc, i64, env, i32)",
+    ), "typed alloc architectural-helper declaration")
     forbid(decoded_prime, (
         "stacked",
         "current_frame_base",
         "ensure_stacked",
     ), "decoded logical-GR priming")
-    require(legacy_branch, (
-        "branch.kind != IA64_TCG_DIRECT_BRANCH_CALL",
-        "branch.kind != IA64_TCG_DIRECT_BRANCH_INDIRECT_CALL",
-    ), "helper-owned call-frame transition")
     forbid(source, (
         "VIBTANIUM_TCG_INLINE_CALL",
         "ia64_tr_emit_call_effects",
     ), "unsafe inline call-frame remapping")
 
-    require(helper_frontier, (
-        "g_assert(!ctx->typed_group_active)",
-        "ia64_tr_store_legacy_helper_frontier",
-    ), "full-bundle legacy-helper frontier")
-    require(partial_helper, (
-        "g_assert(!ctx->typed_group_active)",
-        "ia64_tr_store_legacy_helper_frontier",
-        "gen_helper_exec_slot",
-    ), "partial legacy-helper frontier")
-    require(execution_epoch, (
-        "ia64_slot_is_m_serialization",
-        "ia64_slot_is_m_processor_mask",
-        "ia64_slot_is_m_mov_to_processor_status",
-        "for (unsigned slot = start_slot;",
-        "ia64_tr_emit_exec_slot(ctx, bundle, pc, slot, flow_exit);",
-        "ia64_tr_publish_restart_ri(boundary_slot + 1);",
-    ), "slot-precise PSR/serialization epoch split")
-    epoch_scan = execution_epoch.find(
-        "ia64_tr_first_execution_epoch_end_slot(bundle, start_slot)"
+    ordinary_load_classifier = section(
+        memory_classifiers,
+        "static bool ia64_tr_decoded_is_ordinary_integer_load",
+        "static bool ia64_tr_decoded_is_ordinary_integer_store",
     )
-    epoch_execute = execution_epoch.find(
-        "ia64_tr_emit_exec_slot(ctx, bundle, pc, slot, flow_exit);",
-        epoch_scan,
+    ordinary_store_classifier = section(
+        memory_classifiers,
+        "static bool ia64_tr_decoded_is_ordinary_integer_store",
+        "static bool ia64_tr_decoded_is_ordinary_integer_memory",
     )
-    epoch_restart = execution_epoch.find(
-        "ia64_tr_publish_restart_ri(boundary_slot + 1);",
-        epoch_execute,
-    )
-    if not (0 <= epoch_scan < epoch_execute < epoch_restart):
-        raise AssertionError("execution epochs must scan from the incoming RI, "
-                             "execute through the first boundary, then publish "
-                             "the first unexecuted RI")
-    forbid(helper_frontier + partial_helper, (
-        "ia64_tr_store_source_visibility_state",
-    ), "legacy helper ownership handoff")
-    require(legacy_impl, (
-        "env->issue_group.typed_active",
-        "env->issue_group.saved_gr_mask[0]",
-        "env->issue_group.saved_gr_mask[1]",
-        "env->issue_group.pr_saved",
-        "cpu_abort(cpu",
-    ), "legacy runtime ownership guard")
-    guard = legacy_impl.find("if (unlikely(")
-    first_execution = legacy_impl.find("if (!partial)")
-    if not (0 <= guard < first_execution):
-        raise AssertionError("legacy ownership guard must run before generic "
-                             "bundle execution begins")
-    if legacy_wrappers.count("ia64_exec_bundle_impl(") != 3:
-        raise AssertionError("all three generic TCG helpers must funnel "
-                             "through the guarded legacy implementation")
+    expected_loads = {
+        "IA64_OP_LD1", "IA64_OP_LD2", "IA64_OP_LD4", "IA64_OP_LD8",
+    }
+    expected_stores = {
+        "IA64_OP_ST1", "IA64_OP_ST2", "IA64_OP_ST4", "IA64_OP_ST8",
+        "IA64_OP_ST1REL", "IA64_OP_ST2REL",
+        "IA64_OP_ST4REL", "IA64_OP_ST8REL",
+    }
+    classified_loads = set(re.findall(
+        r"case (IA64_OP_[A-Z0-9_]+):", ordinary_load_classifier
+    ))
+    classified_stores = set(re.findall(
+        r"case (IA64_OP_[A-Z0-9_]+):", ordinary_store_classifier
+    ))
+    if classified_loads != expected_loads or classified_stores != expected_stores:
+        raise AssertionError(
+            "typed ordinary memory tranche is not exactly four loads plus "
+            "four stores/four release stores: loads={} stores={}".format(
+                sorted(classified_loads), sorted(classified_stores)
+            )
+        )
+    for opcode in sorted(expected_loads | expected_stores):
+        pattern = (
+            r"IA64_OPCODE\(" + opcode +
+            r",\s+INTEGER_(?:LOAD|STORE),\s+DIRECT_TCG,\s+NONE,\s+"
+            r"FULL_TCG,\s+MEMORY,\s+NO_OS,\s+TYPED\)"
+        )
+        if re.search(pattern, traits_source) is None:
+            raise AssertionError(
+                f"{opcode} lacks exact direct-TCG memory ownership"
+            )
 
-    group_select = source.find("ia64_tr_preflight_rewrite_region(",
-                               source.find("static void ia64_tr_translate_insn"))
-    start_slot_select = source.find(
-        "ia64_tcg_tb_boundary_for_bundle_from_slot_with_physical(",
-        source.find("static void ia64_tr_translate_insn"),
+    require(cpu_header, (
+        "IA64_TB_PSR_BE_BIT",
+        "IA64_TB_FLAG_BE (1u << 11)",
+        "flags |= IA64_TB_FLAG_BE",
+    ), "PSR.be translation-block keying")
+    require(memory_memop, (
+        "ctx->base.tb->flags & IA64_TB_FLAG_BE",
+        "MO_BE : MO_LE",
+        "MO_UB", "MO_UW", "MO_UL", "MO_UQ",
+    ), "typed endian-aware scalar memory ops")
+    require(memory_classifiers, (
+        "insn->unit != IA64_INSN_UNIT_M",
+        "insn->slot_span != 1",
+        "insn->reg_base_update && insn->imm_base_update",
+        "insn->imm >= -256 && insn->imm <= 255",
+        "!insn->reg_base_update && !insn->mem_acquire",
+        "insn->mem_release == release",
+        "update && insn->r1 == insn->r3",
+    ), "typed ordinary memory normalized-shape admission")
+    require(rewrite_plan, (
+        "ia64_tr_decoded_is_ordinary_integer_memory(insn->opcode)",
+        "plan->source_gr[insn->r3 >= 64]",
+        "load && insn->reg_base_update",
+        "plan->source_gr[insn->r2 >= 64]",
+        "plan->dest_gr[insn->r1 >= 64]",
+        "plan->dest_gr[insn->r3 >= 64]",
+        "plan->must_gr[insn->r1 >= 64]",
+        "plan->must_gr[insn->r3 >= 64]",
+        "plan->unconditional_noreturn = insn->qp == 0",
+    ), "typed ordinary memory transaction-resource planning")
+    require(memory_fault_lower, (
+        "ia64_tr_group_publish_prefix_for_noreturn_fault(ctx)",
+        "gen_helper_raise_data_register_nat_consumption",
+        "gen_helper_raise_unaligned_data_reference",
+        "offsetof(CPUIA64State, rse.sof)",
+        "IA64_TR_PSR_AC_BIT",
+        "0x1000 - payload_size",
+        "ia64_tr_emit_decoded_illegal_operation(ctx, insn)",
+    ), "typed ordinary memory focused fault lowering")
+    forbid(memory_fault_lower, (
+        "fast_ldst", "exec_bundle", "exec_slot", "insn->raw >>",
+        "ia64_bits(",
+    ), "typed ordinary memory focused fault lowering")
+    require(memory_publish, (
+        "ia64_tr_sync_state_cache(ctx)",
+        "tcg_gen_movi_i64(cpu_ip, insn->address)",
+        "ia64_tr_publish_fault_state",
+        "translator_io_start(&ctx->base)",
+    ), "returning direct-memory fault publication")
+    forbid(memory_publish, (
+        "ia64_tr_group_clear_ordinary_source_overlay",
+        "ia64_tr_group_publish_prefix_for_noreturn_fault",
+    ), "returning direct-memory fault publication")
+    require(memory_lower, (
+        "ia64_tr_group_prepare_gr(ctx, insn->r1)",
+        "ia64_tr_group_prepare_gr(ctx, insn->r3)",
+        "ia64_tr_emit_decoded_predicate_guard(ctx, insn)",
+        "ia64_tr_emit_decoded_memory_target_check",
+        "ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat",
+        "ia64_tr_emit_decoded_memory_nat_check",
+        "ia64_tr_publish_decoded_memory_access",
+        "ia64_tr_emit_decoded_data_debug_pre_access",
+        "ia64_tr_emit_decoded_memory_alignment_check",
+        "tcg_gen_qemu_ld_i64",
+        "TCG_BAR_LDAQ | TCG_MO_LD_LD | TCG_MO_LD_ST",
+        "tcg_gen_qemu_st_i64",
+        "TCG_BAR_STRL | TCG_MO_LD_ST | TCG_MO_ST_ST",
+        "ia64_tr_emit_decoded_store_alat_invalidate",
+        "ia64_tr_group_stage_gr(target_write",
+        "ia64_tr_group_stage_gr(base_write",
+        "ia64_tr_finish_faulting_slot()",
+    ), "typed ordinary scalar memory lowering")
+    forbid(memory_lower, (
+        "fast_ldst", "gen_helper_", "exec_bundle", "exec_slot",
+        "insn->raw >>", "ia64_bits(",
+    ), "typed ordinary scalar memory lowering")
+    memory_prepare = memory_lower.find(
+        "target_write = ia64_tr_group_prepare_gr"
     )
-    typed_select = source.find("ia64_tr_try_decoded_bundle(", group_select)
-    legacy_select = source.find("ia64_tr_translate_fast_bundle(", typed_select)
-    if not (0 <= start_slot_select < group_select < typed_select < legacy_select):
-        raise AssertionError("rewrite must preflight a complete region and "
-                             "run before the legacy hybrid selectors, using a "
-                             "boundary scan that starts at the incoming RI")
+    memory_guard = memory_lower.find(
+        "skip = ia64_tr_emit_decoded_predicate_guard", memory_prepare
+    )
+    memory_target = memory_lower.find(
+        "ia64_tr_emit_decoded_memory_target_check", memory_guard
+    )
+    memory_source = memory_lower.find(
+        "ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat",
+        memory_target,
+    )
+    memory_nat = memory_lower.find(
+        "ia64_tr_emit_decoded_memory_nat_check", memory_source
+    )
+    memory_access_publish = memory_lower.find(
+        "ia64_tr_publish_decoded_memory_access", memory_nat
+    )
+    memory_debug = memory_lower.find(
+        "ia64_tr_emit_decoded_data_debug_pre_access",
+        memory_access_publish,
+    )
+    memory_alignment = memory_lower.find(
+        "ia64_tr_emit_decoded_memory_alignment_check", memory_debug
+    )
+    memory_qemu_load = memory_lower.find(
+        "tcg_gen_qemu_ld_i64", memory_alignment
+    )
+    memory_target_stage = memory_lower.find(
+        "ia64_tr_group_stage_gr(target_write", memory_qemu_load
+    )
+    memory_qemu_store = memory_lower.find(
+        "tcg_gen_qemu_st_i64", memory_target_stage
+    )
+    memory_base_stage = memory_lower.find(
+        "ia64_tr_group_stage_gr(base_write", memory_qemu_store
+    )
+    memory_fault_finish = memory_lower.find(
+        "ia64_tr_finish_faulting_slot()", memory_base_stage
+    )
+    if not (0 <= memory_prepare < memory_guard < memory_target <
+            memory_source < memory_nat < memory_access_publish < memory_debug <
+            memory_alignment < memory_qemu_load < memory_target_stage <
+            memory_qemu_store < memory_base_stage < memory_fault_finish):
+        raise AssertionError(
+            "typed memory must seed optional writes, qualify/check/capture, "
+            "publish, probe debug before alignment, access, stage target/base, "
+            "then clear restart state"
+        )
+    require(helper_source, (
+        "DEF_HELPER_FLAGS_2(raise_data_register_nat_consumption",
+        "DEF_HELPER_FLAGS_3(raise_unaligned_data_reference",
+        "DEF_HELPER_3(memory_store_alat_invalidate",
+    ), "focused typed memory helper declarations")
+    require(nat_helper, (
+        "HELPER(raise_data_register_nat_consumption)",
+        "(MMUAccessType)access_type",
+        "IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION",
+        "HELPER(raise_unaligned_data_reference)",
+        "IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE",
+        "fault_exit_pending_tb_translate = true",
+    ), "focused typed memory fault helpers")
+    forbid(nat_helper, (
+        "ia64_decode", "insn->raw", "fast_ldst_prepare",
+        "fast_ldst_complete",
+    ), "focused typed memory fault helpers")
+    require(arch_helper_source, (
+        "HELPER(memory_store_alat_invalidate)",
+        "ia64_data_plane_alat_invalidate_store(env, address, width)",
+    ), "focused physical ALAT store invalidation helper")
+    if "fast_ldst_alat_store" in (source + helper_source +
+                                  arch_helper_source):
+        raise AssertionError(
+            "typed memory must not depend on the legacy fast_ldst ALAT seam"
+        )
+
+    require(instruction_debug, (
+        "gen_helper_instruction_debug_match(matched, tcg_env",
+        "tcg_gen_brcondi_i32(TCG_COND_EQ, matched, 0, resume)",
+        "tcg_gen_movi_i64(cpu_ip, pc)",
+        "ia64_tr_publish_fault_state(",
+        "gen_helper_raise_instruction_debug(tcg_env)",
+    ), "typed instruction-debug predecode guard")
+    debug_match = instruction_debug.find(
+        "gen_helper_instruction_debug_match"
+    )
+    debug_publish = instruction_debug.find(
+        "ia64_tr_publish_fault_state", debug_match
+    )
+    debug_raise = instruction_debug.find(
+        "gen_helper_raise_instruction_debug", debug_publish
+    )
+    if not (0 <= debug_match < debug_publish < debug_raise):
+        raise AssertionError("instruction debug must match, publish the exact "
+                             "fetch slot, then raise before typed admission")
+
+    require(instruction_main, (
+        "ia64_tcg_tb_flags_ri(ctx->base.tb->flags)",
+        "ia64_tr_emit_instruction_debug_guard(ctx, &bundle, pc, start_slot)",
+        "ia64_tr_emit_invalid_template(ctx, &bundle, pc, start_slot)",
+        "ia64_tr_preflight_rewrite_region(",
+        "closed typed preflight rejected a valid bundle",
+        "ia64_tr_group_reserve(ctx, bundle_count * IA64_SLOT_COUNT)",
+        "ia64_tr_try_decoded_bundle(",
+        "closed typed lowering rejected a preflighted bundle",
+        "Branch and slot-ending system rows own every legal partial bundle",
+        "g_assert(last_slot == IA64_SLOT_COUNT - 1)",
+    ), "typed-only translator main")
+    forbid(instruction_main, (
+        "IA64TcgFast",
+        "ia64_tcg_build_fast_bundle",
+        "ia64_tr_translate_fast_bundle",
+        "ia64_tr_translate_direct_branch",
+        "gen_helper_exec_bundle",
+        "gen_helper_exec_slot",
+    ), "typed-only translator main")
+    start_slot_select = instruction_main.find(
+        "ia64_tcg_tb_flags_ri(ctx->base.tb->flags)"
+    )
+    debug_select = instruction_main.find(
+        "ia64_tr_emit_instruction_debug_guard", start_slot_select
+    )
+    group_select = instruction_main.find(
+        "ia64_tr_preflight_rewrite_region(", debug_select
+    )
+    typed_select = instruction_main.find(
+        "ia64_tr_try_decoded_bundle(", group_select
+    )
+    if not (0 <= start_slot_select < debug_select < group_select <
+            typed_select):
+        raise AssertionError("translator must derive the incoming RI, run the "
+                             "fetch debug guard, preflight the closed typed "
+                             "region, then lower it through the typed driver")
 
     print("IA-64 full-TCG structural guardrails: PASS")
     return 0

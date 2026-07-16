@@ -58,10 +58,12 @@ fi
 # --- run -----------------------------------------------------------------
 LOG="$(mktemp 2>/dev/null || echo "$here/bit-run.log")"
 esp_dir=""
-machine_arg="vibtanium,efi-boot-manager=off"
+machine_arg="vibtanium,hcdp-serial-console=on"
 if [ -n "${NVRAM:-}" ]; then
     nvram_path="$(cygpath -am "$NVRAM" 2>/dev/null || printf '%s' "$NVRAM")"
     machine_arg="${machine_arg},nvram=$nvram_path"
+else
+    machine_arg="${machine_arg},nvram=none"
 fi
 
 qemu_boot_args=()
@@ -72,7 +74,7 @@ media)
     cp "$EFI" "$esp_dir/EFI/BOOT/BOOTIA64.EFI"
     printf 'vibtanium-bit-ok\n' > "$esp_dir/EFI/BOOT/BIT.TXT"
     esp_path="$(cygpath -am "$esp_dir" 2>/dev/null || printf '%s' "$esp_dir")"
-    qemu_boot_args=(-drive "file=fat:rw:$esp_path,format=raw,if=ide,index=0,media=disk")
+    qemu_boot_args=(-drive "file=fat:rw:$esp_path,format=raw,if=scsi,index=0,media=disk")
     ;;
 kernel)
     qemu_boot_args=(-kernel "$EFI")
@@ -84,8 +86,9 @@ kernel)
     ;;
 esac
 
-"$QEMU" -M "$machine_arg" -m 512M \
-        "${qemu_boot_args[@]}" -display none -serial null -no-reboot \
+"$QEMU" -L "$repo_root/pc-bios" -M "$machine_arg" -m 512M \
+        "${qemu_boot_args[@]}" -display none -serial stdio -no-reboot \
+        -monitor none \
         >"$LOG" 2>&1 &
 qpid=$!
 winpid="$(cat "/proc/$qpid/winpid" 2>/dev/null || true)"

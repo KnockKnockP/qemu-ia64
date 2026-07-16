@@ -966,6 +966,11 @@ static const VGAInterfaceInfo vga_interfaces[VGA_TYPE_MAX] = {
         .name = "Cirrus VGA",
         .class_names = { "cirrus-vga", "isa-cirrus-vga" },
     },
+    [VGA_ATI] = {
+        .opt_name = "ati",
+        .name = "ATI Rage 128 Pro",
+        .class_names = { "ati-vga" },
+    },
     [VGA_VMWARE] = {
         .opt_name = "vmware",
         .name = "VMWare SVGA",

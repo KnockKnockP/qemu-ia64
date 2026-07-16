@@ -1,0 +1,39 @@
+IA-64 guest firmware
+====================
+
+``ia64-firmware.bin`` is the GPL-2.0-or-later guest-executed PAL/SAL/EFI
+firmware baseline from the vendored IA-64 QEMU reference tree:
+
+  vibtanium/external-src/qemu-system-ia64-main/roms/ia64-firmware
+
+The reference tree's QEMU lineage is attributed to
+``syunnPC/qemu-system-ia64`` (https://github.com/syunnPC/qemu-system-ia64).
+Vibtanium uses that tree as an implementation reference, not as an
+architectural oracle: emulator behavior is checked against the IA-64 manuals
+and independent guest behavior when the reference and architecture disagree.
+
+The checked-in binary was taken from that tree's
+``release-mingw64-lto/share/ia64-firmware.bin`` artifact.  Its SHA-256 is:
+
+  8aa86169bc89739aea4cbfffe78f5f23323c120949e4690936159ce19ff4d2c2
+
+The source uses an IA-64 cross compiler which is not a normal QEMU build
+dependency.  Keeping the firmware as an installed pc-bios blob matches the
+other architecture firmware artifacts and lets the machine locate it through
+``qemu_find_file(QEMU_FILE_TYPE_BIOS, ...)``.
+
+The former host-implemented graphical EFI maintenance front end is not yet
+reproduced by this guest firmware.  Its pre-rewrite implementation remains a
+user-interface design reference, but any port belongs in guest-executed EFI
+firmware rather than in host instruction or service dispatch.
+
+The firmware currently publishes an FPSWA protocol handle only as a visibility
+fallback.  Its callback returns the IA-64 ``UNHANDLED`` status and does not
+perform floating-point software assist.  Windows boot policy can still depend
+on whether this handle is selected or exposed through NVRAM, so automatic
+FPSWA boot registration remains incomplete.
+
+``tests/ia64-efi-bit/bit.efi`` is a separately linked IA-64 PE32+ EFI
+application, not a host callback blob.  The build installs it as
+``vibtanium-bit.efi`` beside the firmware.  ``-Dvibtanium_efi=false`` (or
+``--disable-vibtanium-efi``) opts out of packaging both artifacts together.

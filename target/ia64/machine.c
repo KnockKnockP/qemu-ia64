@@ -3,7 +3,6 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/cputlb.h"
-#include "firmware.h"
 #include "insn.h"
 #include "mem.h"
 #include "migration/vmstate.h"
@@ -128,8 +127,6 @@ static int ia64_rse_vmstate_pre_load(void *opaque)
     rse->invalid = IA64_RSE_PHYSICAL_COUNT;
     rse->cfle = false;
     rse->reference = false;
-    rse->pending_fill_count = 0;
-    rse->pending_fill_ip = 0;
     rse->bsp_load = 0;
     rse->clean_count = 0;
     memset(rse->logical_nat, 0, sizeof(rse->logical_nat));
@@ -144,33 +141,8 @@ static int ia64_rse_vmstate_post_load(void *opaque, int version_id)
 
     /* The issuing-memory-reference tag is never wire state. */
     rse->reference = false;
-    if (version_id < 4) {
-        uint32_t resident_dirty;
-        uint32_t capacity;
-
-        if (rse->sof > IA64_RSE_PHYSICAL_COUNT) {
-            error_report("legacy IA-64 migration stream has SOF above 96");
-            return -EINVAL;
-        }
-        capacity = IA64_RSE_PHYSICAL_COUNT - rse->sof;
-        resident_dirty = MIN(ia64_vmstate_rse_num_regs(rse->bspstore,
-                                                       rse->bsp),
-                             capacity);
-        rse->dirty = resident_dirty;
-        rse->dirty_nat = ia64_vmstate_rse_nat_words(rse->bspstore,
-                                                    rse->bsp);
-        rse->clean = 0;
-        rse->clean_nat = 0;
-        rse->invalid = capacity - resident_dirty;
-        rse->bol = resident_dirty % IA64_RSE_PHYSICAL_COUNT;
-        rse->cfle = false;
-        /* v3's pre-probe continuation has no authority in the new model. */
-        rse->pending_fill_count = 0;
-        rse->pending_fill_ip = 0;
-    } else if (rse->cfle || rse->pending_fill_count != 0 ||
-               rse->pending_fill_ip != 0) {
-        error_report("IA-64 migration stream contains an in-flight RSE "
-                     "completion mechanism");
+    if (version_id != 5) {
+        error_report("unsupported IA-64 RSE VMState version %d", version_id);
         return -EINVAL;
     }
 
@@ -179,8 +151,8 @@ static int ia64_rse_vmstate_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_rse = {
     .name = "rse",
-    .version_id = 4,
-    .minimum_version_id = 1,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .pre_load = ia64_rse_vmstate_pre_load,
     .post_load = ia64_rse_vmstate_post_load,
     .fields = (const VMStateField[]) {
@@ -196,8 +168,6 @@ static const VMStateDescription vmstate_rse = {
         VMSTATE_UINT32(rrb_fr, IA64RSEState),
         VMSTATE_UINT32(rrb_pr, IA64RSEState),
         VMSTATE_UINT32(current_frame_base, IA64RSEState),
-        VMSTATE_UINT32_V(pending_fill_count, IA64RSEState, 3),
-        VMSTATE_UINT64_V(pending_fill_ip, IA64RSEState, 3),
         VMSTATE_UINT64_ARRAY(stacked_gr, IA64RSEState,
                              IA64_STACKED_GR_COUNT),
         VMSTATE_UINT64_ARRAY_V(stacked_nat, IA64RSEState,
@@ -239,26 +209,192 @@ static const VMStateDescription vmstate_alat_entry = {
     }
 };
 
+/*
+ * Keep the v1 entry payload frozen.  GR/FR tags live in a versioned optional
+ * subsection below, so an absent subsection is an explicit legacy-GR default
+ * rather than an ambiguous change to the unversioned struct-array layout.
+ */
+static const VMStateDescription vmstate_alat_entry_target_type = {
+    .name = "alat-entry-target-type",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(target_type, IA64AlatEntry),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool ia64_alat_vmstate_width_valid(uint8_t target_type, uint8_t width)
+{
+    if (target_type == IA64_ALAT_TARGET_GR) {
+        return width == 1 || width == 2 || width == 4 || width == 8;
+    }
+    if (target_type == IA64_ALAT_TARGET_FR) {
+        return width == 4 || width == 8 || width == 10 || width == 16;
+    }
+    return false;
+}
+
+static int ia64_validate_alat_vmstate(const IA64AlatState *alat)
+{
+    if (alat->next >= IA64_ALAT_COUNT) {
+        error_report("IA-64 migration stream has out-of-range ALAT "
+                     "replacement cursor %u", alat->next);
+        return -EINVAL;
+    }
+
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        const IA64AlatEntry *entry = &alat->entries[i];
+
+        if (entry->target_type >= IA64_ALAT_TARGET_TYPE_COUNT) {
+            error_report("IA-64 migration stream ALAT entry %u has invalid "
+                         "target type %u", i, entry->target_type);
+            return -EINVAL;
+        }
+        if (!entry->valid) {
+            continue;
+        }
+        if ((entry->target_type == IA64_ALAT_TARGET_GR &&
+             (entry->target == 0 || entry->target >= IA64_GR_COUNT)) ||
+            (entry->target_type == IA64_ALAT_TARGET_FR &&
+             (entry->target < 2 || entry->target >= IA64_FR_COUNT))) {
+            error_report("IA-64 migration stream ALAT entry %u has invalid "
+                         "%s target %u", i,
+                         entry->target_type == IA64_ALAT_TARGET_FR ?
+                         "FR" : "GR", entry->target);
+            return -EINVAL;
+        }
+        if (!ia64_alat_vmstate_width_valid(entry->target_type,
+                                            entry->width)) {
+            error_report("IA-64 migration stream ALAT entry %u has invalid "
+                         "%s width %u", i,
+                         entry->target_type == IA64_ALAT_TARGET_FR ?
+                         "FR" : "GR", entry->width);
+            return -EINVAL;
+        }
+    }
+    return 0;
+}
+
+static int ia64_alat_vmstate_pre_load(void *opaque)
+{
+    IA64AlatState *alat = opaque;
+
+    /* Missing target-type subsection means the legacy all-GR schema. */
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        alat->entries[i].target_type = IA64_ALAT_TARGET_GR;
+    }
+    alat->valid_mask = 0;
+    memset(alat->gr_mask, 0, sizeof(alat->gr_mask));
+    memset(alat->gr_refcount, 0, sizeof(alat->gr_refcount));
+    return 0;
+}
+
+static int ia64_alat_vmstate_pre_save(void *opaque)
+{
+    return ia64_validate_alat_vmstate(opaque);
+}
+
+static int ia64_alat_vmstate_post_load(void *opaque, int version_id)
+{
+    if (version_id != 1) {
+        error_report("IA-64 migration stream has unsupported ALAT version %d",
+                     version_id);
+        return -EINVAL;
+    }
+    return ia64_validate_alat_vmstate(opaque);
+}
+
+static bool ia64_alat_target_types_needed(void *opaque)
+{
+    IA64AlatState *alat = opaque;
+
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        if (alat->entries[i].target_type != IA64_ALAT_TARGET_GR) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_alat_target_types = {
+    .name = "alat/target-types",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ia64_alat_target_types_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(entries, IA64AlatState, IA64_ALAT_COUNT, 0,
+                             vmstate_alat_entry_target_type, IA64AlatEntry),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_alat = {
     .name = "alat",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_load = ia64_alat_vmstate_pre_load,
+    .pre_save = ia64_alat_vmstate_pre_save,
+    .post_load = ia64_alat_vmstate_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(entries, IA64AlatState, IA64_ALAT_COUNT, 0,
                              vmstate_alat_entry, IA64AlatEntry),
         VMSTATE_UINT8(next, IA64AlatState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_alat_target_types,
+        NULL
     }
 };
 
+static int ia64_interrupt_vmstate_pre_load(void *opaque)
+{
+    IA64InterruptState *interrupt = opaque;
+
+    memset(interrupt->in_service, 0, sizeof(interrupt->in_service));
+    interrupt->legacy_pending_interruption = 0;
+    interrupt->pending_vector = 0;
+    interrupt->timer_compare_latched = IA64_TIMER_COMPARE_IDLE;
+    interrupt->pending = 0;
+    return 0;
+}
+
+static int ia64_interrupt_vmstate_post_load(void *opaque, int version_id)
+{
+    IA64InterruptState *interrupt = opaque;
+    const uint64_t valid_word0 =
+        (~UINT64_C(0) << 16) | UINT64_C(1) | (UINT64_C(1) << 2);
+
+    if (interrupt->timer_compare_latched > IA64_TIMER_COMPARE_ARMED) {
+        error_report("IA-64 migration stream has invalid timer comparison "
+                     "state %u", interrupt->timer_compare_latched);
+        return -EINVAL;
+    }
+    if (version_id >= 3 &&
+        (interrupt->in_service[0] & ~valid_word0) != 0) {
+        error_report("IA-64 migration stream marks a reserved external "
+                     "interrupt vector in service");
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int ia64_interrupt_vmstate_pre_save(void *opaque)
+{
+    return ia64_interrupt_vmstate_post_load(opaque, 3);
+}
+
 static const VMStateDescription vmstate_interrupt = {
     .name = "interrupt",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 3,
+    .minimum_version_id = 3,
+    .pre_save = ia64_interrupt_vmstate_pre_save,
+    .pre_load = ia64_interrupt_vmstate_pre_load,
+    .post_load = ia64_interrupt_vmstate_post_load,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT64(pending_interruption, IA64InterruptState),
-        VMSTATE_UINT64(pending_vector, IA64InterruptState),
-        VMSTATE_UINT8(pending, IA64InterruptState),
+        VMSTATE_UINT64_ARRAY(in_service, IA64InterruptState, 4),
+        VMSTATE_UINT8(timer_compare_latched, IA64InterruptState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -343,6 +479,8 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env);
 static int ia64_env_pre_save(void *opaque)
 {
     CPUIA64State *env = opaque;
+    const uint64_t valid_interrupt_word0 =
+        (~UINT64_C(0) << 16) | UINT64_C(1) | (UINT64_C(1) << 2);
     int ret;
 
     /*
@@ -354,18 +492,19 @@ static int ia64_env_pre_save(void *opaque)
                      "fault breadcrumb");
         return -EINVAL;
     }
-    if (env->rse.cfle || env->rse.reference) {
-        error_report("IA-64 migration reached the middle of a mandatory "
+    if (env->rse.reference) {
+        error_report("IA-64 migration reached the middle of an issued "
                      "RSE memory reference");
-        return -EINVAL;
-    }
-    if (env->rse.pending_fill_count != 0 || env->rse.pending_fill_ip != 0) {
-        error_report("IA-64 migration reached a legacy pending RSE fill");
         return -EINVAL;
     }
     ret = ia64_validate_rse_vmstate(&env->rse);
     if (ret < 0) {
         return ret;
+    }
+    if ((env->cr[IA64_CR_IRR0] & ~valid_interrupt_word0) != 0) {
+        error_report("IA-64 migration reached a reserved pending external "
+                     "interrupt vector");
+        return -EINVAL;
     }
     if ((env->rse.dirty < 0 || env->rse.dirty_nat < 0) &&
         env->rse.bsp_load != env->rse.bspstore) {
@@ -403,6 +542,7 @@ static int ia64_env_pre_load(void *opaque)
     env->current_slot_valid = false;
     env->current_slot_ri = 0;
     env->current_slot_type = 0;
+    env->current_slot_speculative_load = false;
     env->current_slot_ip = 0;
     env->current_slot_raw = 0;
     /* Older streams predate issue-group frontier tracking. */
@@ -443,6 +583,7 @@ static bool ia64_issue_group_overlay_needed(void *opaque)
            env->issue_group.branch_pr_forward_mask != 0 ||
            env->issue_group.pfs_saved ||
            env->issue_group.branch_pfs_forwarded ||
+           env->issue_group.saved_ar_count != 0 ||
            env->issue_group.typed_active;
 }
 
@@ -477,12 +618,20 @@ static int ia64_issue_group_overlay_post_load(void *opaque, int version_id)
         env->issue_group.pfs_saved = false;
         env->issue_group.branch_pfs_forwarded = false;
     }
+    if (version_id < 6) {
+        /* No generic ordinary-AR resource existed in v1-v5 streams. */
+        memset(env->issue_group.saved_ar_value, 0,
+               sizeof(env->issue_group.saved_ar_value));
+        memset(env->issue_group.saved_ar_index, 0,
+               sizeof(env->issue_group.saved_ar_index));
+        env->issue_group.saved_ar_count = 0;
+    }
     return 0;
 }
 
 static const VMStateDescription vmstate_issue_group_overlay = {
     .name = "env/issue-group-overlay",
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 1,
     .needed = ia64_issue_group_overlay_needed,
     .post_load = ia64_issue_group_overlay_post_load,
@@ -506,6 +655,35 @@ static const VMStateDescription vmstate_issue_group_overlay = {
         VMSTATE_BOOL_V(issue_group.pfs_saved, CPUIA64State, 5),
         VMSTATE_BOOL_V(issue_group.branch_pfs_forwarded,
                        CPUIA64State, 5),
+        VMSTATE_UINT64_ARRAY_V(issue_group.saved_ar_value, CPUIA64State,
+                               IA64_ISSUE_GROUP_AR_CAPACITY, 6),
+        VMSTATE_UINT8_ARRAY_V(issue_group.saved_ar_index, CPUIA64State,
+                              IA64_ISSUE_GROUP_AR_CAPACITY, 6),
+        VMSTATE_UINT8_V(issue_group.saved_ar_count, CPUIA64State, 6),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool ia64_issue_group_fr_overlay_needed(void *opaque)
+{
+    CPUIA64State *env = opaque;
+
+    return env->issue_group.saved_fr_mask[0] != 0 ||
+           env->issue_group.saved_fr_mask[1] != 0;
+}
+
+/* Kept as a separate optional subsection so the existing ordinary-source
+   overlay wire versions remain readable. */
+static const VMStateDescription vmstate_issue_group_fr_overlay = {
+    .name = "env/issue-group-fr-overlay",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ia64_issue_group_fr_overlay_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(issue_group.saved_fr, CPUIA64State,
+                             IA64_FR_COUNT, 0, vmstate_float_reg,
+                             IA64FloatReg),
+        VMSTATE_UINT64_ARRAY(issue_group.saved_fr_mask, CPUIA64State, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -516,6 +694,31 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
         env->issue_group.saved_gr_mask[0],
         env->issue_group.saved_gr_mask[1],
     };
+    uint64_t ar_seen[2] = { 0, 0 };
+
+    if (env->issue_group.saved_ar_count >
+        IA64_ISSUE_GROUP_AR_CAPACITY) {
+        error_report("IA-64 migration stream has too many saved ordinary "
+                     "AR sources");
+        return -EINVAL;
+    }
+    for (unsigned i = 0; i < env->issue_group.saved_ar_count; i++) {
+        uint32_t reg = env->issue_group.saved_ar_index[i];
+        uint64_t bit;
+
+        if (reg >= IA64_AR_COUNT) {
+            error_report("IA-64 migration stream has invalid saved ordinary "
+                         "AR%u", reg);
+            return -EINVAL;
+        }
+        bit = UINT64_C(1) << (reg & 63);
+        if (ar_seen[reg >> 6] & bit) {
+            error_report("IA-64 migration stream saves ordinary AR%u more "
+                         "than once", reg);
+            return -EINVAL;
+        }
+        ar_seen[reg >> 6] |= bit;
+    }
 
     if (env->instruction_group_start &&
         ia64_issue_group_overlay_needed(env)) {
@@ -525,17 +728,25 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
     }
     if (!env->issue_group.typed_active &&
         (mask[0] != 0 || mask[1] != 0 || env->issue_group.pr_saved ||
+         env->issue_group.saved_fr_mask[0] != 0 ||
+         env->issue_group.saved_fr_mask[1] != 0 ||
          env->issue_group.branch_pr_forward_mask != 0 ||
          env->issue_group.saved_br_mask != 0 ||
          env->issue_group.branch_br_forward_mask != 0 ||
          env->issue_group.pfs_saved ||
-         env->issue_group.branch_pfs_forwarded)) {
+         env->issue_group.branch_pfs_forwarded ||
+         env->issue_group.saved_ar_count != 0)) {
         error_report("IA-64 migration stream has saved ordinary sources "
                      "or explicit forwarding without a typed epoch owner");
         return -EINVAL;
     }
     if (mask[0] & 1) {
         error_report("IA-64 migration stream marks immutable GR0 as saved");
+        return -EINVAL;
+    }
+    if (env->issue_group.saved_fr_mask[0] & UINT64_C(3)) {
+        error_report("IA-64 migration stream marks immutable FR0/FR1 as "
+                     "saved");
         return -EINVAL;
     }
     for (unsigned half = 0; half < ARRAY_SIZE(mask); half++) {
@@ -571,21 +782,24 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
 static int ia64_env_post_load(void *opaque, int version_id)
 {
     CPUIA64State *env = opaque;
+    const uint64_t valid_interrupt_word0 =
+        (~UINT64_C(0) << 16) | UINT64_C(1) | (UINT64_C(1) << 2);
     int ret;
 
     ret = ia64_validate_issue_group_overlay(env);
     if (ret < 0) {
         return ret;
     }
+    if ((env->cr[IA64_CR_IRR0] & ~valid_interrupt_word0) != 0) {
+        error_report("IA-64 migration stream marks a reserved external "
+                     "interrupt vector pending");
+        return -EINVAL;
+    }
 
-    if (version_id < 2 && (env->psr & IA64_PSR_BN_BIT)) {
-        memcpy(env->banked_gr, &env->gr[16], sizeof(env->banked_gr));
-    }
-    if (version_id < 3) {
-        memset(&env->alat, 0, sizeof(env->alat));
-    }
-    if (version_id < 4) {
-        env->firmware_identity_tlb = false;
+    if (version_id != 8) {
+        error_report("unsupported IA-64 environment VMState version %d",
+                     version_id);
+        return -EINVAL;
     }
     ia64_rse_reconstruct_transients(env);
     /*
@@ -603,46 +817,40 @@ static int ia64_env_post_load(void *opaque, int version_id)
     env->memory.next_dtc %= IA64_TC_COUNT;
     ia64_translation_lookup_cache_flush(env);
     ia64_alat_reconstruct_transients(env);
-    env->interrupt.timer_compare_latched = 0;
     /*
      * Guest time continues from the serialized ITC value; re-derive the
-     * clock offset and re-arm the CR.ITM deadline for the new clock.
+     * clock offset and re-arm the CR.ITM deadline for the new clock.  The
+     * consumed-comparison latch is architectural continuation state: clearing
+     * it here would inject a duplicate timer interrupt after migration.
      */
     ia64_itc_set(env, env->ar[IA64_AR_ITC]);
-    ia64_itc_timer_update(env);
     ia64_reconcile_interrupt_state(env);
+    ia64_refresh_interrupt_delivery(env);
     env->gr[0] = 0;
     env->pr |= 1;
     env->ri = ia64_psr_ri(env->psr);
     env->ri_dirty = false;
     env->instruction_group_dirty = false;
     env->fault_exit_pending_tb_translate = false;
-    ia64_firmware_recover_post_load(env->ip);
     return 0;
 }
 
-static bool ia64_env_uses_rse_v1(void *opaque, int version_id)
+static bool ia64_env_uses_rse_v5(void *opaque, int version_id)
 {
     (void)opaque;
-    return version_id <= 3;
+    return version_id == 8;
 }
 
-static bool ia64_env_uses_rse_v3(void *opaque, int version_id)
+static bool ia64_env_uses_interrupt_v3(void *opaque, int version_id)
 {
     (void)opaque;
-    return version_id == 4;
-}
-
-static bool ia64_env_uses_rse_v4(void *opaque, int version_id)
-{
-    (void)opaque;
-    return version_id >= 5;
+    return version_id >= 7;
 }
 
 static const VMStateDescription vmstate_env = {
     .name = "env",
-    .version_id = 5,
-    .minimum_version_id = 1,
+    .version_id = 8,
+    .minimum_version_id = 8,
     .pre_save = ia64_env_pre_save,
     .pre_load = ia64_env_pre_load,
     .post_load = ia64_env_post_load,
@@ -657,31 +865,26 @@ static const VMStateDescription vmstate_env = {
         VMSTATE_UINT64_ARRAY(cr, CPUIA64State, IA64_CR_COUNT),
         VMSTATE_UINT64_ARRAY(rr, CPUIA64State, IA64_RR_COUNT),
         VMSTATE_UINT64_ARRAY(pkr, CPUIA64State, IA64_PKR_COUNT),
+        VMSTATE_UINT64_ARRAY_V(dbr, CPUIA64State, IA64_DBR_COUNT, 6),
+        VMSTATE_UINT64_ARRAY_V(ibr, CPUIA64State, IA64_IBR_COUNT, 6),
+        VMSTATE_UINT64_ARRAY_V(cpuid, CPUIA64State, IA64_CPUID_COUNT, 6),
+        VMSTATE_UINT64_ARRAY_V(dahr, CPUIA64State, IA64_DAHR_COUNT, 6),
+        VMSTATE_UINT64_ARRAY_V(msr, CPUIA64State, IA64_MSR_COUNT, 6),
+        VMSTATE_UINT64_ARRAY_V(pmc, CPUIA64State, IA64_PMC_COUNT, 6),
+        VMSTATE_UINT64_ARRAY_V(pmd, CPUIA64State, IA64_PMD_COUNT, 6),
         VMSTATE_UINT64_ARRAY(itr, CPUIA64State, IA64_ITR_COUNT),
         VMSTATE_UINT64_ARRAY(dtr, CPUIA64State, IA64_DTR_COUNT),
         VMSTATE_UINT64(ip, CPUIA64State),
         VMSTATE_UINT64(psr, CPUIA64State),
         VMSTATE_UINT64(cfm, CPUIA64State),
         VMSTATE_BOOL_V(firmware_identity_tlb, CPUIA64State, 4),
-        /*
-         * RSE used to be embedded with VMSTATE_STRUCT, which does not put a
-         * nested version on the wire.  Pin each outer env generation to one
-         * exact RSE schema so CPU v3/env v5 and every future stream are
-         * unambiguous.  Env v1-v3 all predate stacked-NaT/RSE-continuation
-         * fields and therefore select RSE v1.  Env v4 selects the latest RSE
-         * v3 layout produced before this fix.  Historical env-v4 payloads
-         * also exist with RSE v1 and v2, but share the same outer version and
-         * are consequently impossible to distinguish from v3 on the wire.
-         */
-        VMSTATE_VSTRUCT_TEST(rse, CPUIA64State, ia64_env_uses_rse_v1, 0,
-                             vmstate_rse, IA64RSEState, 1),
-        VMSTATE_VSTRUCT_TEST(rse, CPUIA64State, ia64_env_uses_rse_v3, 0,
-                             vmstate_rse, IA64RSEState, 3),
-        VMSTATE_VSTRUCT_TEST(rse, CPUIA64State, ia64_env_uses_rse_v4, 0,
-                             vmstate_rse, IA64RSEState, 4),
+        /* The typed-only cutover deliberately starts a new RSE wire schema. */
+        VMSTATE_VSTRUCT_TEST(rse, CPUIA64State, ia64_env_uses_rse_v5, 0,
+                             vmstate_rse, IA64RSEState, 5),
         VMSTATE_STRUCT(nat, CPUIA64State, 0, vmstate_nat, IA64NaTState),
-        VMSTATE_STRUCT(interrupt, CPUIA64State, 0, vmstate_interrupt,
-                       IA64InterruptState),
+        VMSTATE_VSTRUCT_TEST(interrupt, CPUIA64State,
+                             ia64_env_uses_interrupt_v3, 0,
+                             vmstate_interrupt, IA64InterruptState, 3),
         VMSTATE_STRUCT(memory, CPUIA64State, 0, vmstate_memory,
                        IA64MemorySkeletonState),
         VMSTATE_STRUCT(exception, CPUIA64State, 0, vmstate_exception,
@@ -693,6 +896,7 @@ static const VMStateDescription vmstate_env = {
     .subsections = (const VMStateDescription * const []) {
         &vmstate_instruction_group_state,
         &vmstate_issue_group_overlay,
+        &vmstate_issue_group_fr_overlay,
         NULL
     },
 };
@@ -701,8 +905,11 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 {
     IA64CPU *cpu = opaque;
 
-    if (version_id >= 3 &&
-        (cpu->env.rse.dirty < 0 || cpu->env.rse.dirty_nat < 0) &&
+    if (version_id != 6) {
+        error_report("unsupported IA-64 CPU VMState version %d", version_id);
+        return -EINVAL;
+    }
+    if ((cpu->env.rse.dirty < 0 || cpu->env.rse.dirty_nat < 0) &&
         cpu->env.rse.bsp_load != cpu->env.rse.bspstore) {
         error_report("IA-64 migration stream has inconsistent BSPLOAD for "
                      "an incomplete RSE frame");
@@ -737,43 +944,22 @@ static const VMStateDescription vmstate_ia64_collection_state = {
     },
 };
 
-static bool ia64_cpu_uses_env_v3(void *opaque, int version_id)
+static bool ia64_cpu_uses_env_v8(void *opaque, int version_id)
 {
     (void)opaque;
-    return version_id == 1;
-}
-
-static bool ia64_cpu_uses_env_v4(void *opaque, int version_id)
-{
-    (void)opaque;
-    return version_id == 2;
-}
-
-static bool ia64_cpu_uses_env_v5(void *opaque, int version_id)
-{
-    (void)opaque;
-    return version_id >= 3;
+    return version_id == 6;
 }
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 3,
-    .minimum_version_id = 1,
+    .version_id = 6,
+    .minimum_version_id = 6,
     .post_load = ia64_cpu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(parent_obj, IA64CPU, 0, vmstate_cpu_common, CPUState),
-        /*
-         * CPU v1 and v2 likewise embedded a moving env descriptor without a
-         * nested version.  Select the latest layout that is distinguishable
-         * at each outer boundary: v1 -> env v3/RSE v1, v2 -> env v4/RSE v3.
-         * CPU v3 is the first fully versioned chain: env v5/RSE v4.
-         */
-        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v3, 0,
-                             vmstate_env, CPUIA64State, 3),
-        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v4, 0,
-                             vmstate_env, CPUIA64State, 4),
-        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v5, 0,
-                             vmstate_env, CPUIA64State, 5),
+        /* CPU v6 is the typed-only VMState boundary (env v8/RSE v5). */
+        VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v8, 0,
+                             vmstate_env, CPUIA64State, 8),
         VMSTATE_UINT64_V(env.rse.bsp_load, IA64CPU, 2),
         VMSTATE_END_OF_LIST()
     },

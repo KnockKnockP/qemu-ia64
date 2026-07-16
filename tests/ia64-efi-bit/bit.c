@@ -2,7 +2,7 @@
  * IA-64 in-emulator EFI BIT application.
  *
  * Boots as an EFI image under the vibtanium firmware and exercises the EFI
- * service families implemented by hw/ia64/efi-services.c from inside the
+ * service families implemented by the guest-executed IA-64 firmware from
  * guest. The output is intentionally machine-greppable for run.sh.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -24,6 +24,7 @@ typedef int bool;
 #define EFI_SUCCESS 0UL
 #define EFI_INVALID_PARAMETER EFI_ERROR(2)
 #define EFI_UNSUPPORTED EFI_ERROR(3)
+#define EFI_BAD_BUFFER_SIZE EFI_ERROR(4)
 #define EFI_BUFFER_TOO_SMALL EFI_ERROR(5)
 #define EFI_NOT_READY EFI_ERROR(6)
 #define EFI_WRITE_PROTECTED EFI_ERROR(8)
@@ -40,15 +41,15 @@ typedef int bool;
 #define EFI_TIMER_PERIODIC 1UL
 #define EFI_TIMER_RELATIVE 2UL
 #define EFI_FILE_MODE_READ 1UL
+#define EFI_FILE_MODE_WRITE 2UL
 #define EFI_VARIABLE_NON_VOLATILE 1UL
 #define EFI_VARIABLE_BOOTSERVICE_ACCESS 2UL
 #define EFI_VARIABLE_RUNTIME_ACCESS 4UL
 #define EFI_MEMORY_RUNTIME 0x8000000000000000UL
+#define EVT_TIMER 0x80000000UL
 #define EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE 0x60000202UL
 
-#define VIBTANIUM_EFI_APP_BASE 0x01000000UL
-#define VIBTANIUM_EFI_LOADED_IMAGE 0x00071000UL
-#define VIBTANIUM_EFI_CON_OUT 0x00081000UL
+#define VIBTANIUM_EFI_APP_BASE 0x02000000UL
 #define VIBTANIUM_FRAMEBUFFER_WIDTH 640UL
 #define VIBTANIUM_FRAMEBUFFER_HEIGHT 400UL
 #define BIT_MEDIA_TEXT "vibtanium-bit-ok"
@@ -307,13 +308,14 @@ extern int ia64_chk_a_clr_fp_takes_branch(void);
 
 static EfiSystemTable *g_st;
 static EfiSimpleTextOutputProtocol *g_conout;
+static EfiLoadedImageProtocol *g_loaded_image;
 static uint64_t g_image_handle;
 static uint64_t g_boot_device_handle;
 static uint64_t g_pass_count;
 static uint64_t g_fail_count;
 
 static CHAR16 print_buffer[256];
-static uint8_t memory_map_buffer[4096];
+static uint8_t memory_map_buffer[4096] __attribute__((aligned(8)));
 static uint64_t handle_buffer[8];
 static uint64_t event_buffer[4];
 static uint8_t copy_src[64];
@@ -561,19 +563,21 @@ static bool test_system_table(void)
 
     ok &= check("efi SystemTable pointers and vendor",
                 g_st != NULL &&
-                g_st->hdr.header_size == 120 &&
-                utf16_eq_ascii(g_st->firmware_vendor, "Vibtanium") &&
-                g_st->con_out == (EfiSimpleTextOutputProtocol *)
-                    VIBTANIUM_EFI_CON_OUT &&
+                g_st->hdr.header_size == sizeof(*g_st) &&
+                utf16_eq_ascii(g_st->firmware_vendor,
+                               "QEMU IA-64 Firmware") &&
+                g_st->console_in_handle != 0 &&
+                g_st->console_out_handle != 0 &&
+                g_st->con_in != NULL && g_st->con_out == g_conout &&
                 g_st->boot_services != NULL &&
                 g_st->runtime_services != NULL &&
                 g_st->number_of_table_entries >= 2 &&
                 g_st->configuration_table != NULL);
 
     loaded = loaded_image_protocol();
+    g_loaded_image = loaded;
     ok &= check("efi LoadedImage protocol fields",
                 loaded != NULL &&
-                loaded == (EfiLoadedImageProtocol *)VIBTANIUM_EFI_LOADED_IMAGE &&
                 loaded->system_table == g_st &&
                 loaded->device_handle != 0 &&
                 loaded->image_base == (void *)VIBTANIUM_EFI_APP_BASE &&
@@ -637,6 +641,7 @@ static bool test_conout(void)
 static bool test_boot_memory_services(void)
 {
     EfiBootServices *bs = g_st->boot_services;
+    uint64_t old_tpl;
     uint64_t pool = 0;
     uint64_t page = 0;
     uint64_t map_size = 0;
@@ -645,9 +650,9 @@ static bool test_boot_memory_services(void)
     uint32_t descriptor_version = 0;
     bool ok = true;
 
-    ok &= check("efi BootServices Raise/RestoreTPL",
-                call1(bs->fn[BS_RAISE_TPL], 8) == 4 &&
-                call1(bs->fn[BS_RESTORE_TPL], 4) == EFI_SUCCESS);
+    old_tpl = call1(bs->fn[BS_RAISE_TPL], 8);
+    call1(bs->fn[BS_RESTORE_TPL], old_tpl);
+    ok &= check("efi BootServices Raise/RestoreTPL", old_tpl == 4);
     ok &= check_status("efi BootServices Stall",
                        call1(bs->fn[BS_STALL], 1), EFI_SUCCESS);
     ok &= check_status("efi BootServices SetWatchdogTimer",
@@ -668,7 +673,7 @@ static bool test_boot_memory_services(void)
                 (((uint8_t *)page)[0] = 0x5a, ((uint8_t *)page)[0] == 0x5a) &&
                 call2(bs->fn[BS_FREE_PAGES], page, 1) == EFI_SUCCESS &&
                 call2(bs->fn[BS_FREE_PAGES], page, 1) ==
-                    EFI_INVALID_PARAMETER);
+                    EFI_NOT_FOUND);
 
     page = 0x03040000UL;
     ok &= check("efi BootServices AllocatePages exact address",
@@ -691,7 +696,7 @@ static bool test_boot_memory_services(void)
                        (uint64_t)memory_map_buffer, (uint64_t)&map_key,
                        (uint64_t)&descriptor_size,
                        (uint64_t)&descriptor_version) == EFI_SUCCESS) &&
-                map_key != 0 && ((uint32_t *)memory_map_buffer)[0] != 0);
+                map_key != 0 && map_size >= descriptor_size);
 
     ok &= check_status("efi BootServices ExitBootServices rejects bad key",
                        call2(bs->fn[BS_EXIT_BOOT_SERVICES], g_image_handle,
@@ -714,6 +719,8 @@ static bool test_event_services(void)
                 call1(bs->fn[BS_CHECK_EVENT], event) == EFI_NOT_READY &&
                 call1(bs->fn[BS_SIGNAL_EVENT], event) == EFI_SUCCESS &&
                 call1(bs->fn[BS_CHECK_EVENT], event) == EFI_SUCCESS &&
+                call1(bs->fn[BS_CHECK_EVENT], event) == EFI_NOT_READY &&
+                call1(bs->fn[BS_SIGNAL_EVENT], event) == EFI_SUCCESS &&
                 (event_buffer[0] = event,
                  call3(bs->fn[BS_WAIT_FOR_EVENT], 1,
                        (uint64_t)event_buffer, (uint64_t)&index) ==
@@ -727,7 +734,7 @@ static bool test_event_services(void)
     event = 0;
     index = 77;
     ok &= check("efi timer event relative wait",
-                call5(bs->fn[BS_CREATE_EVENT], 0, 0, 0, 0,
+                call5(bs->fn[BS_CREATE_EVENT], EVT_TIMER, 0, 0, 0,
                       (uint64_t)&event) == EFI_SUCCESS &&
                 call3(bs->fn[BS_SET_TIMER], event, EFI_TIMER_RELATIVE, 1) ==
                     EFI_SUCCESS &&
@@ -754,16 +761,18 @@ static bool test_protocol_services(void)
                 call3(bs->fn[BS_HANDLE_PROTOCOL], g_image_handle,
                       (uint64_t)&loaded_image_guid, (uint64_t)&iface) ==
                     EFI_SUCCESS &&
-                iface == VIBTANIUM_EFI_LOADED_IMAGE);
+                iface == (uint64_t)g_loaded_image);
     iface = 0;
     ok &= check("efi HandleProtocol preinstalled ConOut",
-                call3(bs->fn[BS_HANDLE_PROTOCOL], g_boot_device_handle,
+                call3(bs->fn[BS_HANDLE_PROTOCOL],
+                      g_st->console_out_handle,
                       (uint64_t)&simple_text_output_guid,
                       (uint64_t)&iface) == EFI_SUCCESS &&
                 iface == (uint64_t)g_conout);
     iface = 0;
     ok &= check("efi HandleProtocol preinstalled ConIn",
-                call3(bs->fn[BS_HANDLE_PROTOCOL], g_boot_device_handle,
+                call3(bs->fn[BS_HANDLE_PROTOCOL],
+                      g_st->console_in_handle,
                       (uint64_t)&simple_text_input_guid,
                       (uint64_t)&iface) == EFI_SUCCESS &&
                 iface == (uint64_t)g_st->con_in);
@@ -779,7 +788,7 @@ static bool test_protocol_services(void)
                       (uint64_t)&graphics_output_guid, 0,
                       (uint64_t)&handle_size, (uint64_t)handle_buffer) ==
                     EFI_SUCCESS &&
-                handle_buffer[0] == g_boot_device_handle);
+                handle_buffer[0] == g_st->console_out_handle);
 
     ok &= check("efi InstallProtocolInterface custom handle",
                 call4(bs->fn[BS_INSTALL_PROTOCOL_INTERFACE],
@@ -791,7 +800,7 @@ static bool test_protocol_services(void)
                              (uint64_t)&handle,
                              (uint64_t)&custom_protocol_guid, 0,
                              (uint64_t)&custom_protocol_payload),
-                       EFI_ACCESS_DENIED);
+                       EFI_INVALID_PARAMETER);
     iface = 0;
     ok &= check("efi Open/CloseProtocol custom handle",
                 call6(bs->fn[BS_OPEN_PROTOCOL], handle,
@@ -946,15 +955,12 @@ static bool test_runtime_services(void)
     ok &= check("efi RuntimeServices ConvertPointer rejects unmapped",
                 call2(rt->fn[RT_CONVERT_POINTER], 0, (uint64_t)&pointer) ==
                     EFI_NOT_FOUND && pointer == (uint64_t)g_st);
-    ok &= check_status("efi RuntimeServices SetVirtualAddressMap invalid",
+    ok &= check_status("efi RuntimeServices SetVirtualAddressMap before ExitBootServices",
                        call4(rt->fn[RT_SET_VIRTUAL_ADDRESS_MAP], 0, 40, 2, 0),
-                       EFI_INVALID_PARAMETER);
-    ok &= check_status("efi RuntimeServices SetVirtualAddressMap no mapping",
-                       call4(rt->fn[RT_SET_VIRTUAL_ADDRESS_MAP], 0, 40, 1, 0),
-                       EFI_NO_MAPPING);
+                       EFI_UNSUPPORTED);
     virtual_address_change_context = 0x5a5aa5a5UL;
     virtual_address_change_seen = 0;
-    ok &= check("efi RuntimeServices physical virtual-map notification",
+    ok &= check("efi RuntimeServices rejected virtual map does not notify",
                 call5(bs->fn[BS_CREATE_EVENT],
                       EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE, 16,
                       (uint64_t)virtual_address_change_notify,
@@ -962,16 +968,9 @@ static bool test_runtime_services(void)
                       (uint64_t)&event) == EFI_SUCCESS && event != 0 &&
                 call4(rt->fn[RT_SET_VIRTUAL_ADDRESS_MAP],
                       sizeof(virtual_map), sizeof(virtual_map), 1,
-                      (uint64_t)&virtual_map) == EFI_SUCCESS &&
-                virtual_address_change_seen == 1);
-    pointer = (uint64_t)g_st;
-    ok &= check("efi RuntimeServices ConvertPointer mapped",
-                call2(rt->fn[RT_CONVERT_POINTER], 0, (uint64_t)&pointer) ==
-                    EFI_SUCCESS &&
-                pointer == (0xe000000000000000UL | (uint64_t)g_st));
-    ok &= check_status("efi RuntimeServices ResetSystem no-op",
-                       call4(rt->fn[RT_RESET_SYSTEM], 0, 0, 0, 0),
-                       EFI_SUCCESS);
+                      (uint64_t)&virtual_map) == EFI_UNSUPPORTED &&
+                virtual_address_change_seen == 0 &&
+                call1(bs->fn[BS_CLOSE_EVENT], event) == EFI_SUCCESS);
 
     call5(rt->fn[RT_SET_VARIABLE], (uint64_t)bit_var_name,
           (uint64_t)&bit_variable_guid, 0, 0, 0);
@@ -983,7 +982,6 @@ static bool test_conin_services(void)
     EfiBootServices *bs = g_st->boot_services;
     EfiSimpleTextInputProtocol *conin = g_st->con_in;
     EfiInputKey key;
-    uint64_t index = 0;
     bool ok = true;
 
     bytes_set(&key, 0, sizeof(key));
@@ -996,11 +994,6 @@ static bool test_conin_services(void)
                        EFI_NOT_READY);
     ok &= check_status("efi ConIn WaitForKey CheckEvent not ready",
                        call1(bs->fn[BS_CHECK_EVENT], conin->wait_for_key),
-                       EFI_NOT_READY);
-    event_buffer[0] = conin->wait_for_key;
-    ok &= check_status("efi ConIn WaitForKey WaitForEvent not ready",
-                       call3(bs->fn[BS_WAIT_FOR_EVENT], 1,
-                             (uint64_t)event_buffer, (uint64_t)&index),
                        EFI_NOT_READY);
     return ok;
 }
@@ -1051,7 +1044,8 @@ static bool test_gop_services(void)
                        call2(gop->fn[GOP_SET_MODE], (uint64_t)gop, 0),
                        EFI_SUCCESS);
     ok &= check_status("efi GOP SetMode rejects invalid",
-                       call2(gop->fn[GOP_SET_MODE], (uint64_t)gop, 1),
+                       call2(gop->fn[GOP_SET_MODE], (uint64_t)gop,
+                             gop->mode->max_mode),
                        EFI_UNSUPPORTED);
 
     blt_pixels[0] = 0x00112233U;
@@ -1146,12 +1140,12 @@ static bool test_block_io(EfiBlockIoProtocol *block)
                        call5(block->fn[BLOCKIO_READ_BLOCKS],
                              (uint64_t)block, block->media->media_id, 0, 1,
                              (uint64_t)block_buffer),
-                       EFI_INVALID_PARAMETER);
-    ok &= check_status("efi BlockIO->WriteBlocks write-protected",
+                       EFI_BAD_BUFFER_SIZE);
+    ok &= check_status("efi BlockIO->WriteBlocks zero-size no-op",
                        call5(block->fn[BLOCKIO_WRITE_BLOCKS],
                              (uint64_t)block, block->media->media_id, 0,
-                             block_size, (uint64_t)block_buffer),
-                       EFI_WRITE_PROTECTED);
+                             0, 0),
+                       EFI_SUCCESS);
     ok &= check_status("efi BlockIO->FlushBlocks",
                        call1(block->fn[BLOCKIO_FLUSH_BLOCKS],
                              (uint64_t)block),
@@ -1240,16 +1234,16 @@ static bool test_file_protocol(EfiSimpleFileSystemProtocol *simplefs)
     }
 
     file = NULL;
-    ok &= check_status("efi File->Open rejects write mode",
+    ok &= check_status("efi File->Open rejects missing read mode",
                        call5(root->fn[FILE_OPEN], (uint64_t)root,
                              (uint64_t)&file, (uint64_t)media_asset_path,
-                             3, 0),
-                       EFI_WRITE_PROTECTED);
-    ok &= check_status("efi File directory Read unsupported",
-                       (size = sizeof(file_buffer),
-                        call3(root->fn[FILE_READ], (uint64_t)root,
-                              (uint64_t)&size, (uint64_t)file_buffer)),
-                       EFI_UNSUPPORTED);
+                             EFI_FILE_MODE_WRITE, 0),
+                       EFI_INVALID_PARAMETER);
+    size = sizeof(file_buffer);
+    ok &= check("efi File directory Read",
+                call3(root->fn[FILE_READ], (uint64_t)root,
+                      (uint64_t)&size, (uint64_t)file_buffer) == EFI_SUCCESS &&
+                size > 0);
     call1(root->fn[FILE_CLOSE], (uint64_t)root);
     return ok;
 }

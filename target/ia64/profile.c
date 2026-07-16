@@ -14,23 +14,10 @@ int ia64_profile_enabled_cached = -1;
 static unsigned ia64_profile_shift = 11;
 static bool ia64_profile_registered;
 static GPtrArray *ia64_profile_cpus;
-static uint16_t ia64_profile_family_keys[IA64_PROFILE_FAMILY_KIND_COUNT]
-                                        [IA64_PROFILE_FAMILY_SLOTS];
-static bool ia64_profile_family_used[IA64_PROFILE_FAMILY_KIND_COUNT]
-                                    [IA64_PROFILE_FAMILY_SLOTS];
-G_LOCK_DEFINE_STATIC(ia64_profile_family_map);
-
-typedef struct IA64ProfileShapeRecordFamily {
-    uint8_t kind;
-    uint8_t slot;
-    uint16_t count;
-} IA64ProfileShapeRecordFamily;
 
 typedef struct IA64ProfileShapeRecord {
     uint32_t counter[IA64_PROFILE_COUNTER_COUNT];
-    IA64ProfileShapeRecordFamily family[IA64_PROFILE_MAX_SHAPE_FAMILIES];
     uint32_t dirty;
-    uint8_t family_count;
     uint8_t exit;
 } IA64ProfileShapeRecord;
 
@@ -43,60 +30,22 @@ static const char * const ia64_profile_counter_names[] = {
     [IA64_PROFILE_TB_EXECUTED] = "tb.executed",
     [IA64_PROFILE_BUNDLE_EXECUTED] = "bundle.executed",
     [IA64_PROFILE_BUNDLE_ZERO_HELPER] = "bundle.zero_helper",
-    [IA64_PROFILE_BUNDLE_HELPER_FAST] = "bundle.helper_fast",
-    [IA64_PROFILE_BUNDLE_PARTIAL] = "bundle.partial",
-    [IA64_PROFILE_BUNDLE_FULL_HELPER] = "bundle.full_helper",
     [IA64_PROFILE_BRANCH_INLINE_DIRECT] = "branch.inline.direct",
-    [IA64_PROFILE_BRANCH_INLINE_CALL] = "branch.inline.call",
-    [IA64_PROFILE_BRANCH_CALL_HELPER] = "branch.call_helper",
     [IA64_PROFILE_BRANCH_INLINE_INDIRECT] = "branch.inline.indirect",
-    [IA64_PROFILE_BRANCH_RSE_HELPER] = "branch.rse_helper",
-    [IA64_PROFILE_BRANCH_REGION_FOLDED] = "branch.region.folded",
-    [IA64_PROFILE_SPEC_CHECK_INLINE] = "spec_check.inline",
     [IA64_PROFILE_EXIT_DIRECT_CHAIN] = "tb.exit.direct_chain",
     [IA64_PROFILE_EXIT_LOOKUP_PTR] = "tb.exit.lookup_ptr",
     [IA64_PROFILE_EXIT_MAIN_LOOP] = "tb.exit.main_loop",
     [IA64_PROFILE_STATE_CACHE_ACTIVE_BUNDLE] =
         "state_cache.active_bundle",
     [IA64_PROFILE_STATE_CACHE_HIT] = "state_cache.hit",
-    [IA64_PROFILE_STATE_CACHE_BARRIER] = "state_cache.barrier",
-    [IA64_PROFILE_STATE_CACHE_SUSPEND] = "state_cache.suspend",
     [IA64_PROFILE_STATE_CACHE_DIRTY_WRITEBACK] =
         "state_cache.dirty_writeback",
-    [IA64_PROFILE_BRANCH_REJECT_NOT_SLOT2] =
-        "branch.reject.not_slot2",
-    [IA64_PROFILE_BRANCH_REJECT_UNSUPPORTED_TYPE] =
-        "branch.reject.unsupported_type",
-    [IA64_PROFILE_BRANCH_REJECT_PREFIX_UNSUPPORTED] =
-        "branch.reject.prefix_unsupported",
-    [IA64_PROFILE_BRANCH_REJECT_PREFIX_LDST_DEPENDENCY] =
-        "branch.reject.prefix_ldst_dependency",
-    [IA64_PROFILE_BRANCH_REJECT_CROSS_PAGE] =
-        "branch.reject.cross_page",
-    [IA64_PROFILE_BRANCH_REJECT_ROTATING_PREDICATE] =
-        "branch.reject.rotating_predicate",
-    [IA64_PROFILE_BRANCH_REJECT_INDIRECT_UNSUPPORTED] =
-        "branch.reject.indirect_unsupported",
-    [IA64_PROFILE_BRANCH_REJECT_MULTIPLE_BRANCH] =
-        "branch.reject.multiple_branch",
 };
 
 static const char * const ia64_profile_helper_names[] = {
-    [IA64_PROFILE_HELPER_FULL_BUNDLE] = "helper.full_bundle",
-    [IA64_PROFILE_HELPER_PARTIAL_SLOT] = "helper.partial_slot",
-    [IA64_PROFILE_HELPER_FP_SLOT] = "helper.fp_slot",
-    [IA64_PROFILE_HELPER_SPECIAL_LDST] = "helper.special_ldst",
     [IA64_PROFILE_HELPER_RSE] = "helper.rse",
     [IA64_PROFILE_HELPER_NAT_ALAT] = "helper.nat_alat",
-    [IA64_PROFILE_HELPER_BRANCH] = "helper.branch",
-    [IA64_PROFILE_HELPER_FIRMWARE] = "helper.firmware",
     [IA64_PROFILE_HELPER_OTHER] = "helper.other",
-};
-
-static const char * const ia64_profile_family_names[] = {
-    [IA64_PROFILE_FAMILY_UNSUPPORTED] = "unsupported.slot",
-    [IA64_PROFILE_FAMILY_PARTIAL] = "partial.helper_slot",
-    [IA64_PROFILE_FAMILY_BRANCH_PREFIX] = "branch.reject.prefix_family",
 };
 
 static uint64_t ia64_profile_scaled(uint64_t value, long double weight)
@@ -212,14 +161,6 @@ static void ia64_profile_dump(void)
             }
             total.counter[IA64_PROFILE_STATE_CACHE_DIRTY_WRITEBACK] +=
                 ia64_profile_scaled(executions * shape->dirty, weight);
-            for (unsigned i = 0; i < shape->family_count; i++) {
-                const IA64ProfileShapeRecordFamily *family =
-                    &shape->family[i];
-
-                total.family[family->kind][family->slot] +=
-                    ia64_profile_scaled(executions * family->count,
-                                        weight);
-            }
         }
     }
 
@@ -261,39 +202,6 @@ static void ia64_profile_dump(void)
         if (value != 0) {
             ia64_profile_print_rate(ia64_profile_helper_names[i], value,
                                     bundles);
-        }
-    }
-    for (unsigned kind = 0; kind < IA64_PROFILE_FAMILY_KIND_COUNT; kind++) {
-        for (unsigned slot = 0; slot < IA64_PROFILE_FAMILY_SLOTS; slot++) {
-            uint64_t value = total.family[kind][slot];
-            uint16_t key;
-            IA64SlotType type;
-            uint8_t major;
-            uint8_t x6;
-            const IA64OpcodeClass *opcode;
-
-            if (value == 0 || !ia64_profile_family_used[kind][slot]) {
-                continue;
-            }
-            key = ia64_profile_family_keys[kind][slot];
-            if (slot == IA64_PROFILE_FAMILY_OVERFLOW_SLOT &&
-                key == UINT16_MAX) {
-                fprintf(stderr,
-                        "[ia64-profile] %s.overflow=%" PRIu64 "\n",
-                        ia64_profile_family_names[kind], value);
-                continue;
-            }
-            type = (key >> 10) & 0x7;
-            major = (key >> 6) & 0xf;
-            x6 = key & 0x3f;
-            opcode = ia64_opcode_class(type, major);
-            fprintf(stderr,
-                    "[ia64-profile] %s type=%s major=0x%x x6=0x%02x"
-                    " opcode=%s count=%" PRIu64 "\n",
-                    ia64_profile_family_names[kind],
-                    ia64_slot_type_name(type), major, x6,
-                    opcode && opcode->family ? opcode->family : "unknown",
-                    value);
         }
     }
 }
@@ -378,7 +286,6 @@ void ia64_profile_set_active(struct ArchCPU *cpu, bool active)
     memset(profile->tb_length, 0, sizeof(profile->tb_length));
     memset(profile->helper, 0, sizeof(profile->helper));
     memset(profile->shape_exec, 0, sizeof(profile->shape_exec));
-    memset(profile->family, 0, sizeof(profile->family));
     profile->sample_windows = 0;
     profile->wall_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     profile->active = true;
@@ -391,44 +298,8 @@ void ia64_profile_set_active(struct ArchCPU *cpu, bool active)
     }
 }
 
-uint16_t ia64_profile_family_key(IA64SlotType type, uint64_t raw)
-{
-    return ((uint16_t)(type & 0x7) << 10) |
-           ((uint16_t)ia64_slot_major_opcode(raw) << 6) |
-           ((raw >> 27) & 0x3f);
-}
-
-unsigned ia64_profile_family_slot(IA64ProfileFamilyKind kind, uint16_t key)
-{
-    unsigned free_slot = IA64_PROFILE_FAMILY_OVERFLOW_SLOT;
-
-    g_assert(kind < IA64_PROFILE_FAMILY_KIND_COUNT);
-    G_LOCK(ia64_profile_family_map);
-    for (unsigned slot = 0; slot < IA64_PROFILE_FAMILY_OVERFLOW_SLOT;
-         slot++) {
-        if (ia64_profile_family_used[kind][slot]) {
-            if (ia64_profile_family_keys[kind][slot] == key) {
-                G_UNLOCK(ia64_profile_family_map);
-                return slot;
-            }
-        } else if (free_slot == IA64_PROFILE_FAMILY_OVERFLOW_SLOT) {
-            free_slot = slot;
-        }
-    }
-    if (free_slot != IA64_PROFILE_FAMILY_OVERFLOW_SLOT) {
-        ia64_profile_family_used[kind][free_slot] = true;
-        ia64_profile_family_keys[kind][free_slot] = key;
-    } else {
-        ia64_profile_family_used[kind][free_slot] = true;
-        ia64_profile_family_keys[kind][free_slot] = UINT16_MAX;
-    }
-    G_UNLOCK(ia64_profile_family_map);
-    return free_slot;
-}
-
 unsigned ia64_profile_register_tb_shape(
-    const uint32_t *counter, const IA64ProfileShapeFamily *family,
-    unsigned family_count, uint32_t dirty, IA64ProfileExit exit)
+    const uint32_t *counter, uint32_t dirty, IA64ProfileExit exit)
 {
     IA64ProfileShapeRecord *shape;
     unsigned shape_slot;
@@ -444,14 +315,6 @@ unsigned ia64_profile_register_tb_shape(
     memcpy(shape->counter, counter, sizeof(shape->counter));
     shape->dirty = dirty;
     shape->exit = exit;
-    shape->family_count = MIN(family_count,
-                              IA64_PROFILE_MAX_SHAPE_FAMILIES);
-    for (unsigned i = 0; i < shape->family_count; i++) {
-        shape->family[i].kind = family[i].kind;
-        shape->family[i].slot =
-            ia64_profile_family_slot(family[i].kind, family[i].key);
-        shape->family[i].count = family[i].count;
-    }
     G_UNLOCK(ia64_profile_shape_map);
     return shape_slot;
 }

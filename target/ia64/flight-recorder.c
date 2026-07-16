@@ -294,8 +294,9 @@ void ia64_diag_record_external_interrupt(CPUIA64State *env,
     ia64_diag_record_state(env, "interrupt.external",
                            interrupt_request,
                            env ? env->interrupt.pending_vector : 0,
-                           env ? env->interrupt.pending_interruption : 0,
-                           0, "external-interrupt");
+                           env ? env->interrupt.in_service[0] : 0,
+                           env ? env->interrupt.in_service[3] : 0,
+                           "external-interrupt");
 }
 
 void ia64_diag_record_rfi(CPUIA64State *env, uint64_t bundle_ip,

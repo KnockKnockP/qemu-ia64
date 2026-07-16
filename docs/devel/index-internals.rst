@@ -14,6 +14,8 @@ Details about QEMU's various subsystems including how to add features to them.
    block-coroutine-wrapper
    clocks
    ebpf_rss
+   ia64-engine-roles
+   ia64-guest-firmware
    migration/index
    multi-process
    reset

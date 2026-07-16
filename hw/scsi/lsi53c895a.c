@@ -16,6 +16,7 @@
 #include "qemu/osdep.h"
 
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/pci/pci_device.h"
 #include "hw/scsi/scsi.h"
 #include "migration/vmstate.h"
@@ -305,6 +306,7 @@ struct LSIState {
     uint32_t scratch[18]; /* SCRATCHA-SCRATCHR */
     uint8_t sbr;
     uint32_t adder;
+    bool disconnect_on_data_wait;
 
     uint8_t script_ram[2048 * sizeof(uint32_t)];
 };
@@ -902,13 +904,25 @@ static void lsi_do_command(LSIState *s)
     }
     if (!s->command_complete) {
         if (n) {
-            /* Command did not complete immediately so disconnect.  */
-            lsi_add_msg_byte(s, 2); /* SAVE DATA POINTER */
-            lsi_add_msg_byte(s, 4); /* DISCONNECT */
-            /* wait data */
-            lsi_set_phase(s, PHASE_MI);
-            s->msg_action = LSI_MSG_ACTION_DISCONNECT;
-            lsi_queue_command(s);
+            /*
+             * When disconnect-on-data-wait is false, keep the target
+             * connected and let lsi_do_dma() wait for the SCSI layer
+             * callback.  Disconnect/reselect is legal, but doing it for
+             * every CD-ROM READ makes old guests spin in their
+             * scripts/interrupt polling path for each 2 KiB block.  An
+             * emulated disk has no mechanical seek latency to hide here, and
+             * SCSI targets are not required to disconnect while preparing
+             * data.
+             */
+            if (s->disconnect_on_data_wait) {
+                /* Command did not complete immediately so disconnect.  */
+                lsi_add_msg_byte(s, 2); /* SAVE DATA POINTER */
+                lsi_add_msg_byte(s, 4); /* DISCONNECT */
+                /* wait data */
+                lsi_set_phase(s, PHASE_MI);
+                s->msg_action = LSI_MSG_ACTION_DISCONNECT;
+                lsi_queue_command(s);
+            }
         } else {
             /* wait command complete */
             lsi_set_phase(s, PHASE_DI);
@@ -2398,6 +2412,11 @@ static void lsi_scsi_exit(PCIDevice *dev)
     timer_free(s->scripts_timer);
 }
 
+static const Property lsi_properties[] = {
+    DEFINE_PROP_BOOL("disconnect-on-data-wait", LSIState,
+                     disconnect_on_data_wait, true),
+};
+
 static void lsi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -2410,6 +2429,7 @@ static void lsi_class_init(ObjectClass *klass, const void *data)
     k->class_id = PCI_CLASS_STORAGE_SCSI;
     k->subsystem_id = 0x1000;
     device_class_set_legacy_reset(dc, lsi_scsi_reset);
+    device_class_set_props(dc, lsi_properties);
     dc->vmsd = &vmstate_lsi_scsi;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }

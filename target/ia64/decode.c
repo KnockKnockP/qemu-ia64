@@ -229,12 +229,6 @@ static IA64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
         return IA64_OP_LD4;
     case 0x17:
         return IA64_OP_LD8;
-    case 0x18:
-        return IA64_OP_LD1FILL;
-    case 0x19:
-        return IA64_OP_LD2FILL;
-    case 0x1a:
-        return IA64_OP_LD4FILL;
     case 0x1b:
         return IA64_OP_LD8FILL;
     case 0x20:
@@ -277,12 +271,6 @@ static IA64Opcode ia64_memory_opcode_from_x6a(uint64_t x6a)
         return IA64_OP_ST4REL;
     case 0x37:
         return IA64_OP_ST8REL;
-    case 0x38:
-        return IA64_OP_ST1SPILL;
-    case 0x39:
-        return IA64_OP_ST2SPILL;
-    case 0x3a:
-        return IA64_OP_ST4SPILL;
     case 0x3b:
         return IA64_OP_ST8SPILL;
     default:
@@ -499,7 +487,7 @@ static int64_t ia64_fetchadd_imm(uint64_t inc3)
 }
 
 static IA64Opcode ia64_f1_opcode_from_major(uint64_t major, uint64_t f2,
-                                            uint64_t f4)
+                                             uint64_t f4)
 {
     switch (major) {
     case 8:
@@ -547,9 +535,6 @@ static bool ia64_opcode_is_store(IA64Opcode opcode)
     case IA64_OP_ST2REL:
     case IA64_OP_ST4REL:
     case IA64_OP_ST8REL:
-    case IA64_OP_ST1SPILL:
-    case IA64_OP_ST2SPILL:
-    case IA64_OP_ST4SPILL:
     case IA64_OP_ST8SPILL:
         return true;
     default:
@@ -589,9 +574,6 @@ static bool ia64_opcode_is_load(IA64Opcode opcode)
     case IA64_OP_LD2SA:
     case IA64_OP_LD4SA:
     case IA64_OP_LD8SA:
-    case IA64_OP_LD1FILL:
-    case IA64_OP_LD2FILL:
-    case IA64_OP_LD4FILL:
     case IA64_OP_LD8FILL:
     case IA64_OP_LD1C_CLR:
     case IA64_OP_LD2C_CLR:
@@ -660,8 +642,17 @@ static bool ia64_is_b_break(uint64_t raw)
 static bool ia64_is_f_nop(uint64_t raw)
 {
     const uint64_t mask = (0xfULL << 37) | (1ULL << 33) |
-                          (0x3fULL << 27);
+                          (0x3fULL << 27) | (1ULL << 26);
     const uint64_t value = 1ULL << 27;
+
+    return (raw & mask) == value;
+}
+
+static bool ia64_is_f_hint(uint64_t raw)
+{
+    const uint64_t mask = (0xfULL << 37) | (1ULL << 33) |
+                          (0x3fULL << 27) | (1ULL << 26);
+    const uint64_t value = (1ULL << 27) | (1ULL << 26);
 
     return (raw & mask) == value;
 }
@@ -701,6 +692,13 @@ static IA64Instruction ia64_invalid_insn(IA64InstructionUnit unit, uint64_t raw,
         .raw = raw,
         .address = address,
         .slot = slot,
+        /*
+         * Reserved encodings still carry the universal qualifying-predicate
+         * field.  Keep it in the typed result so the architectural Illegal
+         * Operation is suppressed when the instruction is predicated false;
+         * decoder failure must not force an unqualified legacy fallback.
+         */
+        .qp = ia64_bits(raw, 0, 6),
     };
 
     return insn;
@@ -989,8 +987,8 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             ia64_bits(raw, 27, 6) == 0) {
             IA64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_GRRR, unit, raw, address, slot);
-            insn.r1 = ia64_bits(raw, 13, 7);
-            insn.r2 = ia64_bits(raw, 20, 7);
+            insn.r2 = ia64_bits(raw, 13, 7);
+            insn.r3 = ia64_bits(raw, 20, 7);
             return insn;
         }
 
@@ -1042,8 +1040,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
 
         if (ia64_b_op(raw) == 1 &&
             ia64_bits(raw, 33, 3) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x17 &&
-            ia64_bits(raw, 13, 7) == 0) {
+            ia64_bits(raw, 27, 6) == 0x17) {
             IA64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_CPUID_INDEXED, unit, raw,
                                address, slot);
@@ -1065,8 +1062,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
 
         if (ia64_b_op(raw) == 1 &&
             ia64_bits(raw, 33, 3) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x16 &&
-            ia64_bits(raw, 13, 7) == 0) {
+            ia64_bits(raw, 27, 6) == 0x16) {
             IA64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_MSRGR, unit, raw, address, slot);
             insn.r1 = ia64_bits(raw, 6, 7);
@@ -1079,7 +1075,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             ia64_bits(raw, 27, 6) == 0x06) {
             IA64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_GRMSR, unit, raw, address, slot);
-            insn.r1 = ia64_bits(raw, 13, 7);
+            insn.r2 = ia64_bits(raw, 13, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
             return insn;
         }
@@ -1107,7 +1103,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                                IA64_OP_MOV_GRIBR_INDEXED :
                                IA64_OP_MOV_GRDBR_INDEXED,
                                unit, raw, address, slot);
-            insn.r1 = ia64_bits(raw, 13, 7);
+            insn.r2 = ia64_bits(raw, 13, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
             return insn;
         }
@@ -1118,7 +1114,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             IA64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_GRPKR_INDEXED, unit, raw,
                                address, slot);
-            insn.r1 = ia64_bits(raw, 13, 7);
+            insn.r2 = ia64_bits(raw, 13, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
             return insn;
         }
@@ -1143,7 +1139,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                                IA64_OP_MOV_GRPMC_INDEXED :
                                IA64_OP_MOV_GRPMD_INDEXED,
                                unit, raw, address, slot);
-            insn.r1 = ia64_bits(raw, 13, 7);
+            insn.r2 = ia64_bits(raw, 13, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
             return insn;
         }
@@ -1906,8 +1902,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
     }
 
     if (unit == IA64_INSN_UNIT_I && ia64_b_op(raw) == 0 &&
-        ia64_bits(raw, 33, 3) == 3 && ia64_bits(raw, 32, 1) == 1 &&
-        ia64_bits(raw, 20, 4) == 0) {
+        ia64_bits(raw, 33, 3) == 3) {
         IA64Instruction insn =
             ia64_base_insn(IA64_OP_MOV_GRPR, unit, raw, address, slot);
 
@@ -2106,6 +2101,14 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.mem_release = ia64_opcode_is_release_store(opcode);
             return insn;
         }
+        if ((x6a >= 0x18 && x6a <= 0x1a) ||
+            (x6a >= 0x38 && x6a <= 0x3a)) {
+            IA64Instruction insn =
+                ia64_base_insn(IA64_OP_ILLEGAL, unit, raw, address, slot);
+
+            insn.reserved_memory_width = true;
+            return insn;
+        }
     }
 
     if (unit == IA64_INSN_UNIT_M && ia64_b_op(raw) == 4 &&
@@ -2162,6 +2165,14 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.imm = ia64_sign_extend(imm9, 9);
             insn.imm_base_update = true;
             insn.mem_release = ia64_opcode_is_release_store(opcode);
+            return insn;
+        }
+        if ((x6a >= 0x18 && x6a <= 0x1a) ||
+            (x6a >= 0x38 && x6a <= 0x3a)) {
+            IA64Instruction insn =
+                ia64_base_insn(IA64_OP_ILLEGAL, unit, raw, address, slot);
+
+            insn.reserved_memory_width = true;
             return insn;
         }
     }
@@ -2278,6 +2289,13 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.mem_acquire = ia64_memory_x6a_is_acquire_load(x6a);
             return insn;
         }
+        if (x6a >= 0x18 && x6a <= 0x1a) {
+            IA64Instruction insn =
+                ia64_base_insn(IA64_OP_ILLEGAL, unit, raw, address, slot);
+
+            insn.reserved_memory_width = true;
+            return insn;
+        }
     }
 
     if (unit == IA64_INSN_UNIT_M && ia64_b_op(raw) == 4 &&
@@ -2358,6 +2376,12 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.imm = ia64_immu21(raw);
             return insn;
         }
+        if (ia64_is_f_hint(raw)) {
+            IA64Instruction insn =
+                ia64_base_insn(IA64_OP_HINT_F, unit, raw, address, slot);
+            insn.imm = ia64_immu21(raw);
+            return insn;
+        }
         if (ia64_is_f_break(raw)) {
             IA64Instruction insn =
                 ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
@@ -2400,6 +2424,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.r1 = ia64_bits(raw, 6, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
             insn.p2 = ia64_bits(raw, 27, 6);
+            insn.sf = ia64_bits(raw, 34, 2);
             insn.clear_p2_before_predicate = true;
             return insn;
         }
@@ -2412,20 +2437,31 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.r2 = ia64_bits(raw, 13, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
             insn.p2 = ia64_bits(raw, 27, 6);
+            insn.sf = ia64_bits(raw, 34, 2);
             insn.clear_p2_before_predicate = true;
             return insn;
         }
+        if (ia64_b_op(raw) == 1 && ia64_bits(raw, 33, 1) == 0 &&
+            (ia64_bits(raw, 27, 6) == 0x10 ||
+             ia64_bits(raw, 27, 6) == 0x11 ||
+             ia64_bits(raw, 27, 6) == 0x12)) {
+            uint64_t form = ia64_bits(raw, 27, 6);
+            IA64Instruction insn = ia64_base_insn(
+                form == 0x10 ? IA64_OP_FPMERGE_S :
+                form == 0x11 ? IA64_OP_FPMERGE : IA64_OP_FPMERGE_SE,
+                unit, raw, address, slot);
+
+            insn.r1 = ia64_bits(raw, 6, 7);
+            insn.r2 = ia64_bits(raw, 13, 7);
+            insn.r3 = ia64_bits(raw, 20, 7);
+            return insn;
+        }
         if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 36, 1) == 0 &&
             ia64_bits(raw, 33, 1) == 0) {
             uint64_t form = ia64_bits(raw, 27, 6);
             IA64Opcode opcode = IA64_OP_ILLEGAL;
 
-            if (form == 0x10 || form == 0x11 || form == 0x12) {
-                opcode = form == 0x10 ? IA64_OP_FPMERGE_S :
-                         form == 0x11 ? IA64_OP_FPMERGE :
-                                          IA64_OP_FPMERGE_SE;
-            } else if (form >= 0x14 && form <= 0x17) {
+            if (form >= 0x14 && form <= 0x17) {
                 opcode = form == 0x14 ? IA64_OP_FPMIN :
                          form == 0x15 ? IA64_OP_FPMAX :
                          form == 0x16 ? IA64_OP_FPAMIN :
@@ -2442,18 +2478,11 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                 insn.r1 = ia64_bits(raw, 6, 7);
                 insn.r2 = ia64_bits(raw, 13, 7);
                 insn.r3 = ia64_bits(raw, 20, 7);
-                insn.p1 = ia64_bits(raw, 34, 2);
+                insn.sf = ia64_bits(raw, 34, 2);
                 insn.imm = form & 7;
                 return insn;
             }
         }
-        if (ia64_b_op(raw) == 1) {
-            IA64Instruction insn =
-                ia64_base_insn(IA64_OP_HINT_F, unit, raw, address, slot);
-            insn.imm = ia64_immu21(raw);
-            return insn;
-        }
-
         const uint64_t x = ia64_bits(raw, 36, 1);
         const uint64_t x6 = ia64_bits(raw, 30, 6);
         const uint64_t form = ia64_bits(raw, 27, 6);
@@ -2506,7 +2535,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                      form == 0x15 ? IA64_OP_FMAX :
                      form == 0x16 ? IA64_OP_FAMIN :
                                     IA64_OP_FAMAX;
-        } else if (ia64_b_op(raw) == 0 && x == 0 &&
+        } else if (ia64_b_op(raw) == 0 &&
                    ia64_bits(raw, 33, 1) == 0 && form == 0x1c) {
             opcode = IA64_OP_FCVT_XF;
         } else if (ia64_b_op(raw) == 0 && x == 0 &&
@@ -2514,14 +2543,14 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             opcode = IA64_OP_FRCPA;
         } else if (ia64_b_op(raw) == 0 &&
                    ia64_bits(raw, 33, 1) == 0 &&
-                   ia64_bits(raw, 34, 3) == 0 &&
                    ia64_bits(raw, 27, 6) == 0x28) {
             opcode = IA64_OP_FPACK;
-        } else if (ia64_b_op(raw) == 0 && x == 0 &&
+        } else if (ia64_b_op(raw) == 0 &&
                    ia64_bits(raw, 33, 1) == 0 &&
                    form >= 0x18 && form <= 0x1b) {
             opcode = (form & 1) ? IA64_OP_FCVT_FXU : IA64_OP_FCVT_FX;
-        } else if (ia64_b_op(raw) == 0 && x == 0 && x6 == 0x02 &&
+        } else if (ia64_b_op(raw) == 0 &&
+                   ia64_bits(raw, 33, 1) == 0 &&
                    (ia64_bits(raw, 27, 6) == 0x10 ||
                     ia64_bits(raw, 27, 6) == 0x11 ||
                     ia64_bits(raw, 27, 6) == 0x12)) {
@@ -2579,8 +2608,6 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                 opcode = IA64_OP_FSXT_L;
                 break;
             }
-        } else if (ia64_b_op(raw) == 0 && x == 0) {
-            opcode = IA64_OP_FMOV;
         } else if (ia64_b_op(raw) == 0xe && x == 0) {
             opcode = IA64_OP_FSELECT;
         } else if (ia64_b_op(raw) == 0xe && x == 1 &&
@@ -2601,14 +2628,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             insn.r1 = ia64_bits(raw, 6, 7);
             insn.r2 = ia64_bits(raw, 13, 7);
             insn.r3 = ia64_bits(raw, 20, 7);
-            insn.p1 = (opcode == IA64_OP_FMA ||
-                       opcode == IA64_OP_FMS ||
-                       opcode == IA64_OP_FNMA ||
-                       opcode == IA64_OP_XMA_L ||
-                       opcode == IA64_OP_XMA_H ||
-                       opcode == IA64_OP_XMA_HU ||
-                       opcode == IA64_OP_XMPY_HU) ?
-                ia64_bits(raw, 27, 7) : ia64_bits(raw, 27, 6);
+            insn.sf = ia64_bits(raw, 34, 2);
             if (opcode == IA64_OP_FCMP) {
                 insn.p1 = ia64_bits(raw, 6, 6);
                 insn.p2 = ia64_bits(raw, 27, 6);
@@ -2618,11 +2638,11 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             } else if (opcode == IA64_OP_FSETC) {
                 insn.r2 = ia64_bits(raw, 13, 7);
                 insn.r3 = ia64_bits(raw, 20, 7);
-                insn.p1 = ia64_bits(raw, 34, 2);
+                insn.sf = ia64_bits(raw, 34, 2);
             } else if (opcode == IA64_OP_FCLRF) {
-                insn.p1 = ia64_bits(raw, 34, 2);
+                insn.sf = ia64_bits(raw, 34, 2);
             } else if (opcode == IA64_OP_FCHKF) {
-                insn.p1 = ia64_bits(raw, 34, 2);
+                insn.sf = ia64_bits(raw, 34, 2);
                 uint64_t imm20b = ia64_bits(raw, 6, 20);
                 uint64_t sign = ia64_bits(raw, 36, 1);
                 insn.imm = ia64_sign_extend((sign << 20) | imm20b, 21) * 16;
@@ -2632,15 +2652,20 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                 opcode == IA64_OP_FNMA) {
                 insn.r2 = ia64_bits(raw, 13, 7);
                 insn.r3 = ia64_bits(raw, 20, 7);
-                insn.p1 = ia64_bits(raw, 27, 7);
+                insn.r4 = ia64_bits(raw, 27, 7);
             } else if (opcode == IA64_OP_FPMA ||
                        opcode == IA64_OP_FPMS ||
                        opcode == IA64_OP_FPNMA) {
                 insn.r2 = ia64_bits(raw, 13, 7);
                 insn.r3 = ia64_bits(raw, 20, 7);
-                insn.p1 = ia64_bits(raw, 27, 7);
+                insn.r4 = ia64_bits(raw, 27, 7);
             } else if (opcode == IA64_OP_FSELECT) {
-                insn.p1 = ia64_bits(raw, 27, 7);
+                insn.r4 = ia64_bits(raw, 27, 7);
+            } else if (opcode == IA64_OP_XMA_L ||
+                       opcode == IA64_OP_XMA_H ||
+                       opcode == IA64_OP_XMA_HU ||
+                       opcode == IA64_OP_XMPY_HU) {
+                insn.r4 = ia64_bits(raw, 27, 7);
             } else if (opcode == IA64_OP_FMPY) {
                 insn.r2 = ia64_bits(raw, 20, 7);
                 insn.r3 = ia64_bits(raw, 27, 7);
@@ -2652,7 +2677,7 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
                 insn.r2 = ia64_bits(raw, 13, 7);
                 insn.imm = form & 3;
             } else if (opcode == IA64_OP_FRCPA) {
-                insn.p2 = insn.p1;
+                insn.p2 = ia64_bits(raw, 27, 6);
                 insn.clear_p2_before_predicate = true;
             }
             if (ia64_b_op(raw) >= 8 && ia64_b_op(raw) <= 0xd) {
@@ -2988,8 +3013,15 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
     }
 
     if (unit == IA64_INSN_UNIT_B &&
-        (ia64_b_op(raw) == 2 || ia64_b_op(raw) == 7)) {
-        return ia64_base_insn(IA64_OP_BRP, unit, raw, address, slot);
+        ((ia64_b_op(raw) == 2 &&
+          (ia64_bits(raw, 27, 6) == 0x10 ||
+           ia64_bits(raw, 27, 6) == 0x11)) ||
+         ia64_b_op(raw) == 7)) {
+        IA64Instruction insn =
+            ia64_base_insn(IA64_OP_BRP, unit, raw, address, slot);
+
+        insn.qp = 0;
+        return insn;
     }
 
     if (unit == IA64_INSN_UNIT_F && ia64_b_op(raw) == 5) {
@@ -3004,18 +3036,16 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
         return insn;
     }
 
-    if (unit == IA64_INSN_UNIT_M && ia64_b_op(raw) == 0) {
+    if (unit == IA64_INSN_UNIT_M && ia64_b_op(raw) == 0 &&
+        ia64_bits(raw, 33, 3) == 0) {
         const uint64_t x6 = ia64_bits(raw, 27, 6);
         const uint64_t x4 = x6 & 0xf;
-        const uint64_t m24_allowed =
-            (UINT64_C(0x3f) << 27) | UINT64_C(0x3f);
-        const bool m24_reserved_clear = (raw & ~m24_allowed) == 0;
         IA64Opcode opcode = IA64_OP_ILLEGAL;
-        if (x6 == 0x31 && m24_reserved_clear) {
+        if (x6 == 0x31) {
             opcode = IA64_OP_SRLZ;
-        } else if (x6 == 0x30 && m24_reserved_clear) {
+        } else if (x6 == 0x30) {
             opcode = IA64_OP_SRLZ_D;
-        } else if (x6 == 0x33 && m24_reserved_clear) {
+        } else if (x6 == 0x33) {
             opcode = IA64_OP_SYNC_I;
         } else if (x6 == 0x20) {
             opcode = IA64_OP_FWB;
@@ -3168,8 +3198,12 @@ IA64Instruction ia64_decode_instruction_raw(IA64InstructionUnit unit, uint64_t r
             IA64Instruction insn =
                 ia64_base_insn(opcode, unit, raw, address, slot);
 
-            insn.r2 = ia64_bits(raw, 13, 7);
-            insn.r3 = ia64_bits(raw, 20, 7);
+            if (opcode != IA64_OP_PTC_E) {
+                insn.r2 = ia64_bits(raw, 13, 7);
+            }
+            if (opcode != IA64_OP_ITC_D && opcode != IA64_OP_ITC_I) {
+                insn.r3 = ia64_bits(raw, 20, 7);
+            }
             return insn;
         }
     }
@@ -3275,8 +3309,11 @@ bool ia64_instruction_has_invalid_fp_pair(const IA64Instruction *insn)
     case IA64_OP_LDFP8:
     case IA64_OP_LDFPD:
     case IA64_OP_LDFPS:
-        return insn->r1 <= 1 || insn->r2 <= 1 ||
-               ((insn->r1 ^ insn->r2) & 1) == 0;
+        /* Pair-bank parity is a physical-FR rule.  Logical operands can
+           change parity after RRB.FR rotation, so decode may reject only
+           the architecturally fixed f0/f1 destinations; the typed runtime
+           check validates the mapped pair before any other operand fault. */
+        return insn->r1 <= 1 || insn->r2 <= 1;
     default:
         return false;
     }

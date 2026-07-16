@@ -9,6 +9,7 @@
 
 #define IA64_TEST_NOP_RAW UINT64_C(0x08000000)
 #define IA64_TEST_B_NOP_RAW (UINT64_C(2) << 37)
+#define IA64_TEST_RFI_RAW (UINT64_C(0x08) << 27)
 
 static IA64DecodedBundle make_bundle(uint8_t tmpl,
                                      uint64_t slot0,
@@ -36,6 +37,47 @@ static void assert_raw_illegal(IA64InstructionUnit unit, uint64_t raw)
 
     g_assert_false(insn.valid);
     g_assert_cmpint(insn.opcode, ==, IA64_OP_ILLEGAL);
+}
+
+static IA64Instruction assert_raw_opcode(IA64InstructionUnit unit,
+                                         uint64_t raw,
+                                         IA64Opcode opcode)
+{
+    IA64Instruction insn =
+        ia64_decode_instruction_raw(unit, raw, 0x1060, 0);
+
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, opcode);
+    g_assert_cmpint(insn.unit, ==, unit);
+    g_assert_cmphex(insn.raw, ==, raw);
+    return insn;
+}
+
+static void assert_m_slot_bundle_opcode_with_template(uint8_t tmpl,
+                                                      uint64_t raw,
+                                                      IA64Opcode opcode)
+{
+    IA64DecodedBundle bundle =
+        make_bundle(tmpl, raw, IA64_TEST_NOP_RAW, IA64_TEST_NOP_RAW);
+    IA64DecodedInstructionBundle decoded;
+
+    g_assert_true(ia64_decode_instruction_bundle(
+        &bundle, 0x1060, true, 0, &decoded));
+    g_assert_cmpint(decoded.status, ==, IA64_DECODE_OK);
+    g_assert_cmpint(decoded.error_slot, ==, -1);
+    g_assert_true(decoded.instruction[0].valid);
+    g_assert_cmpint(decoded.instruction[0].opcode, ==, opcode);
+}
+
+static void assert_m_slot_bundle_opcode(uint64_t raw, IA64Opcode opcode)
+{
+    assert_m_slot_bundle_opcode_with_template(0x00, raw, opcode);
+}
+
+static void assert_m_slot_bundle_opcode_at_group_end(uint64_t raw,
+                                                     IA64Opcode opcode)
+{
+    assert_m_slot_bundle_opcode_with_template(0x0a, raw, opcode);
 }
 
 static void assert_raw_i_only(uint64_t raw, IA64Opcode opcode)
@@ -146,37 +188,298 @@ static void test_psr_ic_serialization_decode(void)
     g_assert_cmpint(insn.imm, ==, 1);
 }
 
-static void test_m24_serialization_reserved_fields(void)
+static void test_m24_ignored_field_matrix(void)
 {
-    static const uint64_t serialization[] = {
-        UINT64_C(0x00180000000),
-        UINT64_C(0x00188000000),
-        UINT64_C(0x00198000000),
+    static const struct {
+        unsigned x6;
+        IA64Opcode opcode;
+    } cases[] = {
+        { 0x22, IA64_OP_MF },
+        { 0x23, IA64_OP_MF_A },
+        { 0x30, IA64_OP_SRLZ_D },
+        { 0x31, IA64_OP_SRLZ },
+        { 0x33, IA64_OP_SYNC_I },
     };
-    static const unsigned reserved_bits[] = { 6, 26, 36 };
+    const uint64_t qp = 0x2d;
+    const uint64_t white_26_6 =
+        ((UINT64_C(1) << 21) - 1) << 6;
+    const uint64_t all_white = white_26_6 | (UINT64_C(1) << 36);
 
-    for (unsigned i = 0; i < ARRAY_SIZE(serialization); i++) {
-        for (unsigned j = 0; j < ARRAY_SIZE(reserved_bits); j++) {
-            uint64_t raw = serialization[i] |
-                           (UINT64_C(1) << reserved_bits[j]);
-            IA64DecodedBundle bundle =
-                make_bundle(0x00, raw,
-                            IA64_TEST_NOP_RAW, IA64_TEST_NOP_RAW);
-            IA64Instruction insn = ia64_decode_instruction_raw(
-                IA64_INSN_UNIT_M, raw, 0x1050, 0);
-            IA64DecodedInstructionBundle decoded;
+    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+        const uint64_t base = ((uint64_t)cases[i].x6 << 27) | qp;
+        IA64Instruction insn = assert_raw_opcode(
+            IA64_INSN_UNIT_M, base, cases[i].opcode);
 
-            g_assert_false(insn.valid);
-            g_assert_cmpint(insn.opcode, ==, IA64_OP_ILLEGAL);
-            g_assert_true(ia64_decode_instruction_bundle(
-                &bundle, 0x1050, true, 0, &decoded));
-            g_assert_cmpint(decoded.status, ==,
-                            IA64_DECODE_RESERVED_ENCODING);
-            g_assert_cmpint(decoded.error_slot, ==, 0);
-            g_assert_false(decoded.instruction[0].valid);
-            g_assert_cmpint(decoded.instruction[0].opcode, ==,
-                            IA64_OP_ILLEGAL);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        for (unsigned bit = 6; bit <= 26; bit++) {
+            insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                     base | (UINT64_C(1) << bit),
+                                     cases[i].opcode);
+            g_assert_cmpuint(insn.qp, ==, qp);
         }
+        insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                 base | (UINT64_C(1) << 36),
+                                 cases[i].opcode);
+        g_assert_cmpuint(insn.qp, ==, qp);
+
+        insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                 base | all_white, cases[i].opcode);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        g_assert_cmpuint(insn.r1, ==, 0);
+        g_assert_cmpuint(insn.r2, ==, 0);
+        g_assert_cmpuint(insn.r3, ==, 0);
+        assert_m_slot_bundle_opcode(base | all_white, cases[i].opcode);
+
+        /* x3 is fixed zero; x3 values 1-3 are reserved M-unit encodings. */
+        for (unsigned x3 = 1; x3 <= 3; x3++) {
+            assert_raw_illegal(IA64_INSN_UNIT_M,
+                               base | ((uint64_t)x3 << 33));
+        }
+        /* x3 values 4-7 select M20/M21 chk.a, never an M24 operation. */
+        for (unsigned x3 = 4; x3 <= 7; x3++) {
+            insn = assert_raw_opcode(
+                IA64_INSN_UNIT_M, base | ((uint64_t)x3 << 33),
+                (x3 == 4 || x3 == 6) ? IA64_OP_CHK_A : IA64_OP_CHK_A_CLR);
+            g_assert_cmpint(insn.opcode, !=, cases[i].opcode);
+        }
+    }
+}
+
+static void test_m43_move_from_indirect_ignored_fields(void)
+{
+    static const struct {
+        unsigned x6;
+        IA64Opcode opcode;
+    } cases[] = {
+        { 0x17, IA64_OP_MOV_CPUID_INDEXED },
+        { 0x20, IA64_OP_MOV_DAHRGR_INDEXED },
+        { 0x16, IA64_OP_MOV_MSRGR },
+        { 0x11, IA64_OP_MOV_DBRGR_INDEXED },
+        { 0x12, IA64_OP_MOV_IBRGR_INDEXED },
+        { 0x13, IA64_OP_MOV_PKRGR_INDEXED },
+        { 0x14, IA64_OP_MOV_PMCGR_INDEXED },
+        { 0x15, IA64_OP_MOV_PMDGR_INDEXED },
+    };
+    const unsigned r1 = 29;
+    const unsigned r3 = 73;
+    const unsigned qp = 0x15;
+    const uint64_t white_19_13 = UINT64_C(0x7f) << 13;
+    const uint64_t all_white = white_19_13 | (UINT64_C(1) << 36);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+        const uint64_t base = (UINT64_C(1) << 37) |
+                              ((uint64_t)cases[i].x6 << 27) |
+                              ((uint64_t)r3 << 20) |
+                              ((uint64_t)r1 << 6) | qp;
+        IA64Instruction insn;
+
+        for (unsigned bit = 13; bit <= 19; bit++) {
+            insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                     base | (UINT64_C(1) << bit),
+                                     cases[i].opcode);
+            g_assert_cmpuint(insn.r1, ==, r1);
+            g_assert_cmpuint(insn.r3, ==, r3);
+            g_assert_cmpuint(insn.qp, ==, qp);
+        }
+        insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                 base | (UINT64_C(1) << 36),
+                                 cases[i].opcode);
+        g_assert_cmpuint(insn.r1, ==, r1);
+        g_assert_cmpuint(insn.r3, ==, r3);
+        g_assert_cmpuint(insn.qp, ==, qp);
+
+        insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                 base | all_white, cases[i].opcode);
+        g_assert_cmpuint(insn.r1, ==, r1);
+        g_assert_cmpuint(insn.r2, ==, 0);
+        g_assert_cmpuint(insn.r3, ==, r3);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        assert_m_slot_bundle_opcode(base | all_white, cases[i].opcode);
+    }
+}
+
+static void test_m41_m42_m45_m47_ignored_fields(void)
+{
+    static const struct {
+        unsigned x6;
+        IA64Opcode opcode;
+    } m41_cases[] = {
+        { 0x2e, IA64_OP_ITC_D },
+        { 0x2f, IA64_OP_ITC_I },
+    }, m42_cases[] = {
+        { 0x00, IA64_OP_MOV_GRRR },
+        { 0x01, IA64_OP_MOV_GRDBR_INDEXED },
+        { 0x02, IA64_OP_MOV_GRIBR_INDEXED },
+        { 0x03, IA64_OP_MOV_GRPKR_INDEXED },
+        { 0x04, IA64_OP_MOV_GRPMC_INDEXED },
+        { 0x05, IA64_OP_MOV_GRPMD_INDEXED },
+        { 0x06, IA64_OP_MOV_GRMSR },
+        { 0x0e, IA64_OP_ITR_D },
+        { 0x0f, IA64_OP_ITR_I },
+    }, m45_cases[] = {
+        { 0x09, IA64_OP_PTC_L },
+        { 0x0a, IA64_OP_PTC_G },
+        { 0x0b, IA64_OP_PTC_GA },
+        { 0x0c, IA64_OP_PTR_D },
+        { 0x0d, IA64_OP_PTR_I },
+    };
+    const unsigned r2 = 83;
+    const unsigned r3 = 101;
+    const unsigned qp = 0x2a;
+    const uint64_t major = UINT64_C(1) << 37;
+
+    /* M41 ignores bit 36 and its complete 26:20 white field. */
+    for (unsigned i = 0; i < ARRAY_SIZE(m41_cases); i++) {
+        const uint64_t base = major |
+                              ((uint64_t)m41_cases[i].x6 << 27) |
+                              ((uint64_t)r2 << 13) | qp;
+        const uint64_t all_white = (UINT64_C(1) << 36) |
+                                   (UINT64_C(0x7f) << 20);
+        IA64Instruction insn;
+
+        for (unsigned bit = 20; bit <= 26; bit++) {
+            insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                     base | (UINT64_C(1) << bit),
+                                     m41_cases[i].opcode);
+            g_assert_cmpuint(insn.r2, ==, r2);
+        }
+        insn = assert_raw_opcode(IA64_INSN_UNIT_M, base | all_white,
+                                 m41_cases[i].opcode);
+        g_assert_cmpuint(insn.r2, ==, r2);
+        g_assert_cmpuint(insn.r3, ==, 0);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        assert_m_slot_bundle_opcode_at_group_end(base | all_white,
+                                                 m41_cases[i].opcode);
+    }
+
+    /* M42 and M45 use both GR operands; their only white bit is bit 36. */
+    for (unsigned i = 0; i < ARRAY_SIZE(m42_cases); i++) {
+        const uint64_t raw = major | (UINT64_C(1) << 36) |
+                             ((uint64_t)m42_cases[i].x6 << 27) |
+                             ((uint64_t)r3 << 20) |
+                             ((uint64_t)r2 << 13) | qp;
+        IA64Instruction insn = assert_raw_opcode(
+            IA64_INSN_UNIT_M, raw, m42_cases[i].opcode);
+
+        g_assert_cmpuint(insn.r2, ==, r2);
+        g_assert_cmpuint(insn.r3, ==, r3);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        assert_m_slot_bundle_opcode(raw, m42_cases[i].opcode);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(m45_cases); i++) {
+        const uint64_t raw = major | (UINT64_C(1) << 36) |
+                             ((uint64_t)m45_cases[i].x6 << 27) |
+                             ((uint64_t)r3 << 20) |
+                             ((uint64_t)r2 << 13) | qp;
+        IA64Instruction insn = assert_raw_opcode(
+            IA64_INSN_UNIT_M, raw, m45_cases[i].opcode);
+
+        g_assert_cmpuint(insn.r2, ==, r2);
+        g_assert_cmpuint(insn.r3, ==, r3);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        if (m45_cases[i].opcode == IA64_OP_PTC_G ||
+            m45_cases[i].opcode == IA64_OP_PTC_GA) {
+            assert_m_slot_bundle_opcode_at_group_end(raw,
+                                                     m45_cases[i].opcode);
+        } else {
+            assert_m_slot_bundle_opcode(raw, m45_cases[i].opcode);
+        }
+    }
+
+    /* M47 consumes only r3; bit 36 and bits 19:6 are all white. */
+    {
+        const uint64_t base = major | (UINT64_C(0x34) << 27) |
+                              ((uint64_t)r3 << 20) | qp;
+        const uint64_t white_19_6 = UINT64_C(0x3fff) << 6;
+        const uint64_t all_white = white_19_6 | (UINT64_C(1) << 36);
+        IA64Instruction insn;
+
+        for (unsigned bit = 6; bit <= 19; bit++) {
+            insn = assert_raw_opcode(IA64_INSN_UNIT_M,
+                                     base | (UINT64_C(1) << bit),
+                                     IA64_OP_PTC_E);
+            g_assert_cmpuint(insn.r3, ==, r3);
+        }
+        insn = assert_raw_opcode(IA64_INSN_UNIT_M, base | all_white,
+                                 IA64_OP_PTC_E);
+        g_assert_cmpuint(insn.r1, ==, 0);
+        g_assert_cmpuint(insn.r2, ==, 0);
+        g_assert_cmpuint(insn.r3, ==, r3);
+        g_assert_cmpuint(insn.qp, ==, qp);
+        assert_m_slot_bundle_opcode(base | all_white, IA64_OP_PTC_E);
+    }
+}
+
+static void test_b6_b7_brp_exact_forms(void)
+{
+    const uint64_t b7_indirect = UINT64_C(0x04080000000);
+    const uint64_t b7_return = UINT64_C(0x04088000000);
+    const uint64_t b6_ip_relative = UINT64_C(0x0e000000000);
+    const uint64_t b7_nonopcode_fields =
+        IA64_SLOT_MASK & ~((UINT64_C(0xf) << 37) |
+                           (UINT64_C(0x3f) << 27));
+    const uint64_t b6_nonopcode_fields = (UINT64_C(1) << 37) - 1;
+    IA64Instruction insn;
+
+    /* B7 is major 2 with exact x6 values 0x10 and 0x11. */
+    insn = assert_raw_opcode(IA64_INSN_UNIT_B, b7_indirect, IA64_OP_BRP);
+    g_assert_cmpuint(insn.qp, ==, 0);
+    insn = assert_raw_opcode(IA64_INSN_UNIT_B, b7_return, IA64_OP_BRP);
+    g_assert_cmpuint(insn.qp, ==, 0);
+    insn = assert_raw_opcode(IA64_INSN_UNIT_B,
+                             b7_indirect | b7_nonopcode_fields,
+                             IA64_OP_BRP);
+    g_assert_cmpuint(insn.qp, ==, 0);
+    insn = assert_raw_opcode(IA64_INSN_UNIT_B,
+                             b7_return | b7_nonopcode_fields,
+                             IA64_OP_BRP);
+    g_assert_cmpuint(insn.qp, ==, 0);
+
+    /* B6 is the major-7 IP-relative form; every lower bit is an operand/hint. */
+    insn = assert_raw_opcode(IA64_INSN_UNIT_B, b6_ip_relative,
+                             IA64_OP_BRP);
+    g_assert_cmpuint(insn.qp, ==, 0);
+    insn = assert_raw_opcode(IA64_INSN_UNIT_B,
+                             b6_ip_relative | b6_nonopcode_fields,
+                             IA64_OP_BRP);
+    g_assert_cmpuint(insn.qp, ==, 0);
+
+    /* Other major-2 x6 values include B9 nop and reserved encodings, not BRP. */
+    for (unsigned x6 = 0; x6 < 64; x6++) {
+        const uint64_t raw = (UINT64_C(2) << 37) | ((uint64_t)x6 << 27);
+
+        if (x6 == 0x10 || x6 == 0x11) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_B, raw,
+                                           0x1060, 0);
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_BRP);
+    }
+    assert_raw_illegal(IA64_INSN_UNIT_B,
+                       (UINT64_C(2) << 37) | (UINT64_C(0x0f) << 27));
+    assert_raw_illegal(IA64_INSN_UNIT_B,
+                       (UINT64_C(2) << 37) | (UINT64_C(0x12) << 27));
+
+    /* Major-7 recognition remains B-unit-only and does not bleed to neighbors. */
+    for (IA64InstructionUnit unit = IA64_INSN_UNIT_RESERVED;
+         unit <= IA64_INSN_UNIT_X; unit++) {
+        if (unit == IA64_INSN_UNIT_B) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(unit, b6_ip_relative,
+                                           0x1060, 0);
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_BRP);
+    }
+    for (unsigned major = 0; major < 16; major++) {
+        const uint64_t raw = ((uint64_t)major << 37) |
+                             (UINT64_C(0x12) << 27);
+
+        if (major == 7) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_B, raw,
+                                           0x1060, 0);
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_BRP);
     }
 }
 
@@ -208,7 +511,7 @@ static void test_i25_mov_from_predicates(void)
 
 static void test_i23_mov_to_predicates(void)
 {
-    const uint64_t base = (UINT64_C(3) << 33) | (UINT64_C(1) << 32);
+    const uint64_t base = UINT64_C(3) << 33;
 
     for (unsigned r1 = 0; r1 < 128; r1++) {
         const unsigned qp = (r1 * 29) & 0x3f;
@@ -257,11 +560,18 @@ static void test_i23_mov_to_predicates(void)
     }
 
     assert_raw_i_only(base | (UINT64_C(41) << 13), IA64_OP_MOV_GRPR);
-    assert_raw_illegal(IA64_INSN_UNIT_I,
-                       base & ~(UINT64_C(1) << 32));
-    for (unsigned bit = 20; bit <= 23; bit++) {
-        assert_raw_illegal(IA64_INSN_UNIT_I,
-                           base | (UINT64_C(1) << bit));
+    for (unsigned bit = 20; bit <= 32; bit++) {
+        IA64Instruction insn;
+
+        if (bit >= 24 && bit <= 31) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(
+            IA64_INSN_UNIT_I, base | (UINT64_C(1) << bit),
+            0x1070, 0);
+        g_assert_true(insn.valid);
+        g_assert_cmpint(insn.opcode, ==, IA64_OP_MOV_GRPR);
+        g_assert_cmphex((uint64_t)insn.imm, ==, 0);
     }
 }
 
@@ -1855,6 +2165,169 @@ static void test_b4_br_ret_unit_placement_gate(void)
     }
 }
 
+static void assert_b8_rfi_raw(uint64_t raw, uint64_t address, unsigned slot)
+{
+    IA64Instruction insn = ia64_decode_instruction_raw(
+        IA64_INSN_UNIT_B, raw, address, slot);
+
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, IA64_OP_RFI);
+    g_assert_cmpint(insn.unit, ==, IA64_INSN_UNIT_B);
+    g_assert_cmphex(insn.raw, ==, raw);
+    g_assert_cmphex(insn.address, ==, address);
+    g_assert_cmpuint(insn.slot, ==, slot);
+    /* B8 is unpredicated even though its six low white bits vary. */
+    g_assert_cmpuint(insn.qp, ==, 0);
+    g_assert_cmpuint(insn.b1, ==, 0);
+    g_assert_cmpuint(insn.b2, ==, 0);
+}
+
+static void test_b8_rfi_ignored_and_fixed_field_matrix(void)
+{
+    static const struct {
+        unsigned first;
+        unsigned width;
+    } white_fields[] = {
+        { 0, 6 },
+        { 6, 3 },
+        { 9, 3 },
+        { 12, 1 },
+        { 13, 3 },
+        { 16, 11 },
+        { 33, 3 },
+        { 36, 1 },
+    };
+    const uint64_t address = UINT64_C(0x12345678000013b0);
+    const uint64_t all_white = ((UINT64_C(1) << 27) - 1) |
+                               (UINT64_C(0xf) << 33);
+
+    assert_b8_rfi_raw(IA64_TEST_RFI_RAW, address, 0);
+
+    /*
+     * B8 fixes only opcode[40:37] and x6[32:27].  Exhaust every white
+     * field independently, including the complete qp domain, then their
+     * all-ones interaction.  RFI always canonicalizes qp to zero.
+     */
+    for (size_t field = 0; field < G_N_ELEMENTS(white_fields); field++) {
+        const unsigned limit = 1U << white_fields[field].width;
+
+        for (unsigned value = 0; value < limit; value++) {
+            const uint64_t raw = IA64_TEST_RFI_RAW |
+                ((uint64_t)value << white_fields[field].first);
+
+            assert_b8_rfi_raw(raw, address,
+                               (field + value) % IA64_SLOT_COUNT);
+        }
+    }
+    assert_b8_rfi_raw(IA64_TEST_RFI_RAW | all_white, address, 2);
+
+    /* The B-unit, zero major opcode, and x6 value remain fixed. */
+    for (unsigned x6 = 0; x6 < 64; x6++) {
+        IA64Instruction insn;
+
+        if (x6 == 0x08) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(
+            IA64_INSN_UNIT_B, (uint64_t)x6 << 27, address, 1);
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_RFI);
+    }
+    for (unsigned opcode = 1; opcode < 16; opcode++) {
+        IA64Instruction insn = ia64_decode_instruction_raw(
+            IA64_INSN_UNIT_B,
+            ((uint64_t)opcode << 37) | IA64_TEST_RFI_RAW,
+            address, 1);
+
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_RFI);
+    }
+    for (IA64InstructionUnit unit = IA64_INSN_UNIT_RESERVED;
+         unit <= IA64_INSN_UNIT_X; unit++) {
+        IA64Instruction insn;
+
+        if (unit == IA64_INSN_UNIT_B) {
+            continue;
+        }
+        insn = ia64_decode_instruction_raw(
+            unit, IA64_TEST_RFI_RAW | all_white, address, 2);
+        g_assert_cmpint(insn.opcode, !=, IA64_OP_RFI);
+    }
+}
+
+static void test_b8_rfi_bundle_placement_matrix(void)
+{
+    static const uint8_t templates[] = {
+        0x10, 0x11, 0x12, 0x13, 0x16,
+        0x17, 0x18, 0x19, 0x1c, 0x1d,
+    };
+    const uint64_t address = UINT64_C(0x12345678000013c0);
+
+    /*
+     * Cross every B slot, both final-stop forms, both incoming group states,
+     * and every restart suffix.  RFI has no slot-number or group-start rule,
+     * but an executed RFI must be followed by a template stop.
+     */
+    for (size_t t = 0; t < G_N_ELEMENTS(templates); t++) {
+        const IA64TemplateInfo *info = ia64_template_info(templates[t]);
+
+        g_assert_true(info->valid);
+        g_assert_false(info->long_immediate);
+
+        for (unsigned rfi_slot = 0; rfi_slot < IA64_SLOT_COUNT; rfi_slot++) {
+            uint64_t slots[IA64_SLOT_COUNT];
+
+            if (info->slot_type[rfi_slot] != IA64_SLOT_TYPE_B) {
+                continue;
+            }
+            for (unsigned slot = 0; slot < IA64_SLOT_COUNT; slot++) {
+                slots[slot] = info->slot_type[slot] == IA64_SLOT_TYPE_B ?
+                    IA64_TEST_B_NOP_RAW : IA64_TEST_NOP_RAW;
+            }
+            slots[rfi_slot] = IA64_TEST_RFI_RAW | UINT64_C(0x07ffffff) |
+                              (UINT64_C(0xf) << 33);
+
+            for (unsigned start_slot = 0; start_slot < IA64_SLOT_COUNT;
+                 start_slot++) {
+                for (unsigned boundary = 0; boundary < 2; boundary++) {
+                    IA64DecodedBundle bundle = make_bundle(
+                        templates[t], slots[0], slots[1], slots[2]);
+                    IA64DecodedInstructionBundle decoded;
+                    const bool executed = rfi_slot >= start_slot;
+                    const bool legal = !executed ||
+                                       info->stop_after_slot[rfi_slot];
+
+                    g_assert_true(ia64_decode_instruction_bundle(
+                        &bundle, address, boundary, start_slot, &decoded));
+                    g_assert_cmpint(decoded.status, ==,
+                                    legal ? IA64_DECODE_OK :
+                                            IA64_DECODE_ILLEGAL_PLACEMENT);
+                    g_assert_cmpint(decoded.error_slot, ==,
+                                    legal ? -1 : (int)rfi_slot);
+
+                    if (executed) {
+                        const IA64Instruction *insn =
+                            &decoded.instruction[rfi_slot];
+
+                        g_assert_true(insn->valid);
+                        g_assert_cmpint(insn->opcode, ==, IA64_OP_RFI);
+                        g_assert_cmpuint(insn->qp, ==, 0);
+                        g_assert_false(insn->must_start_group);
+                        g_assert_true(insn->must_end_group);
+                        g_assert_false(insn->requires_slot2);
+                        g_assert_cmpuint(insn->placement, ==,
+                                         IA64_PLACE_MUST_END_GROUP);
+                        g_assert_cmpint(insn->stop_after, ==,
+                                        info->stop_after_slot[rfi_slot]);
+                        g_assert_cmpint(insn->placement_illegal, ==, !legal);
+                        g_assert_cmpint(insn->status, ==,
+                                        legal ? IA64_DECODE_OK :
+                                            IA64_DECODE_ILLEGAL_PLACEMENT);
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void test_b5_ignored_field_matrix(void)
 {
     const uint64_t address = UINT64_C(0x1234567800001400);
@@ -2258,6 +2731,176 @@ static void test_mlx_movl_is_one_typed_instruction(void)
     g_assert_true(decoded.ends_at_group_boundary);
 }
 
+static void test_f_unit_reserved_and_ignored_field_matrix(void)
+{
+    static const uint8_t obsolete_fmov_forms[] = {
+        0x02, 0x03, 0x06, 0x07, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+        0x0e, 0x0f, 0x13, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22,
+        0x23, 0x24, 0x25, 0x26, 0x27, 0x29, 0x2a, 0x2b, 0x30,
+        0x31, 0x32, 0x33, 0x37, 0x38, 0x3e, 0x3f,
+    };
+    static const struct {
+        uint64_t raw;
+        IA64Opcode opcode;
+    } ignored_field[] = {
+        { UINT64_C(0x28) << 27, IA64_OP_FPACK },
+        { UINT64_C(0x1c) << 27, IA64_OP_FCVT_XF },
+        { UINT64_C(0x2c) << 27, IA64_OP_FAND },
+        { UINT64_C(0x10) << 27, IA64_OP_FMERGE_S },
+        { (UINT64_C(1) << 37) | (UINT64_C(0x10) << 27) |
+          (UINT64_C(2) << 13), IA64_OP_FPMERGE_S },
+        { (UINT64_C(1) << 37) | (UINT64_C(0x10) << 27),
+          IA64_OP_FPABS },
+    };
+    static const struct {
+        uint64_t raw;
+        IA64Opcode opcode;
+    } ignored_bit36[] = {
+        { UINT64_C(0x14) << 27, IA64_OP_FMIN },
+        { (UINT64_C(1) << 37) | (UINT64_C(0x14) << 27),
+          IA64_OP_FPMIN },
+        { UINT64_C(0x18) << 27, IA64_OP_FCVT_FX },
+    };
+    static const struct {
+        uint64_t raw;
+        IA64Opcode opcode;
+    } ignored_m18_m19[] = {
+        { (UINT64_C(6) << 37) | (UINT64_C(0xe1) << 27),
+          IA64_OP_SETF_SIG },
+        { (UINT64_C(6) << 37) | (UINT64_C(0xe9) << 27),
+          IA64_OP_SETF_EXP },
+        { (UINT64_C(6) << 37) | (UINT64_C(0xf1) << 27),
+          IA64_OP_SETF_S },
+        { (UINT64_C(6) << 37) | (UINT64_C(0xf9) << 27),
+          IA64_OP_SETF_D },
+        { (UINT64_C(4) << 37) | (UINT64_C(0xe1) << 27),
+          IA64_OP_GETF_SIG },
+        { (UINT64_C(4) << 37) | (UINT64_C(0xe9) << 27),
+          IA64_OP_GETF_EXP },
+        { (UINT64_C(4) << 37) | (UINT64_C(0xf1) << 27),
+          IA64_OP_GETF_S },
+        { (UINT64_C(4) << 37) | (UINT64_C(0xf9) << 27),
+          IA64_OP_GETF_D },
+    };
+
+    assert_raw_opcode(IA64_INSN_UNIT_F, UINT64_C(1) << 27,
+                      IA64_OP_NOP);
+    assert_raw_opcode(IA64_INSN_UNIT_F,
+                      (UINT64_C(1) << 27) | (UINT64_C(1) << 26),
+                      IA64_OP_HINT_F);
+
+    /* Undefined major-zero forms must not fall into the old FMOV sink. */
+    for (unsigned sf = 0; sf < 4; sf++) {
+        for (unsigned i = 0; i < ARRAY_SIZE(obsolete_fmov_forms); i++) {
+            uint64_t raw = ((uint64_t)sf << 34) |
+                           ((uint64_t)obsolete_fmov_forms[i] << 27);
+
+            assert_raw_illegal(IA64_INSN_UNIT_F, raw);
+        }
+    }
+
+    /* Intel labels bits 36:34 as ignored for F9/F11.  All eight encodings
+       execute the same instruction; they are not reserved aliases. */
+    for (unsigned i = 0; i < ARRAY_SIZE(ignored_field); i++) {
+        for (unsigned ignored = 0; ignored < 8; ignored++) {
+            assert_raw_opcode(
+                IA64_INSN_UNIT_F,
+                ignored_field[i].raw | ((uint64_t)ignored << 34),
+                ignored_field[i].opcode);
+        }
+    }
+
+    /* F8/F10 use bits 35:34 as sf, but bit 36 remains ignored. */
+    for (unsigned i = 0; i < ARRAY_SIZE(ignored_bit36); i++) {
+        assert_raw_opcode(IA64_INSN_UNIT_F, ignored_bit36[i].raw,
+                          ignored_bit36[i].opcode);
+        assert_raw_opcode(IA64_INSN_UNIT_F,
+                          ignored_bit36[i].raw | (UINT64_C(1) << 36),
+                          ignored_bit36[i].opcode);
+    }
+
+    /* M18/M19 ignore bits 29:28 and 26:20.  Exercise every alias while
+       keeping both architected register operands visibly nonzero. */
+    for (unsigned i = 0; i < ARRAY_SIZE(ignored_m18_m19); i++) {
+        const uint64_t operands = (UINT64_C(19) << 13) |
+                                  (UINT64_C(11) << 6);
+
+        for (unsigned x = 0; x < 4; x++) {
+            for (unsigned ignored = 0; ignored < 128; ignored++) {
+                IA64Instruction insn = ia64_decode_instruction_raw(
+                    IA64_INSN_UNIT_M,
+                    ignored_m18_m19[i].raw | operands |
+                    ((uint64_t)x << 28) | ((uint64_t)ignored << 20),
+                    0x1000, 0);
+
+                g_assert_true(insn.valid);
+                g_assert_cmpint(insn.opcode, ==,
+                                ignored_m18_m19[i].opcode);
+                g_assert_cmpuint(insn.r1, ==, 11);
+                g_assert_cmpuint(insn.r2, ==, 19);
+            }
+        }
+    }
+}
+
+static void test_f_unit_normalized_operands(void)
+{
+    IA64Instruction insn;
+    uint64_t raw;
+
+    raw = (UINT64_C(0xe) << 37) | (UINT64_C(1) << 36) |
+          (UINT64_C(2) << 34) | (UINT64_C(37) << 27) |
+          (UINT64_C(29) << 20) | (UINT64_C(23) << 13) |
+          (UINT64_C(17) << 6) | 5;
+    insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_F, raw, 0x2000, 1);
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, IA64_OP_XMA_HU);
+    g_assert_cmpuint(insn.qp, ==, 5);
+    g_assert_cmpuint(insn.r1, ==, 17);
+    g_assert_cmpuint(insn.r2, ==, 23);
+    g_assert_cmpuint(insn.r3, ==, 29);
+    g_assert_cmpuint(insn.r4, ==, 37);
+    g_assert_cmpuint(insn.p1, ==, 0);
+
+    raw = (UINT64_C(0xe) << 37) | (UINT64_C(41) << 27) |
+          (UINT64_C(31) << 20) | (UINT64_C(27) << 13) |
+          (UINT64_C(19) << 6);
+    insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_F, raw, 0x2010, 1);
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, IA64_OP_FSELECT);
+    g_assert_cmpuint(insn.r1, ==, 19);
+    g_assert_cmpuint(insn.r2, ==, 27);
+    g_assert_cmpuint(insn.r3, ==, 31);
+    g_assert_cmpuint(insn.r4, ==, 41);
+    g_assert_cmpuint(insn.p1, ==, 0);
+
+    raw = (UINT64_C(1) << 37) | (UINT64_C(3) << 34) |
+          (UINT64_C(0x14) << 27) | (UINT64_C(13) << 20) |
+          (UINT64_C(12) << 13) | (UINT64_C(11) << 6);
+    insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_F, raw, 0x2020, 1);
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, IA64_OP_FPMIN);
+    g_assert_cmpuint(insn.sf, ==, 3);
+    g_assert_cmpuint(insn.p1, ==, 0);
+
+    raw = (UINT64_C(2) << 34) | (UINT64_C(0x04) << 27) |
+          (UINT64_C(0x55) << 20) | (UINT64_C(0x2a) << 13);
+    insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_F, raw, 0x2030, 1);
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, IA64_OP_FSETC);
+    g_assert_cmpuint(insn.sf, ==, 2);
+    g_assert_cmpuint(insn.p1, ==, 0);
+
+    raw = (UINT64_C(1) << 33) | (UINT64_C(23) << 27) |
+          (UINT64_C(13) << 20) | (UINT64_C(12) << 13) |
+          (UINT64_C(11) << 6);
+    insn = ia64_decode_instruction_raw(IA64_INSN_UNIT_F, raw, 0x2040, 1);
+    g_assert_true(insn.valid);
+    g_assert_cmpint(insn.opcode, ==, IA64_OP_FRCPA);
+    g_assert_cmpuint(insn.p2, ==, 23);
+    g_assert_cmpuint(insn.p1, ==, 0);
+}
+
 static void test_reserved_template_has_precise_status(void)
 {
     IA64DecodedBundle bundle = make_bundle(0x06, 1, 2, 3);
@@ -2341,8 +2984,14 @@ int main(int argc, char **argv)
                     test_core_integer_fields);
     g_test_add_func("/ia64-decode/psr-ic-serialization",
                     test_psr_ic_serialization_decode);
-    g_test_add_func("/ia64-decode/m24-serialization-reserved-fields",
-                    test_m24_serialization_reserved_fields);
+    g_test_add_func("/ia64-decode/m24-ignored-field-matrix",
+                    test_m24_ignored_field_matrix);
+    g_test_add_func("/ia64-decode/m43-move-from-indirect-ignored-fields",
+                    test_m43_move_from_indirect_ignored_fields);
+    g_test_add_func("/ia64-decode/m41-m42-m45-m47-ignored-fields",
+                    test_m41_m42_m45_m47_ignored_fields);
+    g_test_add_func("/ia64-decode/b6-b7-brp-exact-forms",
+                    test_b6_b7_brp_exact_forms);
     g_test_add_func("/ia64-decode/i25-mov-from-predicates",
                     test_i25_mov_from_predicates);
     g_test_add_func("/ia64-decode/i23-mov-to-predicates",
@@ -2385,6 +3034,10 @@ int main(int argc, char **argv)
                     test_b4_br_ret_bundle_placement_matrix);
     g_test_add_func("/ia64-decode/b4-br-ret-unit-placement-gate",
                     test_b4_br_ret_unit_placement_gate);
+    g_test_add_func("/ia64-decode/b8-rfi-ignored-fixed-field-matrix",
+                    test_b8_rfi_ignored_and_fixed_field_matrix);
+    g_test_add_func("/ia64-decode/b8-rfi-bundle-placement-matrix",
+                    test_b8_rfi_bundle_placement_matrix);
     g_test_add_func("/ia64-decode/b5-ignored-field-matrix",
                     test_b5_ignored_field_matrix);
     g_test_add_func("/ia64-decode/b1-br-cond-non-b-unit-gate",
@@ -2401,6 +3054,10 @@ int main(int argc, char **argv)
                     test_b3_call_ignored_field_matrix);
     g_test_add_func("/ia64-decode/mlx-movl",
                     test_mlx_movl_is_one_typed_instruction);
+    g_test_add_func("/ia64-decode/f-reserved-and-ignored-field-matrix",
+                    test_f_unit_reserved_and_ignored_field_matrix);
+    g_test_add_func("/ia64-decode/f-normalized-operands",
+                    test_f_unit_normalized_operands);
     g_test_add_func("/ia64-decode/reserved-template",
                     test_reserved_template_has_precise_status);
     g_test_add_func("/ia64-decode/alloc-placement",

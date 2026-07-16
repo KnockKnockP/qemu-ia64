@@ -61,7 +61,10 @@ static void ps2_write_ack(QTestState *qts, uint8_t value)
 
 static QTestState *input_test_init(void)
 {
-    return qtest_init("-M vibtanium,efi-boot-manager=off -m 128M");
+    const char *firmware_dir = g_getenv("IA64_QTEST_FIRMWARE_DIR");
+
+    g_assert_nonnull(firmware_dir);
+    return qtest_initf("-L \"%s\" -M vibtanium -m 128M", firmware_dir);
 }
 
 static void test_ps2_reset_and_identify(void)

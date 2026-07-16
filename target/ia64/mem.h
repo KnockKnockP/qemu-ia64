@@ -12,10 +12,36 @@ typedef enum IA64TranslateStatus {
     IA64_TRANSLATE_UNIMPLEMENTED,
     IA64_TRANSLATE_TLB_MISS,
     IA64_TRANSLATE_NOT_PRESENT,
+    IA64_TRANSLATE_NAT_PAGE,
     IA64_TRANSLATE_ACCESS_BIT,
     IA64_TRANSLATE_DIRTY_BIT,
     IA64_TRANSLATE_ACCESS_DENIED,
+    IA64_TRANSLATE_KEY_MISS,
+    IA64_TRANSLATE_KEY_PERMISSION,
 } IA64TranslateStatus;
+
+typedef enum IA64DebugAccess {
+    IA64_DEBUG_ACCESS_READ = 1U << 0,
+    IA64_DEBUG_ACCESS_WRITE = 1U << 1,
+} IA64DebugAccess;
+
+typedef enum IA64ControlSpeculativeLoadAction {
+    IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE,
+    IA64_CONTROL_SPECULATIVE_LOAD_DEFER,
+    /* A lower-priority condition deferred, but the matching DBR did not. */
+    IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG,
+} IA64ControlSpeculativeLoadAction;
+
+/*
+ * The SDM's speculation capability is not the same thing as the ma field.
+ * In particular, virtual WB and physical WBL both have ma=0, but the former
+ * is fully speculative while the latter has only limited speculation.
+ */
+typedef enum IA64MemorySpeculationClass {
+    IA64_MEMORY_SPECULATION_SPEC,
+    IA64_MEMORY_SPECULATION_LIMITED,
+    IA64_MEMORY_SPECULATION_NON,
+} IA64MemorySpeculationClass;
 
 typedef struct IA64TranslateResult {
     IA64TranslateStatus status;
@@ -26,6 +52,9 @@ typedef struct IA64TranslateResult {
     int mmu_idx;
     MMUAccessType access_type;
     uint8_t page_size;
+    /* IA-64 TLB.ma encoding (WB=0, UC=4, UCE=5, WC=6, NaTPage=7). */
+    uint8_t memory_attribute;
+    IA64MemorySpeculationClass speculation_class;
     bool debug;
     bool identity;
     bool vhpt_enabled;
@@ -44,6 +73,10 @@ uint8_t ia64_va_region(vaddr address);
 uint32_t ia64_region_id(uint64_t rr);
 bool ia64_region_vhpt_enabled(uint64_t rr);
 bool ia64_page_size_supported(uint8_t page_size);
+bool ia64_translation_insert_fields_valid(uint64_t translation_format,
+                                          uint64_t itir);
+bool ia64_translation_insert_has_permission(uint64_t translation_format);
+bool ia64_virtual_address_implemented(vaddr address);
 bool ia64_host_tlb_flush_span(vaddr address, uint8_t page_size,
                               vaddr *start, uint64_t *len);
 uint8_t ia64_region_page_size(uint64_t rr);
@@ -93,6 +126,13 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
                                      MMUAccessType access_type, int mmu_idx,
                                      int cpl, bool debug,
                                      IA64TranslateResult *result);
+bool ia64_translate_probe_address(CPUIA64State *env, vaddr address,
+                                  MMUAccessType access_type, int cpl,
+                                  bool regular_form,
+                                  IA64TranslateResult *result);
+uint64_t ia64_translation_access_key(CPUIA64State *env, vaddr address);
+bool ia64_instruction_epc_gate(CPUIA64State *env, vaddr address,
+                               uint8_t *privilege_level);
 bool ia64_translate_rse_address_no_detail(CPUIA64State *env, vaddr address,
                                           MMUAccessType access_type,
                                           int mmu_idx, bool debug,
@@ -108,10 +148,35 @@ bool ia64_data_access_alignment_fault(CPUIA64State *env, vaddr address,
                                       uint8_t size, bool strict);
 bool ia64_control_speculative_load_fault_deferred(
     CPUIA64State *env, const IA64TranslateResult *result);
+IA64ControlSpeculativeLoadAction ia64_control_speculative_load_action(
+    CPUIA64State *env, uint8_t memory_class, bool base_nat, vaddr address,
+    uint8_t width, IA64TranslateResult *fault);
 bool ia64_control_speculative_load_defer(CPUIA64State *env,
                                          uint8_t memory_class,
                                          bool base_nat, vaddr address,
                                          uint8_t width,
                                          IA64TranslateResult *fault);
+
+/* Typed system-register/MMU contracts; none of these consume raw slots. */
+bool ia64_pkr_value_valid(uint64_t value);
+void ia64_pkr_write_state(CPUIA64State *env, uint32_t index, uint64_t value);
+uint64_t ia64_clear_fault_suppression_state(CPUIA64State *env,
+                                            uint64_t entry_mask);
+bool ia64_instruction_debug_match(const CPUIA64State *env, vaddr address);
+bool ia64_data_debug_match(const CPUIA64State *env, vaddr address,
+                           unsigned size, unsigned access);
+bool ia64_data_debug_match_at_cpl(const CPUIA64State *env, vaddr address,
+                                  unsigned size, unsigned access,
+                                  unsigned cpl);
+bool ia64_rse_data_debug_match(const CPUIA64State *env, vaddr address,
+                               unsigned size, unsigned access);
+void ia64_data_plane_alat_resolve_address(CPUIA64State *env,
+                                          uint64_t address,
+                                          MMUAccessType access_type,
+                                          uint64_t *resolved,
+                                          bool *physical);
+void ia64_data_plane_alat_invalidate_store(CPUIA64State *env,
+                                           uint64_t address,
+                                           uint8_t width);
 
 #endif

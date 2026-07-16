@@ -19,8 +19,8 @@ meson_options_help() {
   printf "%s\n" '  --disable-install-blobs  install provided firmware blobs'
   printf "%s\n" '  --disable-qom-cast-debug cast debugging support'
   printf "%s\n" '  --disable-relocatable    toggle relocatable install'
-  printf "%s\n" '  --disable-vibtanium-bit  embed the vibtanium IA-64 EFI Built In Test'
-  printf "%s\n" '                           firmware menu app'
+  printf "%s\n" '  --disable-vibtanium-efi  package the Vibtanium IA-64 EFI firmware and BIT'
+  printf "%s\n" '                           application'
   printf "%s\n" '  --docdir=VALUE           Base directory for documentation installation'
   printf "%s\n" '                           (can be empty) [share/doc]'
   printf "%s\n" '  --enable-asan            enable address sanitizer'
@@ -539,8 +539,6 @@ _meson_option_parse() {
     --disable-vde) printf "%s" -Dvde=disabled ;;
     --enable-vdi) printf "%s" -Dvdi=enabled ;;
     --disable-vdi) printf "%s" -Dvdi=disabled ;;
-    --enable-vibtanium-bit) printf "%s" -Dvibtanium_bit=true ;;
-    --disable-vibtanium-bit) printf "%s" -Dvibtanium_bit=false ;;
     --enable-vduse-blk-export) printf "%s" -Dvduse_blk_export=enabled ;;
     --disable-vduse-blk-export) printf "%s" -Dvduse_blk_export=disabled ;;
     --enable-vfio-user-server) printf "%s" -Dvfio_user_server=enabled ;;
@@ -559,6 +557,8 @@ _meson_option_parse() {
     --disable-vhost-user-blk-server) printf "%s" -Dvhost_user_blk_server=disabled ;;
     --enable-vhost-vdpa) printf "%s" -Dvhost_vdpa=enabled ;;
     --disable-vhost-vdpa) printf "%s" -Dvhost_vdpa=disabled ;;
+    --enable-vibtanium-efi) printf "%s" -Dvibtanium_efi=true ;;
+    --disable-vibtanium-efi) printf "%s" -Dvibtanium_efi=false ;;
     --enable-virglrenderer) printf "%s" -Dvirglrenderer=enabled ;;
     --disable-virglrenderer) printf "%s" -Dvirglrenderer=disabled ;;
     --enable-virtfs) printf "%s" -Dvirtfs=enabled ;;

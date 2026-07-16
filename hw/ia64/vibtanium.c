@@ -1,26 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
-#include "qemu/aio.h"
+#include "qemu/cutils.h"
+#include "qemu/datadir.h"
 #include "qemu/error-report.h"
-#include "qemu/main-loop.h"
-#include "qemu/thread.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "accel/tcg/cpu-ldst.h"
 #include "hw/acpi/acpi.h"
 #include "hw/char/serial-mm.h"
 #include "hw/core/cpu.h"
+#include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
-#include "hw/ide/ide-dev.h"
-#include "hw/ide/pci.h"
-#include "hw/ide/piix.h"
-#ifdef CONFIG_VIBTANIUM_BIT
-#include "hw/ia64/efi-bit.h"
-#endif
-#include "hw/ia64/efi.h"
-#include "hw/ia64/efi-storage.h"
-#include "hw/ia64/efi-vars.h"
+#include "hw/ide/ahci-pci.h"
+#include "hw/ia64/firmware.h"
 #include "hw/ia64/vibtanium.h"
 #include "hw/intc/ia64-iosapic.h"
 #include "hw/input/i8042.h"
@@ -28,71 +20,56 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_host.h"
+#include "hw/pci/pci_bus.h"
+#include "hw/usb/hcd-uhci.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
-#include "system/block-backend.h"
-#include "system/block-backend-io.h"
-#include "system/blockdev.h"
-#include "system/cpus.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "system/reset.h"
+#include "system/rtc.h"
 #include "system/runstate.h"
 #include "system/system.h"
-#include "target/ia64/flight-recorder.h"
-#include "target/ia64/firmware.h"
+#include "target/ia64/bundle.h"
 #include "target/ia64/insn.h"
+#include "target/ia64/mem.h"
 #include "vibtanium-internal.h"
 
-#define VIBTANIUM_DEFAULT_LINUX_APPEND ""
 #define TYPE_VIBTANIUM_PCI_HOST "vibtanium-pci-host"
-#define VIBTANIUM_PIIX_IDETIM_PRIMARY 0x41
-#define VIBTANIUM_PIIX_IDETIM_SECONDARY 0x43
-#define VIBTANIUM_PIIX_IDETIM_ENABLE 0x80
 #define VIBTANIUM_PIB_INTA_OFFSET UINT64_C(0x1e0000)
 #define VIBTANIUM_PIB_XTPR_OFFSET UINT64_C(0x1e0008)
-#define VIBTANIUM_WINDOWS_DEBUG_PROMPT UINT64_C(0x80015)
 
 typedef struct VibtaniumPciHostState {
     PCIHostState parent_obj;
+    MemoryRegion guest_config;
 } VibtaniumPciHostState;
 
 typedef struct VibtaniumPciBarAllocator {
     uint64_t io_next;
     uint64_t mem_next;
+    uint64_t mem_limit;
 } VibtaniumPciBarAllocator;
 
 OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumPciHostState, VIBTANIUM_PCI_HOST)
 
-static bool vibtanium_handle_platform_break(CPUIA64State *env,
-                                             uint64_t immediate)
-{
-    uint64_t response = ia64_read_gr(env, 9);
-    uint64_t maximum = ia64_read_gr(env, 10);
-    uint64_t length = 0;
-
-    /* Windows' IA-64 DebugPrompt stub places break.i in slot 2. */
-    if (immediate != VIBTANIUM_WINDOWS_DEBUG_PROMPT ||
-        ia64_env_ri(env) != 2) {
-        return false;
-    }
-
+static GlobalProperty vibtanium_compat_defaults[] = {
     /*
-     * An inactive Windows kernel-debugger stub does not consume prompt
-     * services.  Checked components then redispatch the prompt breakpoint
-     * recursively.  Act as the vibtanium platform debugger and choose the
-     * documented "g" (ignore and continue) response for headless guests.
-    */
-    if (response != 0 && maximum != 0) {
-        cpu_stb_data(env, response, 'g');
-        length = 1;
-        if (maximum > 1) {
-            cpu_stb_data(env, response + 1, '\n');
-            length = 2;
-        }
-    }
-    ia64_write_gr(env, 8, length);
-    return true;
+     * Windows Server 2003's IA-64 USB hub driver performs an
+     * alignment-requiring 32-bit load from offset 10 of Microsoft OS
+     * extended-property descriptors.  The offset is packed by definition,
+     * so do not expose the optional selective-suspend property on HID input
+     * devices.
+     */
+    { "usb-kbd", "msos-desc", "off" },
+    { "usb-mouse", "msos-desc", "off" },
+    { "usb-tablet", "msos-desc", "off" },
+};
+
+static bool vibtanium_handle_guest_pal_break(CPUIA64State *env,
+                                              uint64_t immediate)
+{
+    return immediate == VIBTANIUM_GUEST_PAL_BREAK &&
+           vibtanium_firmware_dispatch_pal_break(env);
 }
 
 static void vibtanium_acpi_update_sci(ACPIREGS *regs)
@@ -157,7 +134,7 @@ static void vibtanium_acpi_init(VibtaniumMachineState *vms)
     acpi_pm_tmr_init(&vms->acpi_regs, vibtanium_acpi_update_sci,
                      &vms->acpi_io);
     acpi_gpe_init(&vms->acpi_regs, 2);
-    memory_region_add_subregion(get_system_io(), VIBTANIUM_ACPI_PM_BASE,
+    memory_region_add_subregion(&vms->pci_io, VIBTANIUM_ACPI_PM_BASE,
                                 &vms->acpi_io);
 
     vms->acpi_powerdown_notifier.notify = vibtanium_acpi_powerdown_req;
@@ -169,7 +146,7 @@ static void vibtanium_acpi_init(VibtaniumMachineState *vms)
 
 static void vibtanium_isa_init(VibtaniumMachineState *vms)
 {
-    vms->isa_bus = isa_bus_new(NULL, get_system_memory(), get_system_io(),
+    vms->isa_bus = isa_bus_new(NULL, get_system_memory(), &vms->pci_io,
                                &error_fatal);
     for (int i = 0; i < VIBTANIUM_LEGACY_ISA_IRQS; i++) {
         vms->isa_irqs[i] = qdev_get_gpio_in(vms->iosapic, i);
@@ -187,6 +164,70 @@ static void vibtanium_pci_set_irq(void *opaque, int irq_num, int level)
 
     qemu_set_irq(vms->pci_irqs[irq_num], level);
 }
+
+static PCIDevice *vibtanium_pci_config_device(VibtaniumPciHostState *host,
+                                               hwaddr address,
+                                               uint32_t *reg)
+{
+    PCIBus *bus = PCI_HOST_BRIDGE(host)->bus;
+    uint8_t bus_num = extract64(address, 20, 8);
+    uint8_t slot = extract64(address, 15, 5);
+    uint8_t function = extract64(address, 12, 3);
+
+    *reg = address & 0xfff;
+    return pci_find_device(bus, bus_num, PCI_DEVFN(slot, function));
+}
+
+static uint64_t vibtanium_pci_config_read(void *opaque, hwaddr address,
+                                          unsigned size)
+{
+    VibtaniumPciHostState *host = opaque;
+    PCIDevice *dev;
+    uint32_t reg;
+
+    if (address >= VIBTANIUM_GUEST_PCI_CONFIG_SIZE || size > 4 ||
+        address + size > VIBTANIUM_GUEST_PCI_CONFIG_SIZE) {
+        return UINT64_MAX;
+    }
+    dev = vibtanium_pci_config_device(host, address, &reg);
+    if (!dev) {
+        return UINT64_MAX;
+    }
+    return pci_host_config_read_common(dev, reg, pci_config_size(dev), size);
+}
+
+static void vibtanium_pci_config_write(void *opaque, hwaddr address,
+                                       uint64_t value, unsigned size)
+{
+    VibtaniumPciHostState *host = opaque;
+    PCIDevice *dev;
+    uint32_t reg;
+
+    if (address >= VIBTANIUM_GUEST_PCI_CONFIG_SIZE || size > 4 ||
+        address + size > VIBTANIUM_GUEST_PCI_CONFIG_SIZE) {
+        return;
+    }
+    dev = vibtanium_pci_config_device(host, address, &reg);
+    if (dev) {
+        pci_host_config_write_common(dev, reg, pci_config_size(dev), value,
+                                     size);
+    }
+}
+
+static const MemoryRegionOps vibtanium_pci_config_ops = {
+    .read = vibtanium_pci_config_read,
+    .write = vibtanium_pci_config_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+        .unaligned = true,
+    },
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
 
 static uint64_t vibtanium_align_pci_base(uint64_t base, uint64_t size)
 {
@@ -226,6 +267,16 @@ static void vibtanium_assign_pci_device_bars(PCIBus *bus,
     uint16_t command = pci_get_word(dev->config + PCI_COMMAND);
     bool assigned = false;
 
+    if (dev->config[PCI_INTERRUPT_PIN] >= 1 &&
+        dev->config[PCI_INTERRUPT_PIN] <= PCI_NUM_PINS) {
+        unsigned output = (PCI_SLOT(dev->devfn) +
+                           dev->config[PCI_INTERRUPT_PIN] - 1) %
+                          VIBTANIUM_PCI_INTX_IRQS;
+
+        pci_default_write_config(dev, PCI_INTERRUPT_LINE,
+                                 VIBTANIUM_PCI_INTX_IRQ_BASE + output, 1);
+    }
+
     for (int i = 0; i < PCI_NUM_REGIONS; i++) {
         PCIIORegion *region = &dev->io_regions[i];
         uint64_t addr;
@@ -250,8 +301,7 @@ static void vibtanium_assign_pci_device_bars(PCIBus *bus,
             uint64_t flags = region->type & ~PCI_BASE_ADDRESS_MEM_MASK;
 
             addr = vibtanium_alloc_pci_region(
-                "MMIO", &alloc->mem_next,
-                VIBTANIUM_PCI_MMIO_BASE + VIBTANIUM_PCI_MMIO_SIZE,
+                "MMIO", &alloc->mem_next, alloc->mem_limit,
                 region->size, dev, i);
             pci_default_write_config(dev, config_addr,
                                      (uint32_t)(addr | flags), 4);
@@ -273,8 +323,10 @@ static void vibtanium_assign_pci_device_bars(PCIBus *bus,
 static void vibtanium_assign_pci_bars(VibtaniumMachineState *vms)
 {
     VibtaniumPciBarAllocator alloc = {
-        .io_next = VIBTANIUM_PCI_DYNAMIC_IO_BASE,
-        .mem_next = VIBTANIUM_PCI_MMIO_BASE,
+        .io_next = UINT64_C(0xc400),
+        .mem_next = UINT64_C(0xc9000000),
+        .mem_limit = VIBTANIUM_GUEST_PCI_MMIO_BASE +
+                     VIBTANIUM_GUEST_PCI_MMIO_SIZE,
     };
 
     if (!vms->pci_bus) {
@@ -287,35 +339,132 @@ static void vibtanium_assign_pci_bars(VibtaniumMachineState *vms)
 
 static void vibtanium_configure_firmware_pci(VibtaniumMachineState *vms)
 {
-    if (vms->pci_ide) {
+    vms->pci_ide = pci_find_device(vms->pci_bus, 0, PCI_DEVFN(0, 0));
+    if (vms->pci_ide &&
+        pci_get_word(vms->pci_ide->config + PCI_VENDOR_ID) ==
+            PCI_VENDOR_ID_CMD &&
+        pci_get_word(vms->pci_ide->config + PCI_DEVICE_ID) ==
+            PCI_DEVICE_ID_CMD_646) {
+        /* Optional CMD646 controller at the EFI firmware's fixed IDE path. */
         pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_0,
-                                 VIBTANIUM_IDE_PRIMARY_CMD_BASE |
-                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+                                 VIBTANIUM_IDE_PRIMARY_CMD_BASE, 4);
         pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_1,
-                                 VIBTANIUM_IDE_PRIMARY_CTL_BAR_BASE |
-                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+                                 VIBTANIUM_IDE_PRIMARY_CTL_BAR_BASE, 4);
         pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_2,
-                                 VIBTANIUM_IDE_SECONDARY_CMD_BASE |
-                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+                                 VIBTANIUM_IDE_SECONDARY_CMD_BASE, 4);
         pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_3,
-                                 VIBTANIUM_IDE_SECONDARY_CTL_BAR_BASE |
-                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+                                 VIBTANIUM_IDE_SECONDARY_CTL_BAR_BASE, 4);
         pci_default_write_config(vms->pci_ide, PCI_BASE_ADDRESS_4,
-                                 VIBTANIUM_IDE_BMDMA_BASE |
-                                 PCI_BASE_ADDRESS_SPACE_IO, 4);
+                                 VIBTANIUM_IDE_BMDMA_BASE, 4);
         pci_default_write_config(vms->pci_ide, PCI_COMMAND,
-                                 PCI_COMMAND_IO | PCI_COMMAND_MASTER,
-                                 2);
-        /* PIIX3 leaves these firmware-owned channel enables clear at reset. */
-        pci_default_write_config(vms->pci_ide,
-                                 VIBTANIUM_PIIX_IDETIM_PRIMARY,
-                                 VIBTANIUM_PIIX_IDETIM_ENABLE, 1);
-        pci_default_write_config(vms->pci_ide,
-                                 VIBTANIUM_PIIX_IDETIM_SECONDARY,
-                                 VIBTANIUM_PIIX_IDETIM_ENABLE, 1);
+                                 PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
+    } else {
+        vms->pci_ide = NULL;
     }
 
+    if (vms->pci_ahci) {
+        pci_default_write_config(vms->pci_ahci, PCI_BASE_ADDRESS_4,
+                                 VIBTANIUM_AHCI_IDP_IO_BASE, 4);
+        pci_default_write_config(vms->pci_ahci, PCI_BASE_ADDRESS_5,
+                                 VIBTANIUM_AHCI_MMIO_BASE, 4);
+        pci_default_write_config(vms->pci_ahci, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
+                                 PCI_COMMAND_MASTER, 2);
+    }
+
+    if (vms->pci_ohci) {
+        pci_default_write_config(vms->pci_ohci, PCI_BASE_ADDRESS_0,
+                                 VIBTANIUM_OHCI_MMIO_BASE, 4);
+        pci_default_write_config(vms->pci_ohci, PCI_COMMAND,
+                                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
+    }
+
+    if (vms->pci_uhci) {
+        pci_default_write_config(vms->pci_uhci, PCI_BASE_ADDRESS_4,
+                                 VIBTANIUM_UHCI_IO_BASE, 4);
+        pci_default_write_config(vms->pci_uhci, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
+    }
+
+    if (vms->pci_lsi) {
+        pci_default_write_config(vms->pci_lsi, PCI_BASE_ADDRESS_0,
+                                 VIBTANIUM_LSI_IO_BASE, 4);
+        pci_default_write_config(vms->pci_lsi, PCI_BASE_ADDRESS_1,
+                                 VIBTANIUM_LSI_MMIO_BASE, 4);
+        pci_default_write_config(vms->pci_lsi, PCI_BASE_ADDRESS_2,
+                                 VIBTANIUM_LSI_RAM_BASE, 4);
+        pci_default_write_config(vms->pci_lsi, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
+                                 PCI_COMMAND_MASTER, 2);
+    }
+
+    if (vms->pci_vga) {
+        pci_default_write_config(vms->pci_vga, PCI_BASE_ADDRESS_0,
+                                 VIBTANIUM_GUEST_VGA_FRAMEBUFFER_BASE, 4);
+        pci_default_write_config(vms->pci_vga, PCI_BASE_ADDRESS_1,
+                                 VIBTANIUM_VGA_IO_BASE, 4);
+        pci_default_write_config(vms->pci_vga, PCI_BASE_ADDRESS_2,
+                                 VIBTANIUM_VGA_MMIO_BASE, 4);
+        pci_default_write_config(vms->pci_vga, PCI_COMMAND,
+                                 PCI_COMMAND_IO | PCI_COMMAND_MEMORY, 2);
+    }
+
+    /* Allocate user-added BARs after the fixed firmware-visible windows. */
     vibtanium_assign_pci_bars(vms);
+}
+
+static void vibtanium_guest_firmware_write_handoff(
+    VibtaniumMachineState *vms)
+{
+    uint8_t handoff[64] = { 0 };
+    MachineState *machine = MACHINE(vms);
+    MemTxResult result;
+
+    stq_le_p(handoff, VIBTANIUM_GUEST_FIRMWARE_HANDOFF_MAGIC);
+    stq_le_p(handoff + 8, VIBTANIUM_GUEST_FIRMWARE_HANDOFF_VERSION);
+    stq_le_p(handoff + 16, machine->ram_size);
+    stq_le_p(handoff + 24,
+             vms->hcdp_serial_console ? 0 : 1); /* serial : VGA */
+    stq_le_p(handoff + 32, 1); /* IDE bus-master DMA enabled */
+    stq_le_p(handoff + 40, 0); /* no separate debug UART */
+    stq_le_p(handoff + 48, 0);
+    stq_le_p(handoff + 56, 1); /* i8042 present */
+    result = address_space_write(&address_space_memory,
+                                 VIBTANIUM_GUEST_FIRMWARE_HANDOFF,
+                                 MEMTXATTRS_UNSPECIFIED,
+                                 handoff, sizeof(handoff));
+    if (result != MEMTX_OK) {
+        error_report("could not write IA-64 guest firmware handoff");
+        exit(1);
+    }
+}
+
+static void vibtanium_guest_firmware_reset_cpu(VibtaniumMachineState *vms)
+{
+    CPUIA64State *env = &vms->cpu->env;
+
+    ia64_env_replace_psr(env, 0);
+    env->ip = VIBTANIUM_GUEST_FIRMWARE_BASE;
+    env->cr[IA64_CR_IIP] = env->ip;
+    env->cr[IA64_CR_IVA] = UINT64_C(0x10000);
+    env->cr[IA64_CR_PTA] = 0;
+    env->cr[IA64_CR_DCR] = UINT64_C(0x300); /* DCR.dm | DCR.dp */
+    env->br[0] = env->ip;
+    env->gr[1] = VIBTANIUM_GUEST_FIRMWARE_BASE;
+    env->gr[12] = UINT64_C(0x200000);
+    env->ar[IA64_AR_KR0] = VIBTANIUM_GUEST_FIRMWARE_BASE;
+    env->rse.rsc = IA64_RSC_MODE_MASK;
+    env->rse.bsp = UINT64_C(0x80000);
+    env->rse.bspstore = UINT64_C(0x80000);
+    env->rse.bsp_load = UINT64_C(0x80000);
+    env->rse.rnat = 0;
+    env->ar[IA64_AR_RSC] = env->rse.rsc;
+    env->ar[IA64_AR_BSP] = env->rse.bsp;
+    env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
+    env->ar[IA64_AR_RNAT] = 0;
+    env->cfm = 0;
+    ia64_firmware_identity_tlb_set(env, true);
+    ia64_env_begin_source_visibility_epoch(env);
 }
 
 static void vibtanium_reset(MachineState *machine, ResetType type)
@@ -324,16 +473,26 @@ static void vibtanium_reset(MachineState *machine, ResetType type)
 
     qemu_devices_reset(type);
     vibtanium_configure_firmware_pci(vms);
-    vibtanium_efi_console_enter_graphics_mode();
+    vibtanium_guest_firmware_write_handoff(vms);
+    /*
+     * The generic loader installs its reset PC during qemu_devices_reset().
+     * A normal IA-64 CPU reset leaves IP zero; preserve any nonzero entry
+     * point supplied by -device loader for no-OS and kernel fixtures.
+     */
+    if (vms->cpu->env.ip == 0) {
+        vibtanium_guest_firmware_reset_cpu(vms);
+    }
 }
 
 static void vibtanium_pci_init(VibtaniumMachineState *vms)
 {
-    MachineClass *mc = MACHINE_GET_CLASS(vms);
+    MachineState *machine = MACHINE(vms);
     PCIHostState *host;
+    VibtaniumPciHostState *vhost;
 
     vms->pci_host = qdev_new(TYPE_VIBTANIUM_PCI_HOST);
     host = PCI_HOST_BRIDGE(vms->pci_host);
+    vhost = VIBTANIUM_PCI_HOST(vms->pci_host);
 
     for (int i = 0; i < VIBTANIUM_PCI_INTX_IRQS; i++) {
         vms->pci_irqs[i] = qdev_get_gpio_in(vms->iosapic,
@@ -341,17 +500,50 @@ static void vibtanium_pci_init(VibtaniumMachineState *vms)
     }
     vms->pci_bus = pci_register_root_bus(
         vms->pci_host, "pci", vibtanium_pci_set_irq, pci_swizzle_map_irq_fn,
-        vms, get_system_memory(), get_system_io(), 0, VIBTANIUM_PCI_INTX_IRQS,
+        vms, &vms->pci_mmio, &vms->pci_io, 0,
+        VIBTANIUM_PCI_INTX_IRQS,
         TYPE_PCI_BUS);
     host->bus = vms->pci_bus;
     sysbus_realize_and_unref(SYS_BUS_DEVICE(vms->pci_host), &error_fatal);
-    ia64_firmware_set_pci_bus(vms->pci_bus);
 
-    vms->pci_ide = pci_new(PCI_DEVFN(1, 0), TYPE_PIIX3_IDE);
-    pci_realize_and_unref(vms->pci_ide, vms->pci_bus, &error_fatal);
-    pci_ide_create_devs(vms->pci_ide);
+    memory_region_init_io(&vhost->guest_config, OBJECT(vms->pci_host),
+                          &vibtanium_pci_config_ops, vhost,
+                          "vibtanium.guest-firmware-pci-ecam",
+                          VIBTANIUM_GUEST_PCI_CONFIG_SIZE);
+    memory_region_add_subregion(get_system_memory(),
+                                VIBTANIUM_GUEST_PCI_CONFIG_BASE,
+                                &vhost->guest_config);
 
-    pci_init_nic_devices(vms->pci_bus, mc->default_nic);
+    /*
+     * The EFI firmware publishes device paths for these exact slots.  Keep
+     * slot zero
+     * empty by default, but release it after board creation so an explicit
+     * -device cmd646-ide,bus=pci,addr=0 can occupy the optional IDE path.
+     */
+    pci_bus_set_slot_reserved_mask(vms->pci_bus, 1U << 0);
+
+    vms->pci_ahci = pci_new(PCI_DEVFN(1, 0), TYPE_ICH9_AHCI);
+    pci_realize_and_unref(vms->pci_ahci, vms->pci_bus, &error_fatal);
+
+    machine->usb |= defaults_enabled() && !machine->usb_disabled;
+    if (machine_usb(machine)) {
+        vms->pci_ohci = pci_new(PCI_DEVFN(2, 0), "pci-ohci");
+        pci_realize_and_unref(vms->pci_ohci, vms->pci_bus, &error_fatal);
+
+        vms->pci_uhci = pci_new(PCI_DEVFN(3, 0), TYPE_PIIX3_USB_UHCI);
+        pci_realize_and_unref(vms->pci_uhci, vms->pci_bus, &error_fatal);
+    }
+
+    vms->pci_lsi = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
+    qdev_prop_set_bit(DEVICE(vms->pci_lsi),
+                      "disconnect-on-data-wait", false);
+    pci_realize_and_unref(vms->pci_lsi, vms->pci_bus, &error_fatal);
+    lsi53c8xx_handle_legacy_cmdline(DEVICE(vms->pci_lsi));
+
+    vms->pci_vga = pci_vga_init(vms->pci_bus);
+
+    vibtanium_configure_firmware_pci(vms);
+    pci_bus_clear_slot_reserved_mask(vms->pci_bus, 1U << 0);
 }
 
 static void vibtanium_i8042_init(VibtaniumMachineState *vms)
@@ -376,6 +568,366 @@ static void vibtanium_i8042_init(VibtaniumMachineState *vms)
     vms->i8042 = dev;
     vms->i8042_mmio = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
     object_unref(OBJECT(dev));
+}
+
+static uint64_t vibtanium_guest_rtc_read(void *opaque, hwaddr address,
+                                         unsigned size)
+{
+    struct tm tm;
+
+    (void)opaque;
+    if (address != 0 || size != sizeof(uint64_t)) {
+        return 0;
+    }
+    qemu_get_timedate(&tm, 0);
+    return mktimegm(&tm);
+}
+
+static const MemoryRegionOps vibtanium_guest_rtc_ops = {
+    .read = vibtanium_guest_rtc_read,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 8,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 8,
+        .max_access_size = 8,
+    },
+};
+
+static uint64_t vibtanium_guest_acpi_reset_read(void *opaque,
+                                                hwaddr address,
+                                                unsigned size)
+{
+    (void)opaque;
+    (void)address;
+    (void)size;
+    return 0;
+}
+
+static void vibtanium_guest_acpi_reset_write(void *opaque, hwaddr address,
+                                             uint64_t value, unsigned size)
+{
+    (void)opaque;
+    if (address == 0 && size == 1 &&
+        (value & UINT8_MAX) == VIBTANIUM_GUEST_ACPI_RESET_VALUE) {
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
+}
+
+static const MemoryRegionOps vibtanium_guest_acpi_reset_ops = {
+    .read = vibtanium_guest_acpi_reset_read,
+    .write = vibtanium_guest_acpi_reset_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
+static uint8_t *vibtanium_guest_nvram_data(VibtaniumMachineState *vms)
+{
+    return memory_region_get_ram_ptr(&vms->nvram);
+}
+
+static uint64_t vibtanium_guest_nvram_commit_read(void *opaque,
+                                                   hwaddr address,
+                                                   unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    uint8_t *data = vibtanium_guest_nvram_data(vms) +
+                    VIBTANIUM_GUEST_NVRAM_COMMIT_OFFSET + address;
+    uint64_t value = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        value |= (uint64_t)data[i] << (i * 8);
+    }
+    return value;
+}
+
+static void vibtanium_guest_nvram_persist(VibtaniumMachineState *vms)
+{
+    g_autoptr(GError) err = NULL;
+
+    if (!vms->guest_nvram_resolved_path) {
+        return;
+    }
+    if (!g_file_set_contents(vms->guest_nvram_resolved_path,
+                             (const char *)vibtanium_guest_nvram_data(vms),
+                             VIBTANIUM_NVRAM_SIZE, &err) &&
+        !vms->guest_nvram_write_warning) {
+        warn_report("failed to save IA-64 guest NVRAM '%s': %s",
+                    vms->guest_nvram_resolved_path,
+                    err ? err->message : "unknown error");
+        vms->guest_nvram_write_warning = true;
+    }
+}
+
+static void vibtanium_guest_nvram_commit_write(void *opaque,
+                                                hwaddr address,
+                                                uint64_t value,
+                                                unsigned size)
+{
+    VibtaniumMachineState *vms = opaque;
+    uint8_t *data;
+    unsigned i;
+
+    if (address == 0 && size == sizeof(uint64_t) &&
+        value == VIBTANIUM_GUEST_NVRAM_COMMIT_MAGIC) {
+        vibtanium_guest_nvram_persist(vms);
+        return;
+    }
+
+    data = vibtanium_guest_nvram_data(vms) +
+           VIBTANIUM_GUEST_NVRAM_COMMIT_OFFSET + address;
+    for (i = 0; i < size; i++) {
+        data[i] = value >> (i * 8);
+    }
+}
+
+static const MemoryRegionOps vibtanium_guest_nvram_commit_ops = {
+    .read = vibtanium_guest_nvram_commit_read,
+    .write = vibtanium_guest_nvram_commit_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
+};
+
+static void vibtanium_guest_nvram_load(VibtaniumMachineState *vms,
+                                        const char *firmware_path)
+{
+    g_autofree char *directory = NULL;
+    g_autofree char *contents = NULL;
+    g_autoptr(GError) err = NULL;
+    gsize length = 0;
+
+    memset(vibtanium_guest_nvram_data(vms), 0, VIBTANIUM_NVRAM_SIZE);
+    g_clear_pointer(&vms->guest_nvram_resolved_path, g_free);
+    vms->guest_nvram_write_warning = false;
+
+    if (g_strcmp0(vms->nvram_path, "none") == 0) {
+        return;
+    }
+    if (vms->nvram_path && g_strcmp0(vms->nvram_path, "auto") != 0) {
+        vms->guest_nvram_resolved_path = g_strdup(vms->nvram_path);
+    } else {
+        directory = g_path_get_dirname(firmware_path);
+        vms->guest_nvram_resolved_path =
+            g_build_filename(directory, "nvram", NULL);
+    }
+
+    if (g_file_get_contents(vms->guest_nvram_resolved_path, &contents,
+                            &length, &err)) {
+        if (length == VIBTANIUM_NVRAM_SIZE) {
+            memcpy(vibtanium_guest_nvram_data(vms), contents, length);
+        } else {
+            warn_report("ignoring IA-64 guest NVRAM '%s': expected %u "
+                        "bytes, found %zu",
+                        vms->guest_nvram_resolved_path,
+                        (unsigned)VIBTANIUM_NVRAM_SIZE, (size_t)length);
+        }
+    } else if (err && !g_error_matches(err, G_FILE_ERROR,
+                                       G_FILE_ERROR_NOENT)) {
+        warn_report("failed to load IA-64 guest NVRAM '%s': %s",
+                    vms->guest_nvram_resolved_path, err->message);
+    }
+}
+
+static void vibtanium_guest_firmware_init_platform(
+    VibtaniumMachineState *vms)
+{
+    MemoryRegion *sysmem = get_system_memory();
+    MemoryRegion *framebuffer = vms->pci_vga ?
+        vms->pci_vga->io_regions[0].memory : NULL;
+    MemoryRegion *vga_mmio = vms->pci_vga ?
+        vms->pci_vga->io_regions[2].memory : NULL;
+    MemoryRegion *uart = sysbus_mmio_get_region(SYS_BUS_DEVICE(vms->uart), 0);
+    MemoryRegion *iosapic =
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(vms->iosapic), 0);
+    uint64_t framebuffer_size;
+
+    memory_region_init_alias(&vms->guest_uart_alias, OBJECT(vms),
+                             "vibtanium.guest-firmware-uart", uart, 0,
+                             memory_region_size(uart));
+    memory_region_add_subregion(sysmem, VIBTANIUM_GUEST_UART_BASE,
+                                &vms->guest_uart_alias);
+
+    memory_region_init_alias(&vms->guest_iosapic_alias, OBJECT(vms),
+                             "vibtanium.guest-firmware-iosapic", iosapic, 0,
+                             memory_region_size(iosapic));
+    memory_region_add_subregion(sysmem, VIBTANIUM_GUEST_IOSAPIC_BASE,
+                                &vms->guest_iosapic_alias);
+
+    memory_region_init_alias(&vms->guest_acpi_io_alias, OBJECT(vms),
+                             "vibtanium.guest-firmware-acpi-pm",
+                             &vms->acpi_io, 0,
+                             memory_region_size(&vms->acpi_io));
+    memory_region_add_subregion(&vms->pci_io,
+                                VIBTANIUM_GUEST_ACPI_PM_BASE,
+                                &vms->guest_acpi_io_alias);
+    memory_region_init_io(&vms->guest_acpi_reset, OBJECT(vms),
+                          &vibtanium_guest_acpi_reset_ops, vms,
+                          "vibtanium.guest-firmware-acpi-reset", 1);
+    memory_region_add_subregion(
+        &vms->pci_io,
+        VIBTANIUM_GUEST_ACPI_PM_BASE +
+            VIBTANIUM_GUEST_ACPI_RESET_OFFSET,
+        &vms->guest_acpi_reset);
+
+    if (framebuffer && memory_region_size(framebuffer)) {
+        framebuffer_size = MIN(memory_region_size(framebuffer),
+                               VIBTANIUM_GUEST_VGA_FRAMEBUFFER_MAX_SIZE);
+        memory_region_init_alias(&vms->guest_vga_framebuffer_alias,
+                                 OBJECT(vms),
+                                 "vibtanium.guest-firmware-vga-framebuffer",
+                                 framebuffer, 0, framebuffer_size);
+        memory_region_add_subregion_overlap(
+            &vms->pci_mmio, VIBTANIUM_GUEST_VGA_FRAMEBUFFER_BASE,
+            &vms->guest_vga_framebuffer_alias, 1);
+    } else {
+        warn_report("IA-64 guest firmware VGA framebuffer is unavailable");
+    }
+    if (vga_mmio && memory_region_size(vga_mmio)) {
+        memory_region_init_alias(&vms->guest_vga_mmio_alias,
+                                 OBJECT(vms),
+                                 "vibtanium.guest-firmware-vga-mmio",
+                                 vga_mmio, 0,
+                                 memory_region_size(vga_mmio));
+        memory_region_add_subregion_overlap(
+            &vms->pci_mmio, VIBTANIUM_VGA_MMIO_BASE,
+            &vms->guest_vga_mmio_alias, 1);
+    }
+    if (vms->pci_vga) {
+        memory_region_init_alias(&vms->guest_vga_legacy_alias,
+                                 OBJECT(vms),
+                                 "vibtanium.guest-firmware-vga-legacy",
+                                 &vms->pci_mmio,
+                                 VIBTANIUM_VGA_LEGACY_BASE,
+                                 VIBTANIUM_VGA_LEGACY_SIZE);
+        memory_region_add_subregion_overlap(
+            sysmem, VIBTANIUM_VGA_LEGACY_BASE,
+            &vms->guest_vga_legacy_alias, 1);
+    }
+
+    memory_region_init_alias(&vms->guest_nvram_alias, OBJECT(vms),
+                             "vibtanium.guest-firmware-nvram",
+                             &vms->nvram, 0, VIBTANIUM_NVRAM_SIZE);
+    memory_region_add_subregion(sysmem, VIBTANIUM_GUEST_NVRAM_BASE,
+                                &vms->guest_nvram_alias);
+    memory_region_init_io(&vms->guest_nvram_commit, OBJECT(vms),
+                          &vibtanium_guest_nvram_commit_ops, vms,
+                          "vibtanium.guest-firmware-nvram-commit",
+                          sizeof(uint64_t));
+    memory_region_add_subregion_overlap(
+        sysmem,
+        VIBTANIUM_GUEST_NVRAM_BASE +
+            VIBTANIUM_GUEST_NVRAM_COMMIT_OFFSET,
+        &vms->guest_nvram_commit, 1);
+
+    memory_region_init_io(&vms->guest_rtc, OBJECT(vms),
+                          &vibtanium_guest_rtc_ops, vms,
+                          "vibtanium.guest-firmware-rtc",
+                          VIBTANIUM_GUEST_RTC_SIZE);
+    memory_region_add_subregion(sysmem, VIBTANIUM_GUEST_RTC_BASE,
+                                &vms->guest_rtc);
+}
+
+static bool vibtanium_patch_guest_pal_portal(uint8_t *image, size_t size)
+{
+    const size_t portal_offset = 0x60;
+    const uint64_t slot_mask = (UINT64_C(1) << 41) - 1;
+    const uint64_t immediate_mask =
+        (UINT64_C(1) << 36) | (((UINT64_C(1) << 20) - 1) << 6);
+    uint8_t *bundle;
+    uint64_t low;
+    uint64_t raw;
+    uint64_t immediate;
+
+    if (size < portal_offset + IA64_BUNDLE_SIZE) {
+        return false;
+    }
+    bundle = image + portal_offset;
+    low = ldq_le_p(bundle);
+
+    /* The linked PAL portal is an M_MI bundle with break.m in slot zero. */
+    if ((low & 0x1f) != 0x0a) {
+        return false;
+    }
+    raw = (low >> 5) & slot_mask;
+    if ((raw >> 37) != 0 || ((raw >> 33) & 7) != 0 ||
+        ((raw >> 31) & 3) != 0 || ((raw >> 27) & 15) != 0) {
+        return false;
+    }
+    immediate = (((raw >> 36) & 1) << 20) |
+                ((raw >> 6) & 0xfffff);
+    if (immediate == VIBTANIUM_GUEST_PAL_BREAK) {
+        return true;
+    }
+    if (immediate != VIBTANIUM_GUEST_PAL_SOURCE_BREAK) {
+        return false;
+    }
+
+    raw &= ~immediate_mask;
+    raw |= ((VIBTANIUM_GUEST_PAL_BREAK >> 20) & 1) << 36;
+    raw |= (VIBTANIUM_GUEST_PAL_BREAK & 0xfffff) << 6;
+    low &= ~(slot_mask << 5);
+    low |= raw << 5;
+    stq_le_p(bundle, low);
+    return true;
+}
+
+static void vibtanium_load_guest_firmware(VibtaniumMachineState *vms,
+                                           MachineState *machine)
+{
+    const char *firmware = machine->firmware ?: VIBTANIUM_DEFAULT_FIRMWARE;
+    g_autofree char *resolved =
+        qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware);
+    g_autofree uint8_t *image = NULL;
+    const char *filename = resolved ?: firmware;
+    int64_t size = get_image_size(filename, NULL);
+
+    if (size < 0) {
+        error_report("could not open IA-64 guest firmware '%s'",
+                     firmware);
+        exit(1);
+    }
+    if (size == 0 || size > VIBTANIUM_GUEST_FIRMWARE_MAX_SIZE) {
+        error_report("IA-64 guest firmware '%s' has invalid size 0x%" PRIx64
+                     " (maximum 0x%" PRIx64 ")",
+                     firmware, (uint64_t)size,
+                     (uint64_t)VIBTANIUM_GUEST_FIRMWARE_MAX_SIZE);
+        exit(1);
+    }
+    image = g_malloc(size);
+    if (load_image_size(filename, image, size) != size) {
+        error_report("could not load IA-64 guest firmware '%s'",
+                     firmware);
+        exit(1);
+    }
+    if (!vibtanium_patch_guest_pal_portal(image, size)) {
+        error_report("IA-64 guest firmware '%s' has no supported PAL portal "
+                     "at offset 0x60", firmware);
+        exit(1);
+    }
+    rom_add_blob_fixed_as(filename, image, size,
+                          VIBTANIUM_GUEST_FIRMWARE_BASE,
+                          &address_space_memory);
+
+    vibtanium_guest_nvram_load(vms, filename);
+    vibtanium_guest_firmware_init_platform(vms);
+    vibtanium_guest_firmware_write_handoff(vms);
+    vibtanium_guest_firmware_reset_cpu(vms);
 }
 
 static uint64_t vibtanium_local_sapic_ipi_read(void *opaque, hwaddr offset,
@@ -434,960 +986,111 @@ static const MemoryRegionOps vibtanium_local_sapic_ipi_ops = {
     },
 };
 
-typedef struct VibtaniumBlockReadOpaque {
-    BlockBackend *blk;
-} VibtaniumBlockReadOpaque;
-
-typedef struct VibtaniumBlockReadRequest {
-    BlockBackend *blk;
-    uint64_t offset;
-    uint32_t bytes;
-    void *buffer;
-    QemuMutex lock;
-    QemuCond cond;
-    bool complete;
-    bool write;
-    int ret;
-} VibtaniumBlockReadRequest;
-
-typedef struct VibtaniumCachedBlockReadOpaque {
-    uint8_t *data;
-    uint64_t size;
-} VibtaniumCachedBlockReadOpaque;
-
-static bool vibtanium_range_end(uint64_t base, uint64_t size, uint64_t *end)
+static uint64_t vibtanium_map_ram_alias(VibtaniumMachineState *vms,
+                                        MachineState *machine,
+                                        MemoryRegion *alias,
+                                        hwaddr guest_base,
+                                        uint64_t backing_offset,
+                                        uint64_t remaining,
+                                        uint64_t capacity,
+                                        const char *name)
 {
-    if (size == 0 || base > UINT64_MAX - size) {
-        return false;
+    uint64_t size = MIN(remaining, capacity);
+
+    if (size == 0) {
+        return 0;
     }
 
-    *end = base + size;
-    return true;
+    memory_region_init_alias(alias, OBJECT(vms), name, machine->ram,
+                             backing_offset, size);
+    memory_region_add_subregion(get_system_memory(), guest_base, alias);
+    return size;
 }
 
-static bool vibtanium_ranges_overlap(uint64_t a_base, uint64_t a_size,
-                                     uint64_t b_base, uint64_t b_size)
+static void vibtanium_map_ram(VibtaniumMachineState *vms,
+                              MachineState *machine)
 {
-    uint64_t a_end;
-    uint64_t b_end;
-
-    if (!vibtanium_range_end(a_base, a_size, &a_end) ||
-        !vibtanium_range_end(b_base, b_size, &b_end)) {
-        return true;
-    }
-
-    return a_base < b_end && b_base < a_end;
-}
-
-static const char *vibtanium_efi_reserved_overlap(
-    const VibtaniumEfiImage *image)
-{
-    static const struct {
-        const char *name;
-        uint64_t base;
-        uint64_t size;
-    } reserved[] = {
-        {
-            "EFI firmware tables",
-            VIBTANIUM_EFI_BLOB_BASE,
-            VIBTANIUM_EFI_BLOB_SIZE,
-        },
-        {
-            "EFI SAL code and data",
-            VIBTANIUM_EFI_SAL_PROC,
-            0x2000,
-        },
-        {
-            "EFI stack",
-            VIBTANIUM_EFI_STACK_BASE,
-            VIBTANIUM_EFI_STACK_SIZE,
-        },
-        {
-            "EFI backing store",
-            VIBTANIUM_EFI_BACKING_STORE_BASE,
-            VIBTANIUM_EFI_BACKING_STORE_SIZE,
-        },
-        {
-            "EFI pool",
-            VIBTANIUM_EFI_POOL_BASE,
-            VIBTANIUM_EFI_POOL_SIZE,
-        },
-    };
-
-    for (size_t i = 0; i < G_N_ELEMENTS(reserved); i++) {
-        if (vibtanium_ranges_overlap(image->load_base, image->size,
-                                     reserved[i].base, reserved[i].size)) {
-            return reserved[i].name;
-        }
-    }
-
-    return NULL;
-}
-
-static void vibtanium_block_pread_on_aio_context(void *opaque)
-{
-    VibtaniumBlockReadRequest *request = opaque;
-    int ret;
-
-    if (request->write) {
-        ret = blk_pwrite(request->blk, request->offset,
-                         request->bytes, request->buffer, 0);
-    } else {
-        ret = blk_pread(request->blk, request->offset,
-                        request->bytes, request->buffer, 0);
-    }
-    qemu_mutex_lock(&request->lock);
-    request->ret = ret;
-    request->complete = true;
-    qemu_cond_signal(&request->cond);
-    qemu_mutex_unlock(&request->lock);
-}
-
-static void vibtanium_block_pread_wait(VibtaniumBlockReadRequest *request)
-{
-    qemu_mutex_lock(&request->lock);
-    while (!request->complete) {
-        qemu_cond_timedwait(&request->cond, &request->lock, 1);
-        qemu_mutex_unlock(&request->lock);
-
-        /*
-         * VGA dirty-log synchronization uses run_on_cpu().  Firmware block
-         * reads run inside the vCPU helper, so service queued CPU work while
-         * waiting for the main AIO context or GTK can deadlock with this read.
-         */
-        if (current_cpu && !cpu_work_list_empty(current_cpu)) {
-            bql_lock();
-            qemu_process_cpu_events_common(current_cpu);
-            bql_unlock();
-        }
-
-        qemu_mutex_lock(&request->lock);
-    }
-    qemu_mutex_unlock(&request->lock);
-}
-
-static int vibtanium_block_pread(void *opaque,
-                                 uint64_t offset,
-                                 uint32_t bytes,
-                                 void *buffer,
-                                 Error **errp)
-{
-    VibtaniumBlockReadOpaque *read_opaque = opaque;
-    int ret;
-
-    if (qemu_get_current_aio_context() ==
-        blk_get_aio_context(read_opaque->blk)) {
-        ret = blk_pread(read_opaque->blk, offset, bytes, buffer, 0);
-    } else {
-        VibtaniumBlockReadRequest request = {
-            .blk = read_opaque->blk,
-            .offset = offset,
-            .bytes = bytes,
-            .buffer = buffer,
-        };
-
-        qemu_mutex_init(&request.lock);
-        qemu_cond_init(&request.cond);
-        aio_bh_schedule_oneshot(
-            blk_get_aio_context(read_opaque->blk),
-            vibtanium_block_pread_on_aio_context, &request);
-        vibtanium_block_pread_wait(&request);
-        qemu_cond_destroy(&request.cond);
-        qemu_mutex_destroy(&request.lock);
-        ret = request.ret;
-    }
-    if (ret < 0) {
-        error_setg(errp, "block read failed: %s", strerror(-ret));
-        return ret;
-    }
-
-    return 0;
-}
-
-static int vibtanium_block_pwrite(void *opaque,
-                                  uint64_t offset,
-                                  uint32_t bytes,
-                                  const void *buffer,
-                                  Error **errp)
-{
-    VibtaniumBlockReadOpaque *write_opaque = opaque;
-    int ret;
-
-    if (qemu_get_current_aio_context() ==
-        blk_get_aio_context(write_opaque->blk)) {
-        ret = blk_pwrite(write_opaque->blk, offset, bytes, buffer, 0);
-    } else {
-        VibtaniumBlockReadRequest request = {
-            .blk = write_opaque->blk,
-            .offset = offset,
-            .bytes = bytes,
-            .buffer = (void *)buffer,
-            .write = true,
-        };
-
-        qemu_mutex_init(&request.lock);
-        qemu_cond_init(&request.cond);
-        aio_bh_schedule_oneshot(
-            blk_get_aio_context(write_opaque->blk),
-            vibtanium_block_pread_on_aio_context, &request);
-        vibtanium_block_pread_wait(&request);
-        qemu_cond_destroy(&request.cond);
-        qemu_mutex_destroy(&request.lock);
-        ret = request.ret;
-    }
-    if (ret < 0) {
-        error_setg(errp, "block write failed: %s", strerror(-ret));
-        return ret;
-    }
-
-    return 0;
-}
-
-bool vibtanium_blk_media_device(BlockBackend *blk,
-                                VibtaniumEfiBlockDevice *dev)
-{
-    DriveInfo *dinfo;
-    const char *name;
-    int64_t length;
-    bool cdrom;
-    VibtaniumBlockReadOpaque *read_opaque;
-
-    if (!blk || !blk_is_available(blk)) {
-        return false;
-    }
-
-    dinfo = blk_legacy_dinfo(blk);
-    if (!dinfo || dinfo->type == IF_NONE) {
-        return false;
-    }
-    cdrom = dinfo && dinfo->media_cd;
-
-    length = blk_getlength(blk);
-    if (length <= 0) {
-        return false;
-    }
-
-    name = blk_name(blk);
-    read_opaque = g_new0(VibtaniumBlockReadOpaque, 1);
-    read_opaque->blk = blk;
-    *dev = (VibtaniumEfiBlockDevice) {
-        .name = name && *name ? name : "<unnamed>",
-        .size = length,
-        .block_size = cdrom ? 2048 : 512,
-        .ide_bus = dinfo->bus,
-        .ide_unit = dinfo->unit,
-        .read_only = !blk_is_writable(blk),
-        .removable = cdrom,
-        .cdrom = cdrom,
-        .read = vibtanium_block_pread,
-        .write = blk_is_writable(blk) ? vibtanium_block_pwrite : NULL,
-        .opaque = read_opaque,
-    };
-    return true;
-}
-
-void vibtanium_blk_media_device_cleanup(VibtaniumEfiBlockDevice *dev)
-{
-    if (!dev) {
-        return;
-    }
-
-    vibtanium_efi_storage_cache_cleanup(dev);
-    g_free(dev->opaque);
-    dev->opaque = NULL;
-}
-
-static int vibtanium_cached_block_pread(void *opaque,
-                                        uint64_t offset,
-                                        uint32_t bytes,
-                                        void *buffer,
-                                        Error **errp)
-{
-    VibtaniumCachedBlockReadOpaque *cache = opaque;
-
-    if (!cache || !cache->data ||
-        offset > cache->size || bytes > cache->size - offset) {
-        error_setg(errp,
-                   "cached block read beyond media offset=0x%" PRIx64
-                   " bytes=0x%x media-size=0x%" PRIx64,
-                   offset, bytes, cache ? cache->size : 0);
-        return -EINVAL;
-    }
-
-    memcpy(buffer, cache->data + offset, bytes);
-    return 0;
-}
-
-static bool vibtanium_cache_boot_media(const VibtaniumEfiBlockDevice *src,
-                                       VibtaniumEfiBlockDevice *cached,
-                                       Error **errp)
-{
-    const uint32_t chunk_size = 4 * MiB;
-    VibtaniumCachedBlockReadOpaque *opaque;
+    uint64_t remaining = machine->ram_size;
     uint64_t offset = 0;
-
-    if (!src || !src->read || src->size == 0) {
-        error_setg(errp, "cannot cache unavailable EFI boot media");
-        return false;
-    }
+    uint64_t size;
 
     /*
-     * A machine BlockBackend outlives firmware execution.  Retain a fresh
-     * callback wrapper instead of eagerly copying an entire ISO or multi-GiB
-     * disk.  The EFI storage layer now caches mounted metadata and immutable
-     * file contents, while QEMU's block layer handles ordinary read caching.
+     * Keep the RAM backing dense while reproducing the physical holes that
+     * the guest EFI firmware publishes in its memory map.  Displaced RAM
+     * resumes
+     * after each aperture and, once below-4-GiB space is exhausted, at 4 GiB.
      */
-    if (src->read == vibtanium_block_pread) {
-        VibtaniumBlockReadOpaque *source_opaque = src->opaque;
-        VibtaniumBlockReadOpaque *retained;
+    size = vibtanium_map_ram_alias(vms, machine, &vms->low_ram,
+                                   VIBTANIUM_RAM_BASE, offset, remaining,
+                                   VIBTANIUM_LOW_RAM_LIMIT,
+                                   "vibtanium.low-ram");
+    offset += size;
+    remaining -= size;
 
-        if (!source_opaque || !source_opaque->blk) {
-            error_setg(errp, "cannot retain unavailable EFI block backend");
-            return false;
-        }
-        retained = g_new0(VibtaniumBlockReadOpaque, 1);
-        retained->blk = source_opaque->blk;
-        *cached = *src;
-        cached->opaque = retained;
-        cached->cache = NULL;
-        return true;
-    }
+    size = vibtanium_map_ram_alias(
+        vms, machine, &vms->high_ram_below_pci,
+        VIBTANIUM_HIGH_RAM_BASE, offset, remaining,
+        VIBTANIUM_GUEST_PCI_MMIO_BASE - VIBTANIUM_HIGH_RAM_BASE,
+        "vibtanium.high-ram-below-pci");
+    offset += size;
+    remaining -= size;
 
-    opaque = g_new0(VibtaniumCachedBlockReadOpaque, 1);
-    opaque->size = src->size;
-    opaque->data = g_try_malloc(src->size);
-    if (!opaque->data) {
-        g_free(opaque);
-        error_setg(errp, "could not allocate EFI boot media cache of 0x%"
-                   PRIx64 " bytes",
-                   src->size);
-        return false;
-    }
+    size = vibtanium_map_ram_alias(
+        vms, machine, &vms->high_ram_above_pci,
+        VIBTANIUM_GUEST_PCI_MMIO_BASE + VIBTANIUM_GUEST_PCI_MMIO_SIZE,
+        offset, remaining,
+        VIBTANIUM_PROCESSOR_INTERRUPT_BLOCK_BASE -
+            (VIBTANIUM_GUEST_PCI_MMIO_BASE +
+             VIBTANIUM_GUEST_PCI_MMIO_SIZE),
+        "vibtanium.high-ram-above-pci");
+    offset += size;
+    remaining -= size;
 
-    while (offset < src->size) {
-        uint32_t todo = MIN((uint64_t)chunk_size, src->size - offset);
-
-        if (src->read(src->opaque, offset, todo, opaque->data + offset,
-                      errp) < 0) {
-            g_free(opaque->data);
-            g_free(opaque);
-            return false;
-        }
-        offset += todo;
-    }
-
-    *cached = *src;
-    cached->read = vibtanium_cached_block_pread;
-    cached->opaque = opaque;
-    return true;
-}
-
-static void vibtanium_write_guest_blob(CPUIA64State *env, const char *name,
-                                       hwaddr addr,
-                                       const void *data,
-                                       size_t size,
-                                       size_t clear_size)
-{
-    MemTxResult result;
-    bool live_cpu = !vibtanium_efi_cpu_is_pristine_for_handoff(env);
-
-    ia64_diag_record_firmware_write(env, name, addr, size, clear_size,
-                                    live_cpu);
-
-    result = address_space_write(&address_space_memory, addr,
-                                 MEMTXATTRS_UNSPECIFIED, data, size);
-    if (result != MEMTX_OK) {
-        error_report("could not write IA-64 EFI blob '%s' at 0x%"
-                     HWADDR_PRIx, name, addr);
+    if (remaining > UINT64_MAX - VIBTANIUM_HIGH_RAM_AFTER_FIRMWARE_BASE) {
+        error_report("vibtanium RAM does not fit in the guest physical "
+                     "address space");
         exit(1);
     }
-    if (clear_size > size) {
-        result = address_space_set(&address_space_memory, addr + size, 0,
-                                   clear_size - size, MEMTXATTRS_UNSPECIFIED);
-        if (result != MEMTX_OK) {
-            error_report("could not clear IA-64 EFI blob '%s' at 0x%"
-                         HWADDR_PRIx, name, addr + size);
-            exit(1);
-        }
-    }
-    address_space_flush_icache_range(&address_space_memory, addr, size);
-}
-
-static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
-                                       MachineState *machine,
-                                       VibtaniumEfiImage *image,
-                                       const VibtaniumEfiBlockDevice *boot_media)
-{
-    g_autofree uint8_t *firmware_blob = NULL;
-    uint8_t sal_gate[VIBTANIUM_EFI_GATE_SIZE];
-    uint64_t sal_gp_data = 0;
-    size_t firmware_blob_size = 0;
-    const char *linux_append = machine->kernel_cmdline;
-    const char *overlap;
-    VibtaniumEfiFirmwareOptions firmware_options = {
-        .hcdp_serial_console = vms->hcdp_serial_console,
-    };
-    VibtaniumEfiBlockDevice media[VIBTANIUM_EFI_MAX_MEDIA] = { 0 };
-    unsigned media_count = 0;
-    BlockBackend *blk = NULL;
-
-    if (!linux_append || !linux_append[0]) {
-        linux_append = VIBTANIUM_DEFAULT_LINUX_APPEND;
-    }
-
-    if (machine->ram_size <= image->load_base ||
-        image->size > machine->ram_size - image->load_base) {
-        error_report("IA-64 EFI app '%s' image size 0x%" PRIx64
-                     " at 0x%016" PRIx64 " does not fit in RAM",
-                     image->source_path, (uint64_t)image->size,
-                     image->load_base);
-        exit(1);
-    }
-    overlap = vibtanium_efi_reserved_overlap(image);
-    if (overlap) {
-        error_report("IA-64 EFI app '%s' image at 0x%016" PRIx64
-                     " size 0x%" PRIx64 " overlaps reserved %s",
-                     image->source_path, image->load_base,
-                     (uint64_t)image->size, overlap);
-        exit(1);
-    }
-
-    if (!vibtanium_efi_cpu_is_pristine_for_handoff(&vms->cpu->env)) {
-        ia64_diag_record_efi_commit(&vms->cpu->env, "skip-live-cpu",
-                                    image->source_path, image->load_base,
-                                    image->size);
-        warn_report("vibtanium EFI image commit skipped because CPU state "
-                    "is already initialized");
-        return;
-    }
-
-    ia64_diag_record_efi_commit(&vms->cpu->env, "begin",
-                                image->source_path, image->load_base,
-                                image->size);
-
-    if (boot_media) {
-        media[media_count++] = *boot_media;
-    }
-    while (media_count < ARRAY_SIZE(media) && (blk = blk_next(blk)) != NULL) {
-        VibtaniumEfiBlockDevice dev;
-        VibtaniumEfiBlockDevice retained;
-        Error *local_err = NULL;
-
-        if (!vibtanium_blk_media_device(blk, &dev)) {
-            continue;
-        }
-        if (boot_media && dev.ide_bus == boot_media->ide_bus &&
-            dev.ide_unit == boot_media->ide_unit) {
-            vibtanium_blk_media_device_cleanup(&dev);
-            continue;
-        }
-        if (!vibtanium_cache_boot_media(&dev, &retained, &local_err)) {
-            warn_report("could not retain EFI media %s: %s", dev.name,
-                        error_get_pretty(local_err));
-            error_free(local_err);
-            vibtanium_blk_media_device_cleanup(&dev);
-            continue;
-        }
-        media[media_count++] = retained;
-        vibtanium_blk_media_device_cleanup(&dev);
-    }
-
-    firmware_blob = vibtanium_efi_build_firmware_blob(&firmware_blob_size,
-                                                      image, media, media_count,
-                                                      &firmware_options);
-    vibtanium_efi_input_set_auto_enter(vms->efi_auto_enter);
-    vibtanium_efi_register_media(media, media_count);
-    vibtanium_efi_register_loaded_image(image->load_base, image->size);
-    vibtanium_efi_set_linux_cmdline_append(linux_append);
-    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-tables",
-                               VIBTANIUM_EFI_BLOB_BASE, firmware_blob,
-                               firmware_blob_size, VIBTANIUM_EFI_BLOB_SIZE);
-    vibtanium_efi_build_branch_gate(sal_gate);
-    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.sal-code",
-                               VIBTANIUM_EFI_SAL_PROC, sal_gate,
-                               sizeof(sal_gate), 0x1000);
-    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.sal-data",
-                               VIBTANIUM_EFI_SAL_GP, &sal_gp_data,
-                               sizeof(sal_gp_data), 0x1000);
-    vibtanium_write_guest_blob(&vms->cpu->env, "vibtanium.efi-app",
-                               image->load_base,
-                               image->data, image->size, image->size);
-    if (!vibtanium_efi_prepare_cpu(&vms->cpu->env, image)) {
-        warn_report("vibtanium EFI CPU handoff skipped unexpectedly");
-    } else {
-        ia64_diag_record_efi_handoff(&vms->cpu->env, image->source_path,
-                                     image->entry, image->global_pointer);
-    }
-
-    warn_report("%s", image->message);
-    warn_report("vibtanium EFI handoff image-handle=0x%016" PRIx64
-                " system-table=0x%016" PRIx64
-                " con-out=0x%016" PRIx64
-                " loaded-image=0x%016" PRIx64,
-                (uint64_t)VIBTANIUM_EFI_IMAGE_HANDLE,
-                (uint64_t)VIBTANIUM_EFI_SYSTEM_TABLE,
-                (uint64_t)VIBTANIUM_EFI_CON_OUT,
-                (uint64_t)VIBTANIUM_EFI_LOADED_IMAGE);
-    warn_report("IA-64 instruction execution is minimal; unsupported "
-                "bundles report the current execution frontier");
-}
-
-static void vibtanium_warn_frontier(VibtaniumEfiFrontierKind kind,
-                                    uint64_t guest_ip,
-                                    const char *state,
-                                    const char *detail)
-{
-    char message[384];
-
-    vibtanium_efi_format_frontier(message, sizeof(message), kind, guest_ip,
-                                  state, detail);
-    warn_report("%s", message);
-}
-
-static void vibtanium_trace_loader_frontier(const VibtaniumEfiImage *image)
-{
-    const char *pending =
-        "pending runtime observation; use QEMU trace-events or "
-        "VIBTANIUM_EFI_TRACE/VIBTANIUM_IA64_PROGRESS";
-
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_IMAGE_ENTRY, image->entry,
-                            "ready", image->source_path);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_FILE_READ, image->entry,
-                            "firmware-loader-complete", image->source_path);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_EFI_SERVICE_CALL,
-                            image->entry, "dispatch-enabled", pending);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_MEMORY_MAP, image->entry,
-                            "runtime-tracepoint-ready", pending);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_EXIT_BOOT_SERVICES,
-                            image->entry, "runtime-tracepoint-ready",
-                            pending);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_KERNEL_ENTRY, image->entry,
-                            "not-observed-at-loader", pending);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_BOOT_PARAMETERS,
-                            image->entry, "not-observed-at-loader", pending);
-    vibtanium_warn_frontier(VIBTANIUM_EFI_FRONTIER_SAL_PAL_CALL, image->entry,
-                            "not-observed-at-loader", pending);
-}
-
-bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
-                                     MachineState *machine)
-{
-    Error *local_err = NULL;
-    VibtaniumEfiImage image;
-
-    if (!machine->kernel_filename) {
-        return false;
-    }
-
-    if (!vibtanium_efi_image_from_file(machine->kernel_filename,
-                                       VIBTANIUM_EFI_APP_BASE, &image,
-                                       &local_err)) {
-        error_reportf_err(local_err, "could not load IA-64 EFI app '%s': ",
-                          machine->kernel_filename);
-        exit(1);
-    }
-
-    vibtanium_commit_efi_image(vms, machine, &image, NULL);
-    vibtanium_trace_loader_frontier(&image);
-    vibtanium_efi_image_destroy(&image);
-    return true;
-}
-
-bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
-                                MachineState *machine)
-{
-#ifdef CONFIG_VIBTANIUM_BIT
-    Error *local_err = NULL;
-    VibtaniumEfiImage image;
-    VibtaniumEfiBlockDevice bit_media;
-
-    if (!vms->built_in_test) {
-        return false;
-    }
-
-    if (!vibtanium_efi_image_from_buffer("vibtanium-bit.efi",
-                                         vibtanium_efi_bit_blob,
-                                         vibtanium_efi_bit_blob_size,
-                                         VIBTANIUM_EFI_APP_BASE, &image,
-                                         &local_err)) {
-        error_reportf_err(local_err, "could not load embedded IA-64 BIT: ");
-        return false;
-    }
-
-    if (!vibtanium_efi_bit_media_device(&bit_media, &local_err)) {
-        error_reportf_err(local_err,
-                          "could not build embedded IA-64 BIT media: ");
-        vibtanium_efi_image_destroy(&image);
-        return false;
-    }
-
-    g_strlcpy(image.efi_file_path, VIBTANIUM_EFI_FALLBACK_PATH,
-              sizeof(image.efi_file_path));
-    warn_report("vibtanium EFI boot manager selected embedded BIT "
-                "image-bytes=%zu media-bytes=%" PRIu64,
-                vibtanium_efi_bit_blob_size, bit_media.size);
-    vibtanium_commit_efi_image(vms, machine, &image, &bit_media);
-    vibtanium_trace_loader_frontier(&image);
-    vibtanium_efi_image_destroy(&image);
-    return true;
-#else
-    (void)vms;
-    (void)machine;
-    return false;
-#endif
-}
-
-bool vibtanium_builtin_bit_available(void)
-{
-#ifdef CONFIG_VIBTANIUM_BIT
-    return true;
-#else
-    return false;
-#endif
-}
-
-static bool vibtanium_queue_driver_entry(VibtaniumMachineState *vms,
-                                         const VibtaniumEfiBootEntry *entry)
-{
-    BlockBackend *blk = NULL;
-
-    while ((blk = blk_next(blk)) != NULL) {
-        VibtaniumEfiBlockDevice dev;
-        VibtaniumEfiStorageReport report;
-        g_autofree uint8_t *file_data = NULL;
-        size_t file_size = 0;
-        char source[384];
-        Error *local_err = NULL;
-
-        if (!vibtanium_blk_media_device(blk, &dev)) {
-            continue;
-        }
-        if (!vibtanium_efi_media_read_path(&dev, entry->loader_path,
-                                           &file_data, &file_size, source,
-                                           sizeof(source), &report,
-                                           &local_err)) {
-            error_free(local_err);
-            vibtanium_blk_media_device_cleanup(&dev);
-            continue;
-        }
-        vibtanium_blk_media_device_cleanup(&dev);
-
-        if (!vibtanium_efi_queue_driver_image(
-                &vms->cpu->env, source, file_data, file_size,
-                entry->loader_path,
-                entry->load_options ? entry->load_options->data : NULL,
-                entry->load_options ? entry->load_options->len : 0,
-                &local_err)) {
-            warn_report("vibtanium EFI Driver%04X path=%s failed: %s",
-                        entry->id, entry->loader_path,
-                        error_get_pretty(local_err));
-            error_free(local_err);
-            return false;
-        }
-
-        warn_report("vibtanium EFI Driver%04X path=%s queued",
-                    entry->id, entry->loader_path);
-        return true;
-    }
-
-    warn_report("vibtanium EFI Driver%04X path=%s not found",
-                entry->id, entry->loader_path);
-    return false;
-}
-
-static void vibtanium_queue_nvram_drivers(VibtaniumMachineState *vms)
-{
-    g_autoptr(GPtrArray) entries = NULL;
-    Error *local_err = NULL;
-    unsigned queued = 0;
-
-    if (!vibtanium_efi_vars_driver_entries(&entries, &local_err)) {
-        warn_report("vibtanium EFI could not read DriverOrder: %s",
-                    error_get_pretty(local_err));
-        error_free(local_err);
-        return;
-    }
-
-    for (size_t i = 0; i < entries->len; i++) {
-        VibtaniumEfiBootEntry *entry = g_ptr_array_index(entries, i);
-
-        warn_report("vibtanium EFI DriverOrder[%zu]=Driver%04X path=%s "
-                    "active=%s",
-                    i, entry->id, entry->loader_path,
-                    entry->active ? "yes" : "no");
-        if (!entry->active) {
-            warn_report("vibtanium EFI Driver%04X not started: load option "
-                        "is inactive",
-                        entry->id);
-            continue;
-        }
-        if (vibtanium_queue_driver_entry(vms, entry)) {
-            queued++;
-        }
-    }
-
-    if (queued != 0 && !vibtanium_efi_start_driver_images(&vms->cpu->env)) {
-        warn_report("vibtanium EFI DriverOrder images failed to start");
-    }
-}
-
-bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
-                                 MachineState *machine,
-                                 VibtaniumEfiBlockDevice *dev,
-                                 const char *path,
-                                 const VibtaniumEfiBootEntry *entry)
-{
-    Error *local_err = NULL;
-    VibtaniumEfiStorageReport report;
-    g_autofree uint8_t *file_data = NULL;
-    size_t file_size = 0;
-    VibtaniumEfiImage image;
-    VibtaniumEfiBlockDevice cached_dev;
-    char source[384];
-    const char *kind = entry ? "boot-entry" : "discovery";
-    const char *boot_path = path && *path ? path : VIBTANIUM_EFI_FALLBACK_PATH;
-
-    if (!vibtanium_efi_media_read_path(dev, boot_path,
-                                       &file_data, &file_size, source,
-                                       sizeof(source), &report, &local_err)) {
-        warn_report("vibtanium EFI %s media=%s path=%s status=%s "
-                    "reason=%s",
-                    kind,
-                    dev->name ? dev->name : "<unnamed>",
-                    boot_path,
-                    vibtanium_efi_storage_status_name(report.status),
-                    report.message);
-        error_free(local_err);
-        return false;
-    }
-
-    warn_report("vibtanium EFI %s media=%s path=%s status=%s %s",
-                kind,
-                dev->name ? dev->name : "<unnamed>",
-                boot_path,
-                vibtanium_efi_storage_status_name(report.status),
-                report.message);
-
-    local_err = NULL;
-    if (!vibtanium_efi_image_from_buffer(source, file_data, file_size,
-                                         VIBTANIUM_EFI_APP_BASE, &image,
-                                         &local_err)) {
-        warn_report("vibtanium EFI %s media=%s path=%s status=%s "
-                    "reason=%s",
-                    kind,
-                    dev->name ? dev->name : "<unnamed>",
-                    boot_path,
-                    vibtanium_efi_status_name(VIBTANIUM_EFI_LOAD_ERROR),
-                    error_get_pretty(local_err));
-        error_free(local_err);
-        return false;
-    }
-
-    g_strlcpy(image.efi_file_path, boot_path, sizeof(image.efi_file_path));
-    if (entry && entry->load_options && entry->load_options->len != 0) {
-        image.load_options_size = entry->load_options->len;
-        image.load_options = g_memdup2(entry->load_options->data,
-                                       entry->load_options->len);
-    }
-
-    local_err = NULL;
-    if (!vibtanium_cache_boot_media(dev, &cached_dev, &local_err)) {
-        warn_report("vibtanium EFI %s media=%s path=%s status=%s "
-                    "reason=%s",
-                    kind,
-                    dev->name ? dev->name : "<unnamed>",
-                    boot_path,
-                    vibtanium_efi_status_name(VIBTANIUM_EFI_DEVICE_ERROR),
-                    error_get_pretty(local_err));
-        error_free(local_err);
-        vibtanium_efi_image_destroy(&image);
-        return false;
-    }
-
-    warn_report("vibtanium EFI retained media name=%s bytes=%" PRIu64,
-                cached_dev.name ? cached_dev.name : "<unnamed>",
-                cached_dev.size);
-
-    vibtanium_commit_efi_image(vms, machine, &image, &cached_dev);
-    if (entry) {
-        vibtanium_queue_nvram_drivers(vms);
-    }
-    vibtanium_trace_loader_frontier(&image);
-    vibtanium_efi_image_destroy(&image);
-    return true;
-}
-
-bool vibtanium_try_boot_entry_on_media(VibtaniumMachineState *vms,
-                                       MachineState *machine,
-                                       const VibtaniumEfiBootEntry *entry)
-{
-    BlockBackend *blk = NULL;
-
-    while ((blk = blk_next(blk)) != NULL) {
-        VibtaniumEfiBlockDevice dev;
-
-        if (!vibtanium_blk_media_device(blk, &dev)) {
-            continue;
-        }
-        if (vibtanium_try_media_efi_app(vms, machine, &dev,
-                                        entry->loader_path, entry)) {
-            vibtanium_blk_media_device_cleanup(&dev);
-            return true;
-        }
-        vibtanium_blk_media_device_cleanup(&dev);
-    }
-
-    return false;
-}
-
-static bool vibtanium_boot_nvram_efi_app(VibtaniumMachineState *vms,
-                                         MachineState *machine)
-{
-    g_autoptr(GPtrArray) entries = NULL;
-    Error *local_err = NULL;
-
-    if (!vibtanium_efi_vars_boot_entries(&entries, true, &local_err)) {
-        error_reportf_err(local_err, "could not read IA-64 EFI boot variables: ");
-        exit(1);
-    }
-
-    for (size_t i = 0; i < entries->len; i++) {
-        VibtaniumEfiBootEntry *entry = g_ptr_array_index(entries, i);
-
-        warn_report("vibtanium EFI boot entry Boot%04X path=%s%s",
-                    entry->id, entry->loader_path,
-                    entry->from_boot_next ? " source=BootNext" : "");
-        if (!vibtanium_try_boot_entry_on_media(vms, machine, entry)) {
-            continue;
-        }
-        local_err = NULL;
-        if (!vibtanium_efi_vars_set_boot_current(entry->id, &local_err)) {
-            error_reportf_err(local_err,
-                              "could not set IA-64 EFI BootCurrent: ");
-            exit(1);
-        }
-        return true;
-    }
-
-    return false;
-}
-
-static bool vibtanium_discover_efi_app(VibtaniumMachineState *vms,
-                                       MachineState *machine)
-{
-    BlockBackend *blk = NULL;
-    unsigned media_index = 0;
-    unsigned media_candidates = 0;
-
-    while ((blk = blk_next(blk)) != NULL) {
-        DriveInfo *dinfo = blk_legacy_dinfo(blk);
-        const char *name = blk_name(blk);
-        bool available = blk_is_available(blk);
-        bool attached = dinfo && dinfo->type != IF_NONE;
-        bool cdrom = attached && dinfo->media_cd;
-        int64_t length = available ? blk_getlength(blk) : -ENOMEDIUM;
-        VibtaniumEfiBlockDevice dev;
-
-        warn_report("vibtanium EFI media[%u] name=%s attached=%s "
-                    "available=%s cdrom=%s writable=%s bytes=%" PRId64,
-                    media_index++, name && *name ? name : "<unnamed>",
-                    attached ? "yes" : "no", available ? "yes" : "no",
-                    cdrom ? "yes" : "no",
-                    blk_is_writable(blk) ? "yes" : "no", length);
-
-        if (!attached) {
-            warn_report("vibtanium EFI media %s skipped: unattached block "
-                        "backend is not guest-visible",
-                        name && *name ? name : "<unnamed>");
-            continue;
-        }
-
-        if (!vibtanium_blk_media_device(blk, &dev)) {
-            continue;
-        }
-
-        media_candidates++;
-        if (vibtanium_try_media_efi_app(vms, machine, &dev,
-                                        VIBTANIUM_EFI_FALLBACK_PATH, NULL)) {
-            vibtanium_blk_media_device_cleanup(&dev);
-            return true;
-        }
-        vibtanium_blk_media_device_cleanup(&dev);
-    }
-
-    warn_report("vibtanium EFI discovery found no boot app path=%s "
-                "media=%u media-candidates=%u",
-                VIBTANIUM_EFI_FALLBACK_PATH, media_index,
-                media_candidates);
-    return false;
-}
-
-static void vibtanium_load_efi_app(VibtaniumMachineState *vms,
-                                   MachineState *machine)
-{
-    if (vibtanium_start_efi_boot_manager(vms, machine)) {
-        return;
-    }
-
-    if (vibtanium_load_explicit_efi_app(vms, machine)) {
-        return;
-    }
-
-    if (vibtanium_boot_nvram_efi_app(vms, machine)) {
-        return;
-    }
-
-    vibtanium_discover_efi_app(vms, machine);
+    vibtanium_map_ram_alias(vms, machine, &vms->high_ram_above_4g,
+                            VIBTANIUM_HIGH_RAM_AFTER_FIRMWARE_BASE,
+                            offset, remaining, remaining,
+                            "vibtanium.high-ram-above-4g");
 }
 
 static void vibtanium_init(MachineState *machine)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
-    ISADevice *vga;
-    uint64_t kernel_alias_size;
-    Error *local_err = NULL;
 
-    if (machine->ram_size > VIBTANIUM_RAM_LIMIT) {
-        error_report("vibtanium RAM must fit below the placeholder MMIO window "
-                     "(maximum %" PRIu64 " bytes)",
-                     (uint64_t)VIBTANIUM_RAM_LIMIT);
+    if (machine->ram_size < VIBTANIUM_MIN_RAM_SIZE) {
+        g_autofree char *minimum = size_to_str(VIBTANIUM_MIN_RAM_SIZE);
+
+        error_report("vibtanium RAM must be at least %s", minimum);
         exit(1);
     }
-    if (machine->ram_size <= VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET) {
-        error_report("vibtanium RAM must be larger than the IA-64 kernel "
-                     "alias offset 0x%" PRIx64,
-                     (uint64_t)VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET);
-        exit(1);
-    }
-    vibtanium_efi_set_guest_ram_size(machine->ram_size);
+
+    vibtanium_map_ram(vms, machine);
+    memory_region_init(&vms->pci_mmio, OBJECT(vms), "vibtanium.pci-mmio",
+                       VIBTANIUM_GUEST_PCI_MMIO_BASE +
+                       VIBTANIUM_GUEST_PCI_MMIO_SIZE);
+    memory_region_init_alias(&vms->pci_mmio_window, OBJECT(vms),
+                             "vibtanium.pci-mmio-window",
+                             &vms->pci_mmio,
+                             VIBTANIUM_GUEST_PCI_MMIO_BASE,
+                             VIBTANIUM_GUEST_PCI_MMIO_SIZE);
+    memory_region_add_subregion_overlap(
+        sysmem, VIBTANIUM_GUEST_PCI_MMIO_BASE,
+        &vms->pci_mmio_window, 1);
+    memory_region_init(&vms->pci_io, OBJECT(vms), "vibtanium.pci-io",
+                       VIBTANIUM_PCI_IO_SIZE);
+    address_space_init(&vms->pci_io_as, &vms->pci_io,
+                       "vibtanium-pci-io");
+
     vms->cpu = IA64_CPU(cpu_create(machine->cpu_type));
-    if (vms->debug_prompt_autocontinue) {
-        vms->cpu->env.platform_break_handler =
-            vibtanium_handle_platform_break;
-    }
+    vms->cpu->env.platform_break_handler = vibtanium_handle_guest_pal_break;
     vms->iosapic = qdev_new(TYPE_IA64_IOSAPIC);
     ia64_iosapic_set_cpu(IA64_IOSAPIC(vms->iosapic), vms->cpu);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(vms->iosapic), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(vms->iosapic), 0, VIBTANIUM_IOSAPIC_BASE);
-
-    ia64_firmware_set_dispatch(vibtanium_efi_dispatch_gate);
-    ia64_firmware_set_cmdline_append_hooks(
-        vibtanium_efi_linux_cmdline_append_pending,
-        vibtanium_efi_maybe_apply_linux_cmdline_append);
-    ia64_firmware_set_recover_post_load(
-        vibtanium_efi_console_recover_post_load);
-
-    memory_region_add_subregion(sysmem, VIBTANIUM_RAM_BASE, machine->ram);
-
-    kernel_alias_size = machine->ram_size - VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET;
-    memory_region_init_alias(&vms->kernel_alias, OBJECT(machine),
-                             "vibtanium.kernel-region-offset-alias",
-                             machine->ram,
-                             VIBTANIUM_KERNEL_ALIAS_RAM_OFFSET,
-                             kernel_alias_size);
-    memory_region_add_subregion(sysmem, VIBTANIUM_KERNEL_ALIAS_BASE,
-                                &vms->kernel_alias);
 
     memory_region_init_io(&vms->local_sapic_pib, OBJECT(machine),
                           &vibtanium_local_sapic_ipi_ops, vms,
@@ -1405,66 +1108,15 @@ static void vibtanium_init(MachineState *machine)
 
     vibtanium_sparse_io_init(vms, sysmem);
     vibtanium_isa_init(vms);
-    vga = isa_vga_init(vms->isa_bus);
     vms->acpi_sci = qdev_get_gpio_in(vms->iosapic, VIBTANIUM_ACPI_SCI_IRQ);
     vibtanium_acpi_init(vms);
     vibtanium_pci_init(vms);
-
-    vibtanium_efi_console_init(vga);
 
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, VIBTANIUM_NVRAM_BASE, &vms->nvram);
 
-    memory_region_init_ram(&vms->firmware, NULL, "vibtanium.firmware",
-                           VIBTANIUM_FIRMWARE_SIZE,
-                           &error_fatal);
-    memory_region_set_readonly(&vms->firmware, true);
-    memory_region_add_subregion(sysmem, VIBTANIUM_FIRMWARE_BASE,
-                                &vms->firmware);
-
-    if (!vibtanium_efi_vars_global_load(vms->nvram_path,
-                                        vms->hcdp_serial_console,
-                                        &local_err)) {
-        error_reportf_err(local_err, "could not load IA-64 EFI NVRAM: ");
-        exit(1);
-    }
-
-    vibtanium_load_efi_app(vms, machine);
-}
-
-static bool vibtanium_get_efi_auto_enter(Object *obj, Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    return vms->efi_auto_enter;
-}
-
-static void vibtanium_set_efi_auto_enter(Object *obj, bool value, Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    vms->efi_auto_enter = value;
-}
-
-static bool vibtanium_get_built_in_test(Object *obj, Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    return vms->built_in_test;
-}
-
-static void vibtanium_set_built_in_test(Object *obj, bool value, Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    if (value && !vibtanium_builtin_bit_available()) {
-        error_setg(errp,
-                   "Built In Test was not compiled into this QEMU build");
-        return;
-    }
-
-    vms->built_in_test = value;
+    vibtanium_load_guest_firmware(vms, machine);
 }
 
 static bool vibtanium_get_hcdp_serial_console(Object *obj, Error **errp)
@@ -1482,27 +1134,11 @@ static void vibtanium_set_hcdp_serial_console(Object *obj, bool value,
     vms->hcdp_serial_console = value;
 }
 
-static bool vibtanium_get_debug_prompt_autocontinue(Object *obj,
-                                                     Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    return vms->debug_prompt_autocontinue;
-}
-
-static void vibtanium_set_debug_prompt_autocontinue(Object *obj, bool value,
-                                                     Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    vms->debug_prompt_autocontinue = value;
-}
-
 static char *vibtanium_get_nvram(Object *obj, Error **errp)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
-    return g_strdup(vms->nvram_path ? vms->nvram_path : "");
+    return g_strdup(vms->nvram_path ? vms->nvram_path : "auto");
 }
 
 static void vibtanium_set_nvram(Object *obj, const char *value, Error **errp)
@@ -1513,81 +1149,32 @@ static void vibtanium_set_nvram(Object *obj, const char *value, Error **errp)
     vms->nvram_path = g_strdup(value && *value ? value : NULL);
 }
 
-static char *vibtanium_get_efi_boot_manager(Object *obj, Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    return g_strdup(vms->efi_boot_manager ?
-                    vms->efi_boot_manager :
-                    VIBTANIUM_EFI_BOOT_MANAGER_DEFAULT);
-}
-
-static void vibtanium_set_efi_boot_manager(Object *obj,
-                                           const char *value,
-                                           Error **errp)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    if (!vibtanium_efi_boot_manager_policy_valid(value)) {
-        error_setg(errp,
-                   "invalid efi-boot-manager policy '%s' "
-                   "(expected timeout, pause, or off)",
-                   value);
-        return;
-    }
-
-    g_free(vms->efi_boot_manager);
-    vms->efi_boot_manager = g_strdup(value && *value ? value : NULL);
-}
-
 static void vibtanium_machine_finalize(Object *obj)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
 
-    vibtanium_efi_boot_manager_destroy(vms);
+    g_free(vms->guest_nvram_resolved_path);
     g_free(vms->nvram_path);
-    g_free(vms->efi_boot_manager);
-}
-
-static void vibtanium_machine_instance_init(Object *obj)
-{
-    VibtaniumMachineState *vms = VIBTANIUM_MACHINE(obj);
-
-    vms->built_in_test = vibtanium_builtin_bit_available();
-    vms->debug_prompt_autocontinue = true;
 }
 
 static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
-    mc->desc = "Synthetic IA-64 machine skeleton";
+    mc->desc = "Vibtanium IA-64 machine with guest-executed firmware";
     mc->init = vibtanium_init;
     mc->max_cpus = 1;
     mc->reset = vibtanium_reset;
     mc->default_cpu_type = TYPE_ITANIUM2_CPU;
-    mc->default_ram_size = 512 * MiB;
+    mc->default_ram_size = 2 * GiB;
     mc->default_ram_id = "vibtanium.ram";
-    mc->default_nic = "e1000";
-    mc->default_display = "std";
-    mc->block_default_type = IF_IDE;
-    mc->units_per_default_bus = MAX_IDE_DEVS;
-    mc->no_cdrom = 0;
+    mc->default_display = "ati";
+    mc->block_default_type = IF_SCSI;
+    mc->no_cdrom = 1;
     mc->no_floppy = 1;
     mc->no_parallel = 1;
-
-    object_class_property_add_bool(oc, "efi-auto-enter",
-                                   vibtanium_get_efi_auto_enter,
-                                   vibtanium_set_efi_auto_enter);
-    object_class_property_set_description(oc, "efi-auto-enter",
-        "Queue one EFI Simple Text Input Enter key at firmware reset");
-
-    object_class_property_add_bool(oc, "built-in-test",
-                                   vibtanium_get_built_in_test,
-                                   vibtanium_set_built_in_test);
-    object_class_property_set_description(oc, "built-in-test",
-        "Expose the embedded IA-64 EFI Built In Test in the firmware menu "
-        "(requires a vibtanium_bit=true build)");
+    compat_props_add(mc->compat_props, vibtanium_compat_defaults,
+                     G_N_ELEMENTS(vibtanium_compat_defaults));
 
     object_class_property_add_bool(oc, "hcdp-serial-console",
                                    vibtanium_get_hcdp_serial_console,
@@ -1595,30 +1182,18 @@ static void vibtanium_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "hcdp-serial-console",
         "Expose the IA-64 HCDP UART as the firmware-selected primary console");
 
-    object_class_property_add_bool(oc, "debug-prompt-autocontinue",
-                                   vibtanium_get_debug_prompt_autocontinue,
-                                   vibtanium_set_debug_prompt_autocontinue);
-    object_class_property_set_description(oc, "debug-prompt-autocontinue",
-        "Reply 'g' to Windows IA-64 debugger prompts when running headless");
-
     object_class_property_add_str(oc, "nvram",
                                   vibtanium_get_nvram,
                                   vibtanium_set_nvram);
     object_class_property_set_description(oc, "nvram",
-        "Path to a QEMU UefiVarStore JSON file for EFI variables");
-
-    object_class_property_add_str(oc, "efi-boot-manager",
-                                  vibtanium_get_efi_boot_manager,
-                                  vibtanium_set_efi_boot_manager);
-    object_class_property_set_description(oc, "efi-boot-manager",
-        "EFI boot manager policy: timeout, pause, or off");
+        "Raw 64 KiB EFI variable-store path (default: auto; none disables "
+        "persistence)");
 }
 
 static const TypeInfo vibtanium_machine_typeinfo = {
     .name = TYPE_VIBTANIUM_MACHINE,
     .parent = TYPE_MACHINE,
     .instance_size = sizeof(VibtaniumMachineState),
-    .instance_init = vibtanium_machine_instance_init,
     .class_init = vibtanium_machine_class_init,
     .instance_finalize = vibtanium_machine_finalize,
 };

@@ -1,143 +1,49 @@
 # IA-64 EFI Built In Test (BIT)
 
-BIT is a small EFI application that boots through the vibtanium firmware and
-exercises implemented EFI services from *inside* the guest, then prints a
-machine-greppable verdict to the serial/EFI console. It gives a fast,
-deterministic regression signal (seconds, no OS install) that complements the
-host-side unit tests under `tests/unit/` - those poke emulator internals in
-process; this one runs real IA-64 code through the real firmware handoff.
+BIT is a standalone IA-64 EFI application that boots through the packaged
+guest-executed firmware and exercises EFI services from inside the guest.  It
+prints a machine-greppable verdict to the serial console, providing a fast
+system-level complement to the no-OS translator fixtures.
 
-`bit.efi` is intentionally committed and embedded into the vibtanium firmware
-menu. Rebuild it after changing `bit.c`; `build.sh` also refreshes
-`hw/ia64/efi-bit-blob.c`, and both generated files must be committed with the
-source.
-
-The normal QEMU build does **not** require the IA-64 GCC toolchain. It compiles
-the committed `hw/ia64/efi-bit-blob.c` with the host compiler. The toolchain is
-only needed when you intentionally rebuild `bit.efi` from `bit.c`.
-
-## Toolchain Setup
-
-Use an MSYS2 MINGW64 shell and keep the IA-64 tools in the standard local
-locations:
-
-```sh
-export PATH=/c/msys64/opt/ia64-gcc/bin:/c/msys64/opt/ia64-binutils/bin:$PATH
-ia64-linux-gnu-gcc --version
-ia64-linux-gnu-objcopy --version
-```
-
-`build.sh` defaults to:
-
-```sh
-IA64_GCC=/c/msys64/opt/ia64-gcc/bin/ia64-linux-gnu-gcc
-IA64_BINUTILS=/c/msys64/opt/ia64-binutils/bin
-```
-
-Override those variables only if the toolchain is installed elsewhere.
-
-## What it checks
-
-| Check family | What it proves |
-|--------------|----------------|
-| IA-64 opcode smoke | Basic guest execution plus the `chk.a.clr` recovery branch helper that originally motivated this app |
-| System table / LoadedImage | Firmware handoff registers, table layout, image handle, image base/size, and configuration table plumbing |
-| Simple Text Output/Input | Console protocol dispatch, mode state, cursor/attribute methods, and WaitForKey not-ready behavior |
-| Boot memory services | TPL, watchdog/stall, pool allocation, page allocation/free, memory-map sizing/content, and ExitBootServices key validation |
-| Event/timer services | CreateEvent, SignalEvent, CheckEvent, WaitForEvent, SetTimer time warp, and CloseEvent |
-| Protocol database | HandleProtocol, LocateHandle, InstallProtocolInterface, OpenProtocol, CloseProtocol, LocateProtocol, and UninstallProtocolInterface |
-| Boot utility services | CalculateCrc32, CopyMem, and SetMem |
-| Runtime services | Get/SetTime, wakeup time, Set/Get/GetNextVariableName, high monotonic count, ConvertPointer, SetVirtualAddressMap, and ResetSystem |
-| Graphics Output Protocol | QueryMode, SetMode, and all implemented Blt operations |
-| Block/File media services | BlockIO reset/read/write-protected/flush plus SimpleFS and EFI_FILE open/read/get-info/position/write-protected paths |
-
-Add checks in `bit.c`. Keep only IA-64 entry/ABI mechanics or opcodes that
-C cannot express in `entry.S`.
+The committed `bit.efi` lets the test run without an IA-64 cross toolchain.
+`build.sh` rebuilds it when the toolchain is available; the application is no
+longer compiled into the host emulator or dispatched by host EFI callbacks.
 
 ## Running
 
-```sh
-bash run.sh            # builds bit.efi, boots from a temp ESP, prints PASS/FAIL
-```
-
-Exit status is `0` only when the guest prints
-`VIBTANIUM-BIT-RESULT: ALL PASS`. A per-check `[FAIL]` line, an emulator
-`execution frontier` (unimplemented opcode), or a timeout all yield exit `1`.
-
-`run.sh` launches qemu in the background and stops **only its own** guest by
-Windows PID — it never kills qemu by image name, so it is safe to run while
-another qemu (e.g. an OS install) is up.
-
-Useful overrides: `QEMU=`, `TIMEOUT=` (default 40s), `NVRAM=<file>` (attach a
-persistent EFI variable store), `BOOT_MODE=kernel` (old `-kernel bit.efi`
-path; media protocol checks require the default `BOOT_MODE=media`), and
-`SKIP_BIT_BUILD=1` (or the older `NO_BUILD=1`) to reuse the existing
-`bit.efi`.
-
-## Firmware Menu
-
-The vibtanium firmware embeds the committed `bit.efi` blob. In the EFI boot
-manager, press `Esc` for maintenance, then press `B` to run Built In Test. BIT
-prints all results to the EFI console and then spins, leaving the final screen
-visible.
-
-Disable the menu entry with:
+From an MSYS2 shell:
 
 ```sh
-qemu-system-ia64 -M vibtanium,built-in-test=off ...
+SKIP_BIT_BUILD=1 bash run.sh
 ```
 
-Compile QEMU without the embedded BIT blob with either:
+The script creates a temporary FAT ESP containing
+`EFI/BOOT/BOOTIA64.EFI`, starts `qemu-system-ia64` with the normal
+`pc-bios/ia64-firmware.bin`, and waits for
+`VIBTANIUM-BIT-RESULT: ALL PASS`.  `QEMU`, `TIMEOUT`, and `NVRAM` may be
+overridden.  `BOOT_MODE=kernel` retains the direct loader smoke path, while
+the default `media` mode covers the real removable-media boot path.
 
-```sh
-meson setup build-ia64-perf -Dvibtanium_bit=false ...
-# or, through QEMU's configure wrapper:
-../configure --disable-vibtanium-bit ...
+## Coverage
+
+The application covers the system table and loaded-image contract, console
+protocols, pool/page allocation, memory maps and ExitBootServices, events and
+timers, protocol lookup/open/close, runtime variables and time services,
+graphics output, and block/simple-file-system access.  Its small hand-written
+entry sequence also exercises IA-64 function descriptors, stacked calls, and
+`chk.a.clr` recovery.
+
+## Rebuilding
+
+The build uses `ia64-linux-gnu-gcc` plus IA-64 binutils.  Defaults are the
+local MSYS2 paths under `/c/msys64/opt`; use `IA64_GCC` and
+`IA64_BINUTILS` to override them.
+
+```text
+entry.S + bit.c -> bit.elf -> bit.bin -> bit.efi
 ```
 
-With that build-time opt-out, QEMU does not compile or link `efi-bit.c` or
-`efi-bit-blob.c`; the emulator still boots normally, and the maintenance menu
-reports that BIT was not compiled in.
-
-## Build pipeline
-
-The app is C-first and uses the local IA-64 GCC cross compiler installed at
-`/c/msys64/opt/ia64-gcc/bin/ia64-linux-gnu-gcc` plus the existing IA-64
-binutils at `/c/msys64/opt/ia64-binutils/bin`:
-
-```
-ia64-...-as     ->  entry.o     (EFI plabel, _start, opcode helper)
-ia64-...-gcc    ->  bit.o       (C EFI service stress test)
-ia64-...-gcc    ->  bit.elf     (link.ld: fixed base 0x01001000)
-ia64-...-objcopy -O binary -> bit.bin
-mkpe.py         ->  bit.efi     (PE32+, ImageBase 0x01000000, no relocs)
-gen_blob.py     ->  hw/ia64/efi-bit-blob.c
-```
-
-`build.sh` runs the whole pipeline (`build.sh -v` also dumps a disassembly).
-
-### Why it loads with no relocations
-
-The vibtanium loader (`hw/ia64/efi.c`) reads the entry point from a 16-byte
-IA-64 function descriptor (plabel) at `AddressOfEntryPoint` and, when the file
-has no base-relocation directory, loads at the PE's preferred `ImageBase`. We
-set `ImageBase = VIBTANIUM_EFI_APP_BASE (0x01000000)` and link the code at that
-base + text RVA, so every absolute address is already correct. The second word
-of the entry descriptor is `__gp`, allowing GCC-generated IA-64 small-data/GOT
-accesses to work after firmware handoff. The loader does not inspect the PE
-Subsystem field.
-
-`run.sh` copies `bit.efi` to a temporary ESP as
-`\EFI\BOOT\BOOTIA64.EFI`; this exercises the media-discovery/cache path and
-makes BlockIO/SimpleFS/File protocol checks meaningful.
-
-Firmware BIT launch builds an equivalent in-memory FAT ESP, so the embedded
-menu path still exercises BlockIO/SimpleFS/File without depending on any user
-disk image.
-
-## Guest entry contract
-
-From `vibtanium_efi_prepare_cpu`: `r32 = ImageHandle`, `r33 = SystemTable`,
-`r1 = gp`, `r12 = sp`, `PSR.bn = 1`. EFI services are reached with a normal
-`br.call` through the plabel in the relevant table field; the call gate reads
-arguments from `r32+` and returns the status in `r8`.
+The PE image is linked at its preferred fixed base and contains an IA-64
+function descriptor carrying the entry IP and GP.  The guest firmware loads
+the image from the ESP and enters it using the standard IA-64 EFI calling
+convention; services are ordinary guest calls through the EFI tables.

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "qemu/qemu-print.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
@@ -21,6 +22,11 @@
 #include "system/memory.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
+
+void ia64_cpu_tlb_flush(CPUIA64State *env)
+{
+    tlb_flush(env_cpu(env));
+}
 
 static void ia64_cpu_set_pc(CPUState *cs, vaddr value)
 {
@@ -80,6 +86,9 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     }
     if (cpu->env.issue_group.typed_active) {
         flags |= IA64_TB_FLAG_TYPED_GROUP;
+    }
+    if (cpu->env.rse.cfle) {
+        flags |= IA64_TB_FLAG_CFLE_RESUME;
     }
 
     return (TCGTBCPUState) {
@@ -153,15 +162,8 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     CPUIA64State *env = &cpu->env;
 
     IA64_PERF_INC(IA64_PERF_INTERRUPT_EXEC_CHECK);
-    /*
-     * The CR.ITM deadline timer only raises CPU_INTERRUPT_HARD; the IRR
-     * latch must happen here, on the vCPU thread, where guest interrupt
-     * state can be touched safely.
-     */
-    if ((interrupt_request & CPU_INTERRUPT_HARD) != 0 &&
-        ia64_itc_timer_poll(env)) {
-        ia64_latch_timer_interrupt(env);
-    }
+    ia64_refresh_interrupt_delivery(env);
+    interrupt_request = qatomic_read(&cs->interrupt_request);
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) == 0 &&
         !ia64_external_interrupt_pending(env)) {
@@ -198,7 +200,8 @@ static bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     IA64_PERF_INC(IA64_PERF_INTERRUPT_DELIVERED);
     ia64_diag_record_external_interrupt(env, interrupt_request);
     ia64_deliver_exception(env, IA64_EXCEPTION_EXTERNAL_INTERRUPT, env->ip,
-                           MMU_DATA_LOAD, "external interrupt");
+                           IA64_EXCEPTION_ACCESS_NONE,
+                           "external interrupt");
     return true;
 }
 
@@ -333,7 +336,8 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         }
     }
 
-    if (result.status == IA64_TRANSLATE_OK) {
+    if (result.status == IA64_TRANSLATE_OK &&
+        exception_kind == IA64_EXCEPTION_NONE) {
         /*
          * QEMU's softmmu TLB maps one TARGET_PAGE_SIZE page per fill.  IA-64
          * page size remains part of the target-side lookup; split it here so
@@ -497,13 +501,25 @@ static ObjectClass *ia64_cpu_class_by_name(const char *cpu_model)
 static void ia64_itm_timer_cb(void *opaque)
 {
     IA64CPU *cpu = opaque;
+    bool release_bql = false;
 
     /*
      * Runs on the main loop thread; only kick the vCPU.  The
      * cpu_exec_interrupt hook polls the ITC/ITM compare and latches the
      * timer interrupt on the vCPU thread.
+     *
+     * Virtual-clock callbacks can run outside the BQL.  cpu_interrupt()
+     * deliberately requires it, so acquire it only when the timer dispatch
+     * did not already do so.
      */
+    if (!bql_locked()) {
+        release_bql = true;
+        bql_lock();
+    }
     cpu_interrupt(CPU(cpu), CPU_INTERRUPT_HARD);
+    if (release_bql) {
+        bql_unlock();
+    }
 }
 
 static void ia64_cpu_realizefn(DeviceState *dev, Error **errp)

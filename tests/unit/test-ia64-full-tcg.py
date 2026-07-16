@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""No-OS differential tests for the IA-64 full-TCG rewrite.
+"""No-OS architectural tests for the typed IA-64 TCG translator.
 
 The test injects hand-encoded bundles with QEMU's generic loader, runs them on
 the vibtanium machine, and reads architectural state through a TCP HMP monitor.
-Every mode is a fresh QEMU process because the translator's environment
-switches are cached process-wide.
+Each program runs in a fresh QEMU process so architectural state, migration
+state, and TCG operation traces remain isolated between cases.
 """
 
 import argparse
@@ -31,6 +31,7 @@ IA64_UNALIGNED_DATA_REFERENCE_VECTOR = 0x5A00
 IA64_LOWER_PRIVILEGE_TRANSFER_VECTOR = 0x5E00
 IA64_TAKEN_BRANCH_TRAP_VECTOR = 0x5F00
 IA64_PSR_IC = 1 << 13
+IA64_PSR_I = 1 << 14
 IA64_PSR_DT = 1 << 17
 IA64_PSR_LP = 1 << 25
 IA64_PSR_TB = 1 << 26
@@ -45,6 +46,12 @@ IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION = 0x10
 IA64_SLOT_TYPE_M = 1
 IA64_SLOT_TYPE_I = 2
 IA64_AR_PFS = 64
+IA64_AR_LC = 65
+IA64_AR_ITC = 44
+IA64_CR_ITM = 1
+IA64_CR_IVR = 65
+IA64_CR_EOI = 67
+IA64_CR_ITV = 72
 IA64_CR_IPSR = 16
 IA64_CR_ISR = 17
 IA64_CR_IIP = 19
@@ -58,6 +65,8 @@ MONITOR_CONNECT_TIMEOUT = 5.0
 PROGRAM_TIMEOUT = 5.0
 PROCESS_EXIT_TIMEOUT = 2.0
 MIGRATION_TIMEOUT = 15.0
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
+FIRMWARE_DIR = SOURCE_ROOT / "pc-bios"
 
 
 class HarnessError(RuntimeError):
@@ -699,6 +708,15 @@ def mov_i_grar(ar: int, r2: int, qp: int = 0) -> int:
     )
 
 
+def mov_current_ip(r1: int, qp: int = 0) -> int:
+    """Encode I25 ``mov r1 = ip``."""
+    if not 0 <= r1 < 128:
+        raise ValueError("current-IP destination must be a GR")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return bitfield(0x30, 27, 6) | bitfield(r1, 6, 7) | qp
+
+
 def mov_argr(r1: int, ar: int, qp: int = 0) -> int:
     """Encode I28 ``mov r1 = ar`` for loop-counter readback."""
     if not 0 <= r1 < 128 or not 0 <= ar < 128:
@@ -819,6 +837,28 @@ def ld8(r1: int, r3: int, qp: int = 0) -> int:
         op(4)
         | bitfield(0x03, 30, 6)
         | bitfield(r3, 20, 7)
+        | bitfield(r1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def mov_m_grar(ar: int, r2: int, qp: int = 0) -> int:
+    """Encode M29 ``mov.m ar = r2`` (the M-unit AR subset)."""
+    return (
+        op(1)
+        | bitfield(0x2a, 27, 6)
+        | bitfield(ar, 20, 7)
+        | bitfield(r2, 13, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
+def mov_m_argr(r1: int, ar: int, qp: int = 0) -> int:
+    """Encode M31 ``mov.m r1 = ar`` (the M-unit AR subset)."""
+    return (
+        op(1)
+        | bitfield(0x22, 27, 6)
+        | bitfield(ar, 20, 7)
         | bitfield(r1, 6, 7)
         | bitfield(qp, 0, 6)
     )
@@ -1052,9 +1092,8 @@ def core_program() -> Program:
     return Program(
         name="core integer equality",
         bundles=(
-            # Keep the terminal branch out of this bundle: typed preflight is
-            # all-or-nothing, and a branch would route the complete bundle to
-            # the legacy path.
+            # Keep the terminal branch separate so the core bundle's scalar
+            # TCG trace remains independent of control-flow lowering.
             Bundle(0x10, 0x01, nop_m(), adds(1, 42, 0), adds(2, 7, 0)),
             Bundle(0x20, 0x11, nop_m(), nop_i(), br_cond(0x20, 0x20)),
         ),
@@ -1066,8 +1105,7 @@ def stacked_gr_pair_program() -> Program:
     return Program(
         name="stacked GR value/NaT pair and preserved writer",
         bundles=(
-            # Keep alloc on the legacy setup side until its CFM-forwarding
-            # transaction has a dedicated typed lowering.  It creates six
+            # ALLOC is a dedicated frame-setup transaction.  It creates six
             # stacked registers with no rotating subset.
             Bundle(0x10, 0x01, alloc(34, 6, 4, 0), nop_i(), nop_i()),
             Bundle(0x20, 0x01, nop_m(), adds(32, 5, 0),
@@ -1124,7 +1162,7 @@ def nat_program() -> Program:
                    adds(9, 0x1000, 0)),
             # AR.UNAT is application register 36.  Bit zero describes the
             # spill/fill slot at 0x1000, so ld8.fill seeds NaT(r10).
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(10, 9), nop_i(), nop_i()),
             # This is the bundle under test.  The MI_I template supplies the
             # required stop between the dependent ADD and ADDS groups; the
@@ -1156,7 +1194,7 @@ def ordinary_source_nat_overlay_program() -> Program:
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, 0x1000, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(10, 9), nop_i(), nop_i()),
             # Internal shadow invariant, not an architectural RAW golden: the
             # first ADD clears live NaT(r10), while the second must select the
@@ -1311,7 +1349,7 @@ def normal_compare_conformance_program() -> Tuple[Program, Tuple[int, ...]]:
     emit(0x01, nop_m(), adds(5, -1, 0), adds(10, 0x1000, 0))
     emit(0x01, nop_m(), integer_extend(7, 5, 4, signed=False), nop_i())
     # UNAT bit zero describes 0x1000, so ld8.fill creates a valid NaT r11.
-    emit(0x01, nop_m(), mov_i_grar(36, 4), nop_i())
+    emit(0x01, mov_m_grar(36, 4), nop_i(), nop_i())
     emit(0x01, ld8_fill(11, 10), nop_i(), nop_i())
 
     # Every canonical A8 normal opcode is represented once.  Alternate M/I
@@ -1369,9 +1407,8 @@ def parallel_compare_conformance_program() -> Tuple[Program, Tuple[int, ...]]:
 
     Each of the first twelve cases resets p1..p15 from a literal GR image,
     executes one parallel compare, and snapshots the complete predicate image
-    into r12..r23.  This deliberately does not obtain expectations from the
-    legacy compare implementation, which shares decoder and write logic with
-    the historical fast path.
+    into r12..r23.  Every expected image is computed independently from the
+    instruction implementation.
     """
     bundles: List[Bundle] = []
     compare_ips: List[int] = []
@@ -1395,7 +1432,7 @@ def parallel_compare_conformance_program() -> Tuple[Program, Tuple[int, ...]]:
          shl_var(8, 4, 6))
     emit(0x01, nop_m(), adds(10, 0x1000, 0), adds(28, 134, 0))
     # AR.UNAT bit zero and ld8.fill produce an architecturally valid NaT r11.
-    emit(0x01, nop_m(), mov_i_grar(36, 4), nop_i())
+    emit(0x01, mov_m_grar(36, 4), nop_i(), nop_i())
     emit(0x01, ld8_fill(11, 10), nop_i(), nop_i())
 
     # (raw, seed GR, execution unit).  The corresponding literal expected
@@ -1671,7 +1708,7 @@ def predicate_test_branch_program(kind: str) -> Program:
             bundles=(
                 Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                        adds(9, 0x1000, 0)),
-                Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+                Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
                 Bundle(0x30, 0x01, ld8_fill(10, 9), nop_i(), nop_i()),
                 Bundle(0x40, 0x11, nop_m(), test,
                        br_cond(0x40, 0x60, qp=6)),
@@ -1730,7 +1767,7 @@ def predicate_test_conformance_program() \
     bundles: List[Bundle] = [
         Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                adds(9, data_address, 0)),
-        Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+        Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
         Bundle(0x30, 0x01, ld8_fill(11, 9), nop_i(), nop_i()),
     ]
     observations: List[Tuple[str, int, int, int]] = []
@@ -1808,7 +1845,7 @@ def predicate_register_move_program() -> Program:
         bundles=(
             Bundle(0x10, 0x03, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             # Seed two independent NaT destinations from the same UNAT slot.
             # The true PR->GR move clears r20's NaT; the false-qualified
             # GR->PR move below must neither consume nor clear r24's NaT.
@@ -1863,7 +1900,7 @@ def predicate_register_nat_fault_program(mask: int = 0x3e) -> Program:
             *_interruption_collection_setup(),
             Bundle(0x30, 0x03, nop_m(), adds(2, 1, 0),
                    adds(3, data_address, 0)),
-            Bundle(0x40, 0x01, nop_m(), mov_i_grar(36, 2), nop_i()),
+            Bundle(0x40, 0x01, mov_m_grar(36, 2), nop_i(), nop_i()),
             Bundle(0x50, 0x01, ld8_fill(4, 3), nop_i(), nop_i()),
             # Establish a true qualifier and an independently known PR image.
             Bundle(0x60, 0x03, nop_m(),
@@ -1894,7 +1931,7 @@ def branch_register_move_program() -> Program:
             # and false-qualified GR-to-BR source must leave r31 untouched.
             Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(30, 9), nop_i(), nop_i()),
             Bundle(0x40, 0x01, ld8_fill(31, 9), nop_i(), nop_i()),
             Bundle(0x50, 0x01, nop_m(), adds(10, 0x111, 0),
@@ -1953,7 +1990,7 @@ def branch_register_nat_fault_program() -> Program:
             *_interruption_collection_setup(),
             Bundle(0x30, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0x40, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x40, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x50, 0x01, ld8_fill(4, 9), nop_i(), nop_i()),
             Bundle(0x60, 0x01, nop_m(), adds(10, 0x111, 0),
                    adds(12, 0x333, 0)),
@@ -2001,7 +2038,7 @@ def pfs_register_move_program() -> Program:
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             # Keep two NaT-tagged registers for the false-source and
             # destination-NaT tests below.
             Bundle(0x30, 0x01, ld8_fill(30, 9), nop_i(), nop_i()),
@@ -2020,8 +2057,7 @@ def pfs_register_move_program() -> Program:
             Bundle(0x80, 0x01, nop_m(), mov_gr_to_pfs(10), nop_i()),
             Bundle(0x90, 0x00, nop_m(), mov_pfs_to_gr(20),
                    mov_gr_to_pfs(11)),
-            Bundle(0xa0, 0x01, nop_m(), mov_pfs_to_gr(21),
-                   mov_pfs_to_gr(0)),
+            Bundle(0xa0, 0x01, nop_m(), mov_pfs_to_gr(21), nop_i()),
             Bundle(0xb0, 0x01, nop_m(), mov_pfs_to_gr(22), nop_i()),
 
             # A qualified first writer followed by an unconditional writer
@@ -2029,8 +2065,7 @@ def pfs_register_move_program() -> Program:
             # value is D, while ordinary reads retain the first saved B.
             Bundle(0xc0, 0x00, nop_m(), mov_gr_to_pfs(12, qp=6),
                    mov_gr_to_pfs(13)),
-            Bundle(0xd0, 0x01, nop_m(), mov_pfs_to_gr(23),
-                   mov_pfs_to_gr(0)),
+            Bundle(0xd0, 0x01, nop_m(), mov_pfs_to_gr(23), nop_i()),
             Bundle(0xe0, 0x01, nop_m(), mov_pfs_to_gr(24), nop_i()),
 
             # p7=false must guard both NaT consumption and every PFS overlay
@@ -2043,12 +2078,11 @@ def pfs_register_move_program() -> Program:
             Bundle(0x110, 0x01, nop_m(), mov_pfs_to_gr(27, qp=6),
                    nop_i()),
 
-            # r0 is legal on both sides.  The same-group read still sees D;
+            # r0 is a legal GR source.  The same-group read still sees D;
             # after the stop, live PFS=0 and a true read clears NaT(r30).
             Bundle(0x120, 0x01, nop_m(), mov_gr_to_pfs(0),
                    mov_pfs_to_gr(29)),
-            Bundle(0x130, 0x01, nop_m(), mov_pfs_to_gr(30),
-                   mov_pfs_to_gr(0)),
+            Bundle(0x130, 0x01, nop_m(), mov_pfs_to_gr(30), nop_i()),
             spin_bundle(0x140),
             _exception_vector_spin(IA64_REGISTER_NAT_CONSUMPTION_VECTOR),
         ),
@@ -2067,7 +2101,7 @@ def pfs_register_nat_fault_program() -> Program:
             *_interruption_collection_setup(),
             Bundle(0x30, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0x40, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x40, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x50, 0x01, ld8_fill(4, 9), nop_i(), nop_i()),
             Bundle(0x60, 0x01, nop_m(), adds(10, 0x111, 0),
                    cmp_rr(6, 7, 0, 0, "eq")),
@@ -2255,7 +2289,7 @@ def typed_return_incomplete_fill_program() \
             bundles=(
                 Bundle(0x10, 0x01, nop_m(), adds(2, 0x1000, 0),
                        adds(9, config_address, 0)),
-                Bundle(0x20, 0x01, ld8(10, 9), mov_i_grar(18, 2),
+                Bundle(0x20, 0x09, ld8(10, 9), mov_m_grar(18, 2),
                        adds(14, 0x107, 0)),
                 Bundle(0x30, 0x01, nop_m(), mov_gr_to_pfs(10),
                        mov_grbr(6, 14)),
@@ -2298,7 +2332,7 @@ def typed_return_incomplete_trap_program(psr_bits: int, vector: int) \
             bundles=(
                 Bundle(0x10, 0x01, nop_m(), adds(2, 0x1000, 0),
                        adds(9, config_address, 0)),
-                Bundle(0x20, 0x01, ld8(10, 9), mov_i_grar(18, 2),
+                Bundle(0x20, 0x09, ld8(10, 9), mov_m_grar(18, 2),
                        adds(8, config_address + 8, 0)),
                 Bundle(0x30, 0x01, ld8(11, 8), adds(14, 0x107, 0),
                        adds(15, backing_start, 0)),
@@ -2366,8 +2400,8 @@ def typed_return_register_fill_fault_program() \
                        adds(3, fault_address - backing_start, 15)),
                 Bundle(0x40, 0x01, nop_m(), adds(4, replacement, 0),
                        adds(13, 1, 0)),
-                Bundle(0x50, 0x01, nop_m(), mov_i_grar(18, 2),
-                       mov_gr_to_pfs(10)),
+                Bundle(0x50, 0x01, mov_m_grar(18, 2),
+                       mov_gr_to_pfs(10), nop_i()),
                 Bundle(0x60, 0x01, nop_m(), shl_imm(13, 13, 27), nop_i()),
                 Bundle(0x70, 0x01, nop_m(),
                        dep_imm(13, 1, 13, 13, 1), mov_grbr(6, 14)),
@@ -2454,14 +2488,16 @@ def typed_return_rnat_fill_fault_program() \
                 Bundle(0x70, 0x01, nop_m(),
                        adds(13, translation - page_base, 15),
                        mov_grbr(6, 14)),
-                Bundle(0x80, 0x01, nop_m(), mov_i_grar(18, 2),
-                       mov_gr_to_pfs(10)),
+                Bundle(0x80, 0x01, mov_m_grar(18, 2),
+                       mov_gr_to_pfs(10), nop_i()),
                 Bundle(0x90, 0x01, mov_grcr(IA64_CR_IFA, 15),
                        adds(2, rnat_address - page_base, 15),
                        adds(9, 1, 0)),
                 Bundle(0xa0, 0x01, mov_grcr(IA64_CR_ITIR, 12),
                        shl_imm(9, 9, 62), nop_i()),
-                Bundle(0xb0, 0x01, itc_d(13), nop_i(), nop_i()),
+                # ITC.D must terminate its instruction group.  M_MI supplies
+                # the required stop immediately after the M-slot operation.
+                Bundle(0xb0, 0x0b, itc_d(13), nop_m(), nop_i()),
                 Bundle(0xc0, 0x01, srlz_d(), nop_i(), nop_i()),
                 Bundle(0xd0, 0x01, nop_m(), adds(13, 1, 0), nop_i()),
                 Bundle(0xe0, 0x01, nop_m(), shl_imm(13, 13, 27), nop_i()),
@@ -2642,6 +2678,23 @@ def _loop_matrix_rows(kind: str) -> Tuple[Tuple[int, int, bool, bool], ...]:
     raise ValueError("unknown loop branch kind {!r}".format(kind))
 
 
+def application_move_forced_tb_ri_program() -> Program:
+    """Keep a successful AR helper from leaking its slot into the next TB."""
+    return Program(
+        name="application move forced-TB RI canonicalization",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(2, 0x55, 0), nop_i()),
+            # The same-group read observes EC's entry image; the following
+            # bundle must begin at RI=0 and observe the normalized live EC.
+            Bundle(0x20, 0x01, nop_m(), mov_i_grar(66, 2),
+                   mov_argr(20, 66)),
+            Bundle(0x30, 0x01, nop_m(), mov_argr(21, 66), nop_i()),
+            spin_bundle(0x40),
+        ),
+        terminal_ip=0x40,
+    )
+
+
 def loop_matrix_program(kind: str) -> Tuple[
         Program, Tuple[LoopExpectation, ...],
         Tuple[Tuple[int, int, bool], ...], int]:
@@ -2668,34 +2721,38 @@ def loop_matrix_program(kind: str) -> Tuple[
         output = 32 + index * 5
         old_marker = 0x100 + index
         new_marker = 0x200 + index
+        # AR.EC is a six-bit architectural register.  The deliberately wide
+        # source rows still exercise normalization, but loop semantics and
+        # the later mov-from-AR observe only the stored low six bits.
+        live_ec = initial_ec & 0x3f
 
         if kind == "cloop":
             taken = initial_lc != 0
             rotated = False
             injected = False
             final_lc = initial_lc - 1 if taken else 0
-            final_ec = initial_ec
+            final_ec = live_ec
         elif kind in ("ctop", "cexit"):
-            active = initial_lc != 0 or initial_ec > 1
+            active = initial_lc != 0 or live_ec > 1
             taken = active if kind == "ctop" else not active
-            rotated = initial_lc != 0 or initial_ec != 0
+            rotated = initial_lc != 0 or live_ec != 0
             injected = initial_lc != 0
             final_lc = initial_lc - 1 if initial_lc != 0 else 0
             final_ec = (
-                initial_ec
-                if initial_lc != 0 or initial_ec == 0
-                else (initial_ec - 1) & U64_MASK
+                live_ec
+                if initial_lc != 0 or live_ec == 0
+                else live_ec - 1
             )
         else:
-            active = predicate or initial_ec > 1
+            active = predicate or live_ec > 1
             taken = active if kind == "wtop" else not active
-            rotated = predicate or initial_ec != 0
+            rotated = predicate or live_ec != 0
             injected = False
             final_lc = initial_lc
             final_ec = (
-                initial_ec
-                if predicate or initial_ec == 0
-                else (initial_ec - 1) & U64_MASK
+                live_ec
+                if predicate or live_ec == 0
+                else live_ec - 1
             )
         rotation_count += int(rotated)
 
@@ -2782,7 +2839,7 @@ def loop_rotation_wrap_program() -> Tuple[
         Bundle(0x10, 0x01, alloc(31, 8, 8, 1), nop_i(), nop_i()),
         Bundle(0x20, 0x01, nop_m(), adds(8, 1, 0),
                adds(9, data_address, 0)),
-        Bundle(0x30, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+        Bundle(0x30, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
         Bundle(0x40, 0x01, ld8_fill(32, 9), adds(39, 0x777, 0), nop_i()),
         Bundle(0x50, 0x01, nop_m(), adds(1, 49, 0), adds(2, 0, 0)),
         Bundle(0x60, 0x01, nop_m(), mov_i_grar(65, 1),
@@ -2833,7 +2890,7 @@ def loop_rotating_overlay_program() -> Program:
             Bundle(0x10, 0x01, alloc(31, 8, 8, 1), nop_i(), nop_i()),
             Bundle(0x20, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0x30, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x30, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             # The stopped fill establishes old logical r32 with NaT=1.
             Bundle(0x40, 0x01, ld8_fill(32, 9), nop_i(), nop_i()),
             # LC=0/EC=1 makes CTOP false while still requesting one epilog
@@ -2900,8 +2957,8 @@ def call_frame_architectural_program() -> Program:
             # the call later has a nontrivial old privilege level to pack.
             Bundle(0x10, 0x01, nop_m(), adds(2, 0x1000, 0),
                    adds(9, 0x1800, 0)),
-            Bundle(0x20, 0x01, ld8_fill(10, 9),
-                   mov_i_grar(18, 2), adds(4, 0x60, 0)),
+            Bundle(0x20, 0x09, ld8_fill(10, 9),
+                   mov_m_grar(18, 2), adds(4, 0x60, 0)),
             Bundle(0x30, 0x01, nop_m(), mov_i_grar(64, 10),
                    mov_grbr(6, 4)),
             Bundle(0x40, 0x11, nop_m(), nop_i(), br_ret(6)),
@@ -2913,8 +2970,8 @@ def call_frame_architectural_program() -> Program:
             Bundle(0x60, 0x01, alloc(31, 6, 4, 0), nop_i(), nop_i()),
             Bundle(0x70, 0x01, nop_m(), adds(1, 0x2a, 0),
                    adds(8, 4, 0)),
-            Bundle(0x80, 0x01, nop_m(), mov_i_grar(66, 1),
-                   mov_i_grar(36, 8)),
+            Bundle(0x80, 0x01, mov_m_grar(36, 8),
+                   mov_i_grar(66, 1), nop_i()),
             Bundle(0x90, 0x01, nop_m(), adds(9, 0x1810, 0),
                    adds(11, 0x1820, 0)),
             # Dirty output r36 and NaT-tagged output r37 become callee
@@ -3047,11 +3104,11 @@ def indirect_false_call_program() -> Program:
         name="false B5 call preserves link, PFS, and open source epoch",
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(1, 10, 0),
-                   adds(4, 0x6d, 0)),
+                   adds(4, 0x55, 0)),
             Bundle(0x20, 0x01, nop_m(), mov_grbr(5, 4),
                    adds(3, 0x777, 0)),
             Bundle(0x30, 0x01, nop_m(), mov_grbr(2, 3),
-                   mov_i_grar(64, 3)),
+                   mov_i_grar(64, 4)),
             Bundle(0x40, 0x00, nop_m(), adds(1, 11, 0), nop_i()),
             # The encoded stop distinguishes this from the false/no-stop X4
             # case: the call remains nullified, but its successful retirement
@@ -3151,7 +3208,7 @@ def page_crossing_overlay_continuation_program() -> Program:
             # under test.
             Bundle(0xfb0, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0xfc0, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0xfc0, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0xfd0, 0x01, ld8_fill(10, 9), nop_i(), nop_i()),
             # Seed p1=true and p2=false at an architectural stop.
             Bundle(0xfe0, 0x01, nop_m(),
@@ -3176,13 +3233,12 @@ def page_crossing_overlay_continuation_program() -> Program:
 
 
 def internal_stop_typed_handoff_program() -> Program:
-    """Close an incoming typed group, then run a fresh legacy suffix."""
+    """Close an incoming typed group, then run a fresh typed suffix."""
     return Program(
-        name="typed owner handoff at an internal bundle stop",
+        name="typed owner continuation at an internal bundle stop",
         bundles=(
             # r3 makes an accidental restart from slot zero observable: the
-            # typed prefix below must increment it exactly once.  r8 is the
-            # source for the intentionally non-typed mov.i suffix.
+            # typed prefix below must increment it exactly once.
             Bundle(0xfe0, 0x01, nop_m(), adds(3, 10, 0),
                    adds(8, 1, 0)),
             # Open a typed-owned group without creating any saved GR/NaT/PR
@@ -3196,11 +3252,10 @@ def internal_stop_typed_handoff_program() -> Program:
             Bundle(0xff0, 0x00, nop_m(), adds(1, 42, 0, qp=1),
                    adds(2, 7, 0, qp=1)),
             # MI_I stops after slot 1 and slot 2.  Slots 0/1 are the final
-            # typed prefix of the incoming group.  Slot 2 starts a fresh group
-            # and uses an intentionally unsupported typed opcode, so it must
-            # resume at RI=2 under the legacy engine after ownership clears.
+            # typed prefix of the incoming group.  Slot 2 starts a fresh typed
+            # group, so lowering must resume at RI=2 after the prefix closes.
             Bundle(0x1000, 0x03, nop_m(), adds(3, 1, 3),
-                   mov_i_grar(36, 8)),
+                   mov_current_ip(8)),
             Bundle(0x1010, 0x11, nop_m(), nop_i(),
                    br_cond(0x1010, 0x1010)),
         ),
@@ -3213,14 +3268,14 @@ def nonempty_overlay_internal_stop_handoff_program() -> Program:
     data_address = 0x1800
     data_value = 0x123456789abcdef0
     return Program(
-        name="nonempty overlay handoff at an internal bundle stop",
+        name="nonempty overlay continuation at an internal bundle stop",
         bundles=(
             Bundle(0xfa0, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, data_address, 0)),
-            Bundle(0xfb0, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0xfb0, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0xfc0, 0x01, ld8_fill(10, 9), nop_i(), nop_i()),
             # Keep NaT(r10), but make the suffix's AR.UNAT write observable.
-            Bundle(0xfd0, 0x01, nop_m(), mov_i_grar(36, 0), nop_i()),
+            Bundle(0xfd0, 0x01, mov_m_grar(36, 0), nop_i(), nop_i()),
             Bundle(0xfe0, 0x01, nop_m(),
                    cmp_rr(1, 2, 0, 0, "eq"), nop_i()),
             # These writes create both a saved GR+NaT entry and a saved PR
@@ -3229,11 +3284,10 @@ def nonempty_overlay_internal_stop_handoff_program() -> Program:
             Bundle(0xff0, 0x00, nop_m(), adds(10, 1, 0),
                    cmp_rr(1, 2, 0, 0, "lt")),
             # The prefix consumes the saved GR+NaT and closes the typed epoch.
-            # The fresh generic suffix is qualified by live p2 and consumes
-            # live r10.  It can enter the legacy helper only if close cleared
-            # every saved mask/image and typed_active first.
+            # The fresh suffix is qualified by live p2.  It can execute only
+            # if close cleared every saved mask/image and typed_active first.
             Bundle(0x1000, 0x03, nop_m(), adds(11, 0, 10),
-                   mov_i_grar(36, 10, qp=2)),
+                   mov_current_ip(12, qp=2)),
             Bundle(0x1010, 0x11, nop_m(), nop_i(),
                    br_cond(0x1010, 0x1010)),
         ),
@@ -3279,21 +3333,24 @@ def typed_branch_forward_migration_program() -> Program:
     )
 
 
-def legacy_ri_restart_program() -> Program:
+def typed_application_move_ri_restart_program() -> Program:
     data_address = 0x1000
     data_value = 0x123456789abcdef0
     return Program(
-        name="ordinary legacy helper restart at RI=2",
+        name="typed application-move restart at RI=2",
         bundles=(
-            # The test enters this otherwise ordinary generic-helper bundle
-            # at RI=2.  Slots 0 and 1 are deliberately visible and
-            # non-idempotent: replaying either one makes the final register
-            # image fail, while slot 2 provides the positive execution proof.
+            # The test enters this ordinary typed bundle at RI=2.  Slots 0
+            # and 1 are deliberately visible and non-idempotent: replaying
+            # either one makes the final register image fail.  Slot 2 writes
+            # the legal I-unit AR.LC application register; the next bundle
+            # reads it back to provide a positive suffix-execution proof.
             Bundle(0x10, 0x03, ld8_fill(5, 9), adds(1, 1, 1),
-                   mov_i_grar(36, 8)),
-            Bundle(0x20, 0x11, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+                   mov_i_grar(IA64_AR_LC, 8)),
+            Bundle(0x20, 0x11, nop_m(), mov_argr(10, IA64_AR_LC),
+                   br_cond(0x20, 0x30)),
+            spin_bundle(0x30),
         ),
-        terminal_ip=0x20,
+        terminal_ip=0x30,
         data=(DataWord(data_address, data_value, 8),),
     )
 
@@ -3351,6 +3408,35 @@ def _interruption_collection_setup() -> Tuple[Bundle, Bundle]:
     return (
         Bundle(0x10, 0x01, ssm(IA64_PSR_IC), nop_i(), nop_i()),
         Bundle(0x20, 0x01, srlz_i(), nop_i(), nop_i()),
+    )
+
+
+def invalid_alloc_plan_boundary_program(spans_next_bundle: bool) -> Program:
+    """Make a statically faulting alloc terminate a typed rewrite plan."""
+    fault_ip = 0x30
+    fault = alloc(34, 1, 1, 0)
+    bundles: List[Bundle] = [*_interruption_collection_setup()]
+
+    # With SOF=1 only r32 is in-frame; alloc r34 must raise Illegal Operation.
+    # The one-bundle form used to leave two planned suffix instructions behind
+    # (rewrite_plan_index != rewrite_plan_emit_count).  The no-stop form also
+    # made preflight look through the following bundle, so lowering's precise
+    # fault exit contradicted rewrite_region_bundles_left.
+    bundles.append(
+        Bundle(fault_ip, 0x00 if spans_next_bundle else 0x01,
+               fault, adds(20, 77, 0), nop_i())
+    )
+    if spans_next_bundle:
+        bundles.append(
+            Bundle(0x40, 0x01, nop_m(), adds(21, 88, 0), nop_i())
+        )
+    bundles.append(_illegal_vector_spin())
+    return Program(
+        name="invalid alloc {} rewrite plan".format(
+            "multi-bundle" if spans_next_bundle else "single-bundle"
+        ),
+        bundles=tuple(bundles),
+        terminal_ip=IA64_GENERAL_EXCEPTION_VECTOR,
     )
 
 
@@ -3437,7 +3523,10 @@ def psr_ic_rfi_serialization_program() -> Program:
             # p1 selects the first-entry handler path; p2 is its complement.
             Bundle(0x30, 0x03, nop_m(),
                    cmp_rr(1, 2, 0, 0, "eq"), nop_i()),
-            Bundle(0x40, 0x01, nop_m(), first_fault, nop_i()),
+            # The slot-0 increment commits before the slot-1 fault.  RFI must
+            # restore IPSR.ri=1; losing RI would replay slot 0 and increment
+            # r8 a second time before the now-nullified fault.
+            Bundle(0x40, 0x01, adds(8, 1, 8), first_fault, nop_i()),
             Bundle(0x50, 0x01, nop_m(), second_fault, nop_i()),
             # First entry (p1=true) branches to a path that clears p1, toggles
             # IC from the delivery state, and executes RFI.  On return the
@@ -3519,7 +3608,7 @@ def equal_target_unc_nat_fault_program() -> Program:
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(2, 1, 0),
                    adds(3, 0x1000, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 2), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 2), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(4, 3), nop_i(), nop_i()),
             # Seed p14=true and p15=false before the .unc instruction.
             Bundle(0x40, 0x03, nop_m(),
@@ -3642,7 +3731,7 @@ def predicate_test_equal_target_alias_fault_program() -> Program:
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, 0x1000, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(11, 9), nop_i(), nop_i()),
             Bundle(0x40, 0x03, nop_m(),
                    cmp_rr(10, 11, 0, 0, "eq"), nop_i()),
@@ -3668,7 +3757,7 @@ def predicate_test_equal_target_predicated_off_program() -> Program:
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, 0x1000, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(11, 9), nop_i(), nop_i()),
             Bundle(0x40, 0x01, nop_m(), adds(12, 1 << 10, 0), nop_i()),
             Bundle(0x50, 0x01, nop_m(), mov_grpr(12, 0xfffe), nop_i()),
@@ -3692,7 +3781,7 @@ def predicate_test_equal_target_unc_fault_program() -> Program:
         bundles=(
             Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
                    adds(9, 0x1000, 0)),
-            Bundle(0x20, 0x01, nop_m(), mov_i_grar(36, 8), nop_i()),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
             Bundle(0x30, 0x01, ld8_fill(11, 9), nop_i(), nop_i()),
             Bundle(0x40, 0x01, nop_m(), adds(12, 1 << 10, 0), nop_i()),
             Bundle(0x50, 0x01, nop_m(), mov_grpr(12, 0xfffe), nop_i()),
@@ -3983,33 +4072,13 @@ def _loader_arguments(program: Program) -> List[str]:
     return arguments
 
 
-def _child_environment(rewrite: bool, preserve_fault_slot: bool = False,
-                       state_cache: bool = False) -> Dict[str, str]:
+def _child_environment(state_cache: bool = False) -> Dict[str, str]:
     environment = os.environ.copy()
-    # Debug/performance knobs can intentionally disable the zero-helper path.
-    # Strip inherited Vibtanium knobs so this test controls both processes.
+    # Strip inherited debug/performance knobs so every case starts from the
+    # production typed translator configuration.
     for name in list(environment):
         if name.startswith("VIBTANIUM_"):
             del environment[name]
-    environment.update(
-        {
-            "VIBTANIUM_FULL_TCG_REWRITE": "1" if rewrite else "0",
-            # With rewrite off this makes the interpreter the oracle.  Keep it
-            # set for rewrite on as well so no legacy fast classifier can hide
-            # whether the typed path accepted the bundle.
-            "VIBTANIUM_TCG_FAST_DISABLE": (
-                # A direct all-nop branch does not publish current_slot.  Keep
-                # only that path enabled in precise-fault tests so the vector
-                # spin cannot overwrite the faulting slot before HMP stops it.
-                "bundle,indirect,movsys,alloc,upper-gr,predicate,movl,"
-                "memory-class,fp,partial"
-                if preserve_fault_slot else "all"
-            ),
-            "VIBTANIUM_TCG_ZERO_HELPER": "1",
-            "VIBTANIUM_TCG_REGION": "0",
-            "VIBTANIUM_IA64_PERF": "0",
-        }
-    )
     if state_cache:
         environment.update(
             {
@@ -4073,12 +4142,11 @@ def _tcg_op_sections(trace: str, bundle_ip: int) -> List[str]:
 
 
 def _require_typed_fault_trace(trace: str, bundle_ip: int) -> None:
-    """Prove that the tested bundle was lowered by the typed rewrite.
+    """Prove that the tested bundle received typed fault lowering.
 
     QEMU's deterministic ``-d op`` dump places every guest bundle under a
-    ``---- <ip>`` marker.  An equal-target A6 compare lowered by this rewrite
-    contains the direct Illegal Operation helper, while the legacy fallback
-    emits an exec_bundle/exec_slot helper call instead.
+    ``---- <ip>`` marker.  An equal-target A6 compare contains the direct
+    Illegal Operation helper and no generic raw-dispatch call.
     """
     for section in _tcg_op_sections(trace, bundle_ip):
         if not re.search(r"(?m)^\s*call raise_illegal_operation,", section):
@@ -4088,7 +4156,7 @@ def _require_typed_fault_trace(trace: str, bundle_ip: int) -> None:
             )
         if re.search(r"(?m)^\s*call (?:exec_bundle|exec_slot),", section):
             raise HarnessError(
-                "bundle 0x{:x} reached a legacy execution helper in the "
+                "bundle 0x{:x} reached a generic execution helper in the "
                 "TCG op trace".format(bundle_ip)
             )
 
@@ -4114,13 +4182,13 @@ def _require_typed_nat_fault_trace(trace: str, bundle_ip: int) -> None:
             )
         if re.search(r"(?m)^\s*call (?:exec_bundle|exec_slot),", section):
             raise HarnessError(
-                "bundle 0x{:x} reached a legacy execution helper in the "
+                "bundle 0x{:x} reached a generic execution helper in the "
                 "TCG op trace".format(bundle_ip)
             )
 
 
 def _require_typed_direct_trace(trace: str, bundle_ip: int) -> None:
-    """Reject generic interpreter dispatch for a successful typed bundle."""
+    """Reject generic raw dispatch for a successful typed bundle."""
     for section in _tcg_op_sections(trace, bundle_ip):
         marker = re.search(
             r"(?m)^ ---- [0-9a-fA-F]{16} [0-9a-fA-F]{16} "
@@ -4134,7 +4202,7 @@ def _require_typed_direct_trace(trace: str, bundle_ip: int) -> None:
             )
         if re.search(r"(?m)^\s*call (?:exec_bundle|exec_slot),", section):
             raise HarnessError(
-                "bundle 0x{:x} reached a legacy execution helper in the "
+                "bundle 0x{:x} reached a generic execution helper in the "
                 "TCG op trace".format(bundle_ip)
             )
         if not re.search(r"(?m)^\s*(?:add|mov|movi)_i64\b", section):
@@ -4167,7 +4235,7 @@ def _require_typed_branch_trace(trace: str, bundle_ip: int, target: int,
         )
         if forbidden is not None:
             raise HarnessError(
-                "branch bundle 0x{:x} used legacy helper: {}".format(
+                "branch bundle 0x{:x} used a generic helper: {}".format(
                     bundle_ip, forbidden.group(0).strip()
                 )
             )
@@ -4578,6 +4646,66 @@ def _require_typed_return_trace(trace: str, bundle_ip: int,
             raise HarnessError(
                 "return bundle 0x{:x} lacks a dynamic exit after mandatory "
                 "frame loads".format(bundle_ip)
+            )
+
+
+def _require_typed_rfi_trace(trace: str, bundle_ip: int) -> None:
+    """Require direct RFI selection and its shared ordered helper chain."""
+    for trace_section in _tcg_op_sections(trace, bundle_ip):
+        marker = re.search(
+            r"(?m)^ ---- [0-9a-fA-F]{16} [0-9a-fA-F]{16} "
+            r"([0-9a-fA-F]{16})\b",
+            trace_section,
+        )
+        if marker is None or not (int(marker.group(1), 16) & 2):
+            raise HarnessError(
+                "RFI bundle 0x{:x} lacks the typed-owner marker".format(
+                    bundle_ip
+                )
+            )
+
+        forbidden = re.search(
+            r"(?m)^\s*call (?:exec_bundle(?:_lookup_ptr)?|exec_slot|"
+            r"finish_fast_bundle|finish_direct_branch_bundle|"
+            r"finish_indirect_branch_bundle|rfi_chain_ok|"
+            r"rse_sync_logical_in|rse_sync_logical_out|"
+            r"complete_pending_fill|schedule_pending_fill),",
+            trace_section,
+        )
+        if forbidden is not None:
+            raise HarnessError(
+                "RFI bundle 0x{:x} used a forbidden generic helper: {}".format(
+                    bundle_ip, forbidden.group(0).strip()
+                )
+            )
+
+        restore_sites = list(re.finditer(
+            r"(?m)^\s*call rfi,", trace_section
+        ))
+        chain_sites = list(re.finditer(
+            r"(?m)^\s*call return_chain_ok,", trace_section
+        ))
+        if len(restore_sites) != 1 or len(chain_sites) != 1:
+            raise HarnessError(
+                "RFI bundle 0x{:x} has {} restore and {} chain sites; "
+                "expected one of each".format(
+                    bundle_ip, len(restore_sites), len(chain_sites)
+                )
+            )
+        if restore_sites[0].start() >= chain_sites[0].start():
+            raise HarnessError(
+                "RFI bundle 0x{:x} authorizes chaining before restoring "
+                "interruption state".format(bundle_ip)
+            )
+
+        lookup = re.search(
+            r"(?m)^\s*(?:goto_ptr|lookup_and_goto_ptr)\b",
+            trace_section[chain_sites[0].end():],
+        )
+        if lookup is None:
+            raise HarnessError(
+                "RFI bundle 0x{:x} lacks a dynamic exit after its shared "
+                "chain check".format(bundle_ip)
             )
 
 
@@ -5071,9 +5199,10 @@ def _require_overlay_dependency_trace(trace: str, dependency_free_ip: int,
 
 
 def _require_internal_stop_handoff_trace(trace: str, bundle_ip: int) -> None:
-    """Prove one callback emits a typed prefix then a fresh legacy suffix."""
-    helper = re.compile(r"(?m)^\s*call (?:exec_bundle|exec_slot),")
-    direct_scalar = re.compile(r"(?m)^\s*(?:add|mov|movi)_i64\b")
+    """Prove one callback closes a typed prefix then emits a typed suffix."""
+    generic_helper = re.compile(r"(?m)^\s*call (?:exec_bundle|exec_slot),")
+    direct_prefix = re.compile(r"(?m)^\s*(?:add|mov|movi)_i64\b")
+    typed_suffix = re.compile(r"(?m)^\s*call system_preflight,")
     sections = _tcg_op_sections(trace, bundle_ip)
 
     if len(sections) != 1:
@@ -5107,33 +5236,39 @@ def _require_internal_stop_handoff_trace(trace: str, bundle_ip: int) -> None:
             "got 0x{:x}".format(bundle_ip, visibility)
         )
 
-    direct = direct_scalar.search(section)
-    suffix_helper = helper.search(section)
+    direct = direct_prefix.search(section)
+    suffix = typed_suffix.search(section)
     if direct is None:
         raise HarnessError(
             "bundle 0x{:x} typed prefix lacks direct scalar TCG".format(
                 bundle_ip
             )
         )
-    if suffix_helper is None:
+    if suffix is None:
         raise HarnessError(
-            "bundle 0x{:x} fresh post-stop suffix lacks its intentional "
-            "legacy helper".format(bundle_ip)
+            "bundle 0x{:x} fresh post-stop MOV_CURRENT_IP suffix lacks its "
+            "typed system preflight".format(bundle_ip)
         )
-    if direct.start() >= suffix_helper.start():
+    if direct.start() >= suffix.start():
         raise HarnessError(
-            "bundle 0x{:x} legacy suffix helper appears before the direct "
-            "typed prefix".format(bundle_ip)
+            "bundle 0x{:x} typed suffix appears before the direct prefix"
+            .format(bundle_ip)
+        )
+    if generic_helper.search(section) is not None:
+        raise HarnessError(
+            "bundle 0x{:x} unexpectedly used a generic bundle helper"
+            .format(bundle_ip)
         )
 
 
-def _require_ordinary_legacy_restart_trace(trace: str, bundle_ip: int,
-                                           start_slot: int) -> None:
-    """Require the normal full-bundle helper to inherit the TB-entry RI."""
+def _require_typed_application_move_restart_trace(
+        trace: str, bundle_ip: int, start_slot: int,
+        readback_ip: int) -> None:
+    """Require typed RI suffix ownership and focused AR.LC move seams."""
     sections = _tcg_op_sections(trace, bundle_ip)
     if len(sections) != 1:
         raise HarnessError(
-            "legacy restart bundle 0x{:x} expected one translation, got {}"
+            "typed restart bundle 0x{:x} expected one translation, got {}"
             .format(bundle_ip, len(sections))
         )
 
@@ -5145,7 +5280,7 @@ def _require_ordinary_legacy_restart_trace(trace: str, bundle_ip: int,
     )
     if marker is None:
         raise HarnessError(
-            "legacy restart bundle 0x{:x} lacks RI/visibility data".format(
+            "typed restart bundle 0x{:x} lacks RI/visibility data".format(
                 bundle_ip
             )
         )
@@ -5153,24 +5288,49 @@ def _require_ordinary_legacy_restart_trace(trace: str, bundle_ip: int,
     visibility = int(marker.group(2), 16)
     if ri != start_slot:
         raise HarnessError(
-            "legacy restart bundle 0x{:x} expected RI={}, got RI={}"
+            "typed restart bundle 0x{:x} expected RI={}, got RI={}"
             .format(bundle_ip, start_slot, ri)
         )
-    if visibility != 1:
+    if not (visibility & 2):
         raise HarnessError(
-            "legacy restart bundle 0x{:x} expected fresh-group visibility "
-            "0x1, got 0x{:x}".format(bundle_ip, visibility)
+            "typed restart bundle 0x{:x} lacks typed-owner visibility: "
+            "0x{:x}".format(bundle_ip, visibility)
         )
-    if not re.search(r"(?m)^\s*call exec_bundle,", section):
+
+    _require_typed_direct_trace(trace, bundle_ip)
+    _require_typed_direct_trace(trace, readback_ip)
+
+    writer_helpers = (
+        "application_register_write_legality",
+        "application_register_write",
+    )
+    for helper in writer_helpers:
+        if not re.search(
+                r"(?m)^\s*call {},[^\n]*env,\$0x41(?:,|\s*$)".format(
+                    helper
+                ), section):
+            raise HarnessError(
+                "typed restart bundle 0x{:x} lacks its AR.LC {} seam"
+                .format(bundle_ip, helper)
+            )
+
+    readback_sections = _tcg_op_sections(trace, readback_ip)
+    if len(readback_sections) != 1:
         raise HarnessError(
-            "legacy restart bundle 0x{:x} did not use the ordinary "
-            "full-bundle helper".format(bundle_ip)
+            "typed AR.LC readback bundle 0x{:x} expected one translation, "
+            "got {}".format(readback_ip, len(readback_sections))
         )
-    if re.search(r"(?m)^\s*call exec_slot,", section):
-        raise HarnessError(
-            "legacy restart bundle 0x{:x} unexpectedly used a slot helper"
-            .format(bundle_ip)
-        )
+    readback = readback_sections[0]
+    for helper in ("application_register_preflight",
+                   "application_register_read"):
+        if not re.search(
+                r"(?m)^\s*call {},[^\n]*env,\$0x41(?:,|\s*$)".format(
+                    helper
+                ), readback):
+            raise HarnessError(
+                "typed readback bundle 0x{:x} lacks its AR.LC {} seam"
+                .format(readback_ip, helper)
+            )
 
 
 def _require_automatic_segmentation_trace(
@@ -5209,7 +5369,7 @@ def _require_automatic_segmentation_trace(
         )
 
 
-def run_program(qemu: Path, program: Program, rewrite: bool,
+def run_program(qemu: Path, program: Program,
                 preserve_fault_slot: bool = False,
                 typed_fault_trace_ip: Optional[int] = None,
                 typed_nat_fault_trace_ip: Optional[int] = None,
@@ -5231,6 +5391,7 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
                     Tuple[int, Optional[int], bool, int]
                 ] = (),
                 typed_return_traces: Sequence[Tuple[int, int]] = (),
+                typed_rfi_traces: Sequence[int] = (),
                 typed_pfs_move_traces: Sequence[
                     Tuple[int, bool, bool, bool, bool]
                 ] = (),
@@ -5242,8 +5403,10 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
     )
     arguments = [
         str(qemu),
+        "-L",
+        str(FIRMWARE_DIR),
         "-machine",
-        "vibtanium,efi-boot-manager=off",
+        "vibtanium",
         "-m",
         "128M",
         "-smp",
@@ -5276,6 +5439,7 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
             typed_loop_traces or
             typed_call_traces or
             typed_return_traces or
+            typed_rfi_traces or
             typed_pfs_move_traces or
             typed_visibility_states or internal_stop_handoffs or
             automatic_segment_trace_ips or
@@ -5305,9 +5469,7 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_child_environment(
-                rewrite, preserve_fault_slot, state_cache=state_cache
-            ),
+            env=_child_environment(state_cache=state_cache),
             creationflags=creationflags,
         )
         monitor = _connect_monitor(process, port)
@@ -5387,6 +5549,8 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
                 _require_typed_return_trace(
                     trace, bundle_ip, predicate_splits
                 )
+            for bundle_ip in typed_rfi_traces:
+                _require_typed_rfi_trace(trace, bundle_ip)
             for (bundle_ip, require_read, require_write,
                  require_overlay_select, require_nat_fault_path) in \
                     typed_pfs_move_traces:
@@ -5423,7 +5587,6 @@ def run_program(qemu: Path, program: Program, rewrite: bool,
 
 
 def run_ri_restart(qemu: Path, program: Program, start_slot: int, *,
-                   rewrite: bool,
                    register_writes: Sequence[Tuple[int, int]] = ()) \
         -> Tuple[Snapshot, str]:
     """Enter a TB at a nonzero architectural RI without a breakpoint."""
@@ -5433,15 +5596,15 @@ def run_ri_restart(qemu: Path, program: Program, start_slot: int, *,
     monitor_port = _free_tcp_port()
     gdb_port = _free_tcp_port()
     trace_directory = tempfile.TemporaryDirectory(
-        prefix="ia64-{}-ri-restart-".format(
-            "typed" if rewrite else "legacy"
-        )
+        prefix="ia64-typed-ri-restart-"
     )
     trace_path = Path(trace_directory.name) / "tcg-op.log"
     arguments = [
         str(qemu),
+        "-L",
+        str(FIRMWARE_DIR),
         "-machine",
-        "vibtanium,efi-boot-manager=off",
+        "vibtanium",
         "-m",
         "128M",
         "-smp",
@@ -5487,7 +5650,7 @@ def run_ri_restart(qemu: Path, program: Program, start_slot: int, *,
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_child_environment(rewrite),
+            env=_child_environment(),
             creationflags=creationflags,
         )
         monitor = _connect_monitor(process, monitor_port)
@@ -5586,8 +5749,8 @@ def run_ri_restart(qemu: Path, program: Program, start_slot: int, *,
 
 
 def run_savevm_migration(qemu: Path, program: Program,
-                         checkpoint_ip: int,
-                         preserve_fault_slot: bool = False) -> MigrationResult:
+                          checkpoint_ip: int,
+                          preserve_fault_slot: bool = False) -> MigrationResult:
     qemu_img_name = "qemu-img.exe" if qemu.suffix.lower() == ".exe" else "qemu-img"
     qemu_img = qemu.with_name(qemu_img_name)
     if not qemu_img.is_file():
@@ -5642,8 +5805,10 @@ def run_savevm_migration(qemu: Path, program: Program,
 
             common_arguments = [
                 str(qemu),
+                "-L",
+                str(FIRMWARE_DIR),
                 "-machine",
-                "vibtanium,efi-boot-manager=off",
+                "vibtanium",
                 "-m",
                 "128M",
                 "-smp",
@@ -5683,7 +5848,7 @@ def run_savevm_migration(qemu: Path, program: Program,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=_child_environment(True),
+                env=_child_environment(),
                 creationflags=creationflags,
             )
             source_monitor = _connect_monitor(
@@ -5760,9 +5925,7 @@ def run_savevm_migration(qemu: Path, program: Program,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                # The restored typed owner, not this fresh-process debug knob,
-                # must select the continuation lowering.
-                env=_child_environment(False, preserve_fault_slot),
+                env=_child_environment(),
                 creationflags=creationflags,
             )
             destination_monitor = _connect_monitor(
@@ -5884,11 +6047,9 @@ def successful_snapshot_differences(left: Snapshot,
                                     right: Snapshot) -> List[str]:
     """Compare architectural success state, excluding fault scratch state.
 
-    ``current_slot_*`` is published for precise interruption collection.  The
-    legacy whole-slot helper also happens to leave its last successful branch
-    there, while direct TCG correctly avoids those five stores on a successful
-    instruction.  Fault tests assert the fields explicitly and continue to use
-    the unfiltered comparison where appropriate.
+    ``current_slot_*`` is diagnostic state for precise interruption collection,
+    not an architectural success result.  Fault tests assert those fields
+    explicitly and continue to use the unfiltered comparison where appropriate.
     """
     cleared = dict(
         slot_valid=False,
@@ -5910,30 +6071,24 @@ def _require(condition: bool, message: str) -> None:
 
 def test_core_equality(qemu: Path) -> str:
     program = core_program()
-    rewritten = run_program(qemu, program, rewrite=True,
-                            typed_direct_trace_ips=(0x10,))
-    legacy = run_program(qemu, program, rewrite=False)
-    differences = successful_snapshot_differences(rewritten, legacy)
-    if differences:
-        raise HarnessError(
-            "rewrite and interpreter-oracle states differ:\n  "
-            + "\n  ".join(differences)
-        )
+    snapshot = run_program(
+        qemu, program, typed_direct_trace_ips=(0x10,)
+    )
 
-    _require(rewritten.ip == 0x20, "core program did not stop at 0x20")
-    _require(rewritten.gr[0] == 0, "r0 lost its immutable-zero value")
-    _require(rewritten.gr[1] == 42, "ADDS result r1 is not 42")
-    _require(rewritten.gr[2] == 7, "ADDS result r2 is not 7")
-    _require(rewritten.psr == 0, "core program unexpectedly changed PSR")
-    _require(rewritten.pr == 1, "core program unexpectedly changed PR")
-    _require(rewritten.cfm == 0, "core program unexpectedly changed CFM")
+    _require(snapshot.ip == 0x20, "core program did not stop at 0x20")
+    _require(snapshot.gr[0] == 0, "r0 lost its immutable-zero value")
+    _require(snapshot.gr[1] == 42, "ADDS result r1 is not 42")
+    _require(snapshot.gr[2] == 7, "ADDS result r2 is not 7")
+    _require(snapshot.psr == 0, "core program unexpectedly changed PSR")
+    _require(snapshot.pr == 1, "core program unexpectedly changed PR")
+    _require(snapshot.cfm == 0, "core program unexpectedly changed CFM")
     _require(
-        rewritten.nat_high == 0 and rewritten.nat_low == 0,
+        snapshot.nat_high == 0 and snapshot.nat_low == 0,
         "core program unexpectedly set a NaT bit",
     )
 
     overlay = run_program(
-        qemu, ordinary_source_overlay_program(), rewrite=True,
+        qemu, ordinary_source_overlay_program(),
         typed_direct_trace_ips=(0x20, 0x30, 0x50, 0x60),
     )
     _require(overlay.gr[1] == 2,
@@ -5948,7 +6103,7 @@ def test_core_equality(qemu: Path) -> str:
              "predicate overlay invariant left the wrong live PR image")
 
     stacked = run_program(
-        qemu, stacked_gr_pair_program(), rewrite=True,
+        qemu, stacked_gr_pair_program(),
         typed_direct_trace_ips=(0x20, 0x30, 0x40, 0x50),
     )
     _require(stacked.cfm == 0x206,
@@ -5963,24 +6118,15 @@ def test_core_equality(qemu: Path) -> str:
              "false-predicated stacked destination was modified")
     _require(stacked.nat_high == 0 and stacked.nat_low == 0,
              "stacked value/NaT pair introduced an unexpected NaT")
-    return ("rewrite equals the core oracle; direct TCG traces and the internal "
-            "ordinary-source overlay invariant cover repeated GR writers, PR "
-            "qualifiers, stop visibility, and one-slot stacked value/NaT "
-            "mapping reused by duplicate sources and retirement")
+    return ("literal core goldens, direct TCG traces, and the ordinary-source "
+            "overlay invariant cover repeated GR writers, PR qualifiers, stop "
+            "visibility, and one-slot stacked value/NaT mapping reused by "
+            "duplicate sources and retirement")
 
 
 def test_scalar_integer_expansion(qemu: Path) -> str:
     shift_program = scalar_shift_bitfield_program()
-    shift_rewrite = run_program(qemu, shift_program, rewrite=True)
-    shift_legacy = run_program(qemu, shift_program, rewrite=False)
-    differences = successful_snapshot_differences(
-        shift_rewrite, shift_legacy
-    )
-    if differences:
-        raise HarnessError(
-            "shift/bitfield rewrite differs from interpreter oracle:\n  "
-            + "\n  ".join(differences)
-        )
+    shift = run_program(qemu, shift_program)
 
     mask64 = (1 << 64) - 1
     shift_expected = {
@@ -6006,23 +6152,14 @@ def test_scalar_integer_expansion(qemu: Path) -> str:
     }
     for reg, expected in shift_expected.items():
         _require(
-            shift_rewrite.gr[reg] == expected,
+            shift.gr[reg] == expected,
             "shift/bitfield r{} expected 0x{:x}, got 0x{:x}".format(
-                reg, expected, shift_rewrite.gr[reg]
+                reg, expected, shift.gr[reg]
             ),
         )
 
     multiply_program = scalar_multiply_extension_program()
-    multiply_rewrite = run_program(qemu, multiply_program, rewrite=True)
-    multiply_legacy = run_program(qemu, multiply_program, rewrite=False)
-    differences = successful_snapshot_differences(
-        multiply_rewrite, multiply_legacy
-    )
-    if differences:
-        raise HarnessError(
-            "multiply/extension rewrite differs from interpreter oracle:\n  "
-            + "\n  ".join(differences)
-        )
+    multiply = run_program(qemu, multiply_program)
 
     multiply_expected = {
         8: 0x0000000300000000,
@@ -6040,39 +6177,31 @@ def test_scalar_integer_expansion(qemu: Path) -> str:
     }
     for reg, expected in multiply_expected.items():
         _require(
-            multiply_rewrite.gr[reg] == expected,
+            multiply.gr[reg] == expected,
             "multiply/extension r{} expected 0x{:x}, got 0x{:x}".format(
-                reg, expected, multiply_rewrite.gr[reg]
+                reg, expected, multiply.gr[reg]
             ),
         )
-    _require(multiply_rewrite.nat_low == 0 and
-             multiply_rewrite.nat_high == 0,
+    _require(multiply.nat_low == 0 and multiply.nat_high == 0,
              "scalar expansion unexpectedly produced NaT state")
-    return ("two scalar families match the interpreter and independent "
-            "goldens, including large counts, aliases, and false predicates")
+    return ("two scalar families match independent literal goldens, including "
+            "large counts, aliases, and false predicates")
 
 
 def test_predicate_transaction(qemu: Path) -> str:
     program = predicate_compare_program()
-    rewritten = run_program(qemu, program, rewrite=True)
-    legacy = run_program(qemu, program, rewrite=False)
-    differences = successful_snapshot_differences(rewritten, legacy)
-    if differences:
-        raise HarnessError(
-            "A6 compare rewrite differs from interpreter oracle:\n  "
-            + "\n  ".join(differences)
-        )
+    snapshot = run_program(qemu, program)
 
     expected_pr = (
         (1 << 0) | (1 << 1) | (1 << 4) | (1 << 5) |
         (1 << 7) | (1 << 10) | (1 << 11)
     )
-    _require(rewritten.ip == program.terminal_ip,
+    _require(snapshot.ip == program.terminal_ip,
              "predicate program did not reach its terminal bundle")
     _require(
-        rewritten.pr == expected_pr,
+        snapshot.pr == expected_pr,
         "predicate golden expected PR=0x{:x}, got 0x{:x}".format(
-            expected_pr, rewritten.pr
+            expected_pr, snapshot.pr
         ),
     )
     expected_gr = {
@@ -6087,12 +6216,12 @@ def test_predicate_transaction(qemu: Path) -> str:
     }
     for reg, expected in expected_gr.items():
         _require(
-            rewritten.gr[reg] == expected,
+            snapshot.gr[reg] == expected,
             "predicate consumer r{} expected {}, got {}".format(
-                reg, expected, rewritten.gr[reg]
+                reg, expected, snapshot.gr[reg]
             ),
         )
-    _require(rewritten.nat_low == 0 and rewritten.nat_high == 0,
+    _require(snapshot.nat_low == 0 and snapshot.nat_high == 0,
              "A6 compare golden unexpectedly changed NaT state")
     return ("A6 64-bit/cmp4 comparisons and false-qp .unc match the "
             "architectural golden across multi-slot PR transactions")
@@ -6103,7 +6232,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     normal = run_program(
         qemu,
         normal_program,
-        rewrite=True,
+
         typed_direct_trace_ips=normal_compare_ips,
         one_bundle_per_tb=True,
     )
@@ -6143,7 +6272,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     snapshot = run_program(
         qemu,
         program,
-        rewrite=True,
+
         typed_direct_trace_ips=compare_ips,
         one_bundle_per_tb=True,
     )
@@ -6210,7 +6339,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     rotating = run_program(
         qemu,
         rotating_parallel_compare_program(),
-        rewrite=True,
+
         typed_direct_trace_ips=(0x40,),
         one_bundle_per_tb=True,
     )
@@ -6230,7 +6359,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     fault = run_program(
         qemu,
         merge_equal_target_fault_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -6252,7 +6381,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     nullified = run_program(
         qemu,
         merge_equal_target_predicated_off_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -6268,7 +6397,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     a7_fault = run_program(
         qemu,
         a7_equal_target_fault_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -6289,7 +6418,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     a8_fault = run_program(
         qemu,
         a8_cmp4_equal_target_fault_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -6309,7 +6438,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
     a8_nullified = run_program(
         qemu,
         a8_cmp4_equal_target_predicated_off_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -6326,7 +6455,7 @@ def test_integer_compare_conformance(qemu: Path) -> str:
         "normal NaT assignment, all parallel update classes, M/I, cmp/cmp4, "
         "p0, rotating p16/p17 at rrb_pr=47, same-group WAW and qp alias, "
         "plus qualified A6/A7/A8 and nullified equal-target legality; every "
-        "tested compare trace rejects legacy execution helpers"
+        "tested compare trace rejects generic execution helpers"
     )
 
 
@@ -6416,7 +6545,7 @@ def test_predicate_register_moves(qemu: Path) -> str:
     snapshot = run_program(
         qemu,
         program,
-        rewrite=True,
+
         typed_direct_trace_ips=(
             0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0,
         ),
@@ -6479,7 +6608,7 @@ def test_predicate_register_moves(qemu: Path) -> str:
         fault = run_program(
             qemu,
             fault_program,
-            rewrite=True,
+
             preserve_fault_slot=True,
             typed_nat_fault_trace_ip=0x80,
         )
@@ -6521,7 +6650,7 @@ def test_branch_register_moves(qemu: Path) -> str:
     snapshot = run_program(
         qemu,
         program,
-        rewrite=True,
+
         typed_direct_trace_ips=(
             0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0,
             0xf0, 0x100, 0x110, 0x120,
@@ -6573,7 +6702,7 @@ def test_branch_register_moves(qemu: Path) -> str:
     fault = run_program(
         qemu,
         fault_program,
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_nat_fault_trace_ip=0x90,
         typed_direct_trace_ips=(0x80,),
@@ -6617,7 +6746,7 @@ def test_pfs_register_moves(qemu: Path) -> str:
     snapshot = run_program(
         qemu,
         program,
-        rewrite=True,
+
         typed_pfs_move_traces=(
             (0x90, True, True, False, True),
             (0xa0, True, False, True, False),
@@ -6658,8 +6787,7 @@ def test_pfs_register_moves(qemu: Path) -> str:
                 reg, value, snapshot.gr[reg]
             ),
         )
-    _require(snapshot.gr[0] == 0,
-             "AR.PFS move with r0 destination changed architectural r0")
+    _require(snapshot.gr[0] == 0, "AR.PFS moves changed architectural r0")
     _require(
         snapshot.nat_low == (1 << 31) and snapshot.nat_high == 0,
         "AR.PFS reads must clear only qualified destination NaT(r30); got "
@@ -6674,7 +6802,7 @@ def test_pfs_register_moves(qemu: Path) -> str:
     fault = run_program(
         qemu,
         fault_program,
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_nat_fault_trace_ip=0x90,
         typed_pfs_move_traces=(
@@ -6767,14 +6895,14 @@ def test_pfs_register_moves(qemu: Path) -> str:
         for raw in (bundle.slot0, bundle.slot1, bundle.slot2)
     )
     _require(
-        encoding_count == 29,
-        "AR.PFS corpus drifted from 29 exact encodings to {}".format(
+        encoding_count == 26,
+        "AR.PFS corpus drifted from 26 exact encodings to {}".format(
             encoding_count
         ),
     )
     return (
-        "29 exact legal I26/I28 AR.PFS encodings across three forced-TB "
-        "programs cover p0/true/false qualification, r0, first-write and "
+        "26 exact legal I26/I28 AR.PFS encodings across three forced-TB "
+        "programs cover p0/true/false qualification, r0 source, first-write and "
         "last-live WAW ordering, stopped/no-stop ordinary visibility, NaT "
         "nullification and precise prefix faulting, plus a real two-QEMU "
         "save/load of saved/live PFS and branch-forward provenance"
@@ -6785,6 +6913,7 @@ def _require_illegal_operation(snapshot: Snapshot, *, fault_ip: int,
                                fault_slot: int, fault_raw: int,
                                collection_enabled: bool,
                                expected_iipa: Optional[int],
+                               expected_slot_type: int = IA64_SLOT_TYPE_I,
                                expected_ni: Optional[bool] = None) -> None:
     if expected_ni is None:
         expected_ni = not collection_enabled
@@ -6835,10 +6964,11 @@ def _require_illegal_operation(snapshot: Snapshot, *, fault_ip: int,
         ),
     )
     _require(
-        snapshot.slot_type == IA64_SLOT_TYPE_I and
+        snapshot.slot_type == expected_slot_type and
         snapshot.slot_raw == (fault_raw & SLOT_MASK),
-        "fault slot type/raw expected I/0x{:x}, got {}/0x{:x}".format(
-            fault_raw & SLOT_MASK, snapshot.slot_type, snapshot.slot_raw
+        "fault slot type/raw expected {}/0x{:x}, got {}/0x{:x}".format(
+            expected_slot_type, fault_raw & SLOT_MASK,
+            snapshot.slot_type, snapshot.slot_raw
         ),
     )
 
@@ -6868,7 +6998,7 @@ def _require_illegal_operation(snapshot: Snapshot, *, fault_ip: int,
 
 def test_equal_target_precise_faults(qemu: Path) -> str:
     predicated_off = run_program(
-        qemu, equal_target_predicated_off_program(), rewrite=True,
+        qemu, equal_target_predicated_off_program(),
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x40,
     )
@@ -6882,7 +7012,7 @@ def test_equal_target_precise_faults(qemu: Path) -> str:
              "instruction after false-qp compare did not execute")
 
     prefix = run_program(
-        qemu, equal_target_prefix_fault_program(), rewrite=True,
+        qemu, equal_target_prefix_fault_program(),
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x50,
     )
@@ -6902,7 +7032,7 @@ def test_equal_target_precise_faults(qemu: Path) -> str:
              "instruction after the fault executed")
 
     unc = run_program(
-        qemu, equal_target_unc_nat_fault_program(), rewrite=True,
+        qemu, equal_target_unc_nat_fault_program(),
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x70,
     )
@@ -6924,7 +7054,7 @@ def test_equal_target_precise_faults(qemu: Path) -> str:
              "instruction after cmp.unc fault executed")
 
     old_true_alias = run_program(
-        qemu, equal_target_old_true_alias_program(), rewrite=True,
+        qemu, equal_target_old_true_alias_program(),
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x20,
     )
@@ -6944,7 +7074,7 @@ def test_equal_target_precise_faults(qemu: Path) -> str:
     return ("normal and .unc equal-target rules, exact EI/NI fault state, "
             "NaT priority, prefix commit, and old-true qp alias all match "
             "the architectural contract; deterministic TCG op traces reject "
-            "legacy execution-helper fallback for every tested bundle")
+            "generic execution-helper dispatch for every tested bundle")
 
 
 def _require_data_tlb_outcome(snapshot: Snapshot, *, kind: str,
@@ -6998,7 +7128,7 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
         psr_ic_illegal_program(
             "IC=1 serialized by srlz.i", srlz_i()
         ),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -7017,7 +7147,7 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
         psr_ic_illegal_program(
             "IC=1 serialized by srlz.d", srlz_d()
         ),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -7034,7 +7164,7 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
     immediate = run_program(
         qemu,
         psr_ic_immediate_fault_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
     )
     immediate_expected_isr = (1 << IA64_ISR_EI_SHIFT) | IA64_ISR_R | IA64_ISR_NI
@@ -7069,7 +7199,7 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
         psr_ic_illegal_program(
             "sync.i retains an in-flight IC transition", sync_i()
         ),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x30,
     )
@@ -7089,7 +7219,7 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
             "IC=0 serialized Data Nested TLB", srlz_d(),
             IA64_DATA_NESTED_TLB_VECTOR,
         ),
-        rewrite=True,
+
     )
     _require_data_tlb_outcome(
         nested,
@@ -7105,7 +7235,7 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
             "IC=0 in-flight Alternate Data TLB", sync_i(),
             IA64_ALTERNATE_DATA_TLB_VECTOR,
         ),
-        rewrite=True,
+
     )
     _require_data_tlb_outcome(
         in_flight_miss,
@@ -7117,9 +7247,10 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
     rfi_snapshot = run_program(
         qemu,
         psr_ic_rfi_serialization_program(),
-        rewrite=True,
+
         preserve_fault_slot=True,
         typed_fault_trace_ip=0x50,
+        typed_rfi_traces=(0x5440,),
     )
     _require(
         rfi_snapshot.exception_pending and
@@ -7145,6 +7276,13 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
     )
     _require((rfi_snapshot.pr & (1 << 1)) == 0,
              "first-entry handler did not nullify the resumed first fault")
+    _require(
+        rfi_snapshot.gr[8] == 1,
+        "RFI did not restore IPSR.ri=1 exactly; pre-fault slot 0 replayed "
+        "{} times".format(rfi_snapshot.gr[8]),
+    )
+
+
     _require(not rfi_snapshot.psr_ic_inflight,
              "second interruption entry left PSR.ic transition in flight")
 
@@ -7204,36 +7342,316 @@ def test_psr_ic_inflight_policy(qemu: Path) -> str:
     )
 
 
-def _nat_nonquarantined_differences(rewritten: Snapshot,
-                                    legacy: Snapshot) -> List[str]:
-    rewritten_without_nat = dataclasses.replace(rewritten, nat_low=0)
-    legacy_without_nat = dataclasses.replace(legacy, nat_low=0)
-    return successful_snapshot_differences(
-        rewritten_without_nat, legacy_without_nat
+def timer_external_interrupt_rfi_program() -> Program:
+    """Arm CR.ITM in guest code and return from the real CPU interrupt hook."""
+    return Program(
+        name="timer HARD to cpu_exec_interrupt to typed RFI",
+        bundles=(
+            # Capture the clock-backed ITC while constructing an unmasked,
+            # architecturally valid local timer vector and a deadline delta.
+            # A one-tick deadline can already be stale by the CR.ITM write;
+            # use 2^24 ticks so this tests a genuinely armed future equality.
+            Bundle(0x10, 0x01, mov_m_argr(10, IA64_AR_ITC),
+                   adds(12, 0x40, 0), adds(13, 1, 0)),
+            Bundle(0x20, 0x01, nop_m(), shl_imm(13, 13, 24), nop_i()),
+            Bundle(0x30, 0x01, nop_m(), add(11, 10, 13), nop_i()),
+            Bundle(0x40, 0x01, mov_grcr(IA64_CR_ITV, 12),
+                   nop_i(), nop_i()),
+            Bundle(0x50, 0x01, mov_grcr(IA64_CR_ITM, 11),
+                   nop_i(), nop_i()),
+            # The timer callback may only kick HARD; the vCPU interrupt hook
+            # must latch IRR and deliver the external vector once it expires.
+            Bundle(0x60, 0x01, ssm(IA64_PSR_IC | IA64_PSR_I),
+                   nop_i(), nop_i()),
+            # Poll the handler marker.  Whichever loop bundle was interrupted
+            # is resumed by RFI before p1 can select the terminal spin.
+            Bundle(0x70, 0x01, nop_m(),
+                   cmp_rr(1, 2, 0, 20, "lt"), nop_i()),
+            Bundle(0x80, 0x11, nop_m(), nop_i(),
+                   br_cond(0x80, 0xa0, qp=1)),
+            Bundle(0x90, 0x11, nop_m(), nop_i(), br_cond(0x90, 0x70)),
+            spin_bundle(0xa0),
+            # External-interrupt vector.  Reading IVR consumes the pending
+            # vector and proves the architectural IRR/IVR path ran; r20 is the
+            # independently visible handler marker.
+            Bundle(0x3000, 0x01, mov_crgr(15, IA64_CR_IVR),
+                   adds(20, 1, 0), nop_i()),
+            Bundle(0x3010, 0x11, nop_m(), nop_i(), rfi()),
+        ),
+        terminal_ip=0xa0,
+    )
+
+
+def nested_self_ipi_program() -> Program:
+    """Nest a higher-priority self-IPI behind an in-service base vector."""
+    return Program(
+        name="per-vector Local-SAPIC nested self-IPI and ordered EOI",
+        bundles=(
+            # Load the Processor Interrupt Block address, queue vector 0x40
+            # while PSR.i=0, then enable collection and delivery in distinct
+            # serialized steps.  r24 is set only after both handlers unwind.
+            Bundle(0x10, 0x01, nop_m(), adds(3, 0x1000, 0),
+                   adds(4, 0x40, 0)),
+            Bundle(0x20, 0x01, ld8(2, 3), adds(5, 0x80, 0), nop_i()),
+            Bundle(0x30, 0x01, st8(4, 2), nop_i(), nop_i()),
+            Bundle(0x40, 0x01, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+            Bundle(0x50, 0x01, srlz_d(), nop_i(), nop_i()),
+            Bundle(0x60, 0x01, ssm(IA64_PSR_I), nop_i(), nop_i()),
+            Bundle(0x70, 0x01, nop_m(),
+                   cmp_rr(1, 2, 0, 24, "lt"), nop_i()),
+            Bundle(0x80, 0x11, nop_m(), nop_i(),
+                   br_cond(0x80, 0xa0, qp=1)),
+            Bundle(0x90, 0x11, nop_m(), nop_i(), br_cond(0x90, 0x70)),
+            spin_bundle(0xa0),
+
+            # Both deliveries enter the same external-interrupt vector.  The
+            # IVR read atomically moves the selected vector from IRR to ISR;
+            # dispatch in a later group so it observes the new r15 value.
+            Bundle(0x3000, 0x01, mov_crgr(15, IA64_CR_IVR),
+                   nop_i(), nop_i()),
+            Bundle(0x3010, 0x01, nop_m(),
+                   cmp_rr(1, 2, 5, 15, "eq"), nop_i()),
+            Bundle(0x3020, 0x11, nop_m(), nop_i(),
+                   br_cond(0x3020, 0x3180, qp=1)),
+
+            # Outer vector 0x40: preserve its interruption resources before
+            # allowing the nested vector to overwrite CR.IIP/IPSR/IFS.  The
+            # higher vector is queued with I=0, then IC is serialized before
+            # I is enabled.  A single-latch model hangs in the marker loop.
+            Bundle(0x3030, 0x01, nop_m(), adds(22, 0, 15),
+                   adds(20, 1, 20)),
+            Bundle(0x3040, 0x01, mov_crgr(8, IA64_CR_IIP),
+                   nop_i(), nop_i()),
+            Bundle(0x3050, 0x01, mov_crgr(9, IA64_CR_IPSR),
+                   nop_i(), nop_i()),
+            Bundle(0x3060, 0x01, mov_crgr(10, IA64_CR_IFS),
+                   nop_i(), nop_i()),
+            Bundle(0x3070, 0x01, st8(5, 2), nop_i(), nop_i()),
+            Bundle(0x3080, 0x01, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+            Bundle(0x3090, 0x01, srlz_d(), nop_i(), nop_i()),
+            Bundle(0x30a0, 0x01, ssm(IA64_PSR_I), nop_i(), nop_i()),
+            Bundle(0x30b0, 0x01, nop_m(),
+                   cmp_rr(1, 2, 0, 21, "lt"), nop_i()),
+            Bundle(0x30c0, 0x11, nop_m(), nop_i(),
+                   br_cond(0x30c0, 0x30e0, qp=1)),
+            Bundle(0x30d0, 0x11, nop_m(), nop_i(),
+                   br_cond(0x30d0, 0x30b0)),
+
+            # CR interruption resources cannot be accessed with PSR.ic=1.
+            # Disable I and IC together, serialize, restore the outer image,
+            # and EOI.  EOI must now remove vector 0x40, since the nested path
+            # removed only the highest in-service vector 0x80.
+            Bundle(0x30e0, 0x01, rsm(IA64_PSR_IC | IA64_PSR_I),
+                   nop_i(), nop_i()),
+            Bundle(0x30f0, 0x01, srlz_d(), nop_i(), nop_i()),
+            Bundle(0x3100, 0x01, mov_grcr(IA64_CR_IIP, 8),
+                   nop_i(), nop_i()),
+            Bundle(0x3110, 0x01, mov_grcr(IA64_CR_IPSR, 9),
+                   nop_i(), nop_i()),
+            Bundle(0x3120, 0x01, mov_grcr(IA64_CR_IFS, 10),
+                   nop_i(), nop_i()),
+            Bundle(0x3130, 0x01, mov_grcr(IA64_CR_EOI, 0),
+                   adds(24, 1, 0), nop_i()),
+            Bundle(0x3140, 0x11, nop_m(), nop_i(), rfi()),
+
+            # Nested vector 0x80: record exact IVR selection, EOI only the
+            # highest in-service vector, and return to the outer handler.
+            Bundle(0x3180, 0x01, nop_m(), adds(23, 0, 15),
+                   adds(21, 1, 21)),
+            Bundle(0x3190, 0x01, mov_grcr(IA64_CR_EOI, 0),
+                   nop_i(), nop_i()),
+            Bundle(0x31a0, 0x11, nop_m(), nop_i(), rfi()),
+        ),
+        terminal_ip=0xa0,
+        data=(DataWord(0x1000, 0xfee00000, 8),),
+    )
+
+
+def privileged_rfi_program() -> Program:
+    """Execute RFI at CPL3 with a visible successful same-group prefix."""
+    return Program(
+        name="typed RFI current-CPL privileged-operation fault",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(9, 0x1000, 0),
+                   adds(8, 0x1008, 0)),
+            Bundle(0x20, 0x01, ld8(10, 9), nop_i(), nop_i()),
+            Bundle(0x30, 0x01, ld8(11, 8), nop_i(), nop_i()),
+            Bundle(0x40, 0x01, nop_m(), adds(12, 0xa0, 0),
+                   adds(13, 0x200, 0)),
+            Bundle(0x50, 0x01, nop_m(), mov_gr_to_pfs(10),
+                   mov_grbr(6, 12)),
+            # Poison the saved RFI target.  A premature restore reaches 0x200
+            # instead of the General Exception vector.
+            Bundle(0x60, 0x01, mov_grcr(IA64_CR_IIP, 13),
+                   nop_i(), nop_i()),
+            Bundle(0x70, 0x01, mov_gr_to_psr_l(11), nop_i(), nop_i()),
+            Bundle(0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+            Bundle(0x90, 0x11, nop_m(), nop_i(), br_ret(6)),
+            # Slot 1 is the successful prefix.  Slot 2 must fault before RFI
+            # retirement, CR restoration, target commit, or mandatory fills.
+            Bundle(0xa0, 0x11, nop_m(), adds(20, 1, 20), rfi()),
+            spin_bundle(0x200),
+            _illegal_vector_spin(),
+        ),
+        terminal_ip=IA64_GENERAL_EXCEPTION_VECTOR,
+        data=(
+            DataWord(0x1000, 3 << 62, 8),
+            DataWord(0x1008, IA64_PSR_IC, 8),
+        ),
+    )
+
+
+def test_timer_external_interrupt_rfi(qemu: Path) -> str:
+    snapshot = run_program(
+        qemu,
+        timer_external_interrupt_rfi_program(),
+
+        typed_rfi_traces=(0x3010,),
+        one_bundle_per_tb=True,
+    )
+    _require(
+        snapshot.ip == 0xa0 and snapshot.gr[20] == 1 and
+        snapshot.gr[15] == 0x40,
+        "guest timer handler did not consume vector 0x40 and return: "
+        "IP=0x{:x} marker={} IVR=0x{:x}".format(
+            snapshot.ip, snapshot.gr[20], snapshot.gr[15]
+        ),
+    )
+    _require(
+        snapshot.exception_pending and
+        snapshot.exception_kind == "external-interrupt" and
+        snapshot.exception_vector == 0x3000 and
+        snapshot.exception_source in (0x60, 0x70, 0x80, 0x90),
+        "HARD did not traverse cpu_exec_interrupt and architectural external "
+        "delivery: kind={!r} vector=0x{:x} source=0x{:x}".format(
+            snapshot.exception_kind, snapshot.exception_vector,
+            snapshot.exception_source,
+        ),
+    )
+    _require(
+        (snapshot.cr_ipsr & (IA64_PSR_IC | IA64_PSR_I)) ==
+        (IA64_PSR_IC | IA64_PSR_I) and
+        (snapshot.cr_isr & (IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR)) == 0,
+        "external delivery/RFI did not preserve enabled IPSR or produced "
+        "memory/RSE ISR bits: IPSR=0x{:x} ISR=0x{:x}".format(
+            snapshot.cr_ipsr, snapshot.cr_isr
+        ),
+    )
+
+    privileged = run_program(
+        qemu,
+        privileged_rfi_program(),
+
+        preserve_fault_slot=True,
+        typed_rfi_traces=(0xa0,),
+        one_bundle_per_tb=True,
+    )
+    expected_isr = (2 << IA64_ISR_EI_SHIFT) | 0x10
+    _require(
+        privileged.ip == IA64_GENERAL_EXCEPTION_VECTOR and
+        privileged.exception_pending and
+        privileged.exception_kind == "general-exception" and
+        privileged.exception_vector == IA64_GENERAL_EXCEPTION_VECTOR and
+        privileged.exception_source == 0xa0 and
+        privileged.exception_address == 0xa0,
+        "CPL3 RFI did not deliver its General Exception at the issuing "
+        "bundle: IP=0x{:x} kind={!r} vector/source/address="
+        "0x{:x}/0x{:x}/0x{:x}".format(
+            privileged.ip, privileged.exception_kind,
+            privileged.exception_vector, privileged.exception_source,
+            privileged.exception_address,
+        ),
+    )
+    _require(
+        privileged.cr_isr == expected_isr and
+        privileged.cr_iip == 0xa0 and privileged.cr_iipa == 0xa0 and
+        ((privileged.cr_ipsr >> 32) & 3) == 3 and
+        ((privileged.cr_ipsr >> IA64_PSR_RI_SHIFT) & 3) == 2 and
+        (privileged.cr_ipsr & IA64_PSR_IC) != 0,
+        "CPL3 RFI expected ISR.code=0x10/EI2 and pre-restore CPL3/RI2: "
+        "ISR=0x{:x} IIP/IIPA=0x{:x}/0x{:x} IPSR=0x{:x}".format(
+            privileged.cr_isr, privileged.cr_iip, privileged.cr_iipa,
+            privileged.cr_ipsr,
+        ),
+    )
+    _require(
+        privileged.slot_valid and privileged.slot_ip == 0xa0 and
+        privileged.slot_ri == 2 and privileged.slot_raw == rfi() and
+        privileged.gr[20] == 1,
+        "CPL3 RFI did not preserve the exact slot while retiring only its "
+        "successful prefix: slot={}/0x{:x}/{} raw=0x{:x} r20={}".format(
+            privileged.slot_valid, privileged.slot_ip, privileged.slot_ri,
+            privileged.slot_raw, privileged.gr[20],
+        ),
+    )
+    return (
+        "guest CR.ITM expiry raises HARD, the vCPU cpu_exec_interrupt hook "
+        "latches and delivers vector 0x40, the handler consumes IVR, and one "
+        "typed RFI resumes the interrupted loop; a separate CPL3 RFI retires "
+        "only its same-group prefix and delivers exact General Exception "
+        "ISR.code=0x10 at RI2 before restoring poisoned CR state"
+    )
+
+
+def test_nested_self_ipi(qemu: Path) -> str:
+    snapshot = run_program(
+        qemu,
+        nested_self_ipi_program(),
+
+        typed_rfi_traces=(0x3140, 0x31a0),
+        one_bundle_per_tb=True,
+    )
+    _require(
+        snapshot.ip == 0xa0 and
+        snapshot.gr[20] == 1 and snapshot.gr[21] == 1 and
+        snapshot.gr[22] == 0x40 and snapshot.gr[23] == 0x80 and
+        snapshot.gr[24] == 1,
+        "nested self-IPI did not acquire/unwind each vector exactly once: "
+        "IP=0x{:x} outer={} nested={} IVRs=0x{:x}/0x{:x} done={}".format(
+            snapshot.ip, snapshot.gr[20], snapshot.gr[21],
+            snapshot.gr[22], snapshot.gr[23], snapshot.gr[24]
+        ),
+    )
+    _require(
+        snapshot.exception_pending and
+        snapshot.exception_kind == "external-interrupt" and
+        snapshot.exception_vector == 0x3000 and
+        snapshot.exception_source in (0x30a0, 0x30b0, 0x30c0, 0x30d0),
+        "higher self-IPI did not interrupt the enabled outer handler: "
+        "kind={!r} vector/source=0x{:x}/0x{:x}".format(
+            snapshot.exception_kind, snapshot.exception_vector,
+            snapshot.exception_source
+        ),
+    )
+    _require(
+        (snapshot.psr & (IA64_PSR_IC | IA64_PSR_I)) ==
+        (IA64_PSR_IC | IA64_PSR_I),
+        "nested/outer RFI did not restore enabled mainline PSR: "
+        "PSR=0x{:x}".format(snapshot.psr),
+    )
+    return (
+        "a guest self-IPI acquires vector 0x40, enables nesting, acquires "
+        "higher vector 0x80 concurrently in service, EOIs 0x80 then 0x40, "
+        "and executes two typed RFIs back to the interrupted mainline"
     )
 
 
 def test_nat_golden(qemu: Path) -> str:
     program = nat_program()
-    rewritten = run_program(qemu, program, rewrite=True)
-    legacy = run_program(qemu, program, rewrite=False)
+    snapshot = run_program(qemu, program)
     data_value = program.data[0].value
     mask64 = (1 << 64) - 1
     architectural_nat = (
         sum(1 << reg for reg in range(10, 19))
         | sum(1 << reg for reg in range(20, 25))
     )
-    # The legacy oracle propagates NaT through its multiply path but loses it
-    # through the other scalar families in this vector.
-    known_legacy_nat = (1 << 10) | (1 << 23)
-
-    _require(rewritten.ip == 0xb0, "NaT program did not stop at 0xb0")
-    _require(rewritten.gr[8] == 1, "NaT setup did not create the UNAT mask")
-    _require(rewritten.gr[9] == 0x1000, "NaT setup address is wrong")
-    _require(rewritten.gr[10] == data_value, "ld8.fill value is wrong")
-    _require(rewritten.gr[11] == data_value, "ADD value is wrong")
+    _require(snapshot.ip == 0xb0, "NaT program did not stop at 0xb0")
+    _require(snapshot.gr[8] == 1, "NaT setup did not create the UNAT mask")
+    _require(snapshot.gr[9] == 0x1000, "NaT setup address is wrong")
+    _require(snapshot.gr[10] == data_value, "ld8.fill value is wrong")
+    _require(snapshot.gr[11] == data_value, "ADD value is wrong")
     _require(
-        rewritten.gr[12] == (data_value + 1) & ((1 << 64) - 1),
+        snapshot.gr[12] == (data_value + 1) & ((1 << 64) - 1),
         "ADDS value is wrong",
     )
     addp4_minus_one = (
@@ -7260,29 +7678,22 @@ def test_nat_golden(qemu: Path) -> str:
     }
     for reg, expected in propagated_values.items():
         _require(
-            rewritten.gr[reg] == expected,
+            snapshot.gr[reg] == expected,
             "NaT payload r{} expected 0x{:x}, got 0x{:x}".format(
-                reg, expected, rewritten.gr[reg]
+                reg, expected, snapshot.gr[reg]
             ),
         )
-    _require(rewritten.unat == 1, "AR.UNAT setup was not preserved")
-    _require(rewritten.nat_high == 0, "NaT golden set an unexpected high bit")
+    _require(snapshot.unat == 1, "AR.UNAT setup was not preserved")
+    _require(snapshot.nat_high == 0, "NaT golden set an unexpected high bit")
     _require(
-        rewritten.nat_low == architectural_nat,
-        "rewrite failed the architectural NaT golden: expected 0x{:x}, got "
-        "0x{:x}".format(architectural_nat, rewritten.nat_low),
+        snapshot.nat_low == architectural_nat,
+        "typed execution failed the architectural NaT golden: expected "
+        "0x{:x}, got 0x{:x}".format(architectural_nat, snapshot.nat_low),
     )
-
-    other_differences = _nat_nonquarantined_differences(rewritten, legacy)
-    if other_differences:
-        raise HarnessError(
-            "legacy quarantine only permits the known NaT bitmap difference; "
-            "other state differs:\n  " + "\n  ".join(other_differences)
-        )
 
     overlay_program = ordinary_source_nat_overlay_program()
     overlay = run_program(
-        qemu, overlay_program, rewrite=True,
+        qemu, overlay_program,
         typed_direct_trace_ips=(0x40,),
     )
     _require(
@@ -7295,23 +7706,9 @@ def test_nat_golden(qemu: Path) -> str:
         "ordinary-source NaT overlay did not move the saved NaT to r11",
     )
 
-    if legacy.nat_low == known_legacy_nat:
-        return (
-            "rewrite matches architectural NaT propagation and the internal "
-            "saved GR+NaT overlay invariant; legacy oracle remains "
-            "quarantined at 0x{:x}".format(known_legacy_nat)
-        )
-    if legacy.nat_low == architectural_nat:
-        return (
-            "rewrite matches architectural NaT propagation and the internal "
-            "saved GR+NaT overlay invariant; legacy oracle has also been "
-            "corrected"
-        )
-    raise HarnessError(
-        "legacy NaT result is neither the quarantined value 0x{:x} nor the "
-        "architectural value 0x{:x}: got 0x{:x}".format(
-            known_legacy_nat, architectural_nat, legacy.nat_low
-        )
+    return (
+        "typed execution matches the architectural NaT propagation bitmap "
+        "and the saved ordinary-source GR+NaT overlay invariant"
     )
 
 
@@ -7324,7 +7721,7 @@ def test_typed_group_tb_continuation(qemu: Path) -> str:
         snapshot = run_program(
             qemu,
             program,
-            rewrite=True,
+
             typed_direct_trace_ips=group_ips,
             typed_visibility_states=tuple(
                 (bundle_ip, 3 if index == 0 else 2)
@@ -7365,7 +7762,7 @@ def test_typed_group_tb_continuation(qemu: Path) -> str:
     automatic = run_program(
         qemu,
         automatic_program,
-        rewrite=True,
+
         typed_direct_trace_ips=automatic_ips,
         typed_visibility_states=tuple(
             (bundle_ip, 3 if index == 0 else 2)
@@ -7401,9 +7798,9 @@ def test_page_crossing_overlay_continuation(qemu: Path) -> str:
     snapshot = run_program(
         qemu,
         program,
-        rewrite=True,
+
         # These are the two halves of the same issue group.  Naming both IPs
-        # makes the -d op oracle reject fallback independently on either side
+        # makes the -d op trace reject generic dispatch on either side
         # of the 0xff0/0x1000 translation-page boundary.
         typed_direct_trace_ips=(0xfa0, 0xff0, 0x1000),
         typed_visibility_states=((0xfa0, 3), (0xff0, 3), (0x1000, 2)),
@@ -7446,7 +7843,7 @@ def test_internal_stop_typed_handoff(qemu: Path) -> str:
     snapshot = run_program(
         qemu,
         program,
-        rewrite=True,
+
         typed_direct_trace_ips=(0xff0,),
         typed_visibility_states=((0xff0, 3),),
         internal_stop_handoffs=(0x1000,),
@@ -7465,14 +7862,14 @@ def test_internal_stop_typed_handoff(qemu: Path) -> str:
     _require(snapshot.gr[3] == 11,
              "typed prefix was lost or replayed from slot zero: expected "
              "r3=11, got 0x{:x}".format(snapshot.gr[3]))
-    _require(snapshot.gr[8] == 1 and snapshot.unat == 1,
-             "fresh RI=2 legacy mov.i suffix did not execute exactly once")
+    _require(snapshot.gr[8] == 0x1000,
+             "fresh RI=2 typed mov-IP suffix did not execute")
 
     nonempty_program = nonempty_overlay_internal_stop_handoff_program()
     nonempty = run_program(
         qemu,
         nonempty_program,
-        rewrite=True,
+
         typed_direct_trace_ips=(0xff0,),
         typed_visibility_states=((0xff0, 3),),
         internal_stop_handoffs=(0x1000,),
@@ -7491,20 +7888,20 @@ def test_internal_stop_typed_handoff(qemu: Path) -> str:
     )
     _require(
         nonempty.nat_high == 0 and nonempty.nat_low == (1 << 11),
-        "saved GR+NaT overlay did not retire precisely before legacy entry: "
+        "saved GR+NaT overlay did not retire before the fresh typed group: "
         "0x{:x}:0x{:x}".format(nonempty.nat_high, nonempty.nat_low),
     )
     _require(nonempty.pr == ((1 << 0) | (1 << 2)),
              "post-stop live predicate image is wrong: 0x{:x}".format(
                  nonempty.pr
              ))
-    _require(nonempty.unat == 1,
-             "p2-qualified legacy suffix did not consume live r10")
+    _require(nonempty.gr[12] == 0x1000,
+             "p2-qualified typed mov-IP suffix did not execute")
 
     return (
         "empty and nonempty typed overlays legitimately continue across the "
         "0xff0 page boundary, retire through the slot-1 stop, clear ownership, "
-        "and execute the fresh suffix under legacy in the same callback"
+        "and execute the fresh typed suffix in the same callback"
     )
 
 
@@ -7521,7 +7918,6 @@ def _c_source_section(source: str, start: str, end: str) -> str:
 
 
 def test_continuation_structural_invariants(qemu: Path) -> str:
-    del qemu
     source_path = (
         Path(__file__).resolve().parents[2] / "target" / "ia64" /
         "translate.c"
@@ -7535,57 +7931,46 @@ def test_continuation_structural_invariants(qemu: Path) -> str:
     insn_start = _c_source_section(
         source,
         "static void ia64_tr_insn_start",
-        "static void ia64_tr_emit_exec_bundle",
+        "static void ia64_tr_publish_restart_ri",
     )
     restart_ri = _c_source_section(
         source,
         "static void ia64_tr_publish_restart_ri",
-        "static void ia64_tr_emit_exec_bundle",
+        "static void ia64_tr_emit_invalid_template",
     )
-    ordinary_bundle = _c_source_section(
+    invalid_template = _c_source_section(
         source,
-        "static void ia64_tr_emit_exec_bundle(",
-        "static void ia64_tr_emit_exec_bundle_lookup_ptr(",
+        "static void ia64_tr_emit_invalid_template",
+        "static bool ia64_tr_gr_is_stacked",
     )
-    ordinary_lookup = _c_source_section(
+    translate_insn = _c_source_section(
         source,
-        "static void ia64_tr_emit_exec_bundle_lookup_ptr(",
-        "/*\n * Complete a bundle after a typed prefix",
+        "static void ia64_tr_translate_insn",
+        "static void ia64_tr_tb_stop",
     )
-    suffix = _c_source_section(
+    rse_static_noreturn = _c_source_section(
         source,
-        "static void ia64_tr_emit_exec_bundle_suffix",
-        "static void ia64_tr_emit_exec_bundle_lookup_ptr_suffix",
-    )
-    lookup_suffix = _c_source_section(
-        source,
-        "static void ia64_tr_emit_exec_bundle_lookup_ptr_suffix",
-        "static void ia64_tr_emit_exec_bundle_cached_fallback",
-    )
-    firmware_gate = _c_source_section(
-        source,
-        "static void ia64_tr_emit_firmware_call_gate",
-        "static bool ia64_tr_instruction_physical_address",
+        "static bool ia64_tr_rse_spine_is_static_noreturn",
+        "static void ia64_tr_rewrite_plan_reset",
     )
 
     _require(
-        "bool entered_typed = ctx->typed_group_active;" in preflight and
-        "bool fresh_typed_enabled = ia64_tr_full_tcg_rewrite_enabled();"
-        in preflight and
-        "bool continuation_only = entered_typed && !fresh_typed_enabled;"
-        in preflight and
-        re.search(
-            r"\(!entered_typed\s*&&\s*!fresh_typed_enabled\)", preflight
-        ) is not None,
-        "restored typed ownership must override the fresh-group rewrite knob",
+        "!ctx->instruction_group_start && !ctx->typed_group_active" in
+        preflight and
+        "ia64_decode_instruction_bundle" in preflight and
+        "ia64_tr_preflight_decoded_bundle" in preflight and
+        "ia64_tr_rewrite_plan_append_bundle" in preflight,
+        "typed preflight must reject an ownerless continuation and validate "
+        "every admitted decoded bundle into the typed plan",
     )
     _require(
-        "if (continuation_only)" in preflight and
-        "ia64_tr_preflight_to_first_stop" in preflight and
-        preflight.count("if (!entered_typed ||") >= 2 and
-        "ia64_tr_preflight_internal_stop_prefix" in preflight,
-        "fresh groups must remain all-or-nothing while an inherited owner "
-        "may lower only through its first stop",
+        "ia64_tr_first_rse_static_noreturn" in preflight and
+        "rse_static_noreturn" in preflight and
+        "accepted_last_slot = MIN(accepted_last_slot, rse_last_slot)" in
+        preflight and
+        "insn->r1 >= IA64_STATIC_GR_COUNT + sof" in rse_static_noreturn,
+        "typed preflight must cap its durable plan at a statically faulting "
+        "RSE instruction",
     )
     _require(
         re.search(
@@ -7631,54 +8016,73 @@ def test_continuation_structural_invariants(qemu: Path) -> str:
         "offsetof(CPUIA64State, ri_dirty))" in restart_ri,
         "restart-RI publication must store both RI and ri_dirty",
     )
-    for label, emitter, helper_token in (
-        ("ordinary direct", ordinary_bundle, "gen_helper_exec_bundle("),
-        ("ordinary lookup", ordinary_lookup,
-         "gen_helper_exec_bundle_lookup_ptr("),
-    ):
-        _require("uint8_t start_slot" in emitter,
-                 "{} emitter lacks an explicit start_slot".format(label))
-        prepare = emitter.find("ia64_tr_prepare_helper_ip(")
-        publish = emitter.find("ia64_tr_publish_restart_ri(start_slot)",
-                               prepare)
-        helper = emitter.find(helper_token, publish)
-        _require(
-            0 <= prepare < publish < helper,
-            "{} emitter must prepare/commit, publish its explicit start RI, "
-            "then invoke the generic helper".format(label),
-        )
-
-    for label, suffix_source, helper_token in (
-        ("direct", suffix, "gen_helper_exec_bundle("),
-        ("lookup", lookup_suffix, "gen_helper_exec_bundle_lookup_ptr("),
-    ):
-        prepare = suffix_source.find("ia64_tr_prepare_helper_ip(")
-        publish = suffix_source.find("ia64_tr_publish_restart_ri(", prepare)
-        helper = suffix_source.find(helper_token, publish)
-        _require(
-            0 <= prepare < publish < helper,
-            "{} same-callback suffix must prepare/commit, publish RI and "
-            "ri_dirty, then invoke its generic helper".format(label),
-        )
-
     _require(
-        "uint8_t start_slot" in firmware_gate and
-        firmware_gate.find("ia64_tr_prepare_helper_ip(") <
-        firmware_gate.find("ia64_tr_publish_restart_ri(start_slot)") <
-        firmware_gate.find("gen_helper_firmware_call_gate("),
-        "firmware helper emitter must publish an explicit callback RI",
+        invalid_template.find("ia64_tr_sync_state_cache(ctx)") <
+        invalid_template.find("ia64_tr_publish_fault_state(") <
+        invalid_template.find("gen_helper_raise_illegal_operation(tcg_env)"),
+        "an invalid template must synchronize its typed prefix, publish the "
+        "requested fault slot, and raise Illegal Operation directly",
+    )
+
+    preflight_call = translate_insn.find(
+        "ctx->typed_segment_active = ia64_tr_preflight_rewrite_region("
+    )
+    preflight_fail = translate_insn.find(
+        "if (!ctx->typed_segment_active)", preflight_call
+    )
+    typed_assert = translate_insn.find(
+        "g_assert(ctx->typed_segment_active)", preflight_fail
+    )
+    typed_lowering = translate_insn.find(
+        "ia64_tr_try_decoded_bundle(", typed_assert
     )
     _require(
-        "ia64_tr_emit_firmware_call_gate(ctx, pc, dispatch_ip, 0);" in source,
-        "firmware dispatch must explicitly enter its whole-bundle helper "
-        "at canonical RI=0",
+        0 <= preflight_call < preflight_fail < typed_assert < typed_lowering,
+        "the production callback must preflight every valid bundle, fail "
+        "closed on an internal ownership violation, and lower only through "
+        "the typed bundle path",
     )
+
+    for forbidden in (
+        "gen_helper_exec_bundle(",
+        "gen_helper_exec_bundle_lookup_ptr(",
+        "gen_helper_exec_slot(",
+        "ia64_tr_emit_firmware_call_gate",
+        "ia64_tr_full_tcg_rewrite_enabled",
+        "ia64_tr_translate_fast_bundle",
+        "ia64_tr_translate_partial_bundle",
+    ):
+        _require(
+            forbidden not in source,
+            "typed-only translator retains removed production path {!r}"
+            .format(forbidden),
+        )
+
+    for spans_next_bundle in (False, True):
+        program = invalid_alloc_plan_boundary_program(spans_next_bundle)
+        fault = run_program(
+            qemu, program, preserve_fault_slot=True,
+            typed_fault_trace_ip=0x30,
+        )
+        _require_illegal_operation(
+            fault, fault_ip=0x30, fault_slot=0,
+            fault_raw=alloc(34, 1, 1, 0), collection_enabled=True,
+            expected_iipa=None, expected_slot_type=IA64_SLOT_TYPE_M,
+        )
+        _require(
+            fault.gr[20] == 0 and fault.gr[21] == 0,
+            "statically invalid alloc executed a planned suffix: "
+            "r20=0x{:x} r21=0x{:x}".format(
+                fault.gr[20], fault.gr[21]
+            ),
+        )
 
     return (
-        "restored ownership overrides the fresh-group knob while fresh "
-        "selection stays all-or-nothing; plugin segments cap at one bundle; "
-        "reserved RI=3 canonicalizes to zero; ordinary, suffix, and firmware "
-        "emitters publish explicit callback-precise RI"
+        "typed preflight owns every valid bundle and plugin split, caps "
+        "single- and multi-bundle plans at exact static RSE faults, RI "
+        "metadata is callback-precise, invalid templates raise directly, and "
+        "the production callback contains no generic, hybrid, or "
+        "firmware-magic dispatch path"
     )
 
 
@@ -7728,8 +8132,8 @@ def test_typed_epoch_savevm_migration(qemu: Path) -> str:
 
     return (
         "a breakpoint-stable active typed epoch survives savevm into a fresh "
-        "QEMU launched with the rewrite knob off; restored ownership still "
-        "selects direct TCG and the saved r1 view closes with exact state"
+        "QEMU; restored ownership selects direct TCG and the saved r1 view "
+        "closes with exact state"
     )
 
 
@@ -7779,8 +8183,8 @@ def test_typed_branch_forward_savevm_migration(qemu: Path) -> str:
 
     return (
         "an open compare-to-branch epoch preserves its explicit physical PR "
-        "forward mask through savevm; a fresh destination with the rewrite "
-        "knob off consumes forwarded p6 and takes the direct TCG branch"
+        "forward mask through savevm; a fresh typed destination consumes "
+        "forwarded p6 and takes the direct TCG branch"
     )
 
 
@@ -7832,47 +8236,50 @@ def test_typed_br_shadow_savevm_migration(qemu: Path) -> str:
 
     return (
         "an open b5 write survives a real two-QEMU save/load: the fresh "
-        "rewrite-disabled destination consumes serialized group-entry b5 "
+        "typed destination consumes serialized group-entry b5 "
         "through saved_br_mask while source IR establishes a distinct "
         "branch-forward provenance byte and restored close clears both"
     )
 
 
-def test_ordinary_legacy_ri_restart(qemu: Path) -> str:
-    program = legacy_ri_restart_program()
+def test_typed_application_move_ri_restart(qemu: Path) -> str:
+    program = typed_application_move_ri_restart_program()
     snapshot, trace = run_ri_restart(
-        qemu, program, start_slot=2, rewrite=False,
-        register_writes=((1, 10), (8, 1), (9, program.data[0].address)),
+        qemu, program, start_slot=2,
+        register_writes=((1, 10), (8, 7), (9, program.data[0].address)),
     )
 
     _require(not snapshot.exception_pending,
-             "ordinary legacy RI=2 restart has a pending exception")
+             "typed application-move RI=2 restart has a pending exception")
     _require(snapshot.ip == program.terminal_ip,
-             "ordinary legacy RI=2 restart missed its terminal branch")
+             "typed application-move RI=2 restart missed its terminal branch")
     _require(
         snapshot.gr[1] == 10 and snapshot.gr[5] == 0,
-        "ordinary helper replayed skipped slot 0 or 1: r1=0x{:x} r5=0x{:x}"
+        "typed restart replayed skipped slot 0 or 1: r1=0x{:x} r5=0x{:x}"
         .format(snapshot.gr[1], snapshot.gr[5]),
     )
     _require(
-        snapshot.gr[8] == 1 and snapshot.gr[9] == program.data[0].address and
-        snapshot.unat == 1,
-        "ordinary helper did not execute the positive slot-2 AR.UNAT write",
+        snapshot.gr[8] == 7 and snapshot.gr[9] == program.data[0].address and
+        snapshot.gr[10] == 7,
+        "typed restart did not execute and read back the slot-2 AR.LC write",
     )
     _require(snapshot.nat_high == 0 and snapshot.nat_low == 0,
              "skipped slot-0 ld8.fill unexpectedly changed NaT state")
-    _require_ordinary_legacy_restart_trace(trace, program.entry, 2)
+    _require_typed_application_move_restart_trace(
+        trace, program.entry, 2, 0x20
+    )
 
     return (
-        "a normal whole-bundle legacy helper enters at TB RI=2: visible "
-        "non-idempotent slots 0/1 stay skipped while slot 2 executes once"
+        "typed application-move lowering enters at TB RI=2: visible "
+        "non-idempotent slots 0/1 stay skipped while slot 2 writes AR.LC "
+        "and the next bundle reads it back"
     )
 
 
 def test_typed_branch_ri_restart(qemu: Path) -> str:
     short_program = typed_short_branch_ri_restart_program()
     short, short_trace = run_ri_restart(
-        qemu, short_program, start_slot=2, rewrite=True,
+        qemu, short_program, start_slot=2,
     )
     _require(not short.exception_pending,
              "typed B1 RI=2 restart has a pending exception")
@@ -7894,7 +8301,7 @@ def test_typed_branch_ri_restart(qemu: Path) -> str:
 
     long_program = typed_long_branch_ri_restart_program()
     long, long_trace = run_ri_restart(
-        qemu, long_program, start_slot=1, rewrite=True,
+        qemu, long_program, start_slot=1,
     )
     _require(not long.exception_pending,
              "typed X3 RI=1 restart has a pending exception")
@@ -7925,7 +8332,7 @@ def test_predicate_tests_and_direct_branches(qemu: Path) -> str:
                    fallthrough: Optional[int], *,
                    state_cache: bool = False) -> Snapshot:
         snapshot = run_program(
-            qemu, program, rewrite=True,
+            qemu, program,
             typed_branch_traces=((source, target, fallthrough),),
             state_cache=state_cache,
         )
@@ -8048,8 +8455,8 @@ def test_predicate_tests_and_direct_branches(qemu: Path) -> str:
     return (
         "typed B1/X3 branches pass exact target/fallthrough goldens for "
         "same-bundle, nullified, page-split, rotating, no-stop epoch, and "
-        "state-cache cases; tbit/tnat/tf results forward without legacy "
-        "helpers, and forward/false/backward imm60 MLX branches are exact"
+        "state-cache cases; tbit/tnat/tf results forward without generic "
+        "dispatch, and forward/false/backward imm60 MLX branches are exact"
     )
 
 
@@ -8058,7 +8465,7 @@ def test_typed_indirect_and_nonterminal_branches(qemu: Path) -> str:
     forwarding = run_program(
         qemu,
         forwarding_program,
-        rewrite=True,
+
         typed_direct_trace_ips=(0x30, 0xb0),
         typed_indirect_traces=((0x40, 1, 0), (0xc0, 1, 0)),
         one_bundle_per_tb=True,
@@ -8086,7 +8493,7 @@ def test_typed_indirect_and_nonterminal_branches(qemu: Path) -> str:
     suppression = run_program(
         qemu,
         suppression_program,
-        rewrite=True,
+
         typed_indirect_traces=((0x50, 2, 1), (0x70, 2, 1)),
         one_bundle_per_tb=True,
     )
@@ -8105,7 +8512,7 @@ def test_typed_indirect_and_nonterminal_branches(qemu: Path) -> str:
     frontier = run_program(
         qemu,
         frontier_program,
-        rewrite=True,
+
         typed_direct_trace_ips=(0x20, 0x40, 0x60, 0x80),
         typed_indirect_traces=((0x30, 2, 2), (0x70, 2, 2)),
         one_bundle_per_tb=True,
@@ -8148,6 +8555,18 @@ def test_typed_loop_branches(qemu: Path) -> str:
             | ((-rotations % 48) << 32)
         )
 
+    ri_program = application_move_forced_tb_ri_program()
+    ri_snapshot = run_program(
+        qemu, ri_program, one_bundle_per_tb=True
+    )
+    _require(
+        ri_snapshot.gr[20] == 0 and ri_snapshot.gr[21] == 0x15,
+        "successful AR helper leaked its slot across a forced TB or lost "
+        "ordinary/live EC selection: same=0x{:x} next=0x{:x}".format(
+            ri_snapshot.gr[20], ri_snapshot.gr[21]
+        ),
+    )
+
     matrix_rows = 0
     loop_encodings = 0
     for kind in ("cloop", "ctop", "cexit", "wtop", "wexit"):
@@ -8155,7 +8574,7 @@ def test_typed_loop_branches(qemu: Path) -> str:
         snapshot = run_program(
             qemu,
             program,
-            rewrite=True,
+
             typed_loop_traces=traces,
             one_bundle_per_tb=True,
         )
@@ -8202,7 +8621,7 @@ def test_typed_loop_branches(qemu: Path) -> str:
     wrapped = run_program(
         qemu,
         wrap_program,
-        rewrite=True,
+
         typed_direct_trace_ips=(wrap_program.terminal_ip - 0x10,),
         typed_loop_traces=wrap_traces,
         one_bundle_per_tb=True,
@@ -8247,7 +8666,7 @@ def test_typed_loop_branches(qemu: Path) -> str:
     overlay = run_program(
         qemu,
         overlay_program,
-        rewrite=True,
+
         typed_direct_trace_ips=(0x70, 0xa0),
         typed_loop_traces=((0x80, 0xc0, True),),
         one_bundle_per_tb=True,
@@ -8282,7 +8701,7 @@ def test_typed_loop_branches(qemu: Path) -> str:
     suppressed = run_program(
         qemu,
         suppression_program,
-        rewrite=True,
+
         typed_branch_traces=((0x50, 0x80, 0x60),),
         typed_loop_traces=((0x50, 0xa0, True),),
         one_bundle_per_tb=True,
@@ -8321,7 +8740,7 @@ def test_typed_call_branches(qemu: Path) -> str:
     frame = run_program(
         qemu,
         frame_program,
-        rewrite=True,
+
         typed_call_traces=((0xc0, 0x120, False, 1),),
         one_bundle_per_tb=True,
     )
@@ -8376,7 +8795,7 @@ def test_typed_call_branches(qemu: Path) -> str:
     b3 = run_program(
         qemu,
         b3_program,
-        rewrite=True,
+
         typed_call_traces=((0x40, 0x10, False, 1),),
         one_bundle_per_tb=True,
     )
@@ -8403,7 +8822,7 @@ def test_typed_call_branches(qemu: Path) -> str:
         x4 = run_program(
             qemu,
             x4_program,
-            rewrite=True,
+
             typed_call_traces=((0x60, 0x70, False, 1),),
             one_bundle_per_tb=True,
         )
@@ -8437,7 +8856,7 @@ def test_typed_call_branches(qemu: Path) -> str:
     far = run_program(
         qemu,
         far_program,
-        rewrite=True,
+
         typed_call_traces=((0x02000000, 0x10, False, 1),),
         one_bundle_per_tb=True,
     )
@@ -8455,7 +8874,7 @@ def test_typed_call_branches(qemu: Path) -> str:
     alias = run_program(
         qemu,
         alias_program,
-        rewrite=True,
+
         typed_call_traces=((0x40, None, True, 1),),
         one_bundle_per_tb=True,
     )
@@ -8480,7 +8899,7 @@ def test_typed_call_branches(qemu: Path) -> str:
     false_b5 = run_program(
         qemu,
         false_b5_program,
-        rewrite=True,
+
         typed_call_traces=((0x50, None, True, 1),),
         one_bundle_per_tb=True,
     )
@@ -8489,7 +8908,7 @@ def test_typed_call_branches(qemu: Path) -> str:
              "stopped false B5 call did not follow its fallthrough")
     _require(
         false_b5.gr[20] == 11 and false_b5.br[2] == 0x777 and
-        false_b5.gr[21] == 0x777 and
+        false_b5.gr[21] == 0x55 and
         false_b5.cfm == 0 and false_b5.rse_base == 0 and
         not bool(false_b5.pr & (1 << 6)),
         "stopped false B5 did not expose a closed epoch while preserving "
@@ -8506,7 +8925,7 @@ def test_typed_call_branches(qemu: Path) -> str:
     suppressed = run_program(
         qemu,
         suppression_program,
-        rewrite=True,
+
         typed_branch_traces=((0x60, 0x90, None),),
         typed_call_traces=((0x60, 0xb0, False, 1),),
         one_bundle_per_tb=True,
@@ -8550,7 +8969,7 @@ def test_typed_return_branches(qemu: Path) -> str:
         snapshot = run_program(
             qemu,
             program,
-            rewrite=True,
+
             typed_return_traces=((0x90, 3 if mode == "p0" else 4),),
             one_bundle_per_tb=True,
         )
@@ -8621,7 +9040,7 @@ def test_typed_return_branches(qemu: Path) -> str:
         snapshot = run_program(
             qemu,
             program,
-            rewrite=True,
+
             typed_return_traces=((0xa0, 3),),
             one_bundle_per_tb=True,
         )
@@ -8691,7 +9110,7 @@ def test_typed_return_branches(qemu: Path) -> str:
     filled = run_program(
         qemu,
         fill_program,
-        rewrite=True,
+
         typed_return_traces=((0x40, 3),),
         one_bundle_per_tb=True,
     )
@@ -8737,7 +9156,7 @@ def test_typed_return_branches(qemu: Path) -> str:
         snapshot = run_program(
             qemu,
             program,
-            rewrite=True,
+
             typed_return_traces=((0x80, 3),),
             one_bundle_per_tb=True,
         )
@@ -8841,8 +9260,9 @@ def test_typed_return_branches(qemu: Path) -> str:
     faulted = run_program(
         qemu,
         fault_program,
-        rewrite=True,
+
         typed_return_traces=((0xa0, 3),),
+        typed_rfi_traces=(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60,),
         one_bundle_per_tb=True,
     )
     _require(
@@ -8915,6 +9335,65 @@ def test_typed_return_branches(qemu: Path) -> str:
             faulted.gr[25]
         ),
     )
+
+    # Stop at the handler-visible RFI after interruption delivery has exposed
+    # IFS.v=0 continuation state, then make a new QEMU process load and execute
+    # that RFI.  This catches accidental dependence on source-process helper
+    # state, pending-fill replay, or a translation cached before savevm.
+    fault_migration = run_savevm_migration(
+        qemu,
+        fault_program,
+        checkpoint_ip=IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60,
+        preserve_fault_slot=True,
+    )
+    checkpoint_differences = successful_snapshot_differences(
+        fault_migration.checkpoint, fault_migration.restored
+    )
+    _require(
+        not checkpoint_differences,
+        "fresh-process RFI load changed its architectural checkpoint:\n  " +
+        "\n  ".join(checkpoint_differences),
+    )
+    _require(
+        fault_migration.checkpoint.ip ==
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60 and
+        fault_migration.checkpoint.gr[5] == 0 and
+        fault_migration.checkpoint.cr_ipsr == IA64_PSR_IC,
+        "RFI migration checkpoint did not expose IFS.v=0 continuation: "
+        "IP=0x{:x} saved-IFS=0x{:x} IPSR=0x{:x}".format(
+            fault_migration.checkpoint.ip,
+            fault_migration.checkpoint.gr[5],
+            fault_migration.checkpoint.cr_ipsr,
+        ),
+    )
+    _require_typed_rfi_trace(
+        fault_migration.destination_trace,
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60,
+    )
+    migrated_fault = fault_migration.final
+    _require(
+        migrated_fault.ip == fault_program.terminal_ip and
+        migrated_fault.cfm == (4 | (4 << 7)) and
+        migrated_fault.gr[22] == 0x2a and
+        migrated_fault.gr[23] == fault_pfs and
+        migrated_fault.gr[32:36] == backing[:3] + (replacement,) and
+        migrated_fault.gr[25] == replacement and
+        migrated_fault.rse_base == 92 and
+        migrated_fault.rse_bsp == 0x8000 and
+        migrated_fault.rse_bspstore == 0x8000 and
+        migrated_fault.rse_bspload == 0x8000,
+        "fresh destination did not finish the IFS.v=0 RFI frame exactly: "
+        "IP=0x{:x} CFM=0x{:x} EC=0x{:x} PFS=0x{:x} "
+        "frame={} memory=0x{:x} RSE={}/0x{:x}/0x{:x}/0x{:x}".format(
+            migrated_fault.ip, migrated_fault.cfm, migrated_fault.gr[22],
+            migrated_fault.gr[23],
+            tuple("0x{:x}".format(value)
+                  for value in migrated_fault.gr[32:36]),
+            migrated_fault.gr[25], migrated_fault.rse_base,
+            migrated_fault.rse_bsp, migrated_fault.rse_bspstore,
+            migrated_fault.rse_bspload,
+        ),
+    )
     program_count += 1
     return_encodings += 1
 
@@ -8923,8 +9402,9 @@ def test_typed_return_branches(qemu: Path) -> str:
     rnat_faulted = run_program(
         qemu,
         rnat_program,
-        rewrite=True,
+
         typed_return_traces=((0x120, 3),),
+        typed_rfi_traces=(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90,),
         one_bundle_per_tb=True,
     )
     _require(
@@ -9022,16 +9502,16 @@ def test_typed_return_branches(qemu: Path) -> str:
         "restoration across an RNAT slot, post-target trap state, pre-fill "
         "IR1/RS0 evidence, lower-privilege-over-taken-branch priority, and "
         "real SoftMMU first-register/RNAT R/RS/IR faults resumed by IFS.v=0 "
-        "RFI with fault-word retry and committed-prefix idempotence; every "
-        "return has direct typed ownership and one ordered focused-helper "
-        "chain"
+        "RFI with fault-word retry and committed-prefix idempotence, including "
+        "a fresh-process save/load at the handler RFI; every return and RFI "
+        "has direct typed ownership and one ordered focused-helper chain"
     )
 
 
 def test_predicate_test_conformance(qemu: Path) -> str:
     matrix_program, observations = predicate_test_conformance_program()
     matrix = run_program(
-        qemu, matrix_program, rewrite=True,
+        qemu, matrix_program,
         typed_direct_trace_ips=tuple(row[3] for row in observations),
         one_bundle_per_tb=True,
     )
@@ -9057,7 +9537,7 @@ def test_predicate_test_conformance(qemu: Path) -> str:
 
     alias_program = predicate_test_equal_target_alias_fault_program()
     alias = run_program(
-        qemu, alias_program, rewrite=True, preserve_fault_slot=True,
+        qemu, alias_program, preserve_fault_slot=True,
         typed_fault_trace_ip=0x70,
     )
     alias_raw = predicate_test(
@@ -9080,7 +9560,7 @@ def test_predicate_test_conformance(qemu: Path) -> str:
     predicated_off_program = \
         predicate_test_equal_target_predicated_off_program()
     predicated_off = run_program(
-        qemu, predicated_off_program, rewrite=True,
+        qemu, predicated_off_program,
         preserve_fault_slot=True, typed_fault_trace_ip=0x60,
     )
     _require(not predicated_off.exception_pending,
@@ -9099,7 +9579,7 @@ def test_predicate_test_conformance(qemu: Path) -> str:
 
     unc_program = predicate_test_equal_target_unc_fault_program()
     unc = run_program(
-        qemu, unc_program, rewrite=True, preserve_fault_slot=True,
+        qemu, unc_program, preserve_fault_slot=True,
         typed_fault_trace_ip=0x80,
     )
     unc_raw = predicate_test(
@@ -9123,7 +9603,7 @@ def test_predicate_test_conformance(qemu: Path) -> str:
         "nine literal PR-image rows cover NaT, normal/.unc, AND/OR/OR.ANDCM, "
         "TNAT data, and CPUID[4] bits; three exact equal-target cases prove "
         "qualification, .unc precedence, prefix retirement, and source/target "
-        "non-effects without legacy execution helpers"
+        "non-effects without generic execution helpers"
     )
 
 
@@ -9144,7 +9624,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..25")
+    print("1..27")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -9157,7 +9637,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 9 - internal-stop typed ownership handoff")
         print("not ok 10 - typed continuation structural invariants")
         print("not ok 11 - typed epoch savevm migration resume")
-        print("not ok 12 - ordinary legacy RI restart")
+        print("not ok 12 - typed application-move RI restart")
         print("not ok 13 - PSR.ic in-flight serialization policy")
         print("not ok 14 - direct predicate-register moves")
         print("not ok 15 - predicate tests and direct branches")
@@ -9171,6 +9651,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 23 - typed call branches")
         print("not ok 24 - typed AR.PFS register moves")
         print("not ok 25 - typed return branches")
+        print("not ok 26 - timer external interrupt and typed RFI")
+        print("not ok 27 - nested self-IPI and ordered EOI")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -9191,8 +9673,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
          test_continuation_structural_invariants),
         ("typed epoch savevm migration resume",
          test_typed_epoch_savevm_migration),
-        ("ordinary legacy RI restart",
-         test_ordinary_legacy_ri_restart),
+        ("typed application-move RI restart",
+         test_typed_application_move_ri_restart),
         ("PSR.ic in-flight serialization policy",
          test_psr_ic_inflight_policy),
         ("direct predicate-register moves", test_predicate_register_moves),
@@ -9211,6 +9693,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("typed call branches", test_typed_call_branches),
         ("typed AR.PFS register moves", test_pfs_register_moves),
         ("typed return branches", test_typed_return_branches),
+        ("timer external interrupt and typed RFI",
+         test_timer_external_interrupt_rfi),
+        ("nested self-IPI and ordered EOI", test_nested_self_ipi),
     )
     failures = 0
     for index, (name, test) in enumerate(tests, start=1):

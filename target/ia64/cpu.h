@@ -13,15 +13,20 @@
 #define IA64_STACKED_GR_COUNT 4096
 #define IA64_RSE_NAT_WORDS ((IA64_STACKED_GR_COUNT + 63) / 64)
 #define IA64_FR_COUNT 128
+#define IA64_FPSR_RESET_VALUE UINT64_C(0x0009804c0270033f)
 #define IA64_PR_COUNT 64
 #define IA64_BR_COUNT 8
 #define IA64_AR_COUNT 128
+#define IA64_ISSUE_GROUP_AR_CAPACITY IA64_AR_COUNT
 #define IA64_CR_COUNT 128
 #define IA64_RR_COUNT 8
-#define IA64_DBR_COUNT 8
-#define IA64_IBR_COUNT 8
+#define IA64_DBR_COUNT 16
+#define IA64_IBR_COUNT 16
 #define IA64_PKR_COUNT 16
+#define IA64_IMPL_PA_BITS 50
 #define IA64_CPUID_COUNT 5
+#define IA64_DAHR_COUNT 8
+#define IA64_MSR_COUNT 1024
 #define IA64_ITR_COUNT 8
 #define IA64_DTR_COUNT 8
 #define IA64_TC_VMSTATE_COUNT 32
@@ -32,16 +37,46 @@
 #define IA64_PMD_COUNT 256
 #define IA64_CFM_MASK UINT64_C(0x0000003fffffffff)
 #define IA64_IFS_VALID_BIT UINT64_C(0x8000000000000000)
+#define IA64_PSR_BE_BIT UINT64_C(0x0000000000000002)
+#define IA64_PSR_UP_BIT UINT64_C(0x0000000000000004)
+#define IA64_PSR_UM_MASK UINT64_C(0x000000000000003f)
+#define IA64_PSR_UM_WRITABLE_MASK UINT64_C(0x000000000000003e)
 #define IA64_PSR_IC_BIT UINT64_C(0x0000000000002000)
+#define IA64_PSR_PK_BIT UINT64_C(0x0000000000008000)
+#define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
+#define IA64_PSR_SP_BIT UINT64_C(0x0000000000100000)
+#define IA64_PSR_SI_BIT UINT64_C(0x0000000000800000)
+#define IA64_PSR_DI_BIT UINT64_C(0x0000000000400000)
+#define IA64_PSR_DB_BIT UINT64_C(0x0000000001000000)
 #define IA64_PSR_LP_BIT UINT64_C(0x0000000002000000)
 #define IA64_PSR_TB_BIT UINT64_C(0x0000000004000000)
 #define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
+#define IA64_PSR_ID_BIT UINT64_C(0x0000002000000000)
 #define IA64_PSR_DA_BIT UINT64_C(0x0000004000000000)
 #define IA64_PSR_DD_BIT UINT64_C(0x0000008000000000)
 #define IA64_PSR_RI_SHIFT 41
 #define IA64_PSR_RI_MASK UINT64_C(0x0000060000000000)
+#define IA64_PSR_ED_BIT UINT64_C(0x0000080000000000)
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
+#define IA64_PSR_IA_BIT UINT64_C(0x0000200000000000)
+#define IA64_PSR_FAULT_SUPPRESSION_MASK \
+    (IA64_PSR_ID_BIT | IA64_PSR_DA_BIT | IA64_PSR_DD_BIT | IA64_PSR_IA_BIT)
+
+/* Protection-key register layout, SDM Vol. 2 section 4.1.3. */
+#define IA64_PKR_VALID_BIT UINT64_C(0x1)
+#define IA64_PKR_WRITE_DISABLE_BIT UINT64_C(0x2)
+#define IA64_PKR_READ_DISABLE_BIT UINT64_C(0x4)
+#define IA64_PKR_EXECUTE_DISABLE_BIT UINT64_C(0x8)
+#define IA64_PKR_KEY_SHIFT 8
+#define IA64_PKR_KEY_MASK UINT64_C(0x00000000ffffff00)
+#define IA64_PKR_MASK \
+    (IA64_PKR_VALID_BIT | IA64_PKR_WRITE_DISABLE_BIT | \
+     IA64_PKR_READ_DISABLE_BIT | IA64_PKR_EXECUTE_DISABLE_BIT | \
+     IA64_PKR_KEY_MASK)
+#define IA64_TB_PSR_BE_BIT UINT64_C(0x0000000000000002)
 #define IA64_TB_PSR_DT_BIT UINT64_C(0x0000000000020000)
 #define IA64_TB_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_TB_PSR_BN_BIT UINT64_C(0x0000100000000000)
@@ -58,6 +93,8 @@
 #define IA64_TB_FLAG_PROFILE (1u << 8)
 #define IA64_TB_FLAG_GROUP_START (1u << 9)
 #define IA64_TB_FLAG_TYPED_GROUP (1u << 10)
+#define IA64_TB_FLAG_BE (1u << 11)
+#define IA64_TB_FLAG_CFLE_RESUME (1u << 12)
 
 #define IA64_INSN_START_GROUP_START (UINT64_C(1) << 0)
 #define IA64_INSN_START_TYPED_GROUP (UINT64_C(1) << 1)
@@ -67,6 +104,9 @@
 #define IA64_ISR_NA_BIT 35
 #define IA64_ISR_CODE_MASK UINT64_C(0x000000000000ffff)
 #define IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION UINT64_C(0x10)
+#define IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION UINT64_C(0x20)
+#define IA64_ISR_CODE_UNIMPLEMENTED_DATA_ADDRESS UINT64_C(0x30)
+#define IA64_ISR_CODE_UNIMPLEMENTED_INSTRUCTION_ADDRESS UINT64_C(0x10)
 #define IA64_ISR_SP_BIT 36
 #define IA64_ISR_RS_BIT 37
 #define IA64_ISR_IR_BIT 38
@@ -84,14 +124,14 @@
 
 /*
  * AR.ITC advances at a fixed declared rate backed by the QEMU virtual clock,
- * so guest time tracks real time regardless of emulation speed.  100 MHz
- * divides nanoseconds exactly (10 ns per tick) and matches the frequency the
- * firmware advertises (SAL_FREQ_BASE 100 MHz with a 1/1 PAL ITC ratio).
+ * so guest time tracks real time regardless of emulation speed.  The guest
+ * firmware uses 20 ITC ticks per UEFI 100 ns unit: a 200 MHz ITC derived from
+ * the 100 MHz platform base clock through PAL_FREQ_RATIOS' 2/1 ITC ratio.
  */
-#define IA64_ITC_FREQUENCY_HZ 100000000
-#define IA64_ITC_NS_PER_TICK 10
+#define IA64_ITC_FREQUENCY_HZ 200000000
+#define IA64_ITC_NS_PER_TICK 5
 /* UEFI event trigger times are expressed in 100 ns units. */
-#define IA64_ITC_TICKS_PER_100NS 10
+#define IA64_ITC_TICKS_PER_100NS 20
 
 typedef enum IA64MmuIndex {
     IA64_MMU_PHYSICAL = 0,
@@ -145,6 +185,9 @@ static inline uint32_t ia64_tcg_tb_flags_from_psr(uint64_t psr)
     }
     if (psr & IA64_TB_PSR_BN_BIT) {
         flags |= IA64_TB_FLAG_BN;
+    }
+    if (psr & IA64_TB_PSR_BE_BIT) {
+        flags |= IA64_TB_FLAG_BE;
     }
     flags |= ia64_psr_ri(psr) << IA64_TB_FLAG_RI_SHIFT;
     return flags;
@@ -211,10 +254,12 @@ enum IA64ApplicationRegister {
     IA64_AR_BSP = 17,
     IA64_AR_BSPSTORE = 18,
     IA64_AR_RNAT = 19,
+    IA64_AR_CSD = 25,
     IA64_AR_CCV = 32,
     IA64_AR_UNAT = 36,
     IA64_AR_FPSR = 40,
     IA64_AR_ITC = 44,
+    IA64_AR_RUC = 45,
     IA64_AR_PFS = 64,
     IA64_AR_LC = 65,
     IA64_AR_EC = 66,
@@ -294,8 +339,6 @@ typedef struct IA64RSEState {
     bool cfle;
     /* Transient tag while the current memory reference is issued by RSE. */
     bool reference;
-    uint32_t pending_fill_count;
-    uint64_t pending_fill_ip;
     /*
      * Transient simplified clean-partition marker. It is reconstructed by
      * executing flushrs/mov ar.bspstore, so keep snapshots compatible by not
@@ -329,17 +372,29 @@ typedef struct IA64NaTState {
 
 typedef struct IA64InterruptState {
     /*
-     * Minimal local-SAPIC-facing state. Pending external interrupts are
-     * reflected through CR.IRR*, accepted through CR.IVR, and completed through
-     * CR.EOI; pending_interruption tracks the currently accepted vector.
-     * timer_compare_latched suppresses repeated ITM delivery until the guest
-     * programs the timer again.
+     * Local-SAPIC state.  CR.IRR* supplies the per-vector pending bits while
+     * in_service supplies the independent per-vector service bits.  Together
+     * they represent all four architectural states (inactive, pending,
+     * in-service, and in-service/one-pending) without a software stack.
+     *
+     * legacy_pending_interruption exists only as scratch space for loading the
+     * pre-ISR VMState layout.  It is never interrupt-delivery authority.
+     * timer_compare_latched records the comparison epoch (idle, consumed, or
+     * armed) so a late host callback is distinguishable from a freshly
+     * programmed stale ITM and survives migration without duplicate delivery.
      */
-    uint64_t pending_interruption;
+    uint64_t in_service[4];
+    uint64_t legacy_pending_interruption;
     uint64_t pending_vector;
     uint8_t timer_compare_latched;
     uint8_t pending;
 } IA64InterruptState;
+
+enum IA64TimerCompareState {
+    IA64_TIMER_COMPARE_IDLE = 0,
+    IA64_TIMER_COMPARE_CONSUMED = 1,
+    IA64_TIMER_COMPARE_ARMED = 2,
+};
 
 typedef struct IA64TranslationEntry {
     bool valid;
@@ -412,6 +467,22 @@ typedef enum IA64ExceptionKind {
     /* Post-instruction traps; appended to preserve serialized kind values. */
     IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER,
     IA64_EXCEPTION_TAKEN_BRANCH_TRAP,
+    /* Data-plane faults; appended to preserve every preceding wire value. */
+    IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION,
+    IA64_EXCEPTION_UNSUPPORTED_DATA_REFERENCE,
+    /* System-plane key and architectural debug faults. */
+    IA64_EXCEPTION_INSTRUCTION_KEY_MISS,
+    IA64_EXCEPTION_DATA_KEY_MISS,
+    IA64_EXCEPTION_KEY_PERMISSION,
+    IA64_EXCEPTION_INSTRUCTION_DEBUG,
+    IA64_EXCEPTION_DATA_DEBUG,
+    IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION,
+    /* Floating-point interruptions; append-only for migration stability. */
+    IA64_EXCEPTION_FP_FAULT,
+    IA64_EXCEPTION_FP_TRAP,
+    /* Implemented-address-width faults; append-only for migration stability. */
+    IA64_EXCEPTION_UNIMPLEMENTED_INSTRUCTION_ADDRESS,
+    IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS,
 } IA64ExceptionKind;
 
 typedef struct IA64ExceptionRecord {
@@ -426,9 +497,17 @@ typedef struct IA64ExceptionRecord {
     uint8_t message[160];
 } IA64ExceptionRecord;
 
+typedef enum IA64AlatTargetType {
+    /* Zero is the legacy/default wire value for pre-FR ALAT streams. */
+    IA64_ALAT_TARGET_GR = 0,
+    IA64_ALAT_TARGET_FR = 1,
+    IA64_ALAT_TARGET_TYPE_COUNT,
+} IA64AlatTargetType;
+
 typedef struct IA64AlatEntry {
     bool valid;
     uint8_t target;
+    uint8_t target_type;
     uint8_t width;
     bool physical;
     uint64_t address;
@@ -445,21 +524,30 @@ typedef struct IA64AlatState {
 
 /*
  * Hidden ordinary-source overlay for eagerly retired translated results.
- * The first write to a GR/NaT or PR preserves its source-visibility-epoch
- * entry value here; later ordinary reads in the same epoch select the saved
- * value.  Explicitly forwarded sources must bypass this overlay.  It is
- * migrated together with an explicit typed owner so an epoch can span a TB,
- * page, restore, or migration boundary without entering the shadow-unaware
- * coexistence engine.
+ * The first write to a GR/NaT, PR, or ordinary AR preserves its
+ * source-visibility-epoch entry value here; later ordinary reads in the same
+ * epoch select the saved value.  Explicitly forwarded sources must bypass
+ * this overlay.  It is migrated together with an explicit typed owner so an
+ * epoch can span a TB, page, restore, or migration boundary without entering
+ * the shadow-unaware coexistence engine.
  */
 typedef struct IA64IssueGroupState {
     uint64_t saved_gr[IA64_GR_COUNT];
     uint64_t saved_nat[IA64_GR_COUNT];
     uint64_t saved_gr_mask[2];
+    IA64FloatReg saved_fr[IA64_FR_COUNT];
+    uint64_t saved_fr_mask[2];
     uint64_t saved_br[IA64_BR_COUNT];
     uint64_t saved_pr;
     /* Ordinary entry image and branch-only forwarding for AR.PFS. */
     uint64_t saved_pfs;
+    /*
+     * Sparse ordinary-AR entry images.  Capacity covers the complete AR file
+     * so correctness does not depend on the length of an issue group.
+     */
+    uint64_t saved_ar_value[IA64_ISSUE_GROUP_AR_CAPACITY];
+    uint8_t saved_ar_index[IA64_ISSUE_GROUP_AR_CAPACITY];
+    uint8_t saved_ar_count;
     /* Physical PR bits explicitly forwarded from eligible nonbranch writers. */
     uint64_t branch_pr_forward_mask;
     /* BR writes have the same ordinary-vs-branch visibility split as PR. */
@@ -506,6 +594,8 @@ typedef struct CPUArchState {
     uint64_t ibr[IA64_IBR_COUNT];
     uint64_t pkr[IA64_PKR_COUNT];
     uint64_t cpuid[IA64_CPUID_COUNT];
+    uint64_t dahr[IA64_DAHR_COUNT];
+    uint64_t msr[IA64_MSR_COUNT];
     uint64_t itr[IA64_ITR_COUNT];
     uint64_t dtr[IA64_DTR_COUNT];
     uint64_t pmc[IA64_PMC_COUNT];
@@ -558,6 +648,7 @@ typedef struct CPUArchState {
     bool current_slot_valid;
     uint8_t current_slot_ri;
     uint8_t current_slot_type;
+    bool current_slot_speculative_load;
     uint64_t current_slot_ip;
     uint64_t current_slot_raw;
 
@@ -637,12 +728,15 @@ static inline void ia64_env_clear_ordinary_source_overlay(CPUIA64State *env)
 {
     env->issue_group.saved_gr_mask[0] = 0;
     env->issue_group.saved_gr_mask[1] = 0;
+    env->issue_group.saved_fr_mask[0] = 0;
+    env->issue_group.saved_fr_mask[1] = 0;
     env->issue_group.saved_br_mask = 0;
     env->issue_group.branch_br_forward_mask = 0;
     env->issue_group.pr_saved = false;
     env->issue_group.branch_pr_forward_mask = 0;
     env->issue_group.pfs_saved = false;
     env->issue_group.branch_pfs_forwarded = false;
+    env->issue_group.saved_ar_count = 0;
     env->issue_group.typed_active = false;
 }
 
@@ -653,8 +747,14 @@ static inline void ia64_env_begin_source_visibility_epoch(CPUIA64State *env)
     ia64_env_set_source_visibility_frontier(env, true);
 }
 
+void ia64_psr_mmu_state_changed(CPUIA64State *env,
+                                uint64_t old_psr, uint64_t new_psr);
+void ia64_cpu_tlb_flush(CPUIA64State *env);
+
 static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)
 {
+    uint64_t old_psr = env->psr;
+
     if (((env->psr ^ psr) & IA64_TB_PSR_BN_BIT) != 0) {
         const uint64_t banked_mask = UINT64_C(0x00000000ffff0000);
         uint64_t visible = env->nat.gr_nat[0] & banked_mask;
@@ -666,6 +766,7 @@ static inline void ia64_env_set_psr(CPUIA64State *env, uint64_t psr)
             (env->nat.gr_nat[1] & ~banked_mask) | visible;
     }
     env->psr = psr;
+    ia64_psr_mmu_state_changed(env, old_psr, psr);
     env->ri = ia64_psr_ri(psr);
     env->ri_dirty = false;
 }

@@ -19,7 +19,8 @@ _image_start:
         .align 16
         .global _start
 _start:
-        alloc   r38 = ar.pfs, 2, 0, 2, 0
+        /* Keep old PFS in the one local register; r34 is inside new SOF=5. */
+        alloc   r34 = ar.pfs, 2, 1, 2, 0
         mov     out0 = in0
         mov     out1 = in1 ;;
         br.call.sptk.many b0 = efi_main ;;
@@ -32,13 +33,13 @@ _start:
         .align 16
         .global ia64_chk_a_clr_fp_takes_branch
 ia64_chk_a_clr_fp_takes_branch:
-        alloc   r34 = ar.pfs, 0, 1, 0, 0
+        alloc   r32 = ar.pfs, 0, 1, 0, 0
         mov     r8 = r0 ;;
         chk.a.clr f8, .Lchk_recovery
-        mov     ar.pfs = r34 ;;
+        mov     ar.pfs = r32 ;;
         br.ret.sptk.many b0 ;;
 
 .Lchk_recovery:
         mov     r8 = 1
-        mov     ar.pfs = r34 ;;
+        mov     ar.pfs = r32 ;;
         br.ret.sptk.many b0 ;;

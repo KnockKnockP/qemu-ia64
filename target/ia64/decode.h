@@ -493,6 +493,7 @@ typedef struct IA64Instruction {
     uint8_t r1;
     uint8_t r2;
     uint8_t r3;
+    uint8_t r4;
     uint8_t p1;
     uint8_t p2;
     uint8_t b1;
@@ -517,6 +518,10 @@ typedef struct IA64Instruction {
     bool fp_load_check_clear;
     bool probe_fault;
     bool probe_imm;
+    /* Decoder-known reserved ld{1,2,4}.fill/st{1,2,4}.spill width.  These
+       retain no live opcode identity, but typed execution must still honor
+       their qualifying predicate before delivering Illegal Operation. */
+    bool reserved_memory_width;
     bool placement_illegal;
     bool reserved_field;
     bool valid;

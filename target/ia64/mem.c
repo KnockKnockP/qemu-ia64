@@ -2,18 +2,22 @@
 
 #include "qemu/osdep.h"
 #include "mem.h"
+#include "insn.h"
 #include "exec/page-protection.h"
 #include "perf.h"
 #include "system/memory.h"
 #include "trace-target_ia64.h"
 
-#define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
+#define IA64_PHYSICAL_ADDRESS_MASK UINT64_C(0x0003ffffffffffff)
+#define IA64_PHYSICAL_MEMORY_ATTRIBUTE_BIT UINT64_C(0x8000000000000000)
+#define IA64_PHYSICAL_UNIMPLEMENTED_MASK UINT64_C(0x7ffc000000000000)
 #define IA64_REGIONLESS_ADDRESS_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_DCR_BE_BIT UINT64_C(0x0000000000000002)
 #define IA64_DCR_DM_BIT UINT64_C(0x0000000000000100)
 #define IA64_DCR_DP_BIT UINT64_C(0x0000000000000200)
 #define IA64_DCR_DR_BIT UINT64_C(0x0000000000001000)
 #define IA64_DCR_DA_BIT UINT64_C(0x0000000000002000)
+#define IA64_DCR_DD_BIT UINT64_C(0x0000000000004000)
 #define IA64_PTA_VE_BIT UINT64_C(0x0000000000000001)
 #define IA64_PTA_VF_BIT UINT64_C(0x0000000000000100)
 #define IA64_PSR_DT_BIT UINT64_C(0x0000000000020000)
@@ -22,6 +26,69 @@
 #define IA64_PSR_AC_BIT UINT64_C(0x0000000000000008)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
+
+static bool ia64_data_plane_alat_ranges_overlap(uint64_t a, uint8_t a_width,
+                                                uint64_t b, uint8_t b_width)
+{
+    uint64_t a_end;
+    uint64_t b_end;
+
+    if (a_width == 0 || b_width == 0) {
+        return false;
+    }
+    a_end = a + a_width - 1;
+    b_end = b + b_width - 1;
+    if (a_end < a || b_end < b) {
+        return true;
+    }
+    return a <= b_end && b <= a_end;
+}
+
+void ia64_data_plane_alat_resolve_address(CPUIA64State *env,
+                                          uint64_t address,
+                                          MMUAccessType access_type,
+                                          uint64_t *resolved,
+                                          bool *physical)
+{
+    IA64TranslateResult result;
+
+    IA64_PERF_INC(IA64_PERF_ALAT_RESOLVE);
+    if (ia64_translate_address_no_detail(env, address, access_type, 0, true,
+                                         &result)) {
+        *resolved = result.paddr;
+        *physical = true;
+    } else {
+        *resolved = address;
+        *physical = false;
+    }
+}
+
+void ia64_data_plane_alat_invalidate_store(CPUIA64State *env,
+                                           uint64_t address,
+                                           uint8_t width)
+{
+    uint64_t resolved;
+    bool physical;
+    uint32_t valid_mask = env->alat.valid_mask;
+
+    IA64_PERF_INC(IA64_PERF_ALAT_INVALIDATE_STORE);
+    if (valid_mask == 0) {
+        return;
+    }
+    ia64_data_plane_alat_resolve_address(env, address, MMU_DATA_STORE,
+                                         &resolved, &physical);
+    while (valid_mask != 0) {
+        unsigned index = ctz32(valid_mask);
+        IA64AlatEntry *entry = &env->alat.entries[index];
+
+        valid_mask &= valid_mask - 1;
+        if (entry->physical == physical &&
+            ia64_data_plane_alat_ranges_overlap(entry->address, entry->width,
+                                                resolved, width)) {
+            ia64_alat_set_valid(env, index, false);
+        }
+    }
+}
 #define IA64_FIRMWARE_IDENTITY_PAGE_BITS 22
 #define IA64_FIRMWARE_IDENTITY_TR_ATTR \
     (UINT64_C(1) | (UINT64_C(1) << 5) | (UINT64_C(1) << 6) | \
@@ -35,6 +102,10 @@
 #define IA64_VHPT_BASE_ADDRESS_MASK UINT64_C(0x1fffffffffff8000)
 #define IA64_VHPT_VA_HASH_MASK UINT64_C(0x0007ffffffffffff)
 #define IA64_HOST_TLB_MIN_PAGE_BITS 12
+#define IA64_PTE_INSERT_RESERVED_MASK \
+    ((UINT64_C(1) << 1) | (UINT64_C(3) << 50))
+#define IA64_ITIR_INSERT_RESERVED_MASK \
+    (UINT64_C(3) | (UINT64_C(0xffffffff) << 32))
 
 #if (IA64_TRANSLATION_LOOKUP_CACHE_COUNT & \
      IA64_TRANSLATION_LOOKUP_CACHE_MASK) != 0
@@ -46,8 +117,24 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
                                           bool non_access, bool rse_access,
+                                          bool force_translation,
+                                          bool non_access_natpage,
                                           IA64TranslateResult *result);
+static bool ia64_translation_allows(const IA64TranslationEntry *entry,
+                                    MMUAccessType access_type, int cpl);
 static const char *ia64_access_kind(bool instruction);
+
+void ia64_psr_mmu_state_changed(CPUIA64State *env,
+                                uint64_t old_psr, uint64_t new_psr)
+{
+    const uint64_t cached_policy =
+        IA64_PSR_PK_BIT | IA64_PSR_DT_BIT | IA64_PSR_RT_BIT |
+        IA64_PSR_IT_BIT | IA64_PSR_DA_BIT | IA64_PSR_IA_BIT;
+
+    if (env && ((old_psr ^ new_psr) & cached_policy)) {
+        ia64_cpu_tlb_flush(env);
+    }
+}
 
 const char *ia64_translate_status_name(IA64TranslateStatus status)
 {
@@ -62,12 +149,18 @@ const char *ia64_translate_status_name(IA64TranslateStatus status)
         return "tlb-miss";
     case IA64_TRANSLATE_NOT_PRESENT:
         return "not-present";
+    case IA64_TRANSLATE_NAT_PAGE:
+        return "nat-page";
     case IA64_TRANSLATE_ACCESS_BIT:
         return "access-bit";
     case IA64_TRANSLATE_DIRTY_BIT:
         return "dirty-bit";
     case IA64_TRANSLATE_ACCESS_DENIED:
         return "access-denied";
+    case IA64_TRANSLATE_KEY_MISS:
+        return "key-miss";
+    case IA64_TRANSLATE_KEY_PERMISSION:
+        return "key-permission";
     default:
         return "unknown";
     }
@@ -181,10 +274,53 @@ bool ia64_page_size_supported(uint8_t page_size)
     case 24:
     case 26:
     case 28:
+    case 30:
         return true;
     default:
         return false;
     }
+}
+
+bool ia64_translation_insert_fields_valid(uint64_t translation_format,
+                                          uint64_t itir)
+{
+    uint8_t page_size = (itir >> 2) & 0x3f;
+    uint64_t itir_reserved = IA64_ITIR_INSERT_RESERVED_MASK;
+    uint8_t memory_attribute;
+
+    if (!ia64_page_size_supported(page_size)) {
+        return false;
+    }
+    if ((translation_format & 1) == 0) {
+        /* For a not-present insertion only ITIR bits 1:0 are checked. */
+        return (itir & UINT64_C(3)) == 0;
+    }
+    memory_attribute = (translation_format >> 2) & 7;
+    return (translation_format & IA64_PTE_INSERT_RESERVED_MASK) == 0 &&
+           (itir & itir_reserved) == 0 &&
+           (memory_attribute == 0 || memory_attribute >= 4);
+}
+
+bool ia64_translation_insert_has_permission(uint64_t translation_format)
+{
+    IA64TranslationEntry entry = {
+        .access_rights = (translation_format >> 9) & 7,
+        .privilege_level = (translation_format >> 7) & 3,
+    };
+
+    if ((translation_format & 1) == 0) {
+        return true;
+    }
+    return ia64_translation_allows(&entry, MMU_DATA_LOAD, 0) ||
+           ia64_translation_allows(&entry, MMU_DATA_STORE, 0) ||
+           ia64_translation_allows(&entry, MMU_INST_FETCH, 0);
+}
+
+bool ia64_virtual_address_implemented(vaddr address)
+{
+    /* This implementation exposes all 61 payload bits plus region bits. */
+    (void)address;
+    return true;
 }
 
 bool ia64_host_tlb_flush_span(vaddr address, uint8_t page_size,
@@ -501,7 +637,8 @@ static IA64VHPTWalkStatus ia64_try_vhpt_walk_common(
 
     if (!ia64_translate_address_common(env, iha, MMU_DATA_LOAD,
                                        IA64_MMU_DATA_CPL0, 0, false, false,
-                                       false, false, &vhpt_addr)) {
+                                       false, false, false, false,
+                                       &vhpt_addr)) {
         IA64_PERF_INC(IA64_PERF_VHPT_WALK_VADDR_MISS);
         trace_ia64_vhpt_walk("vaddr-miss", ia64_access_kind(instruction),
                              address, iha, 0, 0, itir);
@@ -510,6 +647,24 @@ static IA64VHPTWalkStatus ia64_try_vhpt_walk_common(
             IA64_PERF_INC(IA64_PERF_VHPT_WALK_FAULT);
             return IA64_VHPT_WALK_FAULT;
         }
+        return IA64_VHPT_WALK_MISS;
+    }
+
+    /*
+     * The VHPT backing reference is an architected PL0 read.  A matching
+     * DBR does not deliver Data Debug for the implicit walk: Intel SDM vol. 2
+     * section 4.1.3.2 requires the walker to abort and report the original
+     * instruction/data TLB miss instead.  Test after backing translation so
+     * its higher-priority faults win, but before the physical read so an MMIO
+     * backed table cannot observe a suppressed access.
+     *
+     * Long-format walks are rejected above; the short-format atomic datum is
+     * exactly eight bytes.
+     */
+    if (ia64_data_debug_match_at_cpl(env, iha, 8,
+                                     IA64_DEBUG_ACCESS_READ, 0)) {
+        trace_ia64_vhpt_walk("debug-abort", ia64_access_kind(instruction),
+                             address, iha, vhpt_addr.paddr, 0, itir);
         return IA64_VHPT_WALK_MISS;
     }
 
@@ -679,7 +834,7 @@ static bool ia64_translation_allows(const IA64TranslationEntry *entry,
     }
 }
 
-static int ia64_entry_prot(const IA64TranslationEntry *entry)
+static int ia64_entry_prot(const IA64TranslationEntry *entry, int cpl)
 {
     int prot = 0;
 
@@ -687,33 +842,91 @@ static int ia64_entry_prot(const IA64TranslationEntry *entry)
         return 0;
     }
 
-    if (entry->access_rights == 7) {
-        return PAGE_READ | PAGE_EXEC;
+    /*
+     * Host-TLB protection describes every access the same CPL may perform,
+     * not merely an AR-only approximation.  In particular AR=6 permits
+     * execute exactly at the translation PL, while AR=7 permits data reads
+     * only at CPL0.
+     */
+    if (ia64_translation_allows(entry, MMU_DATA_LOAD, cpl)) {
+        prot |= PAGE_READ;
     }
-
-    switch (entry->access_rights) {
-    case 0:
-    case 4:
-        prot = PAGE_READ;
-        break;
-    case 1:
-    case 5:
-        prot = PAGE_READ | PAGE_EXEC;
-        break;
-    case 2:
-    case 6:
-        prot = PAGE_READ | PAGE_WRITE;
-        break;
-    case 3:
-        prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
-        break;
-    default:
-        break;
+    if (entry->dirty &&
+        ia64_translation_allows(entry, MMU_DATA_STORE, cpl)) {
+        prot |= PAGE_WRITE;
     }
-    if (!entry->dirty) {
-        prot &= ~PAGE_WRITE;
+    if (ia64_translation_allows(entry, MMU_INST_FETCH, cpl)) {
+        prot |= PAGE_EXEC;
     }
     return prot;
+}
+
+static bool ia64_key_check_enabled(const CPUIA64State *env,
+                                   bool instruction, bool rse_access)
+{
+    uint64_t translation_bit = instruction ? IA64_PSR_IT_BIT :
+                               (rse_access ? IA64_PSR_RT_BIT :
+                                             IA64_PSR_DT_BIT);
+
+    return (env->psr & (IA64_PSR_PK_BIT | translation_bit)) ==
+           (IA64_PSR_PK_BIT | translation_bit);
+}
+
+static IA64TranslateStatus ia64_key_access_status(
+    const CPUIA64State *env, uint32_t key, MMUAccessType access_type,
+    bool instruction, bool rse_access, int *prot)
+{
+    uint64_t wanted_key = (uint64_t)(key & 0x00ffffff) << IA64_PKR_KEY_SHIFT;
+    uint64_t disable = 0;
+    bool matched = false;
+
+    if (!ia64_key_check_enabled(env, instruction, rse_access)) {
+        return IA64_TRANSLATE_OK;
+    }
+
+    /*
+     * Architectural writes make valid keys unique.  OR all matching disable
+     * bits anyway so a malformed migration image can never weaken access.
+     */
+    for (unsigned i = 0; i < IA64_PKR_COUNT; i++) {
+        uint64_t pkr = env->pkr[i];
+
+        if ((pkr & IA64_PKR_VALID_BIT) != 0 &&
+            (pkr & IA64_PKR_KEY_MASK) == wanted_key) {
+            matched = true;
+            disable |= pkr;
+        }
+    }
+    if (!matched) {
+        return IA64_TRANSLATE_KEY_MISS;
+    }
+
+    if (disable & IA64_PKR_READ_DISABLE_BIT) {
+        *prot &= ~PAGE_READ;
+    }
+    if (disable & IA64_PKR_WRITE_DISABLE_BIT) {
+        *prot &= ~PAGE_WRITE;
+    }
+    if (disable & IA64_PKR_EXECUTE_DISABLE_BIT) {
+        *prot &= ~PAGE_EXEC;
+    }
+
+    /*
+     * Key Permission is determined only by PKR disable bits.  The incoming
+     * protection mask already reflects PTE access rights, privilege, A and D;
+     * consulting it here would incorrectly promote those later faults above
+     * their architected priority.  Still narrow the returned host-TLB mask so
+     * a cached entry can never bypass any PKR restriction.
+     */
+    if ((access_type == MMU_INST_FETCH &&
+         (disable & IA64_PKR_EXECUTE_DISABLE_BIT)) ||
+        (access_type == MMU_DATA_STORE &&
+         (disable & IA64_PKR_WRITE_DISABLE_BIT)) ||
+        (access_type == MMU_DATA_LOAD &&
+         (disable & IA64_PKR_READ_DISABLE_BIT))) {
+        return IA64_TRANSLATE_KEY_PERMISSION;
+    }
+    return IA64_TRANSLATE_OK;
 }
 
 static void ia64_invalidate_overlapping_entries(IA64TranslationEntry *entries,
@@ -755,7 +968,8 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
     IA64TranslationEntry *tc;
     uint8_t *next_tc;
 
-    if (!env || !ia64_page_size_supported(page_size)) {
+    if (!env || !ia64_translation_insert_fields_valid(translation_format,
+                                                       itir)) {
         return false;
     }
 
@@ -886,7 +1100,7 @@ bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
 
     return ia64_translate_address_common(env, address, access_type, mmu_idx,
                                          access_cpl, false, false, false,
-                                         rse_access, result);
+                                         rse_access, false, false, result);
 }
 
 static IA64TranslationEntry ia64_purge_probe(CPUIA64State *env, vaddr address,
@@ -979,7 +1193,7 @@ bool ia64_translate_data_non_access_checked(CPUIA64State *env,
     return ia64_translate_address_common(
         env, address, MMU_DATA_LOAD, 0,
         ia64_current_privilege_level(env->psr), debug, true, true, false,
-        result);
+        false, true, result);
 }
 
 bool ia64_translate_address(CPUIA64State *env, vaddr address,
@@ -989,7 +1203,7 @@ bool ia64_translate_address(CPUIA64State *env, vaddr address,
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
         ia64_current_privilege_level(env->psr), debug, true, false, false,
-        result);
+        false, false, result);
 }
 
 bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
@@ -999,7 +1213,7 @@ bool ia64_translate_address_no_detail(CPUIA64State *env, vaddr address,
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
         ia64_current_privilege_level(env->psr), debug, false, false, false,
-        result);
+        false, false, result);
 }
 
 bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
@@ -1009,7 +1223,55 @@ bool ia64_translate_address_with_cpl(CPUIA64State *env, vaddr address,
 {
     return ia64_translate_address_common(env, address, access_type, mmu_idx,
                                          cpl, debug, true, false, false,
-                                         result);
+                                         false, false, result);
+}
+
+bool ia64_translate_probe_address(CPUIA64State *env, vaddr address,
+                                  MMUAccessType access_type, int cpl,
+                                  bool regular_form,
+                                  IA64TranslateResult *result)
+{
+    /*
+     * A regular probe still searches the DTLB when PSR.dt is clear.  The
+     * fault form instead treats the operand as a physical address in that
+     * mode.  Neither form is a debugger translation: key, access-right, A,
+     * and D policy must remain observable to the caller's probe fault table.
+     */
+    return ia64_translate_address_common(
+        env, address, access_type, 0, cpl, false, true, false, false,
+        regular_form && !(env->psr & IA64_PSR_DT_BIT), false, result);
+}
+
+uint64_t ia64_translation_access_key(CPUIA64State *env, vaddr address)
+{
+    const IA64TranslationEntry *entry;
+
+    if (!env) {
+        return 1;
+    }
+    entry = ia64_lookup_translation(env, false, address);
+    if (!entry || !entry->present) {
+        return 1;
+    }
+    return (uint64_t)entry->key << 8;
+}
+
+bool ia64_instruction_epc_gate(CPUIA64State *env, vaddr address,
+                               uint8_t *privilege_level)
+{
+    const IA64TranslationEntry *entry;
+
+    if (!env) {
+        return false;
+    }
+    entry = ia64_lookup_translation(env, true, address);
+    if (!entry || !entry->present || entry->access_rights != 7) {
+        return false;
+    }
+    if (privilege_level) {
+        *privilege_level = entry->privilege_level;
+    }
+    return true;
 }
 
 bool ia64_translate_rse_address_no_detail(CPUIA64State *env, vaddr address,
@@ -1023,7 +1285,8 @@ bool ia64_translate_rse_address_no_detail(CPUIA64State *env, vaddr address,
 
     return ia64_translate_address_common(
         env, address, access_type, mmu_idx,
-        ia64_rse_mmu_index_cpl(mmu_idx), debug, false, false, true, result);
+        ia64_rse_mmu_index_cpl(mmu_idx), debug, false, false, true, false,
+        false, result);
 }
 
 static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
@@ -1031,10 +1294,12 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
                                           int mmu_idx, int cpl, bool debug,
                                           bool format_detail,
                                           bool non_access, bool rse_access,
+                                          bool force_translation,
+                                          bool non_access_natpage,
                                           IA64TranslateResult *result)
 {
     bool instruction = access_type == MMU_INST_FETCH;
-    bool needs_translation = non_access || rse_access ||
+    bool needs_translation = force_translation || non_access || rse_access ||
                              ia64_translation_required(env->psr,
                                                        access_type);
     const IA64TranslationEntry *entry;
@@ -1049,6 +1314,8 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         result->prot = 0;
         result->identity = false;
         result->exception_deferral = false;
+        result->memory_attribute = 0;
+        result->speculation_class = IA64_MEMORY_SPECULATION_SPEC;
         result->message[0] = '\0';
     }
     result->vaddr = address;
@@ -1063,6 +1330,8 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
     result->mmu_idx = mmu_idx;
     result->debug = debug;
     result->page_size = 12;
+    result->memory_attribute = 0;
+    result->speculation_class = IA64_MEMORY_SPECULATION_SPEC;
 
     IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE);
     if (!format_detail) {
@@ -1077,15 +1346,33 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
 
     if (!needs_translation) {
         IA64_PERF_INC(IA64_PERF_TARGET_TRANSLATE_PHYSICAL);
-        result->status = IA64_TRANSLATE_OK;
         result->paddr = address & IA64_PHYSICAL_ADDRESS_MASK;
+        result->memory_attribute =
+            (address & IA64_PHYSICAL_MEMORY_ATTRIBUTE_BIT) != 0 ? 4 : 0;
+        result->speculation_class =
+            (address & IA64_PHYSICAL_MEMORY_ATTRIBUTE_BIT) != 0 ?
+            IA64_MEMORY_SPECULATION_NON :
+            IA64_MEMORY_SPECULATION_LIMITED;
+        if (address & IA64_PHYSICAL_UNIMPLEMENTED_MASK) {
+            result->status = IA64_TRANSLATE_UNIMPLEMENTED;
+            if (format_detail) {
+                snprintf(result->message, sizeof(result->message),
+                         "%s physical address has unimplemented bits "
+                         "address=0x%016" VADDR_PRIx
+                         " paddr=0x%016" HWADDR_PRIx,
+                         instruction ? "instruction" : "data", address,
+                         result->paddr);
+            }
+            goto record;
+        }
+        result->status = IA64_TRANSLATE_OK;
         result->prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         result->identity = result->paddr == address;
         if (format_detail) {
             snprintf(result->message, sizeof(result->message),
                      result->identity
                      ? "physical identity translation address=0x%016" VADDR_PRIx
-                     : "physical mode region-bit strip address=0x%016" VADDR_PRIx
+                     : "physical mode PMA-bit strip address=0x%016" VADDR_PRIx
                        " paddr=0x%016" HWADDR_PRIx,
                      address, result->paddr);
         }
@@ -1110,9 +1397,22 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
 
     result->page_size = entry->page_size;
     result->paddr = entry->paddr_base | (address & ia64_page_mask(entry->page_size));
-    result->prot = ia64_entry_prot(entry);
+    result->prot = ia64_entry_prot(entry, cpl);
     result->identity = result->paddr == address;
     result->exception_deferral = entry->exception_deferral;
+    result->memory_attribute = entry->memory_attribute;
+    switch (entry->memory_attribute) {
+    case 0:                         /* WB */
+    case 6:                         /* WC */
+    case 7:                         /* NaTPage */
+        result->speculation_class = IA64_MEMORY_SPECULATION_SPEC;
+        break;
+    case 4:                         /* UC */
+    case 5:                         /* UCE */
+    default:
+        result->speculation_class = IA64_MEMORY_SPECULATION_NON;
+        break;
+    }
 
     if (!entry->present) {
         result->status = IA64_TRANSLATE_NOT_PRESENT;
@@ -1126,16 +1426,40 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         goto record;
     }
 
-    if (!non_access && !debug && !entry->accessed) {
-        result->status = IA64_TRANSLATE_ACCESS_BIT;
+    /*
+     * NaTPage Consumption has priority over every protection-key and access
+     * check.  Keep non-access translations (tpa/probe) and debugger lookups
+     * policy-free; only an architectural memory reference consumes it.
+     */
+    if (entry->memory_attribute == 7 &&
+        ((!non_access && !debug) || non_access_natpage)) {
+        result->status = IA64_TRANSLATE_NAT_PAGE;
         if (format_detail) {
             snprintf(result->message, sizeof(result->message),
-                     "%s translation access bit clear address=0x%016" VADDR_PRIx
-                     " ar=%u pl=%u cpl=%d",
-                     instruction ? "instruction" : "data", address,
-                     entry->access_rights, entry->privilege_level, cpl);
+                     "%s NaTPage consumption address=0x%016" VADDR_PRIx,
+                     instruction ? "instruction" : "data", address);
         }
         goto record;
+    }
+
+    if (!non_access && !debug) {
+        IA64TranslateStatus key_status = ia64_key_access_status(
+            env, entry->key, access_type, instruction, rse_access,
+            &result->prot);
+
+        if (key_status != IA64_TRANSLATE_OK) {
+            result->status = key_status;
+            if (format_detail) {
+                snprintf(result->message, sizeof(result->message),
+                         "%s translation protection-key %s"
+                         " address=0x%016" VADDR_PRIx " key=0x%x",
+                         instruction ? "instruction" : "data",
+                         key_status == IA64_TRANSLATE_KEY_MISS ?
+                             "miss" : "permission",
+                         address, entry->key);
+            }
+            goto record;
+        }
     }
 
     if (!non_access && !ia64_translation_allows(entry, access_type, cpl)) {
@@ -1150,7 +1474,22 @@ static bool ia64_translate_address_common(CPUIA64State *env, vaddr address,
         goto record;
     }
 
-    if (!debug && access_type == MMU_DATA_STORE && !entry->dirty) {
+    if (!non_access && !debug && !entry->accessed &&
+        !(env->psr & (instruction ? IA64_PSR_IA_BIT :
+                                   IA64_PSR_DA_BIT))) {
+        result->status = IA64_TRANSLATE_ACCESS_BIT;
+        if (format_detail) {
+            snprintf(result->message, sizeof(result->message),
+                     "%s translation access bit clear address=0x%016" VADDR_PRIx
+                     " ar=%u pl=%u cpl=%d",
+                     instruction ? "instruction" : "data", address,
+                     entry->access_rights, entry->privilege_level, cpl);
+        }
+        goto record;
+    }
+
+    if (!debug && access_type == MMU_DATA_STORE && !entry->dirty &&
+        !(env->psr & IA64_PSR_DA_BIT)) {
         result->status = IA64_TRANSLATE_DIRTY_BIT;
         if (format_detail) {
             snprintf(result->message, sizeof(result->message),
@@ -1184,6 +1523,127 @@ record:
     }
 
     return result->status == IA64_TRANSLATE_OK;
+}
+
+bool ia64_pkr_value_valid(uint64_t value)
+{
+    return (value & ~IA64_PKR_MASK) == 0;
+}
+
+void ia64_pkr_write_state(CPUIA64State *env, uint32_t index, uint64_t value)
+{
+    uint64_t masked;
+    uint64_t key;
+
+    g_assert(env != NULL && index < IA64_PKR_COUNT &&
+             ia64_pkr_value_valid(value));
+    masked = value & IA64_PKR_MASK;
+    key = masked & IA64_PKR_KEY_MASK;
+    if (masked & IA64_PKR_VALID_BIT) {
+        for (unsigned i = 0; i < IA64_PKR_COUNT; i++) {
+            if (i != index && (env->pkr[i] & IA64_PKR_VALID_BIT) &&
+                (env->pkr[i] & IA64_PKR_KEY_MASK) == key) {
+                env->pkr[i] &= ~IA64_PKR_VALID_BIT;
+            }
+        }
+    }
+    env->pkr[index] = masked;
+}
+
+uint64_t ia64_clear_fault_suppression_state(CPUIA64State *env,
+                                            uint64_t entry_mask)
+{
+    uint64_t clear = env->psr & entry_mask &
+                     IA64_PSR_FAULT_SUPPRESSION_MASK;
+
+    env->psr &= ~clear;
+    return clear;
+}
+
+static bool ia64_debug_address_matches(uint64_t address, uint64_t base,
+                                       uint64_t control, bool instruction)
+{
+    uint64_t compare = UINT64_C(0xff00000000000000) |
+                       (control & UINT64_C(0x00ffffffffffffff));
+
+    if (instruction) {
+        compare &= ~UINT64_C(0xf);
+    }
+    return ((address ^ base) & compare) == 0;
+}
+
+static bool ia64_debug_plm_matches(uint64_t control, unsigned cpl)
+{
+    return (control & (UINT64_C(1) << (56 + (cpl & 3)))) != 0;
+}
+
+bool ia64_instruction_debug_match(const CPUIA64State *env, vaddr address)
+{
+    unsigned cpl;
+
+    if (!env || !(env->psr & IA64_PSR_DB_BIT) ||
+        (env->psr & IA64_PSR_ID_BIT)) {
+        return false;
+    }
+    cpl = (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
+    for (unsigned i = 0; i + 1 < IA64_IBR_COUNT; i += 2) {
+        uint64_t control = env->ibr[i + 1];
+
+        if ((control & (UINT64_C(1) << 63)) &&
+            ia64_debug_plm_matches(control, cpl) &&
+            ia64_debug_address_matches(address, env->ibr[i], control,
+                                       true)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ia64_data_debug_match_at_cpl(const CPUIA64State *env, vaddr address,
+                                  unsigned size, unsigned access,
+                                  unsigned cpl)
+{
+    if (!env || !(env->psr & IA64_PSR_DB_BIT) ||
+        (env->psr & IA64_PSR_DD_BIT) || access == 0) {
+        return false;
+    }
+    cpl &= 3;
+    size = MAX(size, 1U);
+    for (unsigned i = 0; i + 1 < IA64_DBR_COUNT; i += 2) {
+        uint64_t control = env->dbr[i + 1];
+        bool enabled = ((access & IA64_DEBUG_ACCESS_READ) &&
+                        (control & (UINT64_C(1) << 63))) ||
+                       ((access & IA64_DEBUG_ACCESS_WRITE) &&
+                        (control & (UINT64_C(1) << 62)));
+
+        if (!enabled || !ia64_debug_plm_matches(control, cpl)) {
+            continue;
+        }
+        for (unsigned byte = 0; byte < size; byte++) {
+            if (ia64_debug_address_matches(address + byte, env->dbr[i],
+                                           control, false)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool ia64_data_debug_match(const CPUIA64State *env, vaddr address,
+                           unsigned size, unsigned access)
+{
+    unsigned cpl = env ?
+        (env->psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT : 0;
+
+    return ia64_data_debug_match_at_cpl(env, address, size, access, cpl);
+}
+
+bool ia64_rse_data_debug_match(const CPUIA64State *env, vaddr address,
+                               unsigned size, unsigned access)
+{
+    unsigned pl = env ? ia64_rsc_pl(env->rse.rsc) : 0;
+
+    return ia64_data_debug_match_at_cpl(env, address, size, access, pl);
 }
 
 void ia64_format_translate_result(const IA64TranslateResult *result,
@@ -1266,19 +1726,126 @@ bool ia64_data_access_alignment_fault(CPUIA64State *env, vaddr address,
         return false;
     }
 
-    alignment = size >= 16 ? 16 : size;
+    /* Extended FP memory operands contain ten bytes but have a 16-byte
+       alignment boundary.  Other architectural widths are powers of two. */
+    alignment = size == 10 ? 16 : MIN(size, 16);
     if ((address & (alignment - 1)) == 0) {
         return false;
     }
 
     /*
      * Ordinary unaligned references may be supported while PSR.ac is clear.
-     * Semaphores and 16-byte references are always strict, and every IA-64
-     * implementation must fault a datum that crosses a 4 KiB boundary.
+     * Semaphores and LD16/ST16 pass strict explicitly.  FP pair/fill/spill
+     * references are ordinary 16-byte operands.  Every IA-64 implementation
+     * must still fault a datum that crosses a 4 KiB boundary.
      */
-    return strict || size >= 16 ||
+    return strict ||
            (ia64_env_psr(env) & IA64_PSR_AC_BIT) != 0 ||
            (address & 0xfff) + size > 0x1000;
+}
+
+static bool ia64_control_speculative_data_debug_deferred(CPUIA64State *env)
+{
+    uint64_t psr = ia64_env_psr(env);
+
+    return (psr & IA64_PSR_IC_BIT) == 0 ||
+           ((psr & IA64_PSR_IT_BIT) != 0 &&
+            ia64_current_itlb_exception_deferral(env) &&
+            (env->cr[IA64_CR_DCR] & IA64_DCR_DD_BIT) != 0);
+}
+
+IA64ControlSpeculativeLoadAction ia64_control_speculative_load_action(
+    CPUIA64State *env, uint8_t memory_class, bool base_nat, vaddr address,
+    uint8_t width, IA64TranslateResult *fault)
+{
+    IA64TranslateResult local_fault;
+    vaddr current = address;
+    uint32_t remaining = MAX(width, 1);
+    bool defer = false;
+
+    if (!env || !ia64_memory_class_is_control_speculative(memory_class)) {
+        return IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE;
+    }
+
+    if (base_nat) {
+        return IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
+    }
+
+    if ((ia64_env_psr(env) & IA64_PSR_ED_BIT) != 0) {
+        ia64_env_set_psr(env, ia64_env_psr(env) & ~IA64_PSR_ED_BIT);
+        return IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
+    }
+
+    /*
+     * Translation and protection outrank Data Debug.  Inspect each page of
+     * the datum before deciding whether a lower-priority deferred condition
+     * must expose a nondeferred DBR match.  Stop at the first deferred fault:
+     * the speculative reference will not consume any later byte.
+     */
+    while (remaining != 0) {
+        uint32_t page_remaining = 0x1000 - (current & 0xfff);
+        uint32_t chunk = MIN(remaining, page_remaining);
+
+        if (ia64_translate_address_no_detail(env, current, MMU_DATA_LOAD,
+                                             0, false, &local_fault)) {
+            /* Any speculative reference to a NaTPage produces NaTVal without
+               reading memory.  Control-speculative ld.s and ld.sa are
+               admitted only by a fully speculative mapping; physical WBL is
+               LIMITED. */
+            if (local_fault.memory_attribute == 7 ||
+                local_fault.speculation_class !=
+                IA64_MEMORY_SPECULATION_SPEC) {
+                defer = true;
+                break;
+            }
+        } else {
+            if (fault) {
+                *fault = local_fault;
+            }
+
+            /* Unimplemented-address faults preclude every lower fault. */
+            if (local_fault.status == IA64_TRANSLATE_BAD_ADDRESS ||
+                local_fault.status == IA64_TRANSLATE_UNIMPLEMENTED) {
+                return IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
+            }
+
+            /* A speculative load converts NaTPage Consumption into NaTVal. */
+            if (local_fault.status == IA64_TRANSLATE_NAT_PAGE ||
+                ia64_control_speculative_load_fault_deferred(env,
+                                                              &local_fault)) {
+                defer = true;
+                break;
+            }
+
+            /* The real access must deliver this nondeferrable higher fault. */
+            return IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE;
+        }
+
+        current += chunk;
+        remaining -= chunk;
+    }
+
+    if (ia64_data_access_alignment_fault(env, address, width, false)) {
+        defer = true;
+    }
+
+    if (ia64_data_debug_match(env, address, width == 10 ? 16 : width,
+                              IA64_DEBUG_ACCESS_READ)) {
+        if (ia64_control_speculative_data_debug_deferred(env)) {
+            return IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
+        }
+
+        /* The normal pre-access seam will raise a match on a real access. */
+        if (!defer) {
+            return IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE;
+        }
+
+        /* No real access follows a deferred condition, so raise it directly. */
+        return IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG;
+    }
+
+    return defer ? IA64_CONTROL_SPECULATIVE_LOAD_DEFER :
+                   IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE;
 }
 
 bool ia64_control_speculative_load_defer(CPUIA64State *env,
@@ -1287,32 +1854,7 @@ bool ia64_control_speculative_load_defer(CPUIA64State *env,
                                          uint8_t width,
                                          IA64TranslateResult *fault)
 {
-    IA64TranslateResult local_fault;
-
-    if (!env || !ia64_memory_class_is_control_speculative(memory_class)) {
-        return false;
-    }
-
-    if (base_nat) {
-        return true;
-    }
-
-    if ((ia64_env_psr(env) & IA64_PSR_ED_BIT) != 0) {
-        ia64_env_set_psr(env, ia64_env_psr(env) & ~IA64_PSR_ED_BIT);
-        return true;
-    }
-
-    if (ia64_data_access_alignment_fault(env, address, width, false)) {
-        return true;
-    }
-
-    if (ia64_translate_address_no_detail(env, address, MMU_DATA_LOAD,
-                                         0, false, &local_fault)) {
-        return false;
-    }
-
-    if (fault) {
-        *fault = local_fault;
-    }
-    return ia64_control_speculative_load_fault_deferred(env, &local_fault);
+    return ia64_control_speculative_load_action(
+               env, memory_class, base_nat, address, width, fault) ==
+           IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
 }

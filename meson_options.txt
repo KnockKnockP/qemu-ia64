@@ -55,8 +55,8 @@ option('module_upgrades', type : 'boolean', value : false,
        description: 'try to load modules from alternate paths for upgrades')
 option('install_blobs', type : 'boolean', value : true,
        description: 'install provided firmware blobs')
-option('vibtanium_bit', type : 'boolean', value : true,
-       description: 'embed the vibtanium IA-64 EFI Built In Test firmware menu app')
+option('vibtanium_efi', type : 'boolean', value : true,
+       description: 'package the Vibtanium IA-64 EFI firmware and BIT application')
 option('sparse', type : 'feature', value : 'auto',
        description: 'sparse checker')
 option('guest_agent', type : 'feature', value : 'auto',

@@ -1,19 +1,20 @@
 ia64_ss = ss.source_set()
 ia64_ss.add(files(
+  'arch-helpers.c',
   'bundle.c',
   'cpu.c',
-  'debug-trace.c',
+  'data-plane.c',
   'decode.c',
   'exception.c',
   'flight-recorder.c',
-  'firmware-hook.c',
   'insn.c',
-  'interp.c',
   'machine.c',
   'mem.c',
+  'opcode-traits.c',
   'perf.c',
   'profile.c',
-  'tcg-classify.c',
+  'rse.c',
+  'system-plane.c',
   'translate.c',
 ))
 

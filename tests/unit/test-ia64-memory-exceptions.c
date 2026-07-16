@@ -20,8 +20,10 @@
 #define IA64_PSR_TB_BIT   UINT64_C(0x0000000004000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_DCR_DM_BIT   UINT64_C(0x0000000000000100)
+#define IA64_DCR_DD_BIT   UINT64_C(0x0000000000004000)
 #define IA64_PTE_P_BIT    UINT64_C(0x0000000000000001)
 #define IA64_PTE_A_BIT    UINT64_C(0x0000000000000020)
+#define IA64_PTE_D_BIT    UINT64_C(0x0000000000000040)
 #define IA64_PSR_DELIVERY_CLEARED_MASK \
     (IA64_PSR_I_BIT | IA64_PSR_IC_BIT | IA64_PSR_RI_MASK | \
      IA64_PSR_BN_BIT | IA64_PSR_CPL_MASK)
@@ -75,22 +77,107 @@ static void test_identity_debug_memory_path(void)
     g_assert_nonnull(strstr(text, "identity=yes"));
 }
 
-static void test_physical_region_alias_path(void)
+static void test_physical_address_width_and_pma(void)
 {
     CPUIA64State env;
     IA64TranslateResult result;
-    vaddr alias = 0xe000000000001000ULL;
+    static const struct {
+        vaddr address;
+        uint8_t memory_attribute;
+        IA64MemorySpeculationClass speculation_class;
+        bool identity;
+    } valid[] = {
+        { UINT64_C(0x0003ffffffffffff), 0,
+          IA64_MEMORY_SPECULATION_LIMITED, true },
+        { UINT64_C(0x8003ffffffffffff), 4,
+          IA64_MEMORY_SPECULATION_NON, false },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(valid); i++) {
+        ia64_cpu_reset_synthetic_itanium2(&env);
+
+        g_assert_true(ia64_translate_address(
+            &env, valid[i].address, MMU_DATA_LOAD, 0, false, &result));
+        g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
+        g_assert_cmphex(result.paddr, ==, UINT64_C(0x0003ffffffffffff));
+        g_assert_cmpuint(result.memory_attribute, ==,
+                         valid[i].memory_attribute);
+        g_assert_cmpint(result.speculation_class, ==,
+                        valid[i].speculation_class);
+        g_assert_cmpint(result.identity, ==, valid[i].identity);
+    }
 
     ia64_cpu_reset_synthetic_itanium2(&env);
+    g_assert_false(ia64_translate_address(
+        &env, UINT64_C(0x0004000000000000), MMU_DATA_LOAD, 0, false,
+        &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_UNIMPLEMENTED);
+    g_assert_cmphex(result.paddr, ==, 0);
+    g_assert_nonnull(strstr(result.message, "unimplemented bits"));
+    g_assert_cmphex(env.memory.last_vaddr, ==,
+                    UINT64_C(0x0004000000000000));
+    g_assert_cmpint(env.memory.last_status, ==,
+                    IA64_TRANSLATE_UNIMPLEMENTED);
+}
 
-    g_assert_true(ia64_translate_address(&env, alias, MMU_DATA_LOAD, 0,
-                                         false, &result));
-    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
-    g_assert_cmpint(result.region, ==, 7);
-    g_assert_cmphex(result.paddr, ==, 0x1000);
-    g_assert_nonnull(strstr(result.message, "physical mode region-bit strip"));
-    g_assert_cmphex(env.memory.last_vaddr, ==, alias);
-    g_assert_cmpint(env.memory.last_status, ==, IA64_TRANSLATE_OK);
+static void test_unimplemented_physical_address_delivery(void)
+{
+    static const struct {
+        MMUAccessType access;
+        IA64ExceptionKind kind;
+        uint64_t vector;
+        uint64_t code;
+        unsigned access_bit;
+        bool writes_ifa;
+    } rows[] = {
+        { MMU_INST_FETCH,
+          IA64_EXCEPTION_UNIMPLEMENTED_INSTRUCTION_ADDRESS,
+          UINT64_C(0x5e00),
+          IA64_ISR_CODE_UNIMPLEMENTED_INSTRUCTION_ADDRESS,
+          IA64_ISR_X_BIT, true },
+        { MMU_DATA_LOAD, IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS,
+          UINT64_C(0x5400), IA64_ISR_CODE_UNIMPLEMENTED_DATA_ADDRESS,
+          IA64_ISR_R_BIT, true },
+        { MMU_DATA_STORE, IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS,
+          UINT64_C(0x5400), IA64_ISR_CODE_UNIMPLEMENTED_DATA_ADDRESS,
+          IA64_ISR_W_BIT, true },
+    };
+    const vaddr address = UINT64_C(0x0004000000001230);
+    const vaddr source_ip = UINT64_C(0x8040);
+    const uint64_t saved_ifa = UINT64_C(0xfeedfacecafebeef);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
+        CPUIA64State env;
+        IA64TranslateResult result;
+        uint64_t expected_isr = rows[i].code |
+            (UINT64_C(1) << rows[i].access_bit) |
+            (UINT64_C(2) << IA64_ISR_EI_SHIFT);
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        env.psr = ia64_psr_with_ri(IA64_PSR_IC_BIT, 2);
+        env.ip = source_ip;
+        env.cr[IA64_CR_IVA] = UINT64_C(0x100000);
+        env.cr[IA64_CR_IFA] = saved_ifa;
+
+        g_assert_false(ia64_translate_address(
+            &env, address, rows[i].access, 0, false, &result));
+        g_assert_cmpint(result.status, ==, IA64_TRANSLATE_UNIMPLEMENTED);
+        g_assert_cmpint(ia64_exception_for_translate_result(&result), ==,
+                        rows[i].kind);
+        ia64_deliver_exception_fast(&env, rows[i].kind, address,
+                                    rows[i].access, NULL);
+
+        g_assert_cmpint(env.exception.kind, ==, rows[i].kind);
+        g_assert_cmphex(env.exception.vector, ==, rows[i].vector);
+        g_assert_cmphex(env.ip, ==,
+                        UINT64_C(0x100000) + rows[i].vector);
+        g_assert_cmphex(env.cr[IA64_CR_IIP], ==,
+                        rows[i].access == MMU_INST_FETCH ?
+                        address & ~UINT64_C(0xf) : source_ip);
+        g_assert_cmphex(env.cr[IA64_CR_IFA], ==,
+                        rows[i].writes_ifa ? address : saved_ifa);
+        g_assert_cmphex(env.cr[IA64_CR_ISR], ==, expected_isr);
+    }
 }
 
 static void test_instruction_translation_reports_exception_deferral(void)
@@ -145,6 +232,7 @@ static void test_speculative_load_exception_records_isr_sp_ed(void)
     env.current_slot_ri = ia64_psr_ri(psr);
     env.current_slot_type = IA64_SLOT_TYPE_M;
     env.current_slot_raw = test_ldst_load(1, 3, 21, 20);
+    env.current_slot_speculative_load = true;
 
     ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_TLB_MISS, miss,
                            MMU_DATA_LOAD, "speculative-load");
@@ -168,6 +256,7 @@ static void test_speculative_load_exception_records_isr_sp_ed(void)
     env.current_slot_ri = ia64_psr_ri(psr);
     env.current_slot_type = IA64_SLOT_TYPE_M;
     env.current_slot_raw = test_ldst_load(1, 3, 21, 20);
+    env.current_slot_speculative_load = true;
 
     ia64_deliver_exception(&env, IA64_EXCEPTION_DATA_TLB_MISS, miss,
                            MMU_DATA_LOAD, "speculative-load");
@@ -231,6 +320,86 @@ static void test_control_speculative_load_deferral_policy(void)
                                                        miss, 8, NULL));
 }
 
+static void test_control_speculative_load_debug_deferral_policy(void)
+{
+    CPUIA64State env;
+    vaddr ip = 0x4000;
+    vaddr address = 0x6000;
+    uint64_t itir = test_rr(0x44, 12, false);
+    uint64_t code_pte_ed = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                           (7ULL << 9) | (1ULL << 52);
+    uint64_t code_pte_no_ed = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                              (7ULL << 9);
+    uint64_t data_pte = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                        IA64_PTE_D_BIT | (3ULL << 9) | 0x200000;
+    uint64_t dbr_control = (UINT64_C(1) << 63) |
+                           (UINT64_C(1) << 56) |
+                           UINT64_C(0x00ffffffffffffff);
+
+    /* DCR.dd applies only in the ITLB.ed recovery model. */
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_IT_BIT | IA64_PSR_DB_BIT;
+    env.cr[IA64_CR_DCR] = IA64_DCR_DD_BIT;
+    env.rr[0] = test_rr(0x44, 12, false);
+    env.dbr[0] = address;
+    env.dbr[1] = dbr_control;
+    g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
+                                           code_pte_ed, itir));
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 1, false, address, 8, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_DEFER);
+
+    env.cr[IA64_CR_DCR] = 0;
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 1, false, address, 8, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG);
+
+    env.cr[IA64_CR_DCR] = IA64_DCR_DD_BIT;
+    env.psr &= ~IA64_TB_PSR_IT_BIT;
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 1, false, address, 8, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG);
+    env.dbr[0] = address + 15;
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 1, false, address, 10, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.ip = ip;
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_IT_BIT | IA64_PSR_DB_BIT;
+    env.cr[IA64_CR_DCR] = IA64_DCR_DD_BIT;
+    env.rr[0] = test_rr(0x44, 12, false);
+    env.dbr[0] = address;
+    env.dbr[1] = dbr_control;
+    g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
+                                           code_pte_no_ed, itir));
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 3, false, address, 8, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG);
+
+    /* With interruption collection disabled, a matching DBR is deferred. */
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_DB_BIT;
+    env.dbr[0] = address;
+    env.dbr[1] = dbr_control;
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 1, false, address, 8, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_DEFER);
+
+    /* A clean SPEC mapping leaves nondeferred delivery to pre-access DBR. */
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_DT_BIT | IA64_PSR_DB_BIT;
+    env.rr[0] = test_rr(0x44, 12, false);
+    env.dbr[0] = address;
+    env.dbr[1] = dbr_control;
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           data_pte, itir));
+    g_assert_cmpint(ia64_control_speculative_load_action(
+                        &env, 1, false, address, 8, NULL),
+                    ==, IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE);
+}
+
 static void test_unaligned_data_reference_policy(void)
 {
     CPUIA64State env;
@@ -243,11 +412,15 @@ static void test_unaligned_data_reference_policy(void)
     g_assert_true(ia64_data_access_alignment_fault(&env, cross_page, 8,
                                                    false));
     g_assert_true(ia64_data_access_alignment_fault(&env, 0x1004, 8, true));
+    g_assert_false(ia64_data_access_alignment_fault(&env, 0x1008, 16,
+                                                    false));
     g_assert_true(ia64_data_access_alignment_fault(&env, 0x1008, 16,
-                                                   false));
+                                                   true));
 
     env.psr |= IA64_PSR_AC_BIT;
     g_assert_true(ia64_data_access_alignment_fault(&env, 0x1004, 8,
+                                                   false));
+    g_assert_true(ia64_data_access_alignment_fault(&env, 0x1008, 16,
                                                    false));
 
     ia64_cpu_reset_synthetic_itanium2(&env);
@@ -284,9 +457,11 @@ static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
     uint64_t cpl3 = cpl0 | IA64_TB_PSR_CPL_MASK;
     uint64_t banked_ri2 = cpl0 | IA64_TB_PSR_BN_BIT |
                           (2ULL << IA64_PSR_RI_SHIFT);
+    uint64_t big_endian = cpl0 | IA64_TB_PSR_BE_BIT;
     uint32_t cpl0_flags = ia64_tcg_tb_flags_from_psr(cpl0);
     uint32_t cpl3_flags = ia64_tcg_tb_flags_from_psr(cpl3);
     uint32_t banked_ri2_flags = ia64_tcg_tb_flags_from_psr(banked_ri2);
+    uint32_t big_endian_flags = ia64_tcg_tb_flags_from_psr(big_endian);
 
     g_assert_cmpuint(ia64_tcg_psr_cpl(cpl0), ==, 0);
     g_assert_cmpuint(ia64_tcg_psr_cpl(cpl3), ==, 3);
@@ -296,6 +471,12 @@ static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
     g_assert_cmphex(banked_ri2_flags & IA64_TB_FLAG_BN, ==,
                     IA64_TB_FLAG_BN);
     g_assert_cmpuint(ia64_tcg_tb_flags_ri(banked_ri2_flags), ==, 2);
+    g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_BE, ==, 0);
+    g_assert_cmphex(big_endian_flags & IA64_TB_FLAG_BE, ==,
+                    IA64_TB_FLAG_BE);
+    g_assert_cmphex(big_endian_flags, !=, cpl0_flags);
+    g_assert_cmpuint(ia64_tcg_tb_flags_cpl(big_endian_flags), ==, 0);
+    g_assert_cmpuint(ia64_tcg_tb_flags_ri(big_endian_flags), ==, 0);
     g_assert_cmphex(cpl0_flags & IA64_TB_FLAG_BENCHMARK, ==, 0);
     g_assert_cmpuint(
         ia64_tcg_tb_flags_cpl(cpl3_flags | IA64_TB_FLAG_BENCHMARK), ==, 3);
@@ -322,6 +503,8 @@ static void test_tcg_tb_flags_and_mmu_indexes_include_cpl(void)
                     IA64_MMU_DATA_CPL0);
     g_assert_cmpint(ia64_tcg_data_mmu_index_for_tb_flags(cpl3_flags), ==,
                     IA64_MMU_DATA_CPL3);
+    g_assert_cmpint(ia64_tcg_data_mmu_index_for_tb_flags(big_endian_flags),
+                    ==, IA64_MMU_DATA_CPL0);
     g_assert_cmphex(IA64_MMU_ALL_IDXMAP,
                     ==, (1u << IA64_MMU_INDEX_COUNT) - 1u);
 }
@@ -361,6 +544,56 @@ static void test_translated_address_vhpt_miss_reports_region_mode(void)
     g_assert_cmpint(result.region, ==, 5);
     g_assert_true(result.vhpt_enabled);
     g_assert_nonnull(strstr(result.message, "instruction VHPT TLB miss"));
+}
+
+static void test_vhpt_backing_debug_match_aborts_without_read(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr address = 0x6000;
+    vaddr iha;
+    uint64_t rr = test_rr(0x44, 12, true);
+    uint64_t itir = test_rr(0x44, 12, false);
+    uint64_t backing_pte = IA64_PTE_P_BIT | IA64_PTE_A_BIT |
+                           IA64_PTE_D_BIT | (3ULL << 9) | 0x200000;
+    uint64_t dbr_control = (UINT64_C(1) << 63) |
+                           (UINT64_C(1) << 56) |
+                           UINT64_C(0x00ffffffffffffff);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_IC_BIT | IA64_TB_PSR_DT_BIT | IA64_PSR_DB_BIT;
+    env.cr[IA64_CR_PTA] = (UINT64_C(20) << 2) | 1;
+    env.rr[0] = rr;
+    iha = ia64_vhpt_hash_address(&env, address);
+
+    g_assert_true(ia64_vhpt_is_enabled(env.cr[IA64_CR_PTA], rr, env.psr,
+                                       MMU_DATA_LOAD));
+    g_assert_true(ia64_install_translation(&env, false, false, 0, iha,
+                                           backing_pte, itir));
+    g_assert_true(ia64_translate_address(&env, iha, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+
+    env.dbr[0] = iha;
+    env.dbr[1] = dbr_control;
+    g_assert_true(ia64_data_debug_match_at_cpl(
+        &env, iha, 8, IA64_DEBUG_ACCESS_READ, 0));
+
+    /*
+     * The unit AddressSpace reader is deliberately g_assert_not_reached().
+     * Reaching it means the walker failed to suppress the implicit read.
+     */
+    g_assert_cmpint(ia64_try_vhpt_walk(
+                        &env, (AddressSpace *)(uintptr_t)1, address,
+                        MMU_DATA_LOAD),
+                    ==, IA64_VHPT_WALK_MISS);
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
 }
 
 static void test_instruction_translation_register_lookup(void)
@@ -910,41 +1143,78 @@ static void test_rse_reference_isr_and_delivery_cleanup(void)
         int32_t dirty_nat;
         bool cfle;
         bool ir;
+        uint8_t ri;
     } rows[] = {
-        { IA64_EXCEPTION_PAGE_FAULT, MMU_DATA_LOAD, 3, 0, false, false },
-        { IA64_EXCEPTION_DATA_ACCESS_RIGHTS, MMU_DATA_STORE,
-          0, 0, true, true },
-        { IA64_EXCEPTION_DATA_TLB_MISS, MMU_DATA_LOAD,
-          -1, 0, false, false },
         { IA64_EXCEPTION_PAGE_FAULT, MMU_DATA_LOAD,
-          0, -1, false, false },
+          3, 0, false, false, 0 },
+        { IA64_EXCEPTION_DATA_ACCESS_RIGHTS, MMU_DATA_STORE,
+          0, 0, true, true, 1 },
+        { IA64_EXCEPTION_DATA_TLB_MISS, MMU_DATA_LOAD,
+          -1, 0, false, false, 2 },
+        { IA64_EXCEPTION_PAGE_FAULT, MMU_DATA_LOAD,
+          0, -1, false, false, 0 },
+        { IA64_EXCEPTION_DATA_DEBUG, MMU_DATA_LOAD,
+          2, 0, false, false, 0 },
+        { IA64_EXCEPTION_DATA_DEBUG, MMU_DATA_STORE,
+          0, 0, true, true, 0 },
     };
 
     for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
         CPUIA64State env;
+        const vaddr target = UINT64_C(0xa000000100012340) + i * 0x10;
+        const vaddr fault = UINT64_C(0xa0007fffff876600) + i * 8;
+        const vaddr source_bundle =
+            UINT64_C(0xa0000000000047f0) + i * 0x10;
+        const uint64_t restored_psr = ia64_psr_with_ri(
+            IA64_PSR_IC_BIT | IA64_PSR_I_BIT | IA64_PSR_RT_BIT,
+            rows[i].ri);
         uint64_t access_bit = UINT64_C(1) <<
             (rows[i].access == MMU_DATA_STORE ? IA64_ISR_W_BIT :
                                                 IA64_ISR_R_BIT);
         uint64_t expected = access_bit |
                             (UINT64_C(1) << IA64_ISR_RS_BIT) |
-                            (UINT64_C(1) << IA64_ISR_EI_SHIFT);
+                            ((uint64_t)rows[i].ri << IA64_ISR_EI_SHIFT);
 
         if (rows[i].ir) {
             expected |= UINT64_C(1) << IA64_ISR_IR_BIT;
         }
         ia64_cpu_reset_synthetic_itanium2(&env);
-        env.ip = 0x12340;
-        env.psr = ia64_psr_with_ri(IA64_PSR_IC_BIT, 1);
+        env.ip = target;
+        env.psr = restored_psr;
+        env.last_successful_bundle = source_bundle;
         env.cr[IA64_CR_IVA] = 0x100000;
         env.rse.reference = true;
         env.rse.cfle = rows[i].cfle;
         env.rse.dirty = rows[i].dirty;
         env.rse.dirty_nat = rows[i].dirty_nat;
 
-        ia64_deliver_exception(&env, rows[i].kind, 0x88776600,
+        ia64_deliver_exception(&env, rows[i].kind, fault,
                                rows[i].access, "mandatory RSE reference");
 
+        g_assert_cmphex(env.exception.ip, ==, target);
+        g_assert_cmphex(env.exception.address, ==, fault);
+        g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, restored_psr);
+        g_assert_cmpuint(ia64_psr_ri(env.cr[IA64_CR_IPSR]), ==,
+                         rows[i].ri);
+        g_assert_cmphex(env.cr[IA64_CR_IIP], ==, target);
+        g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, source_bundle);
+        g_assert_cmphex(env.cr[IA64_CR_IFA], ==, fault);
         g_assert_cmphex(env.cr[IA64_CR_ISR], ==, expected);
+        g_assert_cmphex(env.cr[IA64_CR_ISR] &
+                        ((UINT64_C(1) << IA64_ISR_R_BIT) |
+                         (UINT64_C(1) << IA64_ISR_W_BIT) |
+                         (UINT64_C(1) << IA64_ISR_RS_BIT) |
+                         (UINT64_C(1) << IA64_ISR_IR_BIT) |
+                         IA64_ISR_EI_MASK), ==, expected);
+        if (rows[i].kind == IA64_EXCEPTION_DATA_DEBUG) {
+            g_assert_cmphex(env.exception.vector, ==, 0x5900);
+            g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK, ==, 0);
+            g_assert_cmphex(env.cr[IA64_CR_ISR] &
+                            ((UINT64_C(1) << IA64_ISR_SP_BIT) |
+                             (UINT64_C(1) << IA64_ISR_ED_BIT)), ==, 0);
+        }
+        g_assert_cmpuint(ia64_psr_ri(env.psr), ==, 0);
+        assert_delivery_psr(&env, IA64_PSR_RT_BIT);
         g_assert_cmpint(env.rse.dirty, ==, rows[i].dirty);
         g_assert_cmpint(env.rse.dirty_nat, ==, rows[i].dirty_nat);
         g_assert_false(env.rse.cfle);
@@ -1443,6 +1713,160 @@ static void test_register_nat_consumption_no_access_fast_delivery(void)
     assert_delivery_psr(&env, 0);
 }
 
+static void test_register_nat_consumption_access_and_na_matrix(void)
+{
+    static const struct {
+        const char *name;
+        int32_t access_type;
+        uint8_t ri;
+        uint64_t isr_access;
+        uint64_t non_access_code;
+    } rows[] = {
+        { "read-value", MMU_DATA_LOAD, 0,
+          UINT64_C(1) << IA64_ISR_R_BIT, 0 },
+        { "read-address", IA64_EXCEPTION_ACCESS_READ_NON_ACCESS, 1,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT), 0 },
+        { "fc-address", IA64_EXCEPTION_ACCESS_FC_READ_NON_ACCESS, 2,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT), UINT64_C(1) },
+        { "lfetch-fault-address",
+          IA64_EXCEPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS, 0,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT), UINT64_C(4) },
+        { "write-value", MMU_DATA_STORE, 2,
+          UINT64_C(1) << IA64_ISR_W_BIT, 0 },
+        { "write-address", IA64_EXCEPTION_ACCESS_WRITE_NON_ACCESS, 0,
+          (UINT64_C(1) << IA64_ISR_W_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT), 0 },
+        { "semaphore-value", IA64_EXCEPTION_ACCESS_SEMAPHORE, 1,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_W_BIT), 0 },
+        { "semaphore-address",
+          IA64_EXCEPTION_ACCESS_SEMAPHORE_NON_ACCESS, 2,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_W_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT), 0 },
+    };
+    const vaddr fault_ip = UINT64_C(0xa00000010015fcf0);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
+        CPUIA64State env;
+        uint64_t expected_ipsr;
+        uint64_t expected_isr;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        env.ip = fault_ip;
+        env.psr = IA64_PSR_IC_BIT;
+        ia64_env_set_ri(&env, rows[i].ri);
+        env.last_successful_bundle = fault_ip - 0x10;
+        env.cr[IA64_CR_IVA] = 0x100000;
+
+        ia64_deliver_exception_fast(
+            &env, IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION, fault_ip,
+            rows[i].access_type, NULL);
+
+        expected_ipsr = ia64_psr_with_ri(IA64_PSR_IC_BIT, rows[i].ri);
+        expected_isr = IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION |
+                       rows[i].non_access_code |
+                       rows[i].isr_access |
+                       ((uint64_t)rows[i].ri << IA64_ISR_EI_SHIFT);
+        g_test_message("%s", rows[i].name);
+        g_assert_cmpint(env.exception.kind, ==,
+                        IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION);
+        g_assert_cmpint(env.exception.access_type, ==, rows[i].access_type);
+        g_assert_cmphex(env.exception.vector, ==, 0x5600);
+        g_assert_cmphex(env.cr[IA64_CR_IPSR], ==, expected_ipsr);
+        g_assert_cmphex(env.cr[IA64_CR_IIP], ==, fault_ip);
+        g_assert_cmphex(env.cr[IA64_CR_IIPA], ==, fault_ip - 0x10);
+        g_assert_cmphex(env.cr[IA64_CR_IFA], ==, fault_ip);
+        g_assert_cmphex(env.cr[IA64_CR_ISR], ==, expected_isr);
+        g_assert_cmphex(env.ip, ==, 0x105600);
+    }
+}
+
+static void test_data_plane_exception_vectors_and_isr(void)
+{
+    static const struct {
+        const char *name;
+        IA64ExceptionKind kind;
+        int32_t access_type;
+        uint8_t ri;
+        uint64_t vector;
+        uint64_t isr_code;
+        uint64_t isr_access;
+    } rows[] = {
+        { "data-nat-page-load", IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION,
+          MMU_DATA_LOAD, 0, 0x5600,
+          IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION,
+          UINT64_C(1) << IA64_ISR_R_BIT },
+        { "data-nat-page-generic-read-non-access",
+          IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION,
+          IA64_EXCEPTION_ACCESS_READ_NON_ACCESS, 1, 0x5600,
+          IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT) },
+        { "fc-translation-fault", IA64_EXCEPTION_PAGE_FAULT,
+          IA64_EXCEPTION_ACCESS_FC_READ_NON_ACCESS, 2, 0x5000,
+          UINT64_C(1),
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT) },
+        { "lfetch-fault-translation-fault", IA64_EXCEPTION_PAGE_FAULT,
+          IA64_EXCEPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS, 0, 0x5000,
+          UINT64_C(4),
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT) },
+        { "fc-data-nat-page", IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION,
+          IA64_EXCEPTION_ACCESS_FC_READ_NON_ACCESS, 1, 0x5600,
+          IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION | UINT64_C(1),
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT) },
+        { "lfetch-fault-data-nat-page",
+          IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION,
+          IA64_EXCEPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS, 2, 0x5600,
+          IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION | UINT64_C(4),
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT) },
+        { "lfetch-fault-data-debug", IA64_EXCEPTION_DATA_DEBUG,
+          IA64_EXCEPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS, 1, 0x5900,
+          UINT64_C(4),
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_NA_BIT) },
+        { "unsupported-semaphore",
+          IA64_EXCEPTION_UNSUPPORTED_DATA_REFERENCE,
+          IA64_EXCEPTION_ACCESS_SEMAPHORE, 2, 0x5b00, 0,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          (UINT64_C(1) << IA64_ISR_W_BIT) },
+    };
+    const vaddr fault_ip = UINT64_C(0xa00000010015fcf0);
+    const vaddr fault_address = UINT64_C(0xe000000000001234);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
+        CPUIA64State env;
+        uint64_t expected_isr;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        env.ip = fault_ip;
+        env.psr = IA64_PSR_IC_BIT;
+        ia64_env_set_ri(&env, rows[i].ri);
+        env.cr[IA64_CR_IVA] = 0x100000;
+
+        ia64_deliver_exception_fast(&env, rows[i].kind, fault_address,
+                                    rows[i].access_type, NULL);
+
+        expected_isr = rows[i].isr_code | rows[i].isr_access |
+                       ((uint64_t)rows[i].ri << IA64_ISR_EI_SHIFT);
+        g_test_message("%s", rows[i].name);
+        g_assert_cmpint(env.exception.kind, ==, rows[i].kind);
+        g_assert_cmpint(env.exception.access_type, ==, rows[i].access_type);
+        g_assert_cmphex(env.exception.vector, ==, rows[i].vector);
+        g_assert_cmphex(env.cr[IA64_CR_IFA], ==, fault_address);
+        g_assert_cmphex(env.cr[IA64_CR_IIP], ==, fault_ip);
+        g_assert_cmphex(env.cr[IA64_CR_ISR], ==, expected_isr);
+        g_assert_cmphex(env.ip, ==, 0x100000 + rows[i].vector);
+    }
+}
+
 static void test_non_nested_exception_with_ic_clear_preserves_collection_state(void)
 {
     CPUIA64State env;
@@ -1707,20 +2131,302 @@ static void test_restore_ri_prefers_dirty_slot(void)
     g_assert_cmpuint(ia64_env_restore_ri(&env, 1), ==, 1);
 }
 
+static void test_fault_suppression_and_protection_keys(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    const vaddr address = 0x8000;
+    const uint32_t key = 7;
+    uint64_t itir = ((uint64_t)key << 8) | (UINT64_C(12) << 2);
+    uint64_t pte = IA64_PTE_P_BIT | (UINT64_C(3) << 9) | 0x2000;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rr[0] = test_rr(0, 12, false);
+    env.psr = IA64_PSR_DT_BIT | IA64_PSR_DA_BIT;
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           pte, itir));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
+    g_assert_cmphex(ia64_clear_fault_suppression_state(
+                        &env, IA64_PSR_DA_BIT), ==, IA64_PSR_DA_BIT);
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_ACCESS_BIT);
+
+    ia64_purge_all_translation_cache(&env);
+    pte |= IA64_PTE_A_BIT | IA64_PTE_D_BIT;
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           pte, itir));
+    env.psr = IA64_PSR_DT_BIT | IA64_PSR_PK_BIT;
+    ia64_pkr_write_state(&env, 0, IA64_PKR_VALID_BIT |
+                                  ((uint64_t)key << IA64_PKR_KEY_SHIFT));
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
+
+    ia64_pkr_write_state(&env, 1, IA64_PKR_VALID_BIT |
+                                  IA64_PKR_READ_DISABLE_BIT |
+                                  ((uint64_t)key << IA64_PKR_KEY_SHIFT));
+    g_assert_cmphex(env.pkr[0] & IA64_PKR_VALID_BIT, ==, 0);
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_KEY_PERMISSION);
+    {
+        CPUIA64State fault_env = env;
+
+        fault_env.psr |= IA64_PSR_IC_BIT;
+        fault_env.cr[IA64_CR_IVA] = 0x100000;
+        ia64_deliver_exception_fast(
+            &fault_env, ia64_exception_for_translate_result(&result),
+            address, MMU_DATA_LOAD, NULL);
+        g_assert_cmphex(fault_env.cr[IA64_CR_IFA], ==, address);
+        g_assert_cmphex(fault_env.cr[IA64_CR_ITIR], ==,
+                        ia64_default_itir(&fault_env, address));
+        g_assert_cmphex(fault_env.cr[IA64_CR_ISR], ==,
+                        UINT64_C(1) << IA64_ISR_R_BIT);
+    }
+
+    ia64_pkr_write_state(&env, 1, 0);
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_KEY_MISS);
+    {
+        CPUIA64State fault_env = env;
+
+        fault_env.psr |= IA64_PSR_IC_BIT;
+        fault_env.cr[IA64_CR_IVA] = 0x100000;
+        ia64_deliver_exception_fast(
+            &fault_env, ia64_exception_for_translate_result(&result),
+            address, MMU_DATA_LOAD, NULL);
+        g_assert_cmphex(fault_env.cr[IA64_CR_IFA], ==, address);
+        g_assert_cmphex(fault_env.cr[IA64_CR_ITIR], ==,
+                        ia64_default_itir(&fault_env, address));
+        g_assert_cmphex(fault_env.cr[IA64_CR_ISR], ==,
+                        UINT64_C(1) << IA64_ISR_R_BIT);
+    }
+    g_assert_false(ia64_pkr_value_valid(UINT64_C(1) << 63));
+}
+
+static void test_translation_fault_priority(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    const vaddr address = 0x8000;
+    const uint32_t key = 7;
+    uint64_t itir = ((uint64_t)key << 8) | (UINT64_C(12) << 2);
+    uint64_t nat_page = IA64_PTE_P_BIT | (UINT64_C(7) << 2) |
+                        IA64_PTE_A_BIT | IA64_PTE_D_BIT |
+                        (UINT64_C(3) << 9) | 0x2000;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rr[0] = test_rr(0, 12, false);
+    env.psr = IA64_PSR_DT_BIT | IA64_PSR_PK_BIT;
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           nat_page, itir));
+
+    /* NaTPage precedes both key miss and key permission. */
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_NAT_PAGE);
+    ia64_pkr_write_state(&env, 0, IA64_PKR_VALID_BIT |
+                                  IA64_PKR_READ_DISABLE_BIT |
+                                  ((uint64_t)key << IA64_PKR_KEY_SHIFT));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_NAT_PAGE);
+
+    /* Instruction NaTPage has its own architected interruption identity. */
+    ia64_purge_all_translation_cache(&env);
+    env.psr = IA64_TB_PSR_IT_BIT | IA64_PSR_PK_BIT;
+    g_assert_true(ia64_install_translation(&env, true, false, 0, address,
+                                           nat_page, itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_NAT_PAGE);
+    g_assert_cmpint(ia64_exception_for_translate_result(&result), ==,
+                    IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION);
+
+    /* Access Rights precedes Access Bit and Dirty Bit. */
+    ia64_purge_all_translation_cache(&env);
+    env.psr = IA64_PSR_DT_BIT;
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           IA64_PTE_P_BIT | 0x2000,
+                                           UINT64_C(12) << 2));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_ACCESS_DENIED);
+
+    /* An unrestricted matching PKR cannot manufacture a permission fault. */
+    ia64_purge_all_translation_cache(&env);
+    env.psr = IA64_PSR_DT_BIT | IA64_PSR_PK_BIT;
+    ia64_pkr_write_state(&env, 0, IA64_PKR_VALID_BIT |
+                                  ((uint64_t)key << IA64_PKR_KEY_SHIFT));
+    g_assert_true(ia64_install_translation(
+        &env, false, false, 0, address,
+        IA64_PTE_P_BIT | IA64_PTE_A_BIT | IA64_PTE_D_BIT | 0x2000, itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_ACCESS_DENIED);
+
+    ia64_purge_all_translation_cache(&env);
+    g_assert_true(ia64_install_translation(
+        &env, false, false, 0, address,
+        IA64_PTE_P_BIT | IA64_PTE_A_BIT | (UINT64_C(3) << 9) | 0x2000,
+        itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_DIRTY_BIT);
+
+    /* A restrictive matching key precedes rights, A and D checks. */
+    ia64_purge_all_translation_cache(&env);
+    ia64_pkr_write_state(&env, 0, IA64_PKR_VALID_BIT |
+                                  IA64_PKR_WRITE_DISABLE_BIT |
+                                  ((uint64_t)key << IA64_PKR_KEY_SHIFT));
+    g_assert_true(ia64_install_translation(&env, false, false, 0, address,
+                                           IA64_PTE_P_BIT | 0x2000, itir));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_STORE,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_KEY_PERMISSION);
+}
+
+static void test_architectural_debug_register_matching(void)
+{
+    CPUIA64State env;
+    const uint64_t pl0 = UINT64_C(1) << 56;
+    const uint64_t exact_mask = UINT64_C(0x00ffffffffffffff);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr = IA64_PSR_DB_BIT;
+    env.ibr[0] = UINT64_C(0x123456789abcdef0);
+    env.ibr[1] = (UINT64_C(1) << 63) | pl0 | exact_mask;
+    g_assert_true(ia64_instruction_debug_match(
+        &env, UINT64_C(0x123456789abcdef7)));
+    g_assert_false(ia64_instruction_debug_match(
+        &env, UINT64_C(0x123456789abcdee0)));
+    env.psr |= IA64_PSR_ID_BIT;
+    g_assert_false(ia64_instruction_debug_match(
+        &env, UINT64_C(0x123456789abcdef0)));
+
+    env.psr = IA64_PSR_DB_BIT;
+    env.dbr[0] = UINT64_C(0x2007);
+    env.dbr[1] = (UINT64_C(1) << 63) | (UINT64_C(1) << 62) |
+                 pl0 | exact_mask;
+    g_assert_true(ia64_data_debug_match(&env, 0x2000, 8,
+                                        IA64_DEBUG_ACCESS_READ));
+    g_assert_true(ia64_data_debug_match(&env, 0x2007, 1,
+                                        IA64_DEBUG_ACCESS_WRITE));
+    g_assert_false(ia64_data_debug_match(&env, 0x3000, 8,
+                                         IA64_DEBUG_ACCESS_READ));
+    env.psr |= IA64_PSR_DD_BIT;
+    g_assert_false(ia64_data_debug_match(&env, 0x2007, 1,
+                                         IA64_DEBUG_ACCESS_WRITE));
+
+    /* Mandatory RSE references use RSC.pl, independently of PSR.cpl. */
+    env.psr = IA64_PSR_DB_BIT | IA64_PSR_CPL_MASK;
+    env.rse.rsc = 0;
+    env.dbr[1] = (UINT64_C(1) << 63) | pl0 | exact_mask;
+    g_assert_false(ia64_data_debug_match(&env, 0x2007, 1,
+                                         IA64_DEBUG_ACCESS_READ));
+    g_assert_true(ia64_rse_data_debug_match(&env, 0x2007, 1,
+                                            IA64_DEBUG_ACCESS_READ));
+
+    env.rse.rsc = UINT64_C(3) << IA64_RSC_PL_SHIFT;
+    g_assert_false(ia64_rse_data_debug_match(&env, 0x2007, 1,
+                                             IA64_DEBUG_ACCESS_READ));
+    env.dbr[1] = (UINT64_C(1) << 63) | (UINT64_C(1) << 59) |
+                 exact_mask;
+    g_assert_true(ia64_rse_data_debug_match(&env, 0x2007, 1,
+                                            IA64_DEBUG_ACCESS_READ));
+    env.psr |= IA64_PSR_DD_BIT;
+    g_assert_false(ia64_rse_data_debug_match(&env, 0x2007, 1,
+                                             IA64_DEBUG_ACCESS_READ));
+}
+
+static void test_key_and_debug_exception_vectors(void)
+{
+    struct {
+        IA64ExceptionKind kind;
+        int access;
+        uint64_t vector;
+        uint64_t isr;
+        bool writes_itir;
+    } rows[] = {
+        { IA64_EXCEPTION_INSTRUCTION_KEY_MISS, MMU_INST_FETCH, 0x1800,
+          UINT64_C(1) << IA64_ISR_X_BIT, true },
+        { IA64_EXCEPTION_DATA_KEY_MISS, MMU_DATA_LOAD, 0x1c00,
+          UINT64_C(1) << IA64_ISR_R_BIT, true },
+        { IA64_EXCEPTION_KEY_PERMISSION, MMU_DATA_STORE, 0x5100,
+          UINT64_C(1) << IA64_ISR_W_BIT, true },
+        { IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION,
+          MMU_INST_FETCH, 0x5600,
+          (UINT64_C(1) << IA64_ISR_X_BIT) |
+          IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION, false },
+        { IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION, MMU_DATA_LOAD, 0x5600,
+          (UINT64_C(1) << IA64_ISR_R_BIT) |
+          IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION, false },
+        { IA64_EXCEPTION_INSTRUCTION_DEBUG, MMU_INST_FETCH, 0x5900,
+          (UINT64_C(1) << IA64_ISR_X_BIT) | UINT64_C(1), false },
+        { IA64_EXCEPTION_DATA_DEBUG, MMU_DATA_LOAD, 0x5900,
+          UINT64_C(1) << IA64_ISR_R_BIT, false },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(rows); i++) {
+        CPUIA64State env;
+
+        ia64_cpu_reset_synthetic_itanium2(&env);
+        env.psr = IA64_PSR_IC_BIT;
+        env.cr[IA64_CR_IVA] = 0x100000;
+        env.cr[IA64_CR_ITIR] = UINT64_C(0xfeedface);
+        env.rr[0] = test_rr(0x1234, 16, false);
+        ia64_deliver_exception_fast(&env, rows[i].kind, 0x3450,
+                                    rows[i].access, NULL);
+        g_assert_cmphex(env.exception.vector, ==, rows[i].vector);
+        g_assert_cmphex(env.cr[IA64_CR_IFA], ==, 0x3450);
+        g_assert_cmphex(env.cr[IA64_CR_ISR], ==, rows[i].isr);
+        if (rows[i].kind == IA64_EXCEPTION_INSTRUCTION_DEBUG) {
+            g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK, ==, 1);
+        } else if (rows[i].kind == IA64_EXCEPTION_DATA_DEBUG) {
+            g_assert_cmphex(env.cr[IA64_CR_ISR] & IA64_ISR_CODE_MASK, ==, 0);
+        }
+        g_assert_cmphex(env.cr[IA64_CR_ITIR], ==,
+                        rows[i].writes_itir ?
+                        ia64_default_itir(&env, 0x3450) :
+                        UINT64_C(0xfeedface));
+    }
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
     g_test_add_func("/ia64-memory/identity-debug-path",
                     test_identity_debug_memory_path);
-    g_test_add_func("/ia64-memory/physical-region-alias",
-                    test_physical_region_alias_path);
+    g_test_add_func("/ia64-memory/physical-address-width-pma",
+                    test_physical_address_width_and_pma);
+    g_test_add_func("/ia64-exception/unimplemented-physical-address",
+                    test_unimplemented_physical_address_delivery);
     g_test_add_func("/ia64-memory/instruction-exception-deferral",
                     test_instruction_translation_reports_exception_deferral);
     g_test_add_func("/ia64-exception/speculative-load-isr-sp-ed",
                     test_speculative_load_exception_records_isr_sp_ed);
     g_test_add_func("/ia64-memory/control-speculative-load-deferral-policy",
                     test_control_speculative_load_deferral_policy);
+    g_test_add_func(
+        "/ia64-memory/control-speculative-load-debug-deferral-policy",
+        test_control_speculative_load_debug_deferral_policy);
     g_test_add_func("/ia64-memory/unaligned-data-reference-policy",
                     test_unaligned_data_reference_policy);
     g_test_add_func("/ia64-exception/unaligned-data-reference-delivery",
@@ -1731,6 +2437,8 @@ int main(int argc, char **argv)
                     test_translated_address_misses_without_entry);
     g_test_add_func("/ia64-memory/translated-vhpt-miss",
                     test_translated_address_vhpt_miss_reports_region_mode);
+    g_test_add_func("/ia64-memory/vhpt-backing-debug-abort",
+                    test_vhpt_backing_debug_match_aborts_without_read);
     g_test_add_func("/ia64-memory/instruction-translation-register",
                     test_instruction_translation_register_lookup);
     g_test_add_func("/ia64-memory/tc-preserves-pinned-tr",
@@ -1786,6 +2494,10 @@ int main(int argc, char **argv)
                     test_register_nat_consumption_delivery_vectors_to_iva);
     g_test_add_func("/ia64-exception/register-nat-consumption-no-access-fast",
                     test_register_nat_consumption_no_access_fast_delivery);
+    g_test_add_func("/ia64-exception/register-nat-consumption-access-na-matrix",
+                    test_register_nat_consumption_access_and_na_matrix);
+    g_test_add_func("/ia64-exception/data-plane-vectors-and-isr",
+                    test_data_plane_exception_vectors_and_isr);
     g_test_add_func("/ia64-exception/ic-clear-preserves-collection-state",
                     test_non_nested_exception_with_ic_clear_preserves_collection_state);
     g_test_add_func("/ia64-exception/data-nested-tlb-delivery",
@@ -1796,6 +2508,14 @@ int main(int argc, char **argv)
                     test_alternate_data_tlb_miss_with_ic_clear_vectors_to_nested);
     g_test_add_func("/ia64-exception/restore-ri-prefers-dirty-slot",
                     test_restore_ri_prefers_dirty_slot);
+    g_test_add_func("/ia64-memory/fault-suppression-protection-keys",
+                    test_fault_suppression_and_protection_keys);
+    g_test_add_func("/ia64-memory/translation-fault-priority",
+                    test_translation_fault_priority);
+    g_test_add_func("/ia64-memory/architectural-debug-register-matching",
+                    test_architectural_debug_register_matching);
+    g_test_add_func("/ia64-exception/key-debug-vectors",
+                    test_key_and_debug_exception_vectors);
 
     return g_test_run();
 }

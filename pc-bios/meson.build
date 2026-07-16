@@ -85,6 +85,18 @@ blobs = [
   'vof-nvram.bin',
 ]
 
+if get_option('vibtanium_efi')
+  blobs += 'ia64-firmware.bin'
+  configure_file(
+    input: '../tests/ia64-efi-bit/bit.efi',
+    output: 'vibtanium-bit.efi',
+    copy: true,
+    install: get_option('install_blobs'),
+    install_dir: qemu_datadir,
+    install_mode: 'rw-r--r--',
+  )
+endif
+
 if get_option('install_blobs')
   install_data(blobs, install_dir: qemu_datadir, install_mode: 'rw-r--r--')
 endif

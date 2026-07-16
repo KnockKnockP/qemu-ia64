@@ -2,17 +2,18 @@ OUTPUT_FORMAT("elf64-ia64-little")
 ENTRY(_start)
 
 /*
- * Link everything contiguously at VIBTANIUM_EFI_APP_BASE (0x01000000) + text
- * RVA (0x1000). mkpe.py maps the flat binary as one section at that RVA with
- * ImageBase 0x01000000, so all absolute addresses and the IA-64 entry
- * descriptor are already correct and no PE base relocations are required.
+ * Link everything contiguously at the firmware's conventional low-image base
+ * (0x02000000) + text RVA (0x1000). mkpe.py maps the flat binary as one section
+ * at that RVA with ImageBase 0x02000000, so all absolute addresses and the
+ * IA-64 entry descriptor are already correct and no PE base relocations are
+ * required.
  *
  * The 16-byte IA-64 entry descriptor (.head) is placed first so its RVA equals
  * the PE AddressOfEntryPoint (0x1000).
  */
 SECTIONS
 {
-  . = 0x01001000;
+  . = 0x02001000;
   .text : {
     *(.head)
     . = ALIGN(16);

@@ -55,17 +55,8 @@ tests = {
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/decode.c',
   ],
-  'test-ia64-firmware': [],
-  'test-ia64-tcg-classify': [
-    'test-ia64-address-space-stubs.c',
-    meson.project_source_root() / 'fpu/softfloat.c',
-    meson.project_source_root() / 'target/ia64/bundle.c',
-    meson.project_source_root() / 'target/ia64/exception.c',
-    meson.project_source_root() / 'target/ia64/flight-recorder.c',
-    meson.project_source_root() / 'target/ia64/insn.c',
-    meson.project_source_root() / 'target/ia64/mem.c',
-    meson.project_source_root() / 'target/ia64/perf.c',
-    meson.project_source_root() / 'target/ia64/tcg-classify.c',
+  'test-ia64-opcode-traits': [
+    meson.project_source_root() / 'target/ia64/opcode-traits.c',
   ],
   'test-ia64-insn': [
     'test-ia64-address-space-stubs.c',
@@ -87,23 +78,15 @@ tests = {
     meson.project_source_root() / 'target/ia64/mem.c',
     meson.project_source_root() / 'target/ia64/perf.c',
   ],
-  'test-ia64-efi-app': [
-    'test-ia64-efi-acpi-stubs.c',
+  'test-ia64-rse-spine': [
+    'test-ia64-address-space-stubs.c',
     meson.project_source_root() / 'fpu/softfloat.c',
-    meson.project_source_root() / 'hw/acpi/aml-build.c',
-    meson.project_source_root() / 'hw/ia64/efi.c',
     meson.project_source_root() / 'target/ia64/bundle.c',
     meson.project_source_root() / 'target/ia64/exception.c',
     meson.project_source_root() / 'target/ia64/flight-recorder.c',
     meson.project_source_root() / 'target/ia64/insn.c',
     meson.project_source_root() / 'target/ia64/mem.c',
     meson.project_source_root() / 'target/ia64/perf.c',
-  ],
-  'test-ia64-efi-storage': [
-    meson.project_source_root() / 'hw/ia64/efi-storage.c',
-  ],
-  'test-ia64-efi-vars': [
-    meson.project_source_root() / 'hw/ia64/efi-vars.c',
   ],
 }
 
@@ -252,7 +235,7 @@ foreach test_name, extra: tests
     src += test_ss.all_sources()
     deps += test_ss.all_dependencies()
   endif
-  if test_name in ['test-ia64-efi-app', 'test-ia64-vmstate']
+  if test_name == 'test-ia64-vmstate'
     test_c_args += ['-ffunction-sections', '-fdata-sections']
     test_link_args += ['-Wl,--gc-sections']
   endif
@@ -283,14 +266,132 @@ test('test-ia64-full-tcg-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-packed-tcg-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-packed-tcg-static.py',
+            '--source-root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-data-plane-tcg-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-data-plane-tcg-static.py',
+            '--root', meson.project_source_root(),
+            '--audit-open'],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-system-tcg-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-system-tcg-static.py',
+            '--source-root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-fp-tcg-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-fp-tcg-static.py',
+            '--source-root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-opcode-ledger', python,
+     args: [meson.project_source_root() / 'scripts/ia64-gen-opcode-ledger.py',
+            '--check',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-rse-spine-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-rse-spine-static.py',
+            '--source-root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 if 'ia64-softmmu' in target_dirs
   ia64_full_tcg_emulator = emulators['qemu-system-ia64']
+  ia64_nm = find_program('nm')
+  test('test-ia64-engine-role', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-engine-role.py',
+              '--source-root', meson.project_source_root(),
+              '--binary', ia64_full_tcg_emulator.full_path(),
+              '--nm', ia64_nm.full_path()],
+       timeout: 30,
+       suite: ['unit'])
+
+  test('test-ia64-production-cutover', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-production-cutover.py',
+              '--source-root', meson.project_source_root(),
+              '--binary', ia64_full_tcg_emulator.full_path(),
+              '--nm', ia64_nm.full_path(),
+              '--runtime-smoke',
+              '--harness',
+              meson.current_source_dir() / 'test-ia64-full-tcg.py'],
+       timeout: 180,
+       suite: ['unit'])
+
+  test('test-ia64-memory-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-memory-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
+       timeout: 60,
+       suite: ['unit'])
+
+  test('test-ia64-system-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-system-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path(),
+              '--harness',
+              meson.current_source_dir() / 'test-ia64-full-tcg.py'],
+       protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
+
+  test('test-ia64-data-plane-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-data-plane-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
   test('test-ia64-full-tcg', python,
        depends: [ia64_full_tcg_emulator],
        env: test_env,
        args: [meson.current_source_dir() / 'test-ia64-full-tcg.py',
               '--qemu', ia64_full_tcg_emulator.full_path()],
        protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
+  test('test-ia64-tcp-migration', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-tcp-migration.py',
+              '--qemu', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
        timeout: 60,
+       suite: ['unit'])
+  test('test-ia64-packed-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-packed-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path(),
+              '--harness',
+              meson.current_source_dir() / 'test-ia64-full-tcg.py'],
+       protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
+  test('test-ia64-fp-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-fp-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path(),
+              '--harness',
+              meson.current_source_dir() / 'test-ia64-full-tcg.py'],
+       protocol: 'tap',
+       timeout: 180,
        suite: ['unit'])
 endif

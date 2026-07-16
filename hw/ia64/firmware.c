@@ -4,28 +4,29 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/getpc.h"
-#include "hw/ia64/efi.h"
-#include "hw/pci/pci.h"
-#include "hw/pci/pci_host.h"
-#include "qemu/main-loop.h"
-#include "target/ia64/firmware.h"
+#include "hw/ia64/firmware.h"
 #include "target/ia64/insn.h"
 #include "target/ia64/perf.h"
 #include "trace-target_ia64.h"
 
-#define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
 #define IA64_FIRMWARE_STATUS_SUCCESS UINT64_C(0)
 #define IA64_FIRMWARE_STATUS_UNIMPLEMENTED UINT64_C(0xffffffffffffffff)
 #define IA64_FIRMWARE_STATUS_INVALID_ARGUMENT UINT64_C(0xfffffffffffffffe)
-#define IA64_FIRMWARE_STATUS_NO_INFORMATION UINT64_C(0xfffffffffffffffb)
 #define IA64_FIRMWARE_STATUS_REQUIRES_MEMORY UINT64_C(0xfffffffffffffff7)
 /*
- * Platform base frequency reported by SAL_FREQ_BASE and PAL_FREQ_BASE.  With
- * the 1/1 PAL ITC ratio below this is also the ITC frequency, which the
- * target really implements: AR.ITC follows the QEMU virtual clock at
- * IA64_ITC_FREQUENCY_HZ.
+ * The packaged guest firmware publishes the same 100 MHz platform clock
+ * through SAL_FREQ_BASE.  PAL ratios derive a 1.6 GHz processor clock,
+ * 400 MHz bus clock, and the target's 200 MHz AR.ITC from that base.
  */
-#define IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY ((uint64_t)IA64_ITC_FREQUENCY_HZ)
+#define IA64_FIRMWARE_PLATFORM_BASE_FREQUENCY_HZ UINT64_C(100000000)
+#define IA64_FIRMWARE_PROCESSOR_RATIO_NUMERATOR UINT64_C(16)
+#define IA64_FIRMWARE_BUS_RATIO_NUMERATOR UINT64_C(4)
+#define IA64_FIRMWARE_ITC_RATIO_NUMERATOR UINT64_C(2)
+#define IA64_FIRMWARE_FREQUENCY_RATIO_DENOMINATOR UINT64_C(1)
+#define IA64_FIRMWARE_PAL_PTCE_BASE UINT64_C(0)
+#define IA64_FIRMWARE_PAL_PTCE_COUNTS \
+    ((UINT64_C(1) << 32) | UINT64_C(1))
+#define IA64_FIRMWARE_PAL_PTCE_STRIDES UINT64_C(0)
 #define IA64_PAL_FREQ_RATIO(den, num) \
     ((((uint64_t)(num)) << 32) | (uint32_t)(den))
 #define IA64_PAL_VERSION UINT64_C(0x0000002300000000)
@@ -36,17 +37,25 @@
 #define IA64_IMPLEMENTED_PERF_MON_REGISTER_COUNT UINT64_C(8)
 #define IA64_MAXIMUM_PERF_MON_REGISTER_COUNT UINT64_C(256)
 #define IA64_MINIMUM_PHYSICAL_STACKED_REGISTERS UINT64_C(96)
-#define IA64_MINIMUM_TRANSLATION_REGISTER_COUNT UINT64_C(8)
-#define IA64_SAL_STATE_INFO_TYPE_COUNT UINT64_C(4)
-#define IA64_SAL_STATE_INFO_MAX_SIZE UINT64_C(128)
 
-static PCIBus *firmware_pci_bus;
-
-void ia64_firmware_set_pci_bus(PCIBus *bus)
-{
-    firmware_pci_bus = bus;
-}
-
+QEMU_BUILD_BUG_MSG(IA64_PKR_COUNT == 0 || IA64_PKR_COUNT > 256,
+                   "PAL_VM_SUMMARY max_pkr must fit in eight bits");
+QEMU_BUILD_BUG_MSG(IA64_ITR_COUNT == 0 || IA64_ITR_COUNT > 256,
+                   "PAL_VM_SUMMARY max_itr_entry must fit in eight bits");
+QEMU_BUILD_BUG_MSG(IA64_DTR_COUNT == 0 || IA64_DTR_COUNT > 256,
+                   "PAL_VM_SUMMARY max_dtr_entry must fit in eight bits");
+QEMU_BUILD_BUG_MSG(
+    IA64_FIRMWARE_PLATFORM_BASE_FREQUENCY_HZ *
+    IA64_FIRMWARE_ITC_RATIO_NUMERATOR /
+    IA64_FIRMWARE_FREQUENCY_RATIO_DENOMINATOR != IA64_ITC_FREQUENCY_HZ,
+    "PAL frequency data must describe the implemented AR.ITC rate");
+QEMU_BUILD_BUG_MSG(
+    IA64_ITC_FREQUENCY_HZ * IA64_ITC_NS_PER_TICK != UINT64_C(1000000000),
+    "AR.ITC frequency must have an exact nanosecond period");
+QEMU_BUILD_BUG_MSG(
+    IA64_ITC_TICKS_PER_100NS * UINT64_C(10000000) !=
+    IA64_ITC_FREQUENCY_HZ,
+    "UEFI timer conversion must match the implemented AR.ITC rate");
 typedef enum IA64PalProcedureId {
     IA64_PAL_CACHE_FLUSH = 1,
     IA64_PAL_CACHE_INFO = 2,
@@ -94,22 +103,6 @@ typedef enum IA64PalProcedureId {
     IA64_PAL_MACHINE_CHECK_ERROR_INJECT = 276,
 } IA64PalProcedureId;
 
-typedef enum IA64SalProcedureId {
-    IA64_SAL_SET_VECTORS = 0x01000000,
-    IA64_SAL_GET_STATE_INFO = 0x01000001,
-    IA64_SAL_GET_STATE_INFO_SIZE = 0x01000002,
-    IA64_SAL_CLEAR_STATE_INFO = 0x01000003,
-    IA64_SAL_MACHINE_CHECK_RENDEZVOUS = 0x01000004,
-    IA64_SAL_MACHINE_CHECK_SET_PARAMETERS = 0x01000005,
-    IA64_SAL_REGISTER_PHYSICAL_ADDRESS = 0x01000006,
-    IA64_SAL_VERSION_PROC = 0x01000007,
-    IA64_SAL_CACHE_FLUSH = 0x01000008,
-    IA64_SAL_CACHE_INIT = 0x01000009,
-    IA64_SAL_PCI_CONFIG_READ = 0x01000010,
-    IA64_SAL_PCI_CONFIG_WRITE = 0x01000011,
-    IA64_SAL_FREQUENCY_BASE = 0x01000012,
-} IA64SalProcedureId;
-
 typedef struct IA64FirmwareResult {
     uint64_t status;
     uint64_t ret0;
@@ -117,26 +110,12 @@ typedef struct IA64FirmwareResult {
     uint64_t ret2;
 } IA64FirmwareResult;
 
-#define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
-
-static uint64_t ia64_region_offset(uint64_t address)
-{
-    return address & IA64_REGION_OFFSET_MASK;
-}
-
-static bool efi_gate_address_is_valid_alias(uint64_t address)
-{
-    uint64_t region = address & ~IA64_REGION_OFFSET_MASK;
-
-    return region == 0 || region == IA64_KERNEL_PAGE_OFFSET;
-}
-
-static bool efi_trace_enabled(void)
+static bool pal_trace_enabled(void)
 {
     static int enabled = -1;
 
     if (enabled < 0) {
-        enabled = g_getenv("VIBTANIUM_EFI_TRACE") != NULL;
+        enabled = g_getenv("VIBTANIUM_PAL_TRACE") != NULL;
     }
     return enabled != 0;
 }
@@ -168,8 +147,6 @@ static const char *firmware_status_name(uint64_t status)
         return "unimplemented";
     case IA64_FIRMWARE_STATUS_INVALID_ARGUMENT:
         return "invalid-argument";
-    case IA64_FIRMWARE_STATUS_NO_INFORMATION:
-        return "no-information";
     case IA64_FIRMWARE_STATUS_REQUIRES_MEMORY:
         return "requires-memory";
     default:
@@ -271,40 +248,6 @@ static const char *pal_procedure_name(uint64_t function_id)
     }
 }
 
-static const char *sal_procedure_name(uint64_t function_id)
-{
-    switch (function_id) {
-    case IA64_SAL_SET_VECTORS:
-        return "SAL_SET_VECTORS";
-    case IA64_SAL_GET_STATE_INFO:
-        return "SAL_GET_STATE_INFO";
-    case IA64_SAL_GET_STATE_INFO_SIZE:
-        return "SAL_GET_STATE_INFO_SIZE";
-    case IA64_SAL_CLEAR_STATE_INFO:
-        return "SAL_CLEAR_STATE_INFO";
-    case IA64_SAL_MACHINE_CHECK_RENDEZVOUS:
-        return "SAL_MC_RENDEZ";
-    case IA64_SAL_MACHINE_CHECK_SET_PARAMETERS:
-        return "SAL_MC_SET_PARAMS";
-    case IA64_SAL_REGISTER_PHYSICAL_ADDRESS:
-        return "SAL_REGISTER_PHYSICAL_ADDR";
-    case IA64_SAL_VERSION_PROC:
-        return "SAL_VERSION";
-    case IA64_SAL_CACHE_FLUSH:
-        return "SAL_CACHE_FLUSH";
-    case IA64_SAL_CACHE_INIT:
-        return "SAL_CACHE_INIT";
-    case IA64_SAL_PCI_CONFIG_READ:
-        return "SAL_PCI_CONFIG_READ";
-    case IA64_SAL_PCI_CONFIG_WRITE:
-        return "SAL_PCI_CONFIG_WRITE";
-    case IA64_SAL_FREQUENCY_BASE:
-        return "SAL_FREQ_BASE";
-    default:
-        return "SAL_UNKNOWN";
-    }
-}
-
 static uint64_t pal_supported_page_size_mask(void)
 {
     return (UINT64_C(1) << 12) |
@@ -349,7 +292,7 @@ static IA64FirmwareResult pal_cache_info(uint64_t level, uint64_t type)
 static uint64_t pal_vm_summary1(void)
 {
     const uint64_t hardware_walker = 1;
-    const uint64_t physical_address_size = 44;
+    const uint64_t physical_address_size = IA64_IMPL_PA_BITS;
     const uint64_t key_size = 24;
     const uint64_t hash_tag_id = 18;
     const uint64_t unique_translation_caches = 1;
@@ -358,10 +301,10 @@ static uint64_t pal_vm_summary1(void)
     return hardware_walker |
            (physical_address_size << 1) |
            (key_size << 8) |
-           ((uint64_t)IA64_PKR_COUNT << 16) |
+           ((uint64_t)(IA64_PKR_COUNT - 1) << 16) |
            (hash_tag_id << 24) |
-           (IA64_MINIMUM_TRANSLATION_REGISTER_COUNT << 32) |
-           (IA64_MINIMUM_TRANSLATION_REGISTER_COUNT << 40) |
+           ((uint64_t)(IA64_DTR_COUNT - 1) << 32) |
+           ((uint64_t)(IA64_ITR_COUNT - 1) << 40) |
            (unique_translation_caches << 48) |
            (translation_cache_levels << 56);
 }
@@ -471,18 +414,22 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_DEBUG_INFO:
         return firmware_success(8, 8, 0);
     case IA64_PAL_FREQUENCY_BASE:
-        return firmware_success(IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY, 0, 0);
+        return firmware_success(IA64_FIRMWARE_PLATFORM_BASE_FREQUENCY_HZ,
+                                0, 0);
     case IA64_PAL_FREQUENCY_RATIOS:
         /*
-         * PAL encodes frequency ratios as { uint32_t den, num }.  Linux uses
-         * ITC frequency = SAL_FREQ_BASE_PLATFORM * num / den for scheduling
-         * and delay loops.  The target backs AR.ITC with the QEMU virtual
-         * clock at exactly IA64_ITC_FREQUENCY_HZ, so a 1/1 ratio on the
-         * 100 MHz base makes the advertised and implemented rates identical.
+         * PAL encodes frequency ratios as { uint32_t den, num }.  These are
+         * the reference platform's 16/1 processor, 4/1 bus, and 2/1 ITC
+         * ratios over its 100 MHz base clock.  In particular, firmware and
+         * the target now agree that AR.ITC advances at 200 MHz.
          */
-        return firmware_success(IA64_PAL_FREQ_RATIO(1, 1),
-                                IA64_PAL_FREQ_RATIO(1, 1),
-                                IA64_PAL_FREQ_RATIO(1, 1));
+        return firmware_success(
+            IA64_PAL_FREQ_RATIO(IA64_FIRMWARE_FREQUENCY_RATIO_DENOMINATOR,
+                                IA64_FIRMWARE_PROCESSOR_RATIO_NUMERATOR),
+            IA64_PAL_FREQ_RATIO(IA64_FIRMWARE_FREQUENCY_RATIO_DENOMINATOR,
+                                IA64_FIRMWARE_BUS_RATIO_NUMERATOR),
+            IA64_PAL_FREQ_RATIO(IA64_FIRMWARE_FREQUENCY_RATIO_DENOMINATOR,
+                                IA64_FIRMWARE_ITC_RATIO_NUMERATOR));
     case IA64_PAL_PERFORMANCE_MONITOR_INFO:
         return firmware_success(IA64_IMPLEMENTED_PERF_MON_REGISTER_COUNT,
                                 IA64_MAXIMUM_PERF_MON_REGISTER_COUNT, 0);
@@ -510,205 +457,6 @@ static bool pal_uses_static_calling_convention(uint64_t function_id)
     return !ia64_pal_uses_stacked_calling_convention(function_id);
 }
 
-static bool sal_pci_config_address(uint64_t sal_addr, uint64_t mode,
-                                   uint32_t *pci_addr)
-{
-    uint64_t segment;
-    uint64_t bus;
-    uint64_t devfn;
-    uint64_t reg;
-
-    if (!firmware_pci_bus) {
-        return false;
-    }
-
-    switch (mode) {
-    case 0:
-        segment = (sal_addr >> 24) & 0xffff;
-        bus = (sal_addr >> 16) & 0xff;
-        devfn = (sal_addr >> 8) & 0xff;
-        reg = sal_addr & 0xff;
-        break;
-    case 1:
-        segment = (sal_addr >> 28) & 0xffff;
-        bus = (sal_addr >> 20) & 0xff;
-        devfn = (sal_addr >> 12) & 0xff;
-        reg = sal_addr & 0xfff;
-        break;
-    default:
-        return false;
-    }
-
-    if (segment != 0 || reg >= PCI_CONFIG_SPACE_SIZE) {
-        return false;
-    }
-
-    *pci_addr = (bus << 16) | (devfn << 8) | reg;
-    return true;
-}
-
-static uint64_t sal_pci_config_default_read(uint64_t size)
-{
-    switch (size) {
-    case 1:
-        return 0xff;
-    case 2:
-        return 0xffff;
-    case 4:
-        return 0xffffffff;
-    default:
-        return UINT64_MAX;
-    }
-}
-
-static uint32_t sal_pci_data_read_locked(uint32_t pci_addr, unsigned size)
-{
-    uint32_t value;
-    bool locked = bql_locked();
-
-    if (!locked) {
-        bql_lock();
-    }
-    value = pci_data_read(firmware_pci_bus, pci_addr, size);
-    if (!locked) {
-        bql_unlock();
-    }
-
-    return value;
-}
-
-static void sal_pci_data_write_locked(uint32_t pci_addr,
-                                      uint32_t value,
-                                      unsigned size)
-{
-    bool locked = bql_locked();
-
-    if (!locked) {
-        bql_lock();
-    }
-    pci_data_write(firmware_pci_bus, pci_addr, value, size);
-    if (!locked) {
-        bql_unlock();
-    }
-}
-
-static IA64FirmwareResult sal_pci_config_read(uint64_t sal_addr,
-                                              uint64_t size,
-                                              uint64_t mode)
-{
-    uint32_t pci_addr;
-
-    switch (size) {
-    case 1:
-    case 2:
-    case 4:
-        break;
-    default:
-        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
-    }
-
-    if (!sal_pci_config_address(sal_addr, mode, &pci_addr)) {
-        return firmware_success(sal_pci_config_default_read(size), 0, 0);
-    }
-
-    return firmware_success(sal_pci_data_read_locked(pci_addr, size),
-                            0, 0);
-}
-
-static IA64FirmwareResult sal_pci_config_write(uint64_t sal_addr,
-                                                uint64_t size,
-                                                uint64_t value,
-                                                uint64_t mode)
-{
-    uint32_t pci_addr;
-
-    switch (size) {
-    case 1:
-    case 2:
-    case 4:
-        break;
-    default:
-        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
-    }
-
-    if (sal_pci_config_address(sal_addr, mode, &pci_addr)) {
-        sal_pci_data_write_locked(pci_addr, value, size);
-    }
-
-    return firmware_success(0, 0, 0);
-}
-
-static bool sal_state_info_type_valid(uint64_t type)
-{
-    /* MCA, INIT, CMC, and CPE are the four architected information types. */
-    return type < IA64_SAL_STATE_INFO_TYPE_COUNT;
-}
-
-static IA64FirmwareResult sal_get_state_info(uint64_t type)
-{
-    if (!sal_state_info_type_valid(type)) {
-        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
-    }
-
-    /* Vibtanium does not currently retain platform error records. */
-    return firmware_status(IA64_FIRMWARE_STATUS_NO_INFORMATION);
-}
-
-static IA64FirmwareResult sal_get_state_info_size(uint64_t type)
-{
-    if (!sal_state_info_type_valid(type)) {
-        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
-    }
-
-    /*
-     * Report storage for a complete generic SAL error-record header plus
-     * implementation-defined payload.  Consumers round this maximum up to
-     * their allocation granularity before asking SAL_GET_STATE_INFO.
-     */
-    return firmware_success(IA64_SAL_STATE_INFO_MAX_SIZE, 0, 0);
-}
-
-static IA64FirmwareResult sal_clear_state_info(uint64_t type)
-{
-    if (!sal_state_info_type_valid(type)) {
-        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
-    }
-
-    /* Clearing an already-empty record store is an idempotent success. */
-    return firmware_success(0, 0, 0);
-}
-
-static IA64FirmwareResult dispatch_sal(uint64_t function_id, uint64_t arg0,
-                                       uint64_t arg1, uint64_t arg2,
-                                       uint64_t arg3)
-{
-    switch (function_id) {
-    case IA64_SAL_GET_STATE_INFO:
-        return sal_get_state_info(arg0);
-    case IA64_SAL_GET_STATE_INFO_SIZE:
-        return sal_get_state_info_size(arg0);
-    case IA64_SAL_CLEAR_STATE_INFO:
-        return sal_clear_state_info(arg0);
-    case IA64_SAL_CACHE_FLUSH:
-    case IA64_SAL_CACHE_INIT:
-    case IA64_SAL_SET_VECTORS:
-    case IA64_SAL_MACHINE_CHECK_RENDEZVOUS:
-    case IA64_SAL_MACHINE_CHECK_SET_PARAMETERS:
-    case IA64_SAL_REGISTER_PHYSICAL_ADDRESS:
-        return firmware_success(0, 0, 0);
-    case IA64_SAL_VERSION_PROC:
-        return firmware_success(UINT64_C(0x0000000200000009), 0, 0);
-    case IA64_SAL_FREQUENCY_BASE:
-        return firmware_success(IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY, 0, 0);
-    case IA64_SAL_PCI_CONFIG_READ:
-        return sal_pci_config_read(arg0, arg1, arg2);
-    case IA64_SAL_PCI_CONFIG_WRITE:
-        return sal_pci_config_write(arg0, arg1, arg2, arg3);
-    default:
-        return firmware_status(IA64_FIRMWARE_STATUS_UNIMPLEMENTED);
-    }
-}
-
 static void firmware_trace_call(CPUIA64State *env, const char *source,
                                 const char *function, uint64_t function_id,
                                 uint64_t arg0, uint64_t arg1,
@@ -720,7 +468,7 @@ static void firmware_trace_call(CPUIA64State *env, const char *source,
     trace_ia64_firmware_call(env->ip, source, function, status, function_id,
                              arg0, arg1, result.ret0, result.ret1,
                              result.ret2);
-    if (!efi_trace_enabled()) {
+    if (!pal_trace_enabled()) {
         return;
     }
 
@@ -752,9 +500,8 @@ static void firmware_invalidate_result_alat(CPUIA64State *env)
     }
 }
 
-static void firmware_write_result(CPUIA64State *env,
-                                  IA64FirmwareResult result,
-                                  bool stacked_return)
+static void firmware_write_result_registers(CPUIA64State *env,
+                                            IA64FirmwareResult result)
 {
     env->gr[8] = result.status;
     env->gr[9] = result.ret0;
@@ -762,14 +509,70 @@ static void firmware_write_result(CPUIA64State *env,
     env->gr[11] = result.ret2;
     firmware_invalidate_result_alat(env);
     env->gr[0] = 0;
+}
 
-    if (stacked_return) {
-        ia64_return_from_call_frame(env, env->br[0]);
+static void ia64_perf_count_pal_call(uint64_t function_id);
+
+static bool firmware_dispatch_pal_call(CPUIA64State *env)
+{
+    IA64FirmwareResult result;
+    uint64_t function_id;
+    uint64_t arg0;
+    uint64_t arg1;
+    uint64_t arg2;
+    bool static_call;
+
+    IA64_PERF_INC(IA64_PERF_FIRMWARE_PAL);
+    function_id = ia64_read_gr(env, 28);
+    static_call = pal_uses_static_calling_convention(function_id);
+    if (static_call) {
+        arg0 = ia64_read_gr(env, 29);
+        arg1 = ia64_read_gr(env, 30);
+        arg2 = ia64_read_gr(env, 31);
     } else {
-        env->ip = env->br[0] & ~0xfULL;
-        env->cr[IA64_CR_IIP] = env->ip;
-        ia64_env_begin_source_visibility_epoch(env);
+        /*
+         * PAL stacked calls copy arguments to out0-out3 before br.call;
+         * at the PAL entry they are visible as the callee's in0-in3.
+         */
+        function_id = ia64_read_gr(env, 32);
+        arg0 = ia64_read_gr(env, 33);
+        arg1 = ia64_read_gr(env, 34);
+        arg2 = ia64_read_gr(env, 35);
     }
+
+    ia64_perf_count_pal_call(function_id);
+    result = dispatch_pal(env, function_id, arg0, arg1);
+    firmware_trace_call(env, "pal", pal_procedure_name(function_id),
+                        function_id, arg0, arg1, arg2, result);
+    /*
+     * Guest firmware owns the PAL entry and executes its plain `br.many b0`
+     * itself.  Stacked PAL calls arrive through br.call, however, so pop that
+     * call frame before the trampoline branches back.  The platform
+     * transaction must not synthesize guest control flow by changing IP.
+     */
+    firmware_write_result_registers(env, result);
+    if (!static_call) {
+        ia64_rse_return_frame_from_pfs(env, env->ar[IA64_AR_PFS]);
+    }
+
+    if ((function_id == IA64_PAL_HALT ||
+         function_id == IA64_PAL_HALT_LIGHT) &&
+        result.status == IA64_FIRMWARE_STATUS_SUCCESS) {
+        CPUState *cs = env_cpu(env);
+
+        /* Resume at the guest PAL return bundle after an interrupt. */
+        env->ip = (env->ip & ~UINT64_C(0xf)) + IA64_BUNDLE_SIZE;
+        ia64_env_set_ri(env, 0);
+        cs->halted = 1;
+        cs->exception_index = EXCP_HLT;
+        cpu_loop_exit(cs);
+    }
+    return true;
+}
+
+bool vibtanium_firmware_dispatch_pal_break(CPUIA64State *env)
+{
+    return env != NULL && firmware_dispatch_pal_call(env);
 }
 
 static void ia64_perf_count_pal_call(uint64_t function_id)
@@ -889,81 +692,4 @@ count_other:
         ia64_perf_count(IA64_PERF_FIRMWARE_PAL_OTHER);
         break;
     }
-}
-
-bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
-{
-    uint64_t physical;
-    IA64FirmwareResult result;
-    uint64_t function_id;
-    uint64_t arg0;
-    uint64_t arg1;
-    uint64_t arg2;
-    uint64_t arg3;
-
-    if (!efi_gate_address_is_valid_alias(gate_ip)) {
-        return false;
-    }
-    physical = ia64_region_offset(gate_ip);
-
-    if (physical == VIBTANIUM_EFI_PAL_PROC) {
-        bool static_call;
-
-        IA64_PERF_INC(IA64_PERF_FIRMWARE_PAL);
-        function_id = ia64_read_gr(env, 28);
-        static_call = pal_uses_static_calling_convention(function_id);
-        if (static_call) {
-            arg0 = ia64_read_gr(env, 29);
-            arg1 = ia64_read_gr(env, 30);
-            arg2 = ia64_read_gr(env, 31);
-        } else {
-            /*
-             * PAL stacked calls copy arguments to out0-out3 before br.call;
-             * at the gate they are visible as the callee's in0-in3.
-             */
-            function_id = ia64_read_gr(env, 32);
-            arg0 = ia64_read_gr(env, 33);
-            arg1 = ia64_read_gr(env, 34);
-            arg2 = ia64_read_gr(env, 35);
-        }
-        ia64_perf_count_pal_call(function_id);
-        result = dispatch_pal(env, function_id, arg0, arg1);
-        firmware_trace_call(env, "pal", pal_procedure_name(function_id),
-                            function_id, arg0, arg1, arg2, result);
-        firmware_write_result(env, result, !static_call);
-        if ((function_id == IA64_PAL_HALT ||
-             function_id == IA64_PAL_HALT_LIGHT) &&
-            result.status == IA64_FIRMWARE_STATUS_SUCCESS) {
-            CPUState *cs = env_cpu(env);
-
-            /*
-             * PAL halt completes when an external interrupt arrives.  The
-             * return values and IP are committed above, so the vCPU can
-             * sleep until has_work() sees CPU_INTERRUPT_HARD or a
-             * deliverable interrupt (ITM deadline timer, device, IPI).
-             * AR.ITC keeps running while halted because it follows the QEMU
-             * virtual clock.
-             */
-            cs->halted = 1;
-            cs->exception_index = EXCP_HLT;
-            cpu_loop_exit(cs);
-        }
-        return true;
-    }
-
-    if (physical == VIBTANIUM_EFI_SAL_PROC) {
-        IA64_PERF_INC(IA64_PERF_FIRMWARE_SAL);
-        function_id = ia64_read_gr(env, 32);
-        arg0 = ia64_read_gr(env, 33);
-        arg1 = ia64_read_gr(env, 34);
-        arg2 = ia64_read_gr(env, 35);
-        arg3 = ia64_read_gr(env, 36);
-        result = dispatch_sal(function_id, arg0, arg1, arg2, arg3);
-        firmware_trace_call(env, "sal", sal_procedure_name(function_id),
-                            function_id, arg0, arg1, arg2, result);
-        firmware_write_result(env, result, true);
-        return true;
-    }
-
-    return false;
 }

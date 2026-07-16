@@ -138,33 +138,14 @@ static bool ia64_current_slot_matches(CPUIA64State *env, uint64_t psr)
            env->current_slot_ri == ia64_psr_ri(psr);
 }
 
-static bool ia64_memory_class_is_speculative(uint8_t memory_class)
-{
-    return memory_class == 1 || memory_class == 3;
-}
-
 static bool ia64_current_slot_is_speculative_load(CPUIA64State *env,
-                                                  uint64_t psr)
+                                                   uint64_t psr)
 {
-    IA64LdstImmediate ldst;
-    IA64FloatingMemoryInstruction fldst;
-
     if (!ia64_current_slot_matches(env, psr) ||
         env->current_slot_type != IA64_SLOT_TYPE_M) {
         return false;
     }
-    if (ia64_decode_ldst_immediate(IA64_SLOT_TYPE_M,
-                                   env->current_slot_raw, &ldst)) {
-        return ldst.kind == IA64_LDST_IMM_LOAD &&
-               ia64_memory_class_is_speculative(ldst.memory_class);
-    }
-    if (ia64_decode_floating_memory(IA64_SLOT_TYPE_M,
-                                    env->current_slot_raw, &fldst)) {
-        return (fldst.kind == IA64_FLOAT_MEM_LOAD ||
-                fldst.kind == IA64_FLOAT_MEM_LOAD_PAIR) &&
-               ia64_memory_class_is_speculative(fldst.memory_class);
-    }
-    return false;
+    return env->current_slot_speculative_load;
 }
 
 static bool ia64_current_code_page_exception_deferral(CPUIA64State *env)
@@ -189,11 +170,28 @@ typedef enum IA64InterruptionAccess {
     IA64_INTERRUPTION_ACCESS_EXECUTE,
     IA64_INTERRUPTION_ACCESS_WRITE,
     IA64_INTERRUPTION_ACCESS_READ,
+    IA64_INTERRUPTION_ACCESS_SEMAPHORE,
+    IA64_INTERRUPTION_ACCESS_WRITE_NON_ACCESS,
+    IA64_INTERRUPTION_ACCESS_READ_NON_ACCESS,
+    IA64_INTERRUPTION_ACCESS_SEMAPHORE_NON_ACCESS,
+    IA64_INTERRUPTION_ACCESS_FC_READ_NON_ACCESS,
+    IA64_INTERRUPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS,
 } IA64InterruptionAccess;
 
 static IA64InterruptionAccess
 ia64_interruption_access(IA64ExceptionKind kind, int32_t access_type)
 {
+    /*
+     * These descriptors carry the complete architected non-access identity,
+     * independent of the interruption kind raised by address translation or
+     * NaT consumption.  Classify them before kind-specific access overrides.
+     */
+    if (access_type == IA64_EXCEPTION_ACCESS_FC_READ_NON_ACCESS) {
+        return IA64_INTERRUPTION_ACCESS_FC_READ_NON_ACCESS;
+    }
+    if (access_type == IA64_EXCEPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS) {
+        return IA64_INTERRUPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS;
+    }
     /*
      * Illegal Operation is an instruction fault, not an instruction-fetch
      * fault.  Its architected ISR has the slot in ei, but x/w/r are all zero.
@@ -201,6 +199,18 @@ ia64_interruption_access(IA64ExceptionKind kind, int32_t access_type)
     if (kind == IA64_EXCEPTION_ILLEGAL_OPERATION ||
         access_type == IA64_EXCEPTION_ACCESS_NONE) {
         return IA64_INTERRUPTION_ACCESS_NONE;
+    }
+    if (access_type == IA64_EXCEPTION_ACCESS_SEMAPHORE) {
+        return IA64_INTERRUPTION_ACCESS_SEMAPHORE;
+    }
+    if (access_type == IA64_EXCEPTION_ACCESS_READ_NON_ACCESS) {
+        return IA64_INTERRUPTION_ACCESS_READ_NON_ACCESS;
+    }
+    if (access_type == IA64_EXCEPTION_ACCESS_WRITE_NON_ACCESS) {
+        return IA64_INTERRUPTION_ACCESS_WRITE_NON_ACCESS;
+    }
+    if (access_type == IA64_EXCEPTION_ACCESS_SEMAPHORE_NON_ACCESS) {
+        return IA64_INTERRUPTION_ACCESS_SEMAPHORE_NON_ACCESS;
     }
 
     switch ((MMUAccessType)access_type) {
@@ -217,7 +227,8 @@ ia64_interruption_access(IA64ExceptionKind kind, int32_t access_type)
 static bool ia64_exception_is_branch_trap(IA64ExceptionKind kind)
 {
     return kind == IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER ||
-           kind == IA64_EXCEPTION_TAKEN_BRANCH_TRAP;
+           kind == IA64_EXCEPTION_TAKEN_BRANCH_TRAP ||
+           kind == IA64_EXCEPTION_FP_TRAP;
 }
 
 static bool ia64_exception_is_data_memory_fault(IA64ExceptionKind kind)
@@ -232,6 +243,12 @@ static bool ia64_exception_is_data_memory_fault(IA64ExceptionKind kind)
     case IA64_EXCEPTION_DATA_ACCESS_RIGHTS:
     case IA64_EXCEPTION_PAGE_FAULT:
     case IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE:
+    case IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION:
+    case IA64_EXCEPTION_UNSUPPORTED_DATA_REFERENCE:
+    case IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS:
+    case IA64_EXCEPTION_DATA_KEY_MISS:
+    case IA64_EXCEPTION_DATA_DEBUG:
+    case IA64_EXCEPTION_KEY_PERMISSION:
         return true;
     default:
         return false;
@@ -254,6 +271,16 @@ static bool ia64_exception_writes_ifa(IA64ExceptionKind kind)
     case IA64_EXCEPTION_PAGE_FAULT:
     case IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION:
     case IA64_EXCEPTION_UNALIGNED_DATA_REFERENCE:
+    case IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION:
+    case IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION:
+    case IA64_EXCEPTION_UNSUPPORTED_DATA_REFERENCE:
+    case IA64_EXCEPTION_INSTRUCTION_KEY_MISS:
+    case IA64_EXCEPTION_DATA_KEY_MISS:
+    case IA64_EXCEPTION_KEY_PERMISSION:
+    case IA64_EXCEPTION_INSTRUCTION_DEBUG:
+    case IA64_EXCEPTION_DATA_DEBUG:
+    case IA64_EXCEPTION_UNIMPLEMENTED_INSTRUCTION_ADDRESS:
+    case IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS:
         return true;
     case IA64_EXCEPTION_NONE:
     case IA64_EXCEPTION_DATA_NESTED_TLB:
@@ -265,6 +292,8 @@ static bool ia64_exception_writes_ifa(IA64ExceptionKind kind)
     case IA64_EXCEPTION_DISABLED_FP_HIGH:
     case IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER:
     case IA64_EXCEPTION_TAKEN_BRANCH_TRAP:
+    case IA64_EXCEPTION_FP_FAULT:
+    case IA64_EXCEPTION_FP_TRAP:
         return false;
     }
     g_assert_not_reached();
@@ -323,6 +352,33 @@ static uint64_t ia64_interruption_isr(CPUIA64State *env, uint64_t psr,
             }
         }
         break;
+    case IA64_INTERRUPTION_ACCESS_SEMAPHORE:
+        isr |= (UINT64_C(1) << IA64_ISR_R_BIT) |
+               (UINT64_C(1) << IA64_ISR_W_BIT);
+        break;
+    case IA64_INTERRUPTION_ACCESS_WRITE_NON_ACCESS:
+        isr |= (UINT64_C(1) << IA64_ISR_W_BIT) |
+               (UINT64_C(1) << IA64_ISR_NA_BIT);
+        break;
+    case IA64_INTERRUPTION_ACCESS_READ_NON_ACCESS:
+        isr |= (UINT64_C(1) << IA64_ISR_R_BIT) |
+               (UINT64_C(1) << IA64_ISR_NA_BIT);
+        break;
+    case IA64_INTERRUPTION_ACCESS_SEMAPHORE_NON_ACCESS:
+        isr |= (UINT64_C(1) << IA64_ISR_R_BIT) |
+               (UINT64_C(1) << IA64_ISR_W_BIT) |
+               (UINT64_C(1) << IA64_ISR_NA_BIT);
+        break;
+    case IA64_INTERRUPTION_ACCESS_FC_READ_NON_ACCESS:
+        isr |= (UINT64_C(1) << IA64_ISR_R_BIT) |
+               (UINT64_C(1) << IA64_ISR_NA_BIT) |
+               UINT64_C(1);
+        break;
+    case IA64_INTERRUPTION_ACCESS_LFETCH_FAULT_READ_NON_ACCESS:
+        isr |= (UINT64_C(1) << IA64_ISR_R_BIT) |
+               (UINT64_C(1) << IA64_ISR_NA_BIT) |
+               UINT64_C(4);
+        break;
     }
     if (ia64_interruption_sets_ni(psr, psr_ic_inflight)) {
         isr |= UINT64_C(1) << IA64_ISR_NI_BIT;
@@ -339,7 +395,8 @@ static uint64_t ia64_interruption_isr(CPUIA64State *env, uint64_t psr,
     }
     if (env->rse.reference && ia64_exception_is_data_memory_fault(kind) &&
         (interruption_access == IA64_INTERRUPTION_ACCESS_READ ||
-         interruption_access == IA64_INTERRUPTION_ACCESS_WRITE)) {
+         interruption_access == IA64_INTERRUPTION_ACCESS_WRITE ||
+         interruption_access == IA64_INTERRUPTION_ACCESS_SEMAPHORE)) {
         isr |= UINT64_C(1) << IA64_ISR_RS_BIT;
     }
 
@@ -395,6 +452,30 @@ const char *ia64_exception_name(IA64ExceptionKind kind)
         return "lower-privilege-transfer";
     case IA64_EXCEPTION_TAKEN_BRANCH_TRAP:
         return "taken-branch-trap";
+    case IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION:
+        return "data-nat-page-consumption";
+    case IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION:
+        return "instruction-nat-page-consumption";
+    case IA64_EXCEPTION_UNSUPPORTED_DATA_REFERENCE:
+        return "unsupported-data-reference";
+    case IA64_EXCEPTION_INSTRUCTION_KEY_MISS:
+        return "instruction-key-miss";
+    case IA64_EXCEPTION_DATA_KEY_MISS:
+        return "data-key-miss";
+    case IA64_EXCEPTION_KEY_PERMISSION:
+        return "key-permission";
+    case IA64_EXCEPTION_INSTRUCTION_DEBUG:
+        return "instruction-debug";
+    case IA64_EXCEPTION_DATA_DEBUG:
+        return "data-debug";
+    case IA64_EXCEPTION_FP_FAULT:
+        return "floating-point-fault";
+    case IA64_EXCEPTION_FP_TRAP:
+        return "floating-point-trap";
+    case IA64_EXCEPTION_UNIMPLEMENTED_INSTRUCTION_ADDRESS:
+        return "unimplemented-instruction-address";
+    case IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS:
+        return "unimplemented-data-address";
     default:
         return "unknown";
     }
@@ -426,6 +507,20 @@ ia64_exception_for_translate_result(const IA64TranslateResult *result)
         return result->access_type == MMU_INST_FETCH ?
                IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS :
                IA64_EXCEPTION_DATA_ACCESS_RIGHTS;
+    case IA64_TRANSLATE_KEY_MISS:
+        return result->access_type == MMU_INST_FETCH ?
+               IA64_EXCEPTION_INSTRUCTION_KEY_MISS :
+               IA64_EXCEPTION_DATA_KEY_MISS;
+    case IA64_TRANSLATE_KEY_PERMISSION:
+        return IA64_EXCEPTION_KEY_PERMISSION;
+    case IA64_TRANSLATE_NAT_PAGE:
+        return result->access_type == MMU_INST_FETCH ?
+               IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION :
+               IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION;
+    case IA64_TRANSLATE_UNIMPLEMENTED:
+        return result->access_type == MMU_INST_FETCH ?
+               IA64_EXCEPTION_UNIMPLEMENTED_INSTRUCTION_ADDRESS :
+               IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS;
     default:
         return IA64_EXCEPTION_PAGE_FAULT;
     }
@@ -472,6 +567,12 @@ static void ia64_record_exception_common(CPUIA64State *env,
     case IA64_EXCEPTION_DATA_NESTED_TLB:
         record->vector = 0x1400;
         break;
+    case IA64_EXCEPTION_INSTRUCTION_KEY_MISS:
+        record->vector = 0x1800;
+        break;
+    case IA64_EXCEPTION_DATA_KEY_MISS:
+        record->vector = 0x1c00;
+        break;
     case IA64_EXCEPTION_DIRTY_BIT:
         record->vector = 0x2000;
         break;
@@ -486,6 +587,9 @@ static void ia64_record_exception_common(CPUIA64State *env,
         break;
     case IA64_EXCEPTION_DATA_ACCESS_RIGHTS:
         record->vector = 0x5300;
+        break;
+    case IA64_EXCEPTION_KEY_PERMISSION:
+        record->vector = 0x5100;
         break;
     case IA64_EXCEPTION_ILLEGAL_OPERATION:
         record->vector = 0x5400;
@@ -516,6 +620,39 @@ static void ia64_record_exception_common(CPUIA64State *env,
     case IA64_EXCEPTION_REGISTER_NAT_CONSUMPTION:
         record->vector = 0x5600;
         record->isr_code = IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION;
+        break;
+    case IA64_EXCEPTION_DATA_NAT_PAGE_CONSUMPTION:
+        record->vector = 0x5600;
+        record->isr_code = IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION;
+        break;
+    case IA64_EXCEPTION_INSTRUCTION_NAT_PAGE_CONSUMPTION:
+        record->vector = 0x5600;
+        record->isr_code = IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION;
+        break;
+    case IA64_EXCEPTION_UNSUPPORTED_DATA_REFERENCE:
+        record->vector = 0x5b00;
+        break;
+    case IA64_EXCEPTION_FP_FAULT:
+        record->vector = 0x5c00;
+        break;
+    case IA64_EXCEPTION_FP_TRAP:
+        record->vector = 0x5d00;
+        break;
+    case IA64_EXCEPTION_UNIMPLEMENTED_INSTRUCTION_ADDRESS:
+        record->vector = 0x5e00;
+        record->isr_code =
+            IA64_ISR_CODE_UNIMPLEMENTED_INSTRUCTION_ADDRESS;
+        break;
+    case IA64_EXCEPTION_UNIMPLEMENTED_DATA_ADDRESS:
+        record->vector = 0x5400;
+        record->isr_code = IA64_ISR_CODE_UNIMPLEMENTED_DATA_ADDRESS;
+        break;
+    case IA64_EXCEPTION_INSTRUCTION_DEBUG:
+        record->vector = 0x5900;
+        record->isr_code = UINT64_C(1);
+        break;
+    case IA64_EXCEPTION_DATA_DEBUG:
+        record->vector = 0x5900;
         break;
     case IA64_EXCEPTION_LOWER_PRIVILEGE_TRANSFER:
         record->vector = 0x5e00;
@@ -566,7 +703,7 @@ static void ia64_record_exception_common(CPUIA64State *env,
 }
 
 void ia64_record_exception(CPUIA64State *env, IA64ExceptionKind kind,
-                           vaddr address, MMUAccessType access_type,
+                           vaddr address, int32_t access_type,
                            const char *detail)
 {
     ia64_record_exception_common(env, kind, address, access_type, detail,
@@ -684,6 +821,9 @@ static void ia64_deliver_exception_common(CPUIA64State *env,
         kind == IA64_EXCEPTION_DATA_ACCESS_BIT ||
         kind == IA64_EXCEPTION_INSTRUCTION_ACCESS_RIGHTS ||
         kind == IA64_EXCEPTION_DATA_ACCESS_RIGHTS ||
+        kind == IA64_EXCEPTION_INSTRUCTION_KEY_MISS ||
+        kind == IA64_EXCEPTION_DATA_KEY_MISS ||
+        kind == IA64_EXCEPTION_KEY_PERMISSION ||
         kind == IA64_EXCEPTION_PAGE_FAULT) {
         env->cr[IA64_CR_ITIR] =
             kind == IA64_EXCEPTION_VHPT_TRANSLATION ?
@@ -712,8 +852,6 @@ trace:
      */
     env->rse.cfle = false;
     env->rse.reference = false;
-    env->rse.pending_fill_count = 0;
-    env->rse.pending_fill_ip = 0;
     ia64_env_begin_source_visibility_epoch(env);
     ia64_diag_record_exception(env, ia64_exception_name(kind), source_ip,
                                address, env->exception.vector, old_psr);
@@ -776,7 +914,7 @@ trace:
 }
 
 void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
-                            vaddr address, MMUAccessType access_type,
+                            vaddr address, int32_t access_type,
                             const char *detail)
 {
     ia64_deliver_exception_common(env, kind, address, access_type, detail,
@@ -784,7 +922,7 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
 }
 
 void ia64_deliver_exception_fast(CPUIA64State *env, IA64ExceptionKind kind,
-                                 vaddr address, MMUAccessType access_type,
+                                 vaddr address, int32_t access_type,
                                  const char *detail)
 {
     ia64_deliver_exception_common(env, kind, address, access_type, detail,
