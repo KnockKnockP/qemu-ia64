@@ -362,6 +362,57 @@ def wide_spill_case() -> RuntimeCase:
     )
 
 
+def ordered_unat_spill_case() -> RuntimeCase:
+    """Two same-group spills must form one ordered UNAT effect chain."""
+    payload = 0x1122334455667788
+    initial_unat = (1 << 0) | (1 << 9)
+    program = H.Program(
+        name="same-group ordered st8.spill UNAT effects",
+        bundles=(
+            H.Bundle(0x10, 0x01, H.nop_m(), H.adds(8, initial_unat, 0),
+                     H.adds(9, 0x1800, 0)),
+            H.Bundle(0x20, 0x01, H.mov_m_grar(36, 8), H.nop_i(), H.nop_i()),
+            # UNAT[0] makes r20 NaT while r21 remains a normal value.
+            H.Bundle(0x30, 0x01, H.ld8_fill(20, 9), H.nop_i(), H.nop_i()),
+            H.Bundle(0x40, 0x03, H.nop_m(), H.adds(10, 0x1840, 0),
+                     H.adds(11, 0x1848, 0)),
+            H.Bundle(0x50, 0x01, H.nop_m(), H.adds(21, 0x55, 0), H.nop_i()),
+            # MMI has no internal stop.  Spill one sets UNAT[8]; spill two
+            # consumes that live image and clears the initially-poisoned bit 9.
+            H.Bundle(0x60, 0x09,
+                     integer_spill(8, r2=20, r3=10),
+                     integer_spill(8, r2=21, r3=11), H.nop_i()),
+            # Read the completed image back through architectural fill behavior.
+            H.Bundle(0x70, 0x09, integer_load(8, "fill", r1=22, r3=10),
+                     integer_load(8, "fill", r1=23, r3=11), H.nop_i()),
+            H.spin_bundle(0x80),
+        ),
+        terminal_ip=0x80,
+        data=(H.DataWord(0x1800, payload, 8),
+              H.DataWord(0x1840, 0, 8), H.DataWord(0x1848, 0, 8)),
+    )
+
+    def verify(snapshot) -> str:
+        expected_unat = (1 << 0) | (1 << 8)
+
+        _no_exception(snapshot, "ordered UNAT spill chain")
+        H._require(snapshot.unat == expected_unat,
+                   "same-group spills lost or reordered a UNAT effect: "
+                   "expected 0x{:x}, got 0x{:x}".format(
+                       expected_unat, snapshot.unat))
+        H._require(snapshot.gr[22] == payload and snapshot.gr[23] == 0x55,
+                   "same-group spill payloads did not round-trip through fill")
+        H._require((snapshot.nat_low & ((1 << 22) | (1 << 23))) == (1 << 22),
+                   "fill did not recover set UNAT[8] and clear UNAT[9]")
+        return ("two no-stop st8.spill instructions preserved the first UNAT "
+                "update, cleared the second bit, and filled both NaTs exactly")
+
+    return RuntimeCase(
+        "same-group ordered UNAT spill effects", program, (0x60, 0x70), verify,
+        ("IA64_OP_ST8SPILL", "IA64_OP_LD8FILL"),
+    )
+
+
 def floating_case() -> RuntimeCase:
     single = 0x3FC00000
     double = 0x4002000000000000
@@ -1887,7 +1938,8 @@ def checked_branch_disabled_fr_case() -> RuntimeCase:
 def runtime_cases() -> Tuple[RuntimeCase, ...]:
     return (
         primary_admission_case(), alias_admission_case(), atomic_case(),
-        wide_spill_case(), floating_case(), floating_zero_encoding_case(),
+        wide_spill_case(), ordered_unat_spill_case(), floating_case(),
+        floating_zero_encoding_case(),
         floating_big_endian_case(),
         big_endian_wide_pair_case(),
         rotated_fp_pair_legal_case(), rotated_fp_pair_illegal_case(),

@@ -577,6 +577,8 @@ static bool ia64_issue_group_overlay_needed(void *opaque)
 
     return env->issue_group.saved_gr_mask[0] != 0 ||
            env->issue_group.saved_gr_mask[1] != 0 ||
+           env->issue_group.check_gr_forward_mask[0] != 0 ||
+           env->issue_group.check_gr_forward_mask[1] != 0 ||
            env->issue_group.saved_br_mask != 0 ||
            env->issue_group.branch_br_forward_mask != 0 ||
            env->issue_group.pr_saved ||
@@ -626,12 +628,17 @@ static int ia64_issue_group_overlay_post_load(void *opaque, int version_id)
                sizeof(env->issue_group.saved_ar_index));
         env->issue_group.saved_ar_count = 0;
     }
+    if (version_id < 7) {
+        /* No typed check-load forwarding existed in v1-v6 streams. */
+        env->issue_group.check_gr_forward_mask[0] = 0;
+        env->issue_group.check_gr_forward_mask[1] = 0;
+    }
     return 0;
 }
 
 static const VMStateDescription vmstate_issue_group_overlay = {
     .name = "env/issue-group-overlay",
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 1,
     .needed = ia64_issue_group_overlay_needed,
     .post_load = ia64_issue_group_overlay_post_load,
@@ -660,6 +667,8 @@ static const VMStateDescription vmstate_issue_group_overlay = {
         VMSTATE_UINT8_ARRAY_V(issue_group.saved_ar_index, CPUIA64State,
                               IA64_ISSUE_GROUP_AR_CAPACITY, 6),
         VMSTATE_UINT8_V(issue_group.saved_ar_count, CPUIA64State, 6),
+        VMSTATE_UINT64_ARRAY_V(issue_group.check_gr_forward_mask,
+                               CPUIA64State, 2, 7),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -729,7 +738,9 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
     if (!env->issue_group.typed_active &&
         (mask[0] != 0 || mask[1] != 0 || env->issue_group.pr_saved ||
          env->issue_group.saved_fr_mask[0] != 0 ||
-         env->issue_group.saved_fr_mask[1] != 0 ||
+          env->issue_group.saved_fr_mask[1] != 0 ||
+          env->issue_group.check_gr_forward_mask[0] != 0 ||
+          env->issue_group.check_gr_forward_mask[1] != 0 ||
          env->issue_group.branch_pr_forward_mask != 0 ||
          env->issue_group.saved_br_mask != 0 ||
          env->issue_group.branch_br_forward_mask != 0 ||
@@ -742,6 +753,16 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
     }
     if (mask[0] & 1) {
         error_report("IA-64 migration stream marks immutable GR0 as saved");
+        return -EINVAL;
+    }
+    if (env->issue_group.check_gr_forward_mask[0] & 1) {
+        error_report("IA-64 migration stream forwards immutable GR0");
+        return -EINVAL;
+    }
+    if ((env->issue_group.check_gr_forward_mask[0] & ~mask[0]) != 0 ||
+        (env->issue_group.check_gr_forward_mask[1] & ~mask[1]) != 0) {
+        error_report("IA-64 migration stream forwards a check-load result "
+                     "without its ordinary-source entry image");
         return -EINVAL;
     }
     if (env->issue_group.saved_fr_mask[0] & UINT64_C(3)) {

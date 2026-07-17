@@ -371,6 +371,11 @@ def main() -> int:
         "void ia64_rotate_modulo_scheduled_registers",
         "void ia64_rse_cover_frame",
     )
+    logical_sync_in = section(
+        insn_source,
+        "void ia64_rse_sync_logical_in(CPUIA64State *env)\n{",
+        "uint64_t ia64_read_gr",
+    )
     call_frame_core = section(
         insn_source,
         "void ia64_enter_call_frame(CPUIA64State *env)\n{",
@@ -593,7 +598,7 @@ def main() -> int:
     cfle_resume = section(
         instruction_main,
         "if (ctx->cfle_resume)",
-        "if (ctx->state_cache_available",
+        "ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_EXECUTED",
     )
     tb_cpu_state = section(
         cpu_source,
@@ -1087,7 +1092,7 @@ def main() -> int:
         call_predicate,
     )
     call_target_load = call_lower.find(
-        "ia64_tr_group_load_branch_br(", call_guard
+        "ia64_tr_group_load_branch_br(", call_predicate
     )
     call_target_align = call_lower.find(
         "tcg_gen_andi_i64(arm->indirect_target", call_target_load
@@ -1106,11 +1111,12 @@ def main() -> int:
         "tcg_gen_brcondi_i64(TCG_COND_NE, predicate, 0, arm->taken)",
         call_cache_split,
     )
-    if not (0 <= call_predicate < call_guard < call_target_load <
-            call_target_align < call_link_stage < call_finish < call_close <
+    if not (0 <= call_predicate < call_target_load < call_target_align <
+            call_guard < call_link_stage < call_finish < call_close <
             call_cache_split < call_taken_split):
         raise AssertionError(
-            "typed call must guard, latch/align B5 target before b1 link, "
+            "typed call must define/latch the B5 target before its guard, "
+            "then stage the b1 link, "
             "retire/close, split the cache, then select the taken arm"
         )
     if call_lower.count("ia64_tr_group_load_branch_predicate") != 1 or \
@@ -1119,7 +1125,6 @@ def main() -> int:
                              "ordinary transaction link stage")
 
     require(call_transition, (
-        "g_assert(!ctx->state_cache_active)",
         "ia64_tr_require_helper(opcode, IA64_OPCODE_HELPER_CALL_FRAME)",
         "gen_helper_enter_call_frame(tcg_env)",
     ), "focused typed call-frame transition")
@@ -1176,6 +1181,17 @@ def main() -> int:
         "#define IA64_PFS_PPL_SHIFT 62",
         "#define IA64_PFS_PPL_MASK UINT64_C(0xc000000000000000)",
     ), "architectural PFS field layout")
+    require(logical_sync_in, (
+        "live_logical = env->rse.sof",
+        "g_assert(live_logical <= IA64_GR_COUNT - IA64_STATIC_GR_COUNT)",
+        "for (uint32_t logical = 0; logical < live_logical; logical++)",
+        "env->gr[reg] = env->rse.stacked_gr[slot]",
+        "env->rse.logical_nat[0] = logical_nat[0]",
+        "env->rse.logical_nat[1] = logical_nat[1] & UINT64_C(0xffffffff)",
+    ), "SOF-bounded resident logical RSE refresh")
+    forbid(logical_sync_in, (
+        "logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT",
+    ), "blanket 96-name logical RSE refresh")
     require(call_frame_core, (
         "caller_cfm = env->cfm",
         "caller_ec = ia64_read_application_register(env, IA64_AR_EC) & 0x3f",
@@ -1289,7 +1305,7 @@ def main() -> int:
         "tcg_gen_andi_i64(arm->indirect_target, arm->indirect_target",
         "~UINT64_C(0xf)",
         "ia64_tr_group_load_branch_pfs(ctx, arm->return_pfs)",
-        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "ia64_tr_publish_fault_state(ctx, insn->address, insn->slot",
         "ia64_tr_group_finish_instruction_success(ctx, insn)",
         "if (insn->stop_after || unconditional)",
         "ia64_tr_group_close(ctx)",
@@ -1364,7 +1380,7 @@ def main() -> int:
         "ia64_tr_emit_exit_request_guard", "cpu_loop_exit",
     ), "return retirement with deferred interrupt observation")
     require(retire_flush, (
-        "if (!ia64_tr_retire_fast_guard_enabled())",
+        "ctx->retired_bundle_count_used",
         "offsetof(CPUIA64State, interrupt.pending)",
         "TCG_COND_EQ, pending, 0, retire_only",
         "offsetof(CPUIA64State, psr)",
@@ -1372,25 +1388,18 @@ def main() -> int:
         "gen_helper_retire_translated_bundles(tcg_env",
         "ctx->base.tb->flags & IA64_TB_FLAG_BENCHMARK",
         "ia64_tr_emit_benchmark_retire(ctx->retired_bundle_count)",
-    ), "retirement interrupt fast guard")
-    retire_pending = retire_flush.find(
-        "offsetof(CPUIA64State, interrupt.pending)"
-    )
-    retire_psr = retire_flush.find(
-        "offsetof(CPUIA64State, psr)", retire_pending
-    )
-    retire_helper = retire_flush.rfind(
-        "gen_helper_retire_translated_bundles(tcg_env"
-    )
-    retire_inline = retire_flush.find(
-        "ia64_tr_emit_benchmark_retire(ctx->retired_bundle_count)",
-        retire_helper,
-    )
-    if not (0 <= retire_pending < retire_psr < retire_helper < retire_inline):
-        raise AssertionError(
-            "retirement must check pending/PSR.i before the unchanged helper "
-            "and account benchmark-only bypasses afterward"
-        )
+        "tcg_gen_movi_i32(ctx->retired_bundle_count, 0)",
+    ), "permanent retirement interrupt fast guard")
+    require(helper_source + arch_helper_source, (
+        "DEF_HELPER_2(retire_translated_bundles, void, env, i32)",
+        "void HELPER(retire_translated_bundles)",
+        "ia64_external_interrupt_enabled(env)",
+        "cpu_loop_exit(env_cpu(env))",
+    ), "focused enabled-interrupt retirement helper")
+    forbid(source, (
+        "VIBTANIUM_TCG_RETIRE_FAST_GUARD",
+        "ia64_tr_retire_fast_guard_enabled",
+    ), "retirement guard escape hatch")
     if sequential_ip_commit.count("ia64_tr_clear_restart_ri();") != 2:
         raise AssertionError(
             "sequential constant/dynamic IP commits must canonicalize both "
@@ -1401,9 +1410,8 @@ def main() -> int:
         "offsetof(CPUIA64State, ri_dirty)",
     ), "sequential RI commit canonicalization")
     require(typed_return_exit, (
-        "ia64_tr_store_typed_taken_visibility_state()",
-        "ia64_tr_clear_restart_ri()",
-        "ia64_tr_commit_ip_value(target)",
+        "ia64_tr_store_typed_taken_visibility_state(ctx)",
+        "ia64_tr_commit_ip_value(ctx, target)",
         "ia64_tr_retire_bundles_deferred_interrupt(ctx)",
         "gen_helper_return_frame_from_pfs(lower_privilege, tcg_env, pfs)",
         "tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr))",
@@ -1425,13 +1433,10 @@ def main() -> int:
         "insn->raw", "fallback",
     ), "architecturally ordered typed return taken exit")
     return_visibility = typed_return_exit.find(
-        "ia64_tr_store_typed_taken_visibility_state()"
-    )
-    return_ri = typed_return_exit.find(
-        "ia64_tr_clear_restart_ri()", return_visibility
+        "ia64_tr_store_typed_taken_visibility_state(ctx)"
     )
     return_ip = typed_return_exit.find(
-        "ia64_tr_commit_ip_value(target)", return_ri
+        "ia64_tr_commit_ip_value(ctx, target)", return_visibility
     )
     return_retire = typed_return_exit.find(
         "ia64_tr_retire_bundles_deferred_interrupt(ctx)", return_ip
@@ -1472,7 +1477,7 @@ def main() -> int:
     return_lookup = typed_return_exit.find(
         "tcg_gen_lookup_and_goto_ptr", return_exit_guard
     )
-    if not (0 <= return_visibility < return_ri < return_ip < return_retire <
+    if not (0 <= return_visibility < return_ip < return_retire <
             return_frame < return_psr < return_demotion < return_lp <
             return_lp_trap < return_lp_done < return_tb < return_tb_trap <
             return_traps_done < return_fill < return_chain_poll <
@@ -1588,11 +1593,11 @@ def main() -> int:
         "TCG_COND_TSTEQ, psr, IA64_PSR_CPL_MASK, cpl_zero",
         "ia64_tr_emit_decoded_privileged_operation(ctx, insn)",
         "gen_set_label(cpl_zero)",
-        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "ia64_tr_publish_fault_state(ctx, insn->address, insn->slot",
         "ia64_tr_group_finish_instruction_success(ctx, insn)",
         "ia64_tr_group_close(ctx)",
         "ia64_tr_split_state_cache_at_typed_branch(ctx)",
-        "ia64_tr_store_typed_taken_visibility_state()",
+        "ia64_tr_store_typed_taken_visibility_state(ctx)",
         "ia64_tr_note_retired_bundle(ctx)",
         "ia64_tr_retire_bundles_deferred_interrupt(ctx)",
         "gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address))",
@@ -1604,7 +1609,7 @@ def main() -> int:
     require(rfi_privilege_fault, (
         "ia64_tr_group_publish_prefix_for_noreturn_fault(ctx)",
         "tcg_gen_movi_i64(cpu_ip, insn->address)",
-        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "ia64_tr_publish_fault_state(ctx, insn->address, insn->slot",
         "gen_helper_raise_privileged_operation(tcg_env)",
     ), "precise pre-retirement RFI privilege fault")
     require(rfi_privilege_helper, (
@@ -1639,7 +1644,7 @@ def main() -> int:
         "ia64_tr_split_state_cache_at_typed_branch(ctx)", rfi_close
     )
     rfi_visibility = rfi_lower.find(
-        "ia64_tr_store_typed_taken_visibility_state()", rfi_cache_split
+        "ia64_tr_store_typed_taken_visibility_state(ctx)", rfi_cache_split
     )
     rfi_note_bundle = rfi_lower.find(
         "ia64_tr_note_retired_bundle(ctx)", rfi_visibility
@@ -2043,12 +2048,13 @@ def main() -> int:
         "ia64_tr_assert_loop_branch_resources(instruction, insn)",
         "arm->direct_target = bundle_ip + (uint64_t)insn->imm",
         "if (insn->opcode == IA64_OP_BR_CLOOP)",
-        "ia64_tr_load_ar(ctx, lc, IA64_AR_LC)",
+        "ia64_tr_ensure_ar(ctx, IA64_AR_LC)",
         "tcg_gen_setcondi_i64(TCG_COND_NE, lc_nonzero, lc, 0)",
         "tcg_gen_subi_i64(decremented, lc, 1)",
-        "ia64_tr_store_ar(ctx, IA64_AR_LC, decremented)",
+        "TCG_COND_NE, next_lc, lc_nonzero",
+        "ia64_tr_store_ar(ctx, IA64_AR_LC, next_lc)",
         "ia64_tr_group_prepare_pr(ctx, 63)",
-        "ia64_tr_load_ar(ctx, ec, IA64_AR_EC)",
+        "ia64_tr_ensure_ar(ctx, IA64_AR_EC)",
         "TCG_COND_GTU, ec_gt_one, ec, 1",
         "ia64_tr_group_load_branch_predicate(ctx, predicate, insn->qp)",
         "tcg_gen_or_i64(active, predicate_true, ec_gt_one)",
@@ -2059,7 +2065,8 @@ def main() -> int:
         "tcg_gen_or_i64(rotate, lc_nonzero, ec_nonzero)",
         "tcg_gen_andc_i64(decrement_ec, ec_nonzero, lc_nonzero)",
         "ia64_tr_group_stage_pr_bool(p63, lc_nonzero)",
-        "ia64_tr_store_ar(ctx, IA64_AR_EC, decremented)",
+        "TCG_COND_NE, next_ec, decrement_ec",
+        "ia64_tr_store_ar(ctx, IA64_AR_EC, next_ec)",
         "tcg_gen_xori_i64(taken, active, 1)",
         "ia64_tr_group_finish_instruction_success(ctx, insn)",
         "ia64_tr_group_close(ctx)",
@@ -2240,14 +2247,14 @@ def main() -> int:
         "if (taken)",
         "ia64_tr_store_typed_taken_visibility_state",
         "ia64_tr_store_source_visibility_state",
-        "ia64_tr_commit_ip(target)",
+        "ia64_tr_commit_ip(ctx, target)",
         "ia64_tr_flush_retired_bundles(ctx)",
         "ia64_tr_emit_exit_request_guard",
         "tcg_gen_goto_tb",
         "tcg_gen_lookup_and_goto_ptr",
     ), "typed direct-branch exit arm")
     branch_publish = typed_direct_branch_exit.find(
-        "ia64_tr_commit_ip(target)"
+        "ia64_tr_commit_ip(ctx, target)"
     )
     branch_flush = typed_direct_branch_exit.find(
         "ia64_tr_flush_retired_bundles(ctx)"
@@ -2261,7 +2268,7 @@ def main() -> int:
 
     require(typed_indirect_branch_exit, (
         "ia64_tr_store_typed_taken_visibility_state",
-        "ia64_tr_commit_ip_value(target)",
+        "ia64_tr_commit_ip_value(ctx, target)",
         "ia64_tr_flush_retired_bundles(ctx)",
         "ia64_tr_emit_exit_request_guard",
         "tcg_gen_lookup_and_goto_ptr",
@@ -2271,7 +2278,7 @@ def main() -> int:
         "ia64_tr_store_source_visibility_state",
     ), "typed indirect-branch exit arm")
     indirect_publish = typed_indirect_branch_exit.find(
-        "ia64_tr_commit_ip_value(target)"
+        "ia64_tr_commit_ip_value(ctx, target)"
     )
     indirect_flush = typed_indirect_branch_exit.find(
         "ia64_tr_flush_retired_bundles(ctx)", indirect_publish
@@ -2541,20 +2548,35 @@ def main() -> int:
                          "IA64TcgFastSlot"),
            "instruction-group transaction")
     require(cpu_header, (
-        "IA64_TB_FLAG_PSR_FINISH (1u << 13)",
-        "IA64_PSR_IC_BIT | IA64_PSR_ED_BIT",
+        "IA64_TB_FLAG_PSR_IC (1u << 13)",
+        "IA64_TB_FLAG_PSR_ONESHOT (1u << 17)",
+        "if (psr & IA64_PSR_IC_BIT)",
+        "flags |= IA64_TB_FLAG_PSR_IC",
+        "IA64_PSR_ED_BIT | IA64_PSR_FAULT_SUPPRESSION_MASK",
         "IA64_PSR_FAULT_SUPPRESSION_MASK",
-        "flags |= IA64_TB_FLAG_PSR_FINISH",
-    ), "PSR finish-state translation-block keying")
+        "flags |= IA64_TB_FLAG_PSR_ONESHOT",
+    ), "split IC and one-shot PSR translation-block keying")
     require(cpu_header + tb_cpu_state + source, (
         "IA64_TB_FLAG_ALAT_ACTIVE (1u << 14)",
         "if (cpu->env.alat.valid_mask != 0)",
         "flags |= IA64_TB_FLAG_ALAT_ACTIVE",
-        "ia64_tr_alat_empty_specialization_enabled()",
         "ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE",
         "if (!ctx->alat_may_active)",
         "ctx->alat_may_active = true",
     ), "empty-ALAT translation-block specialization")
+    store_alat = section(
+        source,
+        "static void ia64_tr_emit_decoded_store_alat_invalidate",
+        "static void ia64_tr_emit_decoded_ordinary_integer_memory",
+    )
+    require(store_alat, (
+        "if (!ctx->alat_may_active)",
+        "offsetof(CPUIA64State, alat.valid_mask)",
+        "gen_helper_memory_store_alat_invalidate",
+    ), "same-TB advanced-load/store ALAT invalidation")
+    forbid(store_alat, (
+        "ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE",
+    ), "same-TB advanced-load/store ALAT invalidation")
     require(cpu_header, (
         "IA64_TB_FLAG_INSN_DEBUG_ACTIVE (1u << 15)",
         "IA64_TB_FLAG_DATA_DEBUG_ACTIVE (1u << 16)",
@@ -2564,16 +2586,27 @@ def main() -> int:
         "flags |= IA64_TB_FLAG_DATA_DEBUG_ACTIVE",
     ), "architectural-debug translation-block keying")
     require(transaction_begin, (
-        "ia64_tr_psr_finish_specialization_enabled()",
-        "ctx->base.tb->flags & IA64_TB_FLAG_PSR_FINISH",
-        "tcg_gen_ld_i64(instruction->pre_psr, tcg_env",
+        "ctx->base.tb->flags & IA64_TB_FLAG_PSR_ONESHOT",
+        "tcg_gen_mov_i64(instruction->pre_psr, cpu_psr)",
+        "ctx->base.tb->flags & IA64_TB_FLAG_PSR_IC",
+        "ctx->iipa_emitted_bundle != bundle_ip",
+        "instruction->publish_iipa = true",
     ), "PSR finish-state specialized instruction entry")
     require(transaction_finish, (
         "if (instruction->pre_psr != NULL)",
         "IA64_TR_PSR_ED_BIT",
         "IA64_TR_PSR_FAULT_SUPPRESSION_MASK",
-        "IA64_TR_PSR_IC_BIT",
+        "if (instruction->publish_iipa)",
+        "offsetof(CPUIA64State, last_successful_bundle)",
     ), "PSR finish-state specialized instruction retirement")
+    forbid(transaction_finish, (
+        "IA64_TR_PSR_IC_BIT",
+        "skip_iipa",
+    ), "common-path dynamic IC retirement")
+    forbid(source, (
+        "VIBTANIUM_TCG_PSR_FINISH_SPECIALIZATION",
+        "ia64_tr_psr_finish_specialization_enabled",
+    ), "PSR finish specialization escape hatch")
     gr_preserve = transaction_retire.find(
         "ia64_tr_group_preserve_ordinary_gr_source"
     )
@@ -2613,7 +2646,8 @@ def main() -> int:
     ), "ordinary packed PR-image overlay selection")
     require(pr_move_lower, (
         "ia64_tr_group_load_ordinary_pr_image",
-        "ia64_tr_group_stage_gr(gr_write, image, tcg_constant_i64(0))",
+        "ia64_tr_group_stage_gr_known(\n"
+        "            gr_write, image, IA64_TR_NAT_KNOWN_CLEAR)",
         "ia64_tr_group_prepare_pr_image",
         "ia64_tr_group_load_ordinary_gr_pair",
         "ia64_tr_emit_decoded_register_nat_consumption",
@@ -2874,7 +2908,7 @@ def main() -> int:
     ), "Register NaT Consumption helper declaration")
 
     require(transaction_begin, (
-        "if (!ctx->source_overlay_known_clear)",
+        "if (!group->ssa.enabled && !ctx->source_overlay_known_clear)",
         "ia64_tr_store_source_visibility_state(ctx, true, false)",
         "ctx->source_overlay_known_clear = true",
         "tcg_get_insn_start_param",
@@ -3007,10 +3041,10 @@ def main() -> int:
     require(rse_spine_lower, (
         "ia64_tr_assert_rse_spine_resources(instruction, insn)",
         "ia64_tr_rse_spine_is_static_noreturn(insn)",
-        "ia64_tr_publish_fault_state(insn->address, insn->slot",
+        "ia64_tr_publish_fault_state(ctx, insn->address, insn->slot",
         "gen_helper_rse_alloc(old_pfs, tcg_env, tcg_constant_i32(packed))",
         "ia64_tr_finish_faulting_slot()",
-        "ia64_tr_group_stage_gr(write, old_pfs, tcg_constant_i64(0))",
+        "write, old_pfs, IA64_TR_NAT_KNOWN_CLEAR",
     ), "typed alloc/RSE-spine transition")
     require(rse_static_noreturn, (
         "insn->r1 == 0",
@@ -3142,7 +3176,7 @@ def main() -> int:
         "ia64_tr_group_prepare_gr(ctx, insn->r3)",
         "ia64_tr_emit_decoded_predicate_guard(ctx, insn)",
         "ia64_tr_emit_decoded_memory_target_check",
-        "ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat",
+        "ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat",
         "ia64_tr_emit_decoded_memory_nat_check",
         "ia64_tr_publish_decoded_memory_access",
         "ia64_tr_emit_decoded_data_debug_pre_access",
@@ -3152,7 +3186,8 @@ def main() -> int:
         "tcg_gen_qemu_st_i64",
         "TCG_BAR_STRL | TCG_MO_LD_ST | TCG_MO_ST_ST",
         "ia64_tr_emit_decoded_store_alat_invalidate",
-        "ia64_tr_group_stage_gr(target_write",
+        "ia64_tr_group_stage_gr_known(\n"
+        "            target_write, result, IA64_TR_NAT_KNOWN_CLEAR)",
         "ia64_tr_group_stage_gr(base_write",
         "ia64_tr_finish_faulting_slot()",
     ), "typed ordinary scalar memory lowering")
@@ -3170,7 +3205,7 @@ def main() -> int:
         "ia64_tr_emit_decoded_memory_target_check", memory_guard
     )
     memory_source = memory_lower.find(
-        "ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat",
+        "ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat",
         memory_target,
     )
     memory_nat = memory_lower.find(
@@ -3190,7 +3225,7 @@ def main() -> int:
         "tcg_gen_qemu_ld_i64", memory_alignment
     )
     memory_target_stage = memory_lower.find(
-        "ia64_tr_group_stage_gr(target_write", memory_qemu_load
+        "target_write, result, IA64_TR_NAT_KNOWN_CLEAR", memory_qemu_load
     )
     memory_qemu_store = memory_lower.find(
         "tcg_gen_qemu_st_i64", memory_target_stage
@@ -3238,7 +3273,6 @@ def main() -> int:
         )
 
     require(instruction_debug, (
-        "if (ia64_tr_debug_fast_guard_enabled() &&",
         "ctx->base.tb->flags & IA64_TB_FLAG_INSN_DEBUG_ACTIVE",
         "return;",
         "gen_helper_instruction_debug_match(matched, tcg_env",
@@ -3247,6 +3281,12 @@ def main() -> int:
         "ia64_tr_publish_fault_state(",
         "gen_helper_raise_instruction_debug(tcg_env)",
     ), "typed instruction-debug predecode guard")
+    forbid(source, (
+        "VIBTANIUM_TCG_DEBUG_FAST_GUARD",
+        "VIBTANIUM_TCG_ALAT_EMPTY_SPECIALIZATION",
+        "ia64_tr_debug_fast_guard_enabled",
+        "ia64_tr_alat_empty_specialization_enabled",
+    ), "WP1 production specialization escape hatches")
     debug_fast_guard = instruction_debug.find("return;")
     debug_sync = instruction_debug.find(
         "ia64_tr_sync_state_cache", debug_fast_guard
@@ -3303,6 +3343,331 @@ def main() -> int:
         raise AssertionError("translator must derive the incoming RI, run the "
                              "fetch debug guard, preflight the closed typed "
                              "region, then lower it through the typed driver")
+
+    # Work Package 1: production-default fast issue-group architecture.
+    stable_state = section(
+        source, "static TCGv_i64 cpu_ip;", "static bool ia64_tr_group_is_empty"
+    )
+    stable_init = section(
+        source, "void ia64_translate_init(void)",
+        "static void ia64_tr_init_disas_context",
+    )
+    tb_start = section(
+        source, "static void ia64_tr_tb_start", "static void ia64_tr_note_retired_bundle"
+    )
+    shape_select = section(
+        source, "static void ia64_tr_select_execution_shape",
+        "static void ia64_tr_rewrite_plan_finalize",
+    )
+    shape_c_arm = section(
+        shape_select, "if (!foundational || durable_mode)", "} else if"
+    )
+    state_cache_gr_policy = section(
+        source, "static unsigned ia64_tr_state_cache_gr_limit(void)",
+        "void ia64_translate_init(void)",
+    )
+    ssa_state = section(
+        source, "typedef enum IA64TrNatState", "typedef struct IA64TrGrRef"
+    )
+    ssa_begin = section(
+        source, "static void ia64_tr_ssa_begin", "static void ia64_tr_ssa_ensure_entry_gr"
+    )
+    ssa_materialize = section(
+        source, "static void ia64_tr_ssa_capture_safepoint",
+        "static void ia64_tr_group_begin_instruction",
+    )
+    ssa_prime = section(
+        source, "static void ia64_tr_ssa_prime_instruction_sources",
+        "static void ia64_tr_group_begin_instruction",
+    )
+    check_gr_load = section(
+        source, "static void ia64_tr_group_load_ordinary_gr_pair",
+        "static void ia64_tr_group_load_ordinary_br",
+    )
+    integer_compare = section(
+        source, "static void ia64_tr_emit_decoded_integer_compare",
+        "static void ia64_tr_emit_decoded_predicate_test",
+    )
+    system_load_gr = section(
+        source, "static void ia64_tr_system_load_gr",
+        "static uint64_t ia64_tr_system_nat_isr_extra",
+    )
+    ordered_ar_load = section(
+        source, "static void ia64_tr_group_load_ordered_ar_effect",
+        "static void ia64_tr_store_ar",
+    )
+    ordered_ar_prepare = section(
+        source,
+        "static IA64TrArEffect *ia64_tr_group_prepare_ordered_ar_effect(\n"
+        "    DisasContext *ctx, uint8_t reg, bool must_write)\n{",
+        "static void ia64_tr_group_stage_ordered_ar_effect(\n"
+        "    DisasContext *ctx, IA64TrArEffect *write, TCGv_i64 value)\n{",
+    )
+    ordered_ar_stage = section(
+        source,
+        "static void ia64_tr_group_stage_ordered_ar_effect(\n"
+        "    DisasContext *ctx, IA64TrArEffect *write, TCGv_i64 value)\n{",
+        "static void ia64_tr_group_stage_gr",
+    )
+    integer_spill = section(
+        source, "static void ia64_tr_emit_decoded_data_plane_integer_spill",
+        "static void ia64_tr_emit_decoded_data_plane_atomic",
+    )
+    group_begin = section(
+        source, "static void ia64_tr_group_begin_instruction",
+        "static IA64TrGrWrite *ia64_tr_group_prepare_gr",
+    )
+    fast_retire = section(
+        transaction_retire, "if (ssa->enabled)",
+        "ia64_tr_profile_add(ctx, IA64_PROFILE_FINAL_COMMIT, writes)",
+    )
+    fresh_overlay_clear = section(
+        source_overlay_clear,
+        "if (!ssa->inherited && !ssa->durable_materialized)",
+        "if (!ssa->inherited)",
+    )
+    taken_visibility = section(
+        source, "static void ia64_tr_store_typed_taken_visibility_state",
+        "static void ia64_tr_emit_typed_direct_branch_exit",
+    )
+    fast_taken_visibility = section(
+        taken_visibility,
+        "if (ctx->rewrite_ssa_enabled && !ctx->rewrite_ssa_inherited)",
+        "tcg_gen_st_i64(tcg_constant_i64(0), tcg_env",
+    )
+
+    require(ssa_state, (
+        "IA64_TR_NAT_KNOWN_CLEAR", "IA64_TR_NAT_KNOWN_SET",
+        "IA64_TR_NAT_UNKNOWN", "IA64_TR_SHAPE_A", "IA64_TR_SHAPE_B",
+        "IA64_TR_SHAPE_C", "typedef struct IA64TrSafepointMap",
+        "entry_gr[IA64_GR_COUNT]", "live_gr[IA64_GR_COUNT]",
+        "entry_nat_state[IA64_GR_COUNT]", "live_nat_state[IA64_GR_COUNT]",
+        "dirty_gr[2]", "entry_br[IA64_BR_COUNT]",
+        "live_br[IA64_BR_COUNT]", "branch_pr_forward_mask",
+        "branch_br_forward_mask", "branch_pfs_forwarded",
+        "check_gr_forward_mask[2]", "check_gr_forward_may[2]",
+    ), "WP1 four-layer SSA/deoptimization model")
+    require(stable_state, (
+        "cpu_static_gr[IA64_STATIC_GR_COUNT]",
+        "cpu_logical_gr[IA64_GR_COUNT - IA64_STATIC_GR_COUNT]",
+        "cpu_br[IA64_BR_COUNT]", "cpu_ar[IA64_AR_COUNT]", "cpu_pr",
+        "cpu_gr_nat", "cpu_psr", "cpu_cfm", "cpu_ip",
+    ), "WP1 stable architectural TCG handles")
+    require(stable_init, (
+        "cpu_static_gr[i] = tcg_global_mem_new_i64",
+        "cpu_logical_gr[i] = tcg_global_mem_new_i64",
+        "cpu_br[i] = tcg_global_mem_new_i64",
+        "cpu_ar[i] = tcg_global_mem_new_i64",
+        "cpu_pr = tcg_global_mem_new_i64",
+        "cpu_gr_nat = tcg_global_mem_new_i64",
+        "cpu_psr = tcg_global_mem_new_i64",
+        "cpu_cfm = tcg_global_mem_new_i64",
+        "cpu_ip = tcg_global_mem_new_i64",
+    ), "WP1 stable-handle initialization")
+    require(tb_start, (
+        "ctx->state_cache_available = true",
+        "ctx->state_cache_active = true",
+    ), "WP1 immediate TB-resident state activation")
+    forbid(source, (
+        "VIBTANIUM_TCG_STATE_CACHE",
+        "state_cache_activation_bundle",
+        "STATE_CACHE_ACTIVATE_AFTER",
+    ), "WP1 production resident-state policy")
+    require(state_cache_gr_policy, ("return 0;",),
+            "WP0-measured stable-direct static-GR policy")
+
+    require(shape_select, (
+        "foundational && !durable_mode",
+        "ctx->base.plugin_enabled",
+        "IA64_TB_FLAG_INSN_DEBUG_ACTIVE",
+        "IA64_TB_FLAG_DATA_DEBUG_ACTIVE",
+        "ia64_tr_decoded_data_plane(plan->opcode) != NULL",
+        "ctx->rewrite_shape = IA64_TR_SHAPE_C",
+        "!ctx->typed_group_active && complete && !boundary",
+        "ctx->rewrite_shape = IA64_TR_SHAPE_A",
+        "ctx->rewrite_shape = IA64_TR_SHAPE_B",
+    ), "WP1 Shape-A/B/C production classifier")
+    forbid(shape_select, (
+        "IA64_TB_FLAG_ALAT_ACTIVE", "ctx->alat_may_active ||",
+    ), "WP1 active-ALAT-compatible SSA classifier")
+    forbid(shape_c_arm, ("typed_group_active",),
+           "WP1 inherited ordinary Shape-B classification")
+
+    require(ssa_begin, (
+        "ssa->enabled = true", "ssa->inherited = inherited",
+        "ssa->check_gr_forward_may[half] = UINT64_MAX",
+        "issue_group.check_gr_forward_mask",
+        "ssa->branch_pr_forward_mask = tcg_temp_new_i64()",
+        "ssa->branch_br_forward_mask = tcg_temp_new_i64()",
+        "ssa->branch_pfs_forwarded = tcg_temp_new_i64()",
+        "tcg_gen_movi_i64(ssa->branch_pr_forward_mask, 0)",
+        "tcg_gen_movi_i64(ssa->branch_br_forward_mask, 0)",
+        "tcg_gen_movi_i64(ssa->branch_pfs_forwarded, 0)",
+    ), "WP1 immutable-entry/live SSA initialization")
+    require(ssa_prime, (
+        "plan->source_gr[half]", "plan->source_br | plan->branch_source_br",
+        "plan->source_ar[word]", "plan->source_pr | plan->branch_source_pr",
+        "ia64_tr_ssa_ensure_entry_gr(ctx, reg)",
+        "ssa->check_gr_forward_may[half] & bit",
+        "ia64_tr_ssa_ensure_live_gr(ctx, reg)",
+        "ia64_tr_ssa_ensure_entry_br(ctx, reg)",
+        "plan->branch_source_br & (1u << reg)",
+        "ia64_tr_ssa_ensure_live_br(ctx, reg)",
+        "ia64_tr_ssa_ensure_entry_ar(ctx, reg)",
+        "ia64_tr_ssa_ensure_entry_pr(ctx)",
+        "plan->branch_source_pr != 0",
+        "ia64_tr_ssa_ensure_live_pr(ctx)",
+        "plan->branch_source_pfs",
+        "ia64_tr_ssa_ensure_live_ar(ctx, IA64_AR_PFS)",
+        "plan->opcode == IA64_OP_MOV_ARGR",
+        "reg != IA64_AR_PFS",
+    ), "WP1 predicate-independent entry and forwarded-live definitions")
+    forbid(ssa_prime, ("gen_helper_", "qemu_ld", "qemu_st"),
+           "WP1 side-effect-free entry-source priming")
+    helper_ar_skip = ssa_prime.find("plan->opcode == IA64_OP_MOV_ARGR")
+    helper_ar_prime = ssa_prime.find(
+        "ia64_tr_ssa_ensure_entry_ar(ctx, reg)", helper_ar_skip
+    )
+    if not (0 <= helper_ar_skip < helper_ar_prime):
+        raise AssertionError(
+            "effectful mov r=ar sources must bypass env-backed SSA priming "
+            "and let the architectural read helper define group entry"
+        )
+    require(check_gr_load, (
+        "physical forwarding predicate", "ia64_tr_group_load_entry_gr_pair",
+        "ssa->check_gr_forward_may[half]", "ssa->live_gr[reg]",
+        "ssa->live_nat[reg]", "issue_group.check_gr_forward_mask",
+        "ia64_tr_group_ordinary_gr_nat_state",
+        "ia64_tr_nat_join(ssa->entry_nat_state[reg]",
+    ), "WP1 explicit check-load GR forwarding and NaT join")
+    require(integer_compare, (
+        "TCGv_i64 narrowed_left = ia64_tr_scratch_i64(ctx)",
+        "TCGv_i64 narrowed_right = ia64_tr_scratch_i64(ctx)",
+        "tcg_gen_ext32s_i64(narrowed_left, left)",
+        "tcg_gen_ext32s_i64(narrowed_right, right)",
+        "tcg_gen_ext32u_i64(narrowed_left, left)",
+        "tcg_gen_ext32u_i64(narrowed_right, right)",
+        "left = narrowed_left", "right = narrowed_right",
+    ), "WP1 immutable-entry CMP4 normalization")
+    forbid(integer_compare, (
+        "tcg_gen_ext32s_i64(left, left)",
+        "tcg_gen_ext32s_i64(right, right)",
+        "tcg_gen_ext32u_i64(left, left)",
+        "tcg_gen_ext32u_i64(right, right)",
+    ), "WP1 immutable-entry CMP4 normalization")
+    require(system_load_gr, (
+        "TCGv_i64 source_value = value",
+        "TCGv_i64 source_nat = nat",
+        "ctx, &source_value, &source_nat, reg",
+        "if (source_value != value)",
+        "tcg_gen_mov_i64(value, source_value)",
+        "if (source_nat != nat)",
+        "tcg_gen_mov_i64(nat, source_nat)",
+    ), "WP1 system-plane SSA handle selection")
+    require(source, (
+        "typedef struct IA64TrArEffect", "ar_effect_count",
+    ), "WP1 ordered AR-effect SSA representation")
+    require(ordered_ar_load, (
+        "ia64_tr_ssa_ensure_live_ar(ctx, reg)",
+        "ssa->live_ar[reg]", "ia64_tr_load_ar(ctx, value, reg)",
+    ), "WP1 ordered AR-effect source selection")
+    forbid(ordered_ar_load, (
+        "entry_ar", "ia64_tr_group_load_ordinary_ar",
+    ), "WP1 ordered AR-effect source selection")
+    require(ordered_ar_prepare, (
+        "write->previous_value = group->ssa.live_ar[reg]",
+        "write->value = tcg_temp_new_i64()",
+        "tcg_gen_mov_i64(write->value, write->previous_value)",
+    ), "WP1 unique predicated AR-effect SSA candidate")
+    require(ordered_ar_stage, (
+        "tcg_gen_mov_i64(write->value, value)",
+        "ia64_tr_store_ar(ctx, write->reg, value)",
+    ), "WP1 ordered AR-effect staging")
+    require(fast_retire, (
+        "instruction->ar_effect_count",
+        "ssa->live_ar[write->reg] = ia64_tr_ssa_merge_write",
+        "ssa->dirty_ar[word] |= bit", "ssa->written_ar[word] |= bit",
+    ), "WP1 ordered AR-effect SSA retirement")
+    require(integer_spill, (
+        "ia64_tr_group_prepare_ordered_ar_effect",
+        "ia64_tr_group_load_ordered_ar_effect",
+        "ia64_tr_group_stage_ordered_ar_effect",
+    ), "WP1 sequential same-group st8.spill UNAT effects")
+    forbid(integer_spill, (
+        "ia64_tr_group_load_ordinary_ar(ctx, unat, IA64_AR_UNAT)",
+        "ia64_tr_store_ar(ctx, IA64_AR_UNAT, next)",
+    ), "WP1 sequential same-group st8.spill UNAT effects")
+    scratch_active = group_begin.find("ctx->rewrite_scratch_active = true")
+    prime_sources = group_begin.find(
+        "ia64_tr_ssa_prime_instruction_sources(ctx, plan)")
+    destination_prime = group_begin.find(
+        "uint64_t pending = instruction->dest_ar[word]")
+    if not (0 <= scratch_active < prime_sources < destination_prime):
+        raise AssertionError(
+            "SSA entry sources must be defined after scratch activation and "
+            "before any destination preparation or runtime qualifier"
+        )
+    require(source, (
+        "static IA64TrNatState ia64_tr_nat_join",
+        "static IA64TrNatState ia64_tr_nat_or",
+        "ssa->live_nat_state[write->reg] = write->nat_state",
+    ), "WP1 compile-time NaT lattice")
+    require(fast_retire, (
+        "Shape A/B retirement is an SSA rename",
+        "value = ia64_tr_ssa_merge_write",
+        "ssa->live_gr[write->reg] = value",
+        "write->dependent_forwarded",
+        "ssa->check_gr_forward_mask[half] = next",
+        "ssa->dirty_gr[half] |= bit", "ssa->dirty_br |= bit",
+        "ssa->dirty_pr = true",
+        "ia64_tr_ssa_ensure_pending_alat_gr_mask", "return;",
+    ), "WP1 Shape-A/B SSA retirement")
+    forbid(fast_retire, (
+        "write->written", "issue_group.",
+        "IA64_PROFILE_OVERLAY_VALIDITY_BRANCH",
+    ), "WP1 Shape-A/B retirement")
+    require(source, (
+        "static void ia64_tr_ssa_flush_alat_gr_effects",
+        "ssa->pending_alat_gr_mask[0]",
+        "ssa->pending_alat_gr_mask[1]",
+        "ia64_tr_emit_gr_alat_invalidate(ctx, low, high",
+        "ia64_tr_ssa_flush_alat_gr_effects(ctx);",
+    ), "WP1 group-coalesced active-ALAT SSA effects")
+    require(ssa_materialize, (
+        "ia64_tr_ssa_capture_safepoint(ctx, &map)",
+        "ia64_tr_ssa_materialize_map(ctx, &map, true)",
+        "ia64_tr_ssa_materialize_map(ctx, &map, false)",
+        "ssa->written_gr[half]", "ssa->written_br", "ssa->written_pr",
+        "ssa->written_ar[word]", "IA64_PROFILE_DURABLE_MATERIALIZATION",
+    ), "WP1 sparse safepoint/continuation materialization")
+    require(cpu_header, (
+        "uint64_t check_gr_forward_mask[2]",
+        "env->issue_group.check_gr_forward_mask[0] = 0",
+        "env->issue_group.check_gr_forward_mask[1] = 0",
+    ), "WP1 durable check-load-forward state")
+    require(machine_source, (
+        ".name = \"env/issue-group-overlay\"", ".version_id = 7",
+        "VMSTATE_UINT64_ARRAY_V(issue_group.check_gr_forward_mask",
+        "No typed check-load forwarding existed in v1-v6 streams",
+        "forwards a check-load result",
+    ), "WP1 migrated check-load-forward state")
+    if source.count("ia64_tr_ssa_materialize_continuation(ctx)") != 1:
+        raise AssertionError(
+            "SSA durable continuation must be emitted only by the actual "
+            "open-group TB-boundary path"
+        )
+    require(fresh_overlay_clear, ("return;",),
+            "WP1 zero-durable-traffic fresh Shape A close")
+    forbid(fresh_overlay_clear, ("tcg_gen_st", "issue_group."),
+           "WP1 zero-durable-traffic fresh Shape A close")
+    require(fast_taken_visibility, (
+        "issue_group.typed_active", "instruction_group_start",
+        "instruction_group_dirty", "return;",
+    ), "WP1 cheap helper-free taken exit")
+    forbid(fast_taken_visibility, (
+        "saved_gr_mask", "saved_br_mask", "saved_pr", "saved_pfs",
+        "saved_ar_count", "saved_fr_mask", "gen_helper_",
+    ), "WP1 cheap helper-free taken exit")
 
     print("IA-64 full-TCG structural guardrails: PASS")
     return 0

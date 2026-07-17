@@ -324,6 +324,10 @@ def add(r1: int, r2: int, r3: int, qp: int = 0) -> int:
     return alu(0, 0, r1, r2, r3, qp)
 
 
+def sub(r1: int, r2: int, r3: int, qp: int = 0) -> int:
+    return alu(1, 1, r1, r2, r3, qp)
+
+
 # These encoders are derived from the policy-free decoder and the GPL-2.0+
 # reference vectors in external-src/qemu-system-ia64-main/tests/unit.
 def shl_var(r1: int, value: int, count: int, qp: int = 0) -> int:
@@ -904,6 +908,21 @@ def ld8_advanced(r1: int, r3: int, qp: int = 0) -> int:
     )
 
 
+def ld8_check_clear(r1: int, r3: int, qp: int = 0) -> int:
+    """Encode M1 ``ld8.c.clr r1 = [r3]`` for GR forwarding tests."""
+    if not 0 <= r1 < 128 or not 0 <= r3 < 128:
+        raise ValueError("check-load GR operands must fit in seven bits")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(4)
+        | bitfield(0x23, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(r1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
 def chk_a(r2: int, source: int, target: int, *,
           clear: bool = False, qp: int = 0) -> int:
     """Encode integer M22 ``chk.a[.clr] r2,target``."""
@@ -1150,6 +1169,26 @@ def ordinary_source_overlay_program() -> Program:
             Bundle(0x70, 0x11, nop_m(), nop_i(), br_cond(0x70, 0x70)),
         ),
         terminal_ip=0x70,
+    )
+
+
+def differently_predicated_entry_source_program() -> Program:
+    return Program(
+        name="differently predicated immutable group-entry source",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(17, 100, 0), nop_i()),
+            # p8=false/p9=true and p10=true/p11=false at a stop.
+            Bundle(0x20, 0x01, nop_m(), cmp_rr(8, 9, 0, 0, "lt"),
+                   cmp_rr(10, 11, 0, 0, "eq")),
+            # The first r17 source is behind a false qualifier.  Both later
+            # qualifiers are true and must still consume the same immutable
+            # group-entry r17 definition rather than an undefined TCG temp.
+            Bundle(0x30, 0x00, nop_m(), adds(19, 0, 17, qp=8),
+                   adds(20, 0, 17, qp=9)),
+            Bundle(0x40, 0x01, nop_m(), adds(17, 5, 17, qp=10), nop_i()),
+            Bundle(0x50, 0x11, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        ),
+        terminal_ip=0x50,
     )
 
 
@@ -3188,6 +3227,29 @@ def long_no_stop_scalar_program(bundle_count: int) -> Program:
     )
 
 
+def inherited_false_source_destination_program() -> Program:
+    """Keep forwarded-live SSA defined when its first source is nullified."""
+    return Program(
+        name="inherited false source then false destination",
+        bundles=(
+            Bundle(0x10, 0x03, nop_m(), adds(14, 0x50, 0),
+                   adds(15, 0x1800, 0)),
+            # This no-stop group is deliberately split before the next bundle,
+            # making its continuation inherit dynamic forwarding provenance.
+            Bundle(0x20, 0x00, nop_m(), adds(1, 1, 0), nop_i()),
+            # Both p7 instructions are nullified.  The store nevertheless
+            # names r14 as a source before the later instruction names r14 as
+            # a destination.  Translation-time live-value discovery must not
+            # leave the false predecessor with an undefined SSA temporary.
+            Bundle(0x30, 0x01, st8(14, 15, qp=7),
+                   adds(14, 0x555, 0, qp=7), nop_i()),
+            spin_bundle(0x40),
+        ),
+        terminal_ip=0x40,
+        data=(DataWord(0x1800, 0x111, 8),),
+    )
+
+
 def page_crossing_overlay_continuation_program() -> Program:
     """Contrast an independent group with a page-crossing dependency."""
     data_address = 0x1800
@@ -3298,20 +3360,32 @@ def nonempty_overlay_internal_stop_handoff_program() -> Program:
 
 
 def typed_epoch_migration_program() -> Program:
+    data_address = 0x1800
+    data_value = 0x123456789abcdef0
     return Program(
-        name="typed epoch save/load migration resume",
+        name="typed epoch and check-load forwarding save/load resume",
         bundles=(
-            # The source is stopped before 0x20.  This no-stop bundle has then
-            # retired r1/r4 while preserving their group-entry values in the
-            # migrated ordinary-source overlay.
-            Bundle(0x10, 0x00, nop_m(), adds(1, 5, 0), adds(4, 9, 0)),
-            # A destination that loses the saved r1 image computes r2=5.  A
-            # restored typed owner must instead keep the group-entry r1=0 and
-            # close the epoch with r2=0.
-            Bundle(0x20, 0x01, nop_m(), adds(2, 0, 1), adds(3, 7, 0)),
-            Bundle(0x30, 0x11, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+            Bundle(0x10, 0x01, nop_m(), adds(8, 1, 0),
+                   adds(9, data_address, 0)),
+            Bundle(0x20, 0x01, mov_m_grar(36, 8), nop_i(), nop_i()),
+            # Seed NaT(r16) from AR.UNAT before the forwarding group.  With no
+            # ALAT entry the check load reloads and clears NaT(r16).  Its
+            # result is an explicit dependent-GR producer, so same-bundle r17
+            # must observe both the loaded value and its clear NaT while the
+            # unrelated r1 write still has ordinary group-entry visibility.
+            Bundle(0x30, 0x01, ld8_fill(16, 9), nop_i(), nop_i()),
+            Bundle(0x40, 0x00, ld8_check_clear(16, 9),
+                   adds(17, 4, 16), adds(1, 5, 0)),
+            # The breakpoint at 0x50 migrates this open group.  A fresh QEMU
+            # must restore both the saved entry values and the distinct
+            # check-load provenance: r18 forwards live r16, whereas r2 reads
+            # ordinary group-entry r1=0.
+            Bundle(0x50, 0x01, nop_m(), adds(18, 8, 16),
+                   adds(2, 0, 1)),
+            Bundle(0x60, 0x11, nop_m(), nop_i(), br_cond(0x60, 0x60)),
         ),
-        terminal_ip=0x30,
+        terminal_ip=0x60,
+        data=(DataWord(data_address, data_value, 8),),
     )
 
 
@@ -4205,9 +4279,12 @@ def _require_typed_direct_trace(trace: str, bundle_ip: int) -> None:
                 "bundle 0x{:x} reached a generic execution helper in the "
                 "TCG op trace".format(bundle_ip)
             )
-        if not re.search(r"(?m)^\s*(?:add|mov|movi)_i64\b", section):
+        if not re.search(
+                r"(?m)^\s*(?:[a-z][a-z0-9_]*_i(?:32|64|128)\b|"
+                r"call\s+(?!exec_bundle|exec_slot)[A-Za-z_])",
+                section):
             raise HarnessError(
-                "bundle 0x{:x} lacks direct scalar TCG operations".format(
+                "bundle 0x{:x} lacks generated typed TCG operations".format(
                     bundle_ip
                 )
             )
@@ -4380,9 +4457,11 @@ def _require_typed_loop_trace(trace: str, bundle_ip: int, target: int,
                 "loop branch bundle 0x{:x} lacks a direct TCG control split"
                 .format(bundle_ip)
             )
-        if not re.search(r"(?m)^\s*ld_i64\b", trace_section):
+        if not re.search(
+                r"(?m)^\s*mov_i64\s+[^,\s]+,ar(?:65|66)\s*$",
+                trace_section):
             raise HarnessError(
-                "loop branch bundle 0x{:x} lacks a direct LC/EC load"
+                "loop branch bundle 0x{:x} lacks a stable LC/EC read"
                 .format(bundle_ip)
             )
         decrement = re.search(
@@ -4397,9 +4476,12 @@ def _require_typed_loop_trace(trace: str, bundle_ip: int, target: int,
                 "loop branch bundle 0x{:x} lacks a direct counter decrement"
                 .format(bundle_ip)
             )
-        if not re.search(r"(?m)^\s*st_i64\b", trace_section):
+        if not re.search(
+                r"(?m)^\s*mov_i64\s+(?:ar(?:65|66)|pr),",
+                trace_section):
             raise HarnessError(
-                "loop branch bundle 0x{:x} lacks a direct counter/PR store"
+                "loop branch bundle 0x{:x} lacks direct stable-handle "
+                "counter/PR publication"
                 .format(bundle_ip)
             )
         if not re.search(
@@ -4482,9 +4564,9 @@ def _require_typed_call_trace(trace: str, bundle_ip: int,
                 "call bundle 0x{:x} does not materialize exact link 0x{:x}"
                 .format(bundle_ip, link)
             )
-        if not re.search(r"(?m)^\s*st_i64\b", trace_section):
+        if not re.search(r"(?m)^\s*mov_i64\s+b[0-7],", trace_section):
             raise HarnessError(
-                "call bundle 0x{:x} lacks a direct BR/link store".format(
+                "call bundle 0x{:x} lacks a direct stable BR/link store".format(
                     bundle_ip
                 )
             )
@@ -4733,22 +4815,35 @@ def _require_branch_forward_savevm_trace(source_trace: str,
         )
 
     # Learn the VMState field offset from destination IR rather than copying a
-    # C-structure constant into the test.  The predicate's physical mask bit
-    # must gate live-vs-ordinary PR selection, and the producer must store that
-    # same field before the checkpoint.
+    # C-structure constant into the test.  The restored Shape-B continuation
+    # must first rebuild the immutable group-entry PR image from saved/live
+    # state, then use the physical forward bit to select live versus entry.
     temp = r"[A-Za-z_][A-Za-z0-9_]*"
     select = re.search(
-        r"(?ms)^\s*mov_i64\s+(?P<bit>{}),\$0x{:x}\s*$\n"
-        r"^\s*ld_i64\s+(?P<mask>{}),env,\$(?P<offset>0x[0-9a-f]+)\s*$\n"
-        r"^\s*and_i64\s+(?P=mask),(?P=mask),(?P=bit)\s*$.*?"
-        r"^\s*movcond_i64\s+{},(?P=mask),\$0x0,{},{},ne\s*$"
-        .format(temp, 1 << predicate, temp, temp, temp, temp),
+        r"(?ms)^\s*ld_i64\s+(?P<mask>{}),env,"
+        r"\$(?P<offset>0x[0-9a-f]+)\s*$.*?"
+        r"^\s*ld_i64\s+(?P<saved>{}),env,\$0x[0-9a-f]+\s*$\n"
+        r"^\s*ld8u_i64\s+(?P<valid>{}),env,\$0x[0-9a-f]+\s*$\n"
+        r"^\s*mov_i64\s+(?P<live>{}),pr\s*$\n"
+        r"^\s*movcond_i64\s+(?P<entry>{}),(?P=valid),\$0x0,"
+        r"(?P=saved),(?P=live),ne\s*$.*?"
+        r"^\s*mov_i64\s+(?P<branch_live>{}),(?P=live)\s*$\n"
+        r"^\s*mov_i64\s+(?P<bit>{}),\$0x{:x}\s*$\n"
+        r"^\s*and_i64\s+(?P<forward>{}),(?P=mask),(?P=bit)\s*$\n"
+        r"^\s*movcond_i64\s+{},(?P=forward),\$0x0,"
+        r"(?P=branch_live),(?P=entry),ne\s*$"
+        .format(
+            temp, temp, temp, temp, temp, temp,
+            temp, 1 << predicate, temp, temp
+        ),
         destination,
     )
     if select is None:
         raise HarnessError(
             "restored branch 0x{:x} lacks an explicit p{} forward-mask "
-            "live/ordinary selection".format(branch_ip, predicate)
+            "live/ordinary selection:\n{}".format(
+                branch_ip, predicate, destination
+            )
         )
     offset = re.escape(select.group("offset"))
     if re.search(
@@ -4786,14 +4881,17 @@ def _require_br_shadow_savevm_trace(source_trace: str,
 
     temp = r"[A-Za-z_][A-Za-z0-9_]*"
     select = re.search(
-        r"(?m)^\s*ld_i64\s+(?P<live>{}),env,\$0x[0-9a-f]+\s*$\n"
+        r"(?m)^\s*mov_i64\s+(?P<current>{}),b{}\s*$\n"
+        r"^\s*mov_i64\s+(?P<live>{}),(?P=current)\s*$\n"
         r"^\s*ld_i64\s+(?P<saved>{}),env,\$"
         r"(?P<saved_offset>0x[0-9a-f]+)\s*$\n"
         r"^\s*ld8u_i64\s+(?P<mask>{}),env,\$"
         r"(?P<mask_offset>0x[0-9a-f]+)\s*$\n"
         r"^\s*and_i64\s+(?P=mask),(?P=mask),\$0x{:x}\s*$\n"
         r"^\s*movcond_i64\s+{},(?P=mask),\$0x0,(?P=saved),"
-        r"(?P=live),ne\s*$".format(temp, temp, temp, bit, temp),
+        r"(?P=live),ne\s*$".format(
+            temp, branch_reg, temp, temp, temp, bit, temp
+        ),
         destination,
     )
     if select is None:
@@ -4813,7 +4911,7 @@ def _require_br_shadow_savevm_trace(source_trace: str,
             "selected after loadvm".format(producer_ip, branch_reg)
         )
     if re.search(
-            r"(?m)^\s*st8_i64\s+\$0x{:x},env,\${}\s*$".format(
+            r"(?m)^\s*st8_i(?:32|64)\s+\$0x{:x},env,\${}\s*$".format(
                 bit, mask_offset
             ), source) is None:
         raise HarnessError(
@@ -4821,19 +4919,17 @@ def _require_br_shadow_savevm_trace(source_trace: str,
             .format(producer_ip, bit)
         )
 
-    # The branch-only forward mask is a separate physical byte.  Learn it
-    # from the producer's clear/set/store sequence and require the restored
-    # continuation to clear both migrated metadata fields when the group
-    # closes.  This avoids baking CPUIA64State offsets into the test.
+    # The branch-only forward mask is a separate physical byte.  Learn the
+    # compact continuation header from the destination and require the source
+    # to persist that exact byte.  This avoids baking CPUIA64State offsets into
+    # the test while allowing SSA to compute provenance entirely in temps.
     forward = re.search(
-        r"(?m)^\s*ld8u_i64\s+(?P<value>{}),env,\$"
-        r"(?P<offset>0x[0-9a-f]+)\s*$\n"
-        r"^\s*and_i64\s+(?P=value),(?P=value),\$0x{:x}\s*$\n"
-        r"^\s*or_i64\s+(?P=value),(?P=value),\$0x{:x}\s*$\n"
-        r"^\s*st8_i64\s+(?P=value),env,\$(?P=offset)\s*$".format(
-            temp, 0xff & ~bit, bit
+        r"(?m)^\s*ld_i64\s+{},env,\$0x[0-9a-f]+\s*$\n"
+        r"^\s*ld8u_i64\s+{},env,\$(?P<offset>0x[0-9a-f]+)\s*$\n"
+        r"^\s*ld8u_i64\s+{},env,\$0x[0-9a-f]+\s*$".format(
+            temp, temp, temp
         ),
-        source,
+        destination,
     )
     if forward is None:
         raise HarnessError(
@@ -4845,6 +4941,14 @@ def _require_br_shadow_savevm_trace(source_trace: str,
         raise HarnessError(
             "saved BR validity and branch-forward provenance alias one "
             "metadata byte"
+        )
+    if re.search(
+            r"(?m)^\s*st8_i64\s+{},env,\${}\s*$".format(
+                temp, re.escape(forward_offset)
+            ), source) is None:
+        raise HarnessError(
+            "BR producer 0x{:x} did not persist its SSA forward mask at "
+            "env+{}".format(producer_ip, forward_offset)
         )
     for label, offset in (
         ("saved_br_mask", select.group("mask_offset")),
@@ -4891,30 +4995,30 @@ def _require_typed_pfs_move_trace(trace: str, bundle_ip: int,
                 .format(bundle_ip, forbidden.group(0).strip())
             )
 
-        env_loads = re.findall(
-            r"(?m)^\s*ld_i64\s+[^,\s]+,env,\$0x[0-9a-fA-F]+\s*$",
+        stable_reads = re.findall(
+            r"(?m)^\s*mov_i64\s+[^,\s]+,ar64\s*$",
             trace_section,
         )
-        env_stores = re.findall(
-            r"(?m)^\s*st_i64\s+[^,\s]+,env,\$0x[0-9a-fA-F]+\s*$",
+        stable_writes = re.findall(
+            r"(?m)^\s*mov_i64\s+ar64,[^,\s]+\s*$",
             trace_section,
         )
-        if require_read and not env_loads:
+        if require_read and not stable_reads:
             raise HarnessError(
-                "AR.PFS read bundle 0x{:x} lacks a direct env load".format(
+                "AR.PFS read bundle 0x{:x} lacks a stable direct read".format(
                     bundle_ip
                 )
             )
-        if require_write and not env_stores:
+        if require_write and not stable_writes:
             raise HarnessError(
-                "AR.PFS write bundle 0x{:x} lacks a direct env store".format(
+                "AR.PFS write bundle 0x{:x} lacks a stable direct write".format(
                     bundle_ip
                 )
             )
 
         selector = re.search(
-            r"(?m)^\s*ld_i64\s+(?P<live>[^,\s]+),env,"
-            r"\$0x[0-9a-fA-F]+\s*$\n"
+            r"(?m)^\s*mov_i64\s+(?P<current>[^,\s]+),ar64\s*$\n"
+            r"^\s*mov_i64\s+(?P<live>[^,\s]+),(?P=current)\s*$\n"
             r"^\s*ld_i64\s+(?P<saved>[^,\s]+),env,"
             r"\$0x[0-9a-fA-F]+\s*$\n"
             r"^\s*ld8u_i64\s+(?P<valid>[^,\s]+),env,"
@@ -4945,8 +5049,10 @@ def _require_typed_pfs_move_trace(trace: str, bundle_ip: int,
             )
         for helper in nat_helpers:
             branch = trace_section.rfind("brcond_i64", 0, helper.start())
-            direct_store = trace_section.find("st_i64", helper.end())
-            if branch < 0 or direct_store < 0:
+            direct_store = re.search(
+                r"(?m)^\s*mov_i64\s+ar64,", trace_section[helper.end():]
+            )
+            if branch < 0 or direct_store is None:
                 raise HarnessError(
                     "AR.PFS NaT helper at 0x{:x} is not isolated before "
                     "the direct write path".format(bundle_ip)
@@ -4979,14 +5085,14 @@ def _require_pfs_shadow_savevm_trace(source_trace: str,
 
     temp = r"[A-Za-z_][A-Za-z0-9_]*"
     selector = re.search(
-        r"(?m)^\s*ld_i64\s+(?P<live>{}),env,\$"
-        r"(?P<ar_offset>0x[0-9a-f]+)\s*$\n"
+        r"(?m)^\s*mov_i64\s+(?P<current>{}),ar64\s*$\n"
+        r"^\s*mov_i64\s+(?P<live>{}),(?P=current)\s*$\n"
         r"^\s*ld_i64\s+(?P<saved>{}),env,\$"
         r"(?P<saved_offset>0x[0-9a-f]+)\s*$\n"
         r"^\s*ld8u_i64\s+(?P<valid>{}),env,\$"
         r"(?P<valid_offset>0x[0-9a-f]+)\s*$\n"
         r"^\s*movcond_i64\s+{},(?P=valid),\$0x0,(?P=saved),"
-        r"(?P=live),ne\s*$".format(temp, temp, temp, temp),
+        r"(?P=live),ne\s*$".format(temp, temp, temp, temp, temp),
         destination,
     )
     if selector is None:
@@ -4995,14 +5101,12 @@ def _require_pfs_shadow_savevm_trace(source_trace: str,
             .format(consumer_ip)
         )
 
-    ar_offset = re.escape(selector.group("ar_offset"))
     saved_offset = re.escape(selector.group("saved_offset"))
     valid_offset = re.escape(selector.group("valid_offset"))
     preserve = re.search(
-        r"(?m)^\s*ld_i64\s+(?P<old>{}),env,\${}\s*$\n"
-        r"^\s*st_i64\s+(?P=old),env,\${}\s*$\n"
+        r"(?m)^\s*st_i64\s+{},env,\${}\s*$\n"
         r"^\s*st8_i32\s+\$0x1,env,\${}\s*$".format(
-            temp, ar_offset, saved_offset, valid_offset
+            temp, saved_offset, valid_offset
         ),
         source,
     )
@@ -5012,10 +5116,13 @@ def _require_pfs_shadow_savevm_trace(source_trace: str,
             "before writing".format(producer_ip)
         )
     live_write = re.search(
-        r"(?m)^\s*st_i64\s+{},env,\${}\s*$\n"
-        r"^\s*st8_i32\s+\$0x1,env,\$"
-        r"(?P<forward_offset>0x[0-9a-f]+)\s*$".format(temp, ar_offset),
-        source,
+        r"(?m)^\s*ld_i64\s+{},env,\$0x[0-9a-f]+\s*$\n"
+        r"^\s*ld8u_i64\s+{},env,\$0x[0-9a-f]+\s*$\n"
+        r"^\s*ld8u_i64\s+{},env,\$"
+        r"(?P<forward_offset>0x[0-9a-f]+)\s*$".format(
+            temp, temp, temp
+        ),
+        destination,
     )
     if live_write is None:
         raise HarnessError(
@@ -5026,6 +5133,14 @@ def _require_pfs_shadow_savevm_trace(source_trace: str,
     if forward_offset == selector.group("valid_offset"):
         raise HarnessError(
             "PFS validity and branch-forward provenance alias one byte"
+        )
+    if re.search(
+            r"(?m)^\s*st8_i64\s+{},env,\${}\s*$".format(
+                temp, re.escape(forward_offset)
+            ), source) is None:
+        raise HarnessError(
+            "PFS producer 0x{:x} did not persist its SSA forward "
+            "provenance at env+{}".format(producer_ip, forward_offset)
         )
     for label, offset in (
         ("pfs_saved", selector.group("valid_offset")),
@@ -5125,6 +5240,7 @@ def _require_overlay_dependency_trace(trace: str, dependency_free_ip: int,
     pr_pattern = re.compile(
         r"(?m)^\s*ld8u_i64\s+(?P<temp>[^,\s]+),env,\$"
         r"(?P<offset>0x[0-9a-fA-F]+)\s*\n"
+        r"(?:\s*mov_i64\s+[^\n]+\n)*"
         r"\s*movcond_i64\s+[^,]+,(?P=temp),\$0x0,[^\n]+,ne\s*$"
     )
     pr_offsets = {
@@ -6118,10 +6234,21 @@ def test_core_equality(qemu: Path) -> str:
              "false-predicated stacked destination was modified")
     _require(stacked.nat_high == 0 and stacked.nat_low == 0,
              "stacked value/NaT pair introduced an unexpected NaT")
+    predicated_entry = run_program(
+        qemu, differently_predicated_entry_source_program(),
+        typed_direct_trace_ips=(0x30, 0x40),
+    )
+    _require(predicated_entry.gr[19] == 0,
+             "false-qualified first group-entry consumer wrote r19")
+    _require(predicated_entry.gr[20] == 100,
+             "later true qualifier lost the immutable group-entry r17 value")
+    _require(predicated_entry.gr[17] == 105,
+             "differently predicated destination did not merge from entry r17")
     return ("literal core goldens, direct TCG traces, and the ordinary-source "
             "overlay invariant cover repeated GR writers, PR qualifiers, stop "
-            "visibility, and one-slot stacked value/NaT mapping reused by "
-            "duplicate sources and retirement")
+            "visibility, differently predicated immutable entry operands, and "
+            "one-slot stacked value/NaT mapping reused by duplicate sources "
+            "and retirement")
 
 
 def test_scalar_integer_expansion(qemu: Path) -> str:
@@ -6754,7 +6881,9 @@ def test_pfs_register_moves(qemu: Path) -> str:
             (0xc0, False, True, False, True),
             (0xd0, True, False, True, False),
             (0xe0, True, False, False, False),
-            (0xf0, True, True, True, True),
+            # This group starts and ends inside one TB.  Its immutable PFS
+            # entry is pure SSA and must not touch the durable overlay.
+            (0xf0, True, True, False, True),
             (0x100, True, False, True, False),
             (0x110, True, False, False, False),
             (0x130, True, False, False, False),
@@ -6806,7 +6935,7 @@ def test_pfs_register_moves(qemu: Path) -> str:
         preserve_fault_slot=True,
         typed_nat_fault_trace_ip=0x90,
         typed_pfs_move_traces=(
-            (0x90, True, True, True, True),
+            (0x90, True, True, False, True),
             (IA64_REGISTER_NAT_CONSUMPTION_VECTOR,
              True, False, False, False),
         ),
@@ -7785,11 +7914,29 @@ def test_typed_group_tb_continuation(qemu: Path) -> str:
             .format(reg, expected, automatic.gr[reg]),
         )
 
+    false_program = inherited_false_source_destination_program()
+    false_path = run_program(
+        qemu, false_program,
+        typed_direct_trace_ips=(0x20, 0x30),
+        typed_visibility_states=((0x20, 3), (0x30, 2)),
+        one_bundle_per_tb=True,
+    )
+    _require(not false_path.exception_pending,
+             "inherited false source/destination raised an exception")
+    _require(false_path.ip == false_program.terminal_ip,
+             "inherited false source/destination missed its terminal IP")
+    _require(false_path.gr[1] == 1 and false_path.gr[14] == 0x50,
+             "nullified source/destination continuation exposed an undefined "
+             "forwarded-live value: r1=0x{:x} r14=0x{:x}".format(
+                 false_path.gr[1], false_path.gr[14]))
+
     return (
         "5-, 6-, and 16-bundle no-stop scalar groups survive an explicit "
         "one-bundle-per-TB split, and the normal 16-bundle run segments "
-        "automatically on its TCG op budget; every continuation segment has "
-        "direct TCG operations and no exec_bundle/exec_slot call"
+        "automatically on its TCG op budget; an inherited nullified source "
+        "followed by a nullified destination retains a defined forwarded-live "
+        "SSA value; every continuation segment has direct TCG operations and "
+        "no exec_bundle/exec_slot call"
     )
 
 
@@ -8047,7 +8194,6 @@ def test_continuation_structural_invariants(qemu: Path) -> str:
         "gen_helper_exec_bundle(",
         "gen_helper_exec_bundle_lookup_ptr(",
         "gen_helper_exec_slot(",
-        "ia64_tr_emit_firmware_call_gate",
         "ia64_tr_full_tcg_rewrite_enabled",
         "ia64_tr_translate_fast_bundle",
         "ia64_tr_translate_partial_bundle",
@@ -8088,19 +8234,23 @@ def test_continuation_structural_invariants(qemu: Path) -> str:
 
 def test_typed_epoch_savevm_migration(qemu: Path) -> str:
     program = typed_epoch_migration_program()
-    result = run_savevm_migration(qemu, program, checkpoint_ip=0x20)
+    data_value = program.data[0].value
+    result = run_savevm_migration(qemu, program, checkpoint_ip=0x50)
 
     _require(not result.checkpoint.exception_pending,
              "source checkpoint has a pending exception")
     _require(
-        result.checkpoint.ip == 0x20 and
+        result.checkpoint.ip == 0x50 and
         result.checkpoint.gr[1] == 5 and
         result.checkpoint.gr[2] == 0 and
-        result.checkpoint.gr[3] == 0 and
-        result.checkpoint.gr[4] == 9,
-        "source did not stop after exactly the typed 0x10 prefix",
+        result.checkpoint.gr[16] == data_value and
+        result.checkpoint.gr[17] == (data_value + 4) & ((1 << 64) - 1) and
+        result.checkpoint.gr[18] == 0 and
+        result.checkpoint.nat_low == 0 and result.checkpoint.nat_high == 0,
+        "source did not stop after the same-bundle check-load forwarding "
+        "prefix",
     )
-    restored_differences = snapshot_differences(
+    restored_differences = successful_snapshot_differences(
         result.checkpoint, result.restored
     )
     _require(
@@ -8111,29 +8261,32 @@ def test_typed_epoch_savevm_migration(qemu: Path) -> str:
 
     _require(not result.final.exception_pending,
              "migration destination has a pending exception")
-    _require(result.final.ip == 0x30,
-             "migration destination missed terminal IP 0x30")
+    _require(result.final.ip == 0x60,
+             "migration destination missed terminal IP 0x60")
     _require(
         result.final.gr[1] == 5 and
         result.final.gr[2] == 0 and
-        result.final.gr[3] == 7 and
-        result.final.gr[4] == 9,
-        "migrated typed continuation lost its saved source view or retired "
-        "prefix: r1=0x{:x} r2=0x{:x} r3=0x{:x} r4=0x{:x}".format(
-            result.final.gr[1], result.final.gr[2],
-            result.final.gr[3], result.final.gr[4]
+        result.final.gr[16] == data_value and
+        result.final.gr[17] == (data_value + 4) & ((1 << 64) - 1) and
+        result.final.gr[18] == (data_value + 8) & ((1 << 64) - 1) and
+        result.final.nat_low == 0 and result.final.nat_high == 0,
+        "migrated typed continuation lost its ordinary entry view or "
+        "check-load producer: r1=0x{:x} r2=0x{:x} r16=0x{:x} "
+        "r17=0x{:x} r18=0x{:x}".format(
+            result.final.gr[1], result.final.gr[2], result.final.gr[16],
+            result.final.gr[17], result.final.gr[18]
         ),
     )
 
-    _require_typed_direct_trace(result.source_trace, 0x10)
-    _require_source_visibility_trace(result.source_trace, 0x10, 3)
-    _require_typed_direct_trace(result.destination_trace, 0x20)
-    _require_source_visibility_trace(result.destination_trace, 0x20, 2)
+    _require_typed_direct_trace(result.source_trace, 0x40)
+    _require_typed_direct_trace(result.destination_trace, 0x50)
 
     return (
-        "a breakpoint-stable active typed epoch survives savevm into a fresh "
-        "QEMU; restored ownership selects direct TCG and the saved r1 view "
-        "closes with exact state"
+        "a check-load miss forwards its value and clear NaT over a NaT-set "
+        "entry image to a same-bundle dependent; "
+        "the open epoch and physical GR-forward provenance survive savevm "
+        "into a fresh QEMU, whose cross-TB dependent forwards r16 while an "
+        "ordinary r1 consumer retains the immutable entry value"
     )
 
 
@@ -9607,6 +9760,203 @@ def test_predicate_test_conformance(qemu: Path) -> str:
     )
 
 
+def test_same_tb_alat_activation(qemu: Path) -> str:
+    """Later store and ordinary-SSA GR effects see a same-TB ALAT record."""
+    program = Program(
+        name="same-TB empty-to-active ALAT transition",
+        bundles=(
+            Bundle(0x10, 0x03, nop_m(), adds(10, 0x1800, 0),
+                   adds(12, 0x222, 0)),
+            # M_MI stops after slot 0.  The advanced load therefore records
+            # before the following store, while both slots are translated in
+            # one TB that began with an empty ALAT.
+            Bundle(0x20, 0x0B, ld8_advanced(11, 10), st8(12, 10), nop_i()),
+            Bundle(0x30, 0x01, ld8_check_clear(11, 10), nop_i(), nop_i()),
+            spin_bundle(0x40),
+        ),
+        terminal_ip=0x40,
+        data=(DataWord(0x1800, 0x111, 8),),
+    )
+    snapshot = run_program(
+        qemu, program, typed_direct_trace_ips=(0x20, 0x30),
+    )
+
+    _require(not snapshot.exception_pending,
+             "same-TB ALAT transition raised an exception")
+    _require(snapshot.ip == program.terminal_ip,
+             "same-TB ALAT transition missed its terminal bundle")
+    _require(snapshot.gr[11] == 0x222,
+             "store failed to invalidate the same-TB advanced-load entry: "
+             "r11=0x{:x}".format(snapshot.gr[11]))
+
+    gr_program = Program(
+        name="same-TB active-ALAT ordinary GR SSA invalidation",
+        bundles=(
+            Bundle(0x10, 0x03, nop_m(), adds(10, 0x1800, 0), nop_i()),
+            # The stop after LD8.A establishes the record before a fresh
+            # ordinary Shape-A group overwrites the recorded GR.
+            Bundle(0x20, 0x0B, ld8_advanced(11, 10), nop_m(), nop_i()),
+            Bundle(0x30, 0x01, nop_m(), adds(11, 0x333, 0), nop_i()),
+            Bundle(0x40, 0x01, ld8_check_clear(11, 10), nop_i(), nop_i()),
+            spin_bundle(0x50),
+        ),
+        terminal_ip=0x50,
+        data=(DataWord(0x1800, 0x111, 8),),
+    )
+    gr_snapshot = run_program(
+        qemu, gr_program, typed_direct_trace_ips=(0x20, 0x30, 0x40),
+    )
+    _require(not gr_snapshot.exception_pending and
+             gr_snapshot.ip == gr_program.terminal_ip,
+             "active-ALAT ordinary GR SSA program did not complete")
+    _require(gr_snapshot.gr[11] == 0x111,
+             "coalesced ordinary GR retirement retained its ALAT entry: "
+             "r11=0x{:x}".format(gr_snapshot.gr[11]))
+    return (
+        "an initially empty TB records LD8.A; both a later M-slot store and "
+        "a fresh ordinary Shape-A GR overwrite invalidate it, so LD8.C.CLR "
+        "reloads memory after each effect"
+    )
+
+
+def test_effectful_application_read_ssa(qemu: Path) -> str:
+    """Each AR.ITC instruction must sample its helper-owned clock value."""
+    program = Program(
+        name="helper-owned AR.ITC group-entry sampling",
+        bundles=(
+            Bundle(0x10, 0x01, mov_m_argr(10, IA64_AR_ITC),
+                   adds(34, 0, 0), nop_i()),
+            # Match Linux timer_interrupt's mixed handoff exactly: CR.ITM
+            # write, internal stop, srlz.d with no bundle-ending stop, then an
+            # inherited SSA bundle whose M slot samples AR.ITC.
+            Bundle(0x20, 0x0A, mov_grcr(IA64_CR_ITM, 34),
+                   srlz_d(), nop_i()),
+            Bundle(0x30, 0x01, mov_m_argr(11, IA64_AR_ITC),
+                   nop_i(), nop_i()),
+            # A separately stopped third read also guards against retaining an
+            # env-backed resident mirror across completed groups.
+            Bundle(0x40, 0x01, mov_m_argr(12, IA64_AR_ITC),
+                   nop_i(), nop_i()),
+            Bundle(0x50, 0x01, nop_m(),
+                   cmp_rr(1, 2, 10, 11, "lt"), nop_i()),
+            Bundle(0x60, 0x01, nop_m(), adds(20, 1, 20, qp=1), nop_i()),
+            Bundle(0x70, 0x01, nop_m(),
+                   cmp_rr(3, 4, 11, 12, "lt"), nop_i()),
+            Bundle(0x80, 0x01, nop_m(), adds(20, 2, 20, qp=3), nop_i()),
+            spin_bundle(0x90),
+        ),
+        terminal_ip=0x90,
+    )
+    snapshot = run_program(qemu, program)
+
+    _require(not snapshot.exception_pending,
+             "helper-owned AR.ITC sampling raised an exception")
+    _require(snapshot.ip == program.terminal_ip,
+             "helper-owned AR.ITC sampling missed its terminal bundle")
+    _require(snapshot.gr[11] > snapshot.gr[10] and
+             snapshot.gr[12] > snapshot.gr[11] and
+             snapshot.gr[20] == 3,
+             "a same-group or stopped AR.ITC read reused a stale SSA/env "
+             "entry: first=0x{:x} second=0x{:x} third=0x{:x} marker={}".format(
+                 snapshot.gr[10], snapshot.gr[11], snapshot.gr[12],
+                 snapshot.gr[20]))
+    return (
+        "a mixed durable CR.ITM/srlz.d-to-SSA handoff and a later stopped "
+        "mov r=ar.itc sample strictly increasing helper-owned clock values "
+        "instead of reusing an immutable SSA entry or resident env mirror"
+    )
+
+
+def test_stopped_predicate_handoff(qemu: Path) -> str:
+    """A stop must publish compare predicates to a predicated suffix/branch."""
+    program = Program(
+        name="stopped compare to predicated add and branch",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(27, 1, 0),
+                   adds(34, 10, 0)),
+            Bundle(0x20, 0x01, nop_m(), adds(26, 5, 0), nop_i()),
+            # Match the timer catch-up shape: compare in M0, internal stop,
+            # then a p6 integer update before the bundle-ending stop.
+            Bundle(0x30, 0x0B, cmp_rr(6, 7, 0, 27, "lt"),
+                   add(34, 34, 26, qp=6), nop_i()),
+            Bundle(0x40, 0x11, nop_m(), nop_i(),
+                   br_cond(0x40, 0x60, qp=6)),
+            Bundle(0x50, 0x11, nop_m(), adds(20, 2, 0),
+                   br_cond(0x50, 0x70)),
+            Bundle(0x60, 0x11, nop_m(), adds(20, 1, 0),
+                   br_cond(0x60, 0x70)),
+            spin_bundle(0x70),
+        ),
+        terminal_ip=0x70,
+    )
+    snapshot = run_program(qemu, program, one_bundle_per_tb=True)
+
+    _require(not snapshot.exception_pending,
+             "stopped predicate handoff raised an exception")
+    _require(snapshot.ip == program.terminal_ip,
+             "stopped predicate handoff missed its terminal bundle")
+    _require(snapshot.gr[34] == 15 and snapshot.gr[20] == 1 and
+             (snapshot.pr & (1 << 6)) != 0,
+             "compare p6 did not survive the internal/bundle stops: "
+             "r34={} marker={} PR=0x{:x}".format(
+                 snapshot.gr[34], snapshot.gr[20], snapshot.pr))
+
+    timer_compare = Program(
+        name="timer itm-next load/itc/signed-compare branch",
+        bundles=(
+            # Linux timer_interrupt uses alloc r43=ar.pfs,16,13,0.  Preserve
+            # that locals/outputs split so the loaded r34/r35 values exercise
+            # the same logical-to-physical stacked-register mapping.
+            Bundle(0x10, 0x01, alloc(43, 16, 13, 0), nop_i(), nop_i()),
+            Bundle(0x20, 0x01, nop_m(), adds(35, 0x1800, 0), nop_i()),
+            Bundle(0x30, 0x01, ld8(10, 35), nop_i(), nop_i()),
+            Bundle(0x40, 0x01, mov_m_grar(IA64_AR_ITC, 10),
+                   nop_i(), nop_i()),
+            Bundle(0x50, 0x01, mov_m_argr(10, IA64_AR_ITC),
+                   nop_i(), nop_i()),
+            Bundle(0x60, 0x01, st8(10, 35), nop_i(), nop_i()),
+            # Match timer_interrupt at 0x360/0x370: a Shape-B memory load in
+            # an open MMI bundle followed by the I/O-bounded AR.ITC bundle.
+            Bundle(0x70, 0x08, nop_m(), ld8(34, 35), nop_i()),
+            Bundle(0x80, 0x01, mov_m_argr(14, IA64_AR_ITC),
+                   nop_i(), nop_i()),
+            # Match 0x380: reject the wrap sentinel, form itm_next-itc, and
+            # execute the first conditional branch from the same group.
+            Bundle(0x90, 0x11,
+                   cmp_imm(6, 7, -1, 14, "eq", width=4),
+                   sub(24, 34, 14), br_cond(0x90, 0xC0, qp=6)),
+            # Match 0x390: signed-negative means the tick is due, and the
+            # compare result must forward to a no-stop direct branch.
+            Bundle(0xA0, 0x10, nop_m(), cmp_rr(6, 7, 24, 0, "lt"),
+                   br_cond(0xA0, 0xD0, qp=6)),
+            Bundle(0xB0, 0x11, nop_m(), adds(21, 2, 0),
+                   br_cond(0xB0, 0xE0)),
+            Bundle(0xC0, 0x11, nop_m(), adds(21, 3, 0),
+                   br_cond(0xC0, 0xE0)),
+            Bundle(0xD0, 0x11, nop_m(), adds(21, 1, 0),
+                   br_cond(0xD0, 0xE0)),
+            spin_bundle(0xE0),
+        ),
+        terminal_ip=0xE0,
+        data=(DataWord(0x1800, 0x100000000, 8),),
+    )
+    compare_snapshot = run_program(qemu, timer_compare)
+    _require(not compare_snapshot.exception_pending,
+             "timer signed-compare handoff raised an exception")
+    _require(compare_snapshot.ip == timer_compare.terminal_ip and
+             compare_snapshot.gr[14] > compare_snapshot.gr[34] and
+             compare_snapshot.gr[21] == 1,
+             "timer due test took the early-tick path: itc=0x{:x} "
+             "itm_next=0x{:x} marker={}".format(
+                 compare_snapshot.gr[14], compare_snapshot.gr[34],
+                 compare_snapshot.gr[21]))
+    return (
+        "an M-slot compare publishes p6 across internal/bundle stops, and "
+        "the kernel timer's Shape-B itm_next/ITC load plus signed-difference "
+        "Shape-A branch takes the architecturally due path"
+    )
+
+
 def _print_failure(exc: Exception) -> None:
     for line in str(exc).splitlines() or [repr(exc)]:
         print("# " + line)
@@ -9624,7 +9974,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..27")
+    print("1..30")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -9653,6 +10003,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 25 - typed return branches")
         print("not ok 26 - timer external interrupt and typed RFI")
         print("not ok 27 - nested self-IPI and ordered EOI")
+        print("not ok 28 - same-TB empty-to-active ALAT transition")
+        print("not ok 29 - helper-owned application-read SSA")
+        print("not ok 30 - stopped predicate handoff")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -9696,6 +10049,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("timer external interrupt and typed RFI",
          test_timer_external_interrupt_rfi),
         ("nested self-IPI and ordered EOI", test_nested_self_ipi),
+        ("same-TB empty-to-active ALAT transition",
+         test_same_tb_alat_activation),
+        ("helper-owned application-read SSA",
+         test_effectful_application_read_ssa),
+        ("stopped predicate handoff", test_stopped_predicate_handoff),
     )
     failures = 0
     for index, (name, test) in enumerate(tests, start=1):

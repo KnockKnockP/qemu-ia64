@@ -511,6 +511,10 @@ static void assert_issue_group_equal(const IA64IssueGroupState *actual,
     g_assert_cmpmem(actual->saved_gr_mask, sizeof(actual->saved_gr_mask),
                     expected->saved_gr_mask,
                     sizeof(expected->saved_gr_mask));
+    g_assert_cmpmem(actual->check_gr_forward_mask,
+                    sizeof(actual->check_gr_forward_mask),
+                    expected->check_gr_forward_mask,
+                    sizeof(expected->check_gr_forward_mask));
     g_assert_cmpmem(actual->saved_fr_mask, sizeof(actual->saved_fr_mask),
                     expected->saved_fr_mask,
                     sizeof(expected->saved_fr_mask));
@@ -697,6 +701,29 @@ static void test_branch_pr_forward_overlay(void)
     source.issue_group.branch_pr_forward_mask =
         (UINT64_C(1) << 1) | (UINT64_C(1) << 17) | (UINT64_C(1) << 63);
     assert_round_trip(&source);
+}
+
+static void test_check_gr_forward_overlay(void)
+{
+    CPUIA64State source;
+
+    init_typed_source(&source);
+    source.issue_group.saved_gr_mask[0] = UINT64_C(1) << 20;
+    source.issue_group.saved_gr_mask[1] = UINT64_C(1) << (70 - 64);
+    source.issue_group.check_gr_forward_mask[0] = UINT64_C(1) << 20;
+    source.issue_group.check_gr_forward_mask[1] = UINT64_C(1) << (70 - 64);
+    source.issue_group.saved_gr[20] = UINT64_C(0x123456789abcdef0);
+    source.issue_group.saved_gr[70] = UINT64_C(0xfedcba9876543210);
+    assert_round_trip(&source);
+}
+
+static void test_check_gr_forward_needed(void)
+{
+    CPUIA64State env = { 0 };
+
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.check_gr_forward_mask[1] = UINT64_C(1) << (70 - 64);
+    g_assert_true(ia64_issue_group_overlay_needed(&env));
 }
 
 static void test_branch_pr_forward_needed(void)
@@ -1437,7 +1464,7 @@ static void test_stream_ignores_stale_serialized_logical_gr(void)
     /* The transient mirror must not manufacture a new wire generation. */
     g_assert_cmpint(vmstate_rse.version_id, ==, 5);
     g_assert_cmpint(vmstate_rse.minimum_version_id, ==, 5);
-    g_assert_cmpint(vmstate_issue_group_overlay.version_id, ==, 6);
+    g_assert_cmpint(vmstate_issue_group_overlay.version_id, ==, 7);
     g_assert_cmpint(vmstate_env.version_id, ==, 8);
     g_assert_cmpint(vmstate_env.minimum_version_id, ==, 8);
     g_assert_cmpint(vmstate_ia64_cpu.version_id, ==, 6);
@@ -1888,10 +1915,14 @@ int main(int argc, char **argv)
                     test_branch_pr_forward_overlay);
     g_test_add_func("/ia64/vmstate/round-trip/branch-br-forward",
                     test_branch_br_forward_overlay);
+    g_test_add_func("/ia64/vmstate/round-trip/check-gr-forward",
+                    test_check_gr_forward_overlay);
     g_test_add_func("/ia64/vmstate/round-trip/combined",
                     test_combined_overlay);
     g_test_add_func("/ia64/vmstate/needed/branch-pr-forward",
                     test_branch_pr_forward_needed);
+    g_test_add_func("/ia64/vmstate/needed/check-gr-forward",
+                    test_check_gr_forward_needed);
     g_test_add_func("/ia64/vmstate/needed/br-state",
                     test_br_overlay_needed);
     g_test_add_func("/ia64/vmstate/needed/pfs-state",

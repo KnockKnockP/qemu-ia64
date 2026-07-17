@@ -964,6 +964,7 @@ void ia64_rse_sync_logical_out(CPUIA64State *env)
 void ia64_rse_sync_logical_in(CPUIA64State *env)
 {
     uint64_t logical_nat[2] = { 0, 0 };
+    uint32_t live_logical;
 
     if (!env) {
         return;
@@ -973,8 +974,17 @@ void ia64_rse_sync_logical_in(CPUIA64State *env)
     g_assert((env->rse.logical_dirty[0] |
               env->rse.logical_dirty[1]) == 0);
 
-    for (uint32_t logical = 0;
-         logical < IA64_GR_COUNT - IA64_STATIC_GR_COUNT; logical++) {
+    /*
+     * SOF is the exact architectural validity boundary for logical stacked
+     * names.  Names outside the current frame are neither observable nor a
+     * part of the resident logical image; the next frame transition that
+     * makes one valid refreshes it from the physical backing image here.
+     * Refreshing all 96 names on every call, return, alloc, cover, and RFI
+     * turns a mapping transition into a blanket helper-wide state sync.
+     */
+    live_logical = env->rse.sof;
+    g_assert(live_logical <= IA64_GR_COUNT - IA64_STATIC_GR_COUNT);
+    for (uint32_t logical = 0; logical < live_logical; logical++) {
         uint32_t reg = IA64_STATIC_GR_COUNT + logical;
         uint32_t slot = ia64_stacked_gr_slot(env, reg);
 

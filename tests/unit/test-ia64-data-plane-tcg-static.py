@@ -347,7 +347,7 @@ def check_sources(root: Path) -> None:
         "static void ia64_tr_emit_decoded_store_alat_invalidate",
     )
     for token in (
-        "if (ia64_tr_debug_fast_guard_enabled() &&",
+        "if ((ctx->base.tb->flags & IA64_TB_FLAG_DATA_DEBUG_ACTIVE) == 0)",
         "ctx->base.tb->flags & IA64_TB_FLAG_DATA_DEBUG_ACTIVE",
         "return;",
         "gen_helper_data_debug_pre_access(",
@@ -357,6 +357,9 @@ def check_sources(root: Path) -> None:
     require(data_debug_guard.index("return;") <
             data_debug_guard.index("gen_helper_data_debug_pre_access"),
             "inactive Data Debug TBs must emit no helper")
+    require("ia64_tr_debug_fast_guard_enabled" not in translate and
+            "VIBTANIUM_TCG_DEBUG_FAST_GUARD" not in translate,
+            "typed Data Debug production shape retains an escape hatch")
 
     reserved = {
         spec.opcode for spec in DATA_PLANE_OPCODE_SPECS

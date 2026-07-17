@@ -225,19 +225,11 @@ def _memory_trace_check(trace: str, bundle_ip: int,
                 r"(?m)^\s*call memory_store_alat_invalidate,", section
             )
         ]
-        if expected.kind == "st":
-            H._require(
-                len(alat_calls) == 1 and alat_calls[0] > op_pos,
-                "store bundle 0x{:x} must invalidate ALAT after qemu_st"
-                .format(bundle_ip),
-            )
-        else:
-            H._require(
-                not alat_calls,
-                "load bundle 0x{:x} unexpectedly invalidates ALAT".format(
-                    bundle_ip
-                ),
-            )
+        H._require(
+            not alat_calls,
+            "ordinary memory bundle 0x{:x} emitted active-ALAT work in the "
+            "production empty-ALAT TB shape".format(bundle_ip),
+        )
 
         barriers = [
             match.start()
@@ -502,7 +494,8 @@ def test_store_update_matrix(qemu: Path) -> str:
     return (
         "st1/2/4/8 and st1/2/4/8.rel pass both no-update and imm9-update "
         "round trips; direct stores truncate correctly, update last, place "
-        "release barriers before qemu_st, and invalidate ALAT afterward"
+        "release barriers before qemu_st, and keep the production empty-ALAT "
+        "TB shape helper-free"
     )
 
 

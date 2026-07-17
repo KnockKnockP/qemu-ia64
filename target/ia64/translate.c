@@ -42,33 +42,62 @@ typedef struct IA64ProfileTbShape {
 #define IA64_TR_GR_WRITES_PER_INSN 2
 #define IA64_TR_PR_WRITES_PER_INSN 2
 #define IA64_TR_BR_WRITES_PER_INSN 1
+#define IA64_TR_AR_EFFECTS_PER_INSN 4
 #define IA64_TR_I64_SCRATCH_COUNT 96
 #define IA64_TR_I32_SCRATCH_COUNT 24
 
 typedef struct IA64TrGrWrite {
     TCGv_i64 value;
     TCGv_i64 nat;
+    TCGv_i64 previous_value;
+    TCGv_i64 previous_nat;
+    TCGv_i64 dependent_forwarded;
     TCGv_i64 written;
+    uint8_t nat_state;
+    uint8_t previous_nat_state;
     uint8_t reg;
+    bool ssa;
     bool preserve_source;
     bool must_write;
+    bool forward_to_dependent;
 } IA64TrGrWrite;
 
 typedef struct IA64TrPrWrite {
     TCGv_i64 value;
+    TCGv_i64 previous_value;
     TCGv_i64 written;
+    TCGv_i64 physical_bit;
     uint8_t predicate;
+    bool ssa;
+    bool forward_to_branch;
     bool must_write;
 } IA64TrPrWrite;
 
 typedef struct IA64TrBrWrite {
     TCGv_i64 value;
+    TCGv_i64 previous_value;
     TCGv_i64 written;
     uint8_t reg;
+    bool ssa;
     bool preserve_source;
     bool must_write;
     bool forward_to_branch;
 } IA64TrBrWrite;
+
+/*
+ * Most AR reads obey ordinary issue-group entry visibility.  A small set of
+ * architectural effects is explicitly ordered, however: every st8.spill must
+ * consume the UNAT image produced by the preceding successful spill.  Model
+ * those effects as their own SSA chain instead of mutating an entry value or
+ * rereading the immutable group-entry AR image.
+ */
+typedef struct IA64TrArEffect {
+    TCGv_i64 value;
+    TCGv_i64 previous_value;
+    uint8_t reg;
+    bool ssa;
+    bool must_write;
+} IA64TrArEffect;
 
 /*
  * Packed PR moves are one architectural masked-image transaction.  Keeping
@@ -78,11 +107,98 @@ typedef struct IA64TrBrWrite {
  */
 typedef struct IA64TrPrImageWrite {
     TCGv_i64 value;
+    TCGv_i64 previous_value;
     TCGv_i64 written;
+    uint64_t forward_bits;
     uint64_t mask;
     bool active;
+    bool ssa;
     bool must_write;
 } IA64TrPrImageWrite;
+
+typedef enum IA64TrNatState {
+    IA64_TR_NAT_KNOWN_CLEAR,
+    IA64_TR_NAT_KNOWN_SET,
+    IA64_TR_NAT_UNKNOWN,
+} IA64TrNatState;
+
+typedef enum IA64TrExecutionShape {
+    IA64_TR_SHAPE_A,
+    IA64_TR_SHAPE_B,
+    IA64_TR_SHAPE_C,
+} IA64TrExecutionShape;
+
+/*
+ * Compact translation-time deoptimization map.  Values live in the group's
+ * SSA arrays; this map records only the resources that a particular boundary
+ * must publish.  It is copied into branch arms before later fallthrough slots
+ * can add more dirty resources.
+ */
+typedef struct IA64TrSafepointMap {
+    uint64_t gr[2];
+    uint64_t ar[2];
+    uint64_t pr;
+    uint8_t br;
+    bool cfm;
+} IA64TrSafepointMap;
+
+/*
+ * Fast issue-group state.  Entry values are immutable ordinary-source SSA;
+ * live values are the ordered successful prefix.  Neither array is durable.
+ * The legacy issue_group image is touched only when inherited state must be
+ * consumed or an open group must cross an actual observation boundary.
+ */
+typedef struct IA64TrGroupSSA {
+    TCGv_i64 entry_gr[IA64_GR_COUNT];
+    TCGv_i64 entry_nat[IA64_GR_COUNT];
+    TCGv_i64 live_gr[IA64_GR_COUNT];
+    TCGv_i64 live_nat[IA64_GR_COUNT];
+    IA64TrNatState entry_nat_state[IA64_GR_COUNT];
+    IA64TrNatState live_nat_state[IA64_GR_COUNT];
+    uint64_t entry_gr_valid[2];
+    uint64_t live_gr_valid[2];
+    uint64_t dirty_gr[2];
+    uint64_t written_gr[2];
+    TCGv_i64 check_gr_forward_mask[2];
+    uint64_t check_gr_forward_may[2];
+    TCGv_i64 pending_alat_gr_mask[2];
+
+    TCGv_i64 entry_br[IA64_BR_COUNT];
+    TCGv_i64 live_br[IA64_BR_COUNT];
+    TCGv_i64 branch_br_forward_mask;
+    uint8_t entry_br_valid;
+    uint8_t live_br_valid;
+    uint8_t dirty_br;
+    uint8_t written_br;
+
+    TCGv_i64 entry_ar[IA64_AR_COUNT];
+    TCGv_i64 live_ar[IA64_AR_COUNT];
+    uint64_t entry_ar_valid[2];
+    uint64_t live_ar_valid[2];
+    uint64_t dirty_ar[2];
+    uint64_t written_ar[2];
+
+    TCGv_i64 entry_pr;
+    TCGv_i64 live_pr;
+    TCGv_i64 branch_pr_forward_mask;
+    TCGv_i64 branch_pfs_forwarded;
+    bool entry_pr_valid;
+    bool live_pr_valid;
+    bool dirty_pr;
+    bool written_pr;
+
+    TCGv_i64 entry_cfm;
+    TCGv_i64 live_cfm;
+    bool entry_cfm_valid;
+    bool live_cfm_valid;
+    bool dirty_cfm;
+    bool written_cfm;
+
+    bool enabled;
+    bool inherited;
+    bool durable_materialized;
+    bool materializing;
+} IA64TrGroupSSA;
 
 typedef struct IA64TrGrRef {
     uint8_t reg;
@@ -94,6 +210,7 @@ typedef struct IA64TrInstructionPlan {
     IA64Opcode opcode;
     uint64_t source_gr[2];
     uint64_t dest_gr[2];
+    uint64_t forward_gr[2];
     uint64_t preserve_gr[2];
     uint64_t source_ar[2];
     uint64_t dest_ar[2];
@@ -137,16 +254,19 @@ typedef struct IA64TrDecodedBranchArm {
     bool call;
     bool ret;
     bool taken_trap;
+    IA64TrSafepointMap safepoint;
 } IA64TrDecodedBranchArm;
 
 typedef struct IA64TrInstructionTransaction {
     IA64TrGrWrite gr[IA64_TR_GR_WRITES_PER_INSN];
     IA64TrPrWrite pr[IA64_TR_PR_WRITES_PER_INSN];
     IA64TrBrWrite br[IA64_TR_BR_WRITES_PER_INSN];
+    IA64TrArEffect ar_effect[IA64_TR_AR_EFFECTS_PER_INSN];
     IA64TrPrImageWrite pr_image;
     TCGv_i64 pre_psr;
     uint64_t address;
     uint64_t dest_gr[2];
+    uint64_t forward_gr[2];
     uint64_t preserve_gr[2];
     uint64_t must_gr[2];
     uint64_t source_ar[2];
@@ -165,6 +285,7 @@ typedef struct IA64TrInstructionTransaction {
     uint8_t gr_count;
     uint8_t pr_count;
     uint8_t br_count;
+    uint8_t ar_effect_count;
     uint8_t slot;
     uint8_t post_alat_target;
     uint8_t post_alat_width;
@@ -172,12 +293,14 @@ typedef struct IA64TrInstructionTransaction {
     uint8_t post_alat_memory_class;
     TCGv_i64 post_alat_address;
     TCGv_i64 post_alat_record;
+    TCGv_i64 qualifier;
     bool post_alat_active;
     bool source_cfm;
     bool dest_cfm;
     bool forward_pfs;
     bool branch_source_pfs;
     bool must_pfs;
+    bool publish_iipa;
 } IA64TrInstructionTransaction;
 
 typedef struct IA64TrGroupTransaction {
@@ -207,10 +330,12 @@ typedef struct IA64TrGroupTransaction {
     bool pr_may_saved;
     bool pr_must_saved;
     bool branch_forward_may_nonzero;
+    bool check_gr_forward_may_nonzero;
     bool branch_br_forward_may_nonzero;
     bool pfs_may_saved;
     bool pfs_must_saved;
     bool branch_pfs_forward_may_nonzero;
+    IA64TrGroupSSA ssa;
     bool active;
 } IA64TrGroupTransaction;
 
@@ -249,6 +374,10 @@ typedef struct DisasContext {
     uint8_t rewrite_region_last_slot;
     size_t rewrite_region_ops_start;
     IA64TrGroupTransaction rewrite_group;
+    IA64TrExecutionShape rewrite_shape;
+    bool rewrite_ssa_enabled;
+    bool rewrite_ssa_inherited;
+    IA64TrNatState nat_state[IA64_GR_COUNT];
     IA64TrInstructionPlan *rewrite_plan;
     uint16_t rewrite_plan_capacity;
     uint16_t rewrite_plan_count;
@@ -261,7 +390,10 @@ typedef struct DisasContext {
     bool rewrite_scratch_active;
     bool rewrite_control_flow_exit;
     bool source_overlay_known_clear;
+    bool source_frontier_maybe_changed;
+    bool restart_ri_maybe_dirty;
     bool alat_may_active;
+    uint64_t iipa_emitted_bundle;
     uint32_t perf_tb_id;
     IA64ProfileTbEnd profile_end_reason;
     IA64ProfileTbShape profile_shape;
@@ -295,7 +427,6 @@ typedef struct IA64TrStateCacheDirty {
     ((intptr_t)offsetof(IA64CPU, field) - \
      (intptr_t)offsetof(IA64CPU, env))
 
-#define IA64_TR_PSR_IC_BIT UINT64_C(0x0000000000002000)
 #define IA64_TR_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_TR_PSR_AC_BIT UINT64_C(0x0000000000000008)
 #define IA64_TR_PSR_ED_BIT UINT64_C(0x0000080000000000)
@@ -304,10 +435,22 @@ typedef struct IA64TrStateCacheDirty {
 #define IA64_TR_PR_ROTATING_MASK UINT64_C(0xffffffffffff0000)
 
 static TCGv_i64 cpu_ip;
+static TCGv_i64 cpu_static_gr[IA64_STATIC_GR_COUNT];
+static TCGv_i64 cpu_banked_gr[16];
 static TCGv_i64 cpu_logical_gr[IA64_GR_COUNT - IA64_STATIC_GR_COUNT];
 static TCGv_i64 cpu_logical_nat[2];
 static TCGv_i64 cpu_logical_dirty[2];
+static TCGv_i64 cpu_br[IA64_BR_COUNT];
+static TCGv_i64 cpu_ar[IA64_AR_COUNT];
+static TCGv_i64 cpu_pr;
+static TCGv_i64 cpu_gr_nat;
+static TCGv_i64 cpu_psr;
+static TCGv_i64 cpu_cfm;
+static char cpu_static_gr_names[IA64_STATIC_GR_COUNT][5];
+static char cpu_banked_gr_names[16][8];
 static char cpu_logical_gr_names[IA64_GR_COUNT - IA64_STATIC_GR_COUNT][5];
+static char cpu_br_names[IA64_BR_COUNT][4];
+static char cpu_ar_names[IA64_AR_COUNT][6];
 static const char * const cpu_logical_nat_names[2] = {
     "logical_nat0", "logical_nat1",
 };
@@ -316,11 +459,36 @@ static const char * const cpu_logical_dirty_names[2] = {
 };
 
 static bool ia64_tr_group_is_empty(const DisasContext *ctx);
+static bool ia64_tr_ssa_bit(const uint64_t mask[2], uint8_t reg);
+static void ia64_tr_ssa_ensure_entry_gr(DisasContext *ctx, uint8_t reg);
+static void ia64_tr_ssa_ensure_live_gr(DisasContext *ctx, uint8_t reg);
+static void ia64_tr_ssa_ensure_entry_br(DisasContext *ctx, uint8_t reg);
+static void ia64_tr_ssa_ensure_live_br(DisasContext *ctx, uint8_t reg);
+static void ia64_tr_ssa_ensure_entry_pr(DisasContext *ctx);
+static void ia64_tr_ssa_ensure_live_pr(DisasContext *ctx);
+static void ia64_tr_ssa_ensure_entry_ar(DisasContext *ctx, uint8_t reg);
+static void ia64_tr_ssa_ensure_live_ar(DisasContext *ctx, uint8_t reg);
+static IA64TrArEffect *ia64_tr_group_prepare_ordered_ar_effect(
+    DisasContext *ctx, uint8_t reg, bool must_write);
+static void ia64_tr_group_stage_ordered_ar_effect(
+    DisasContext *ctx, IA64TrArEffect *write, TCGv_i64 value);
+static IA64TrNatState ia64_tr_nat_join(IA64TrNatState left,
+                                       IA64TrNatState right);
+static TCGv_i64 ia64_tr_ssa_ensure_check_gr_forward_mask(
+    IA64TrGroupSSA *ssa, unsigned half);
+static TCGv_i64 ia64_tr_ssa_ensure_branch_pr_forward_mask(
+    IA64TrGroupSSA *ssa);
+static TCGv_i64 ia64_tr_ssa_ensure_branch_br_forward_mask(
+    IA64TrGroupSSA *ssa);
+static TCGv_i64 ia64_tr_ssa_ensure_branch_pfs_forwarded(
+    IA64TrGroupSSA *ssa);
 static IA64SlotType ia64_tr_decoded_slot_type(IA64InstructionUnit unit);
 static bool ia64_tr_decoded_instruction_supported(
     const IA64Instruction *insn);
+static bool ia64_tr_decoded_is_loop_branch(IA64Opcode opcode);
 static void ia64_tr_clear_restart_ri(void);
-static void ia64_tr_publish_fault_state(uint64_t pc, uint8_t slot_index,
+static void ia64_tr_publish_fault_state(DisasContext *ctx, uint64_t pc,
+                                        uint8_t slot_index,
                                         uint8_t slot_type, uint64_t raw,
                                         bool group_start);
 static void ia64_tr_emit_application_target_check(
@@ -436,119 +604,35 @@ static void ia64_tr_profile_emit(DisasContext *ctx, IA64ProfileExit exit)
     }
 }
 
-static bool ia64_tr_state_cache_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE");
-
-        enabled = value != NULL &&
-                  !(strcmp(value, "0") == 0 ||
-                    g_ascii_strcasecmp(value, "off") == 0 ||
-                    g_ascii_strcasecmp(value, "false") == 0);
-    }
-    return enabled;
-}
-
-static bool ia64_tr_debug_fast_guard_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        const char *value = g_getenv("VIBTANIUM_TCG_DEBUG_FAST_GUARD");
-
-        enabled = value == NULL ||
-                  !(strcmp(value, "0") == 0 ||
-                    g_ascii_strcasecmp(value, "off") == 0 ||
-                    g_ascii_strcasecmp(value, "false") == 0);
-    }
-    return enabled;
-}
-
-static bool ia64_tr_retire_fast_guard_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        const char *value = g_getenv("VIBTANIUM_TCG_RETIRE_FAST_GUARD");
-
-        enabled = value == NULL ||
-                  !(strcmp(value, "0") == 0 ||
-                    g_ascii_strcasecmp(value, "off") == 0 ||
-                    g_ascii_strcasecmp(value, "false") == 0);
-    }
-    return enabled;
-}
-
-static bool ia64_tr_psr_finish_specialization_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        const char *value =
-            g_getenv("VIBTANIUM_TCG_PSR_FINISH_SPECIALIZATION");
-
-        enabled = value == NULL ||
-                  !(strcmp(value, "0") == 0 ||
-                    g_ascii_strcasecmp(value, "off") == 0 ||
-                    g_ascii_strcasecmp(value, "false") == 0);
-    }
-    return enabled;
-}
-
-static bool ia64_tr_alat_empty_specialization_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        const char *value =
-            g_getenv("VIBTANIUM_TCG_ALAT_EMPTY_SPECIALIZATION");
-
-        enabled = value == NULL ||
-                  !(strcmp(value, "0") == 0 ||
-                    g_ascii_strcasecmp(value, "off") == 0 ||
-                    g_ascii_strcasecmp(value, "false") == 0);
-    }
-    return enabled;
-}
-
+/*
+ * WP0's cache sweep found no repeatable benefit from pinning an arbitrary
+ * first-N static-GR set and found measurable regressions for early 4-GR
+ * activation.  Static GRs therefore use stable direct TCG global-memory
+ * handles; the immediate resident set is reserved for packed PR/NaT and the
+ * BR/AR values actually touched by a TB.  This is a production policy, not an
+ * environment-selected cache experiment.
+ */
 static unsigned ia64_tr_state_cache_gr_limit(void)
 {
-    static int limit = -1;
-
-    if (limit < 0) {
-        const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE_GRS");
-        const char *end = NULL;
-        unsigned long parsed = 4;
-
-        limit = value != NULL &&
-                qemu_strtoul(value, &end, 0, &parsed) == 0 && *end == '\0'
-            ? MIN(parsed, IA64_STATIC_GR_COUNT - 1)
-            : 4;
-    }
-    return limit;
-}
-
-static unsigned ia64_tr_state_cache_min_bundles(void)
-{
-    static int minimum = -1;
-
-    if (minimum < 0) {
-        const char *value = g_getenv("VIBTANIUM_TCG_STATE_CACHE_MIN_BUNDLES");
-        const char *end = NULL;
-        unsigned long parsed = 12;
-
-        minimum = value != NULL &&
-                  qemu_strtoul(value, &end, 0, &parsed) == 0 && *end == '\0'
-            ? MIN(parsed, (unsigned long)TCG_MAX_INSNS)
-            : 12;
-    }
-    return minimum;
+    return 0;
 }
 
 void ia64_translate_init(void)
 {
+    for (unsigned i = 0; i < ARRAY_SIZE(cpu_static_gr); i++) {
+        snprintf(cpu_static_gr_names[i], sizeof(cpu_static_gr_names[i]),
+                 "r%u", i);
+        cpu_static_gr[i] = tcg_global_mem_new_i64(
+            tcg_env, offsetof(CPUIA64State, gr) + i * sizeof(uint64_t),
+            cpu_static_gr_names[i]);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(cpu_banked_gr); i++) {
+        snprintf(cpu_banked_gr_names[i], sizeof(cpu_banked_gr_names[i]),
+                 "bank%u", i + 16);
+        cpu_banked_gr[i] = tcg_global_mem_new_i64(
+            tcg_env, offsetof(CPUIA64State, banked_gr) +
+                     i * sizeof(uint64_t), cpu_banked_gr_names[i]);
+    }
     for (unsigned i = 0; i < ARRAY_SIZE(cpu_logical_gr); i++) {
         snprintf(cpu_logical_gr_names[i], sizeof(cpu_logical_gr_names[i]),
                  "r%u", IA64_STATIC_GR_COUNT + i);
@@ -565,6 +649,26 @@ void ia64_translate_init(void)
             tcg_env, offsetof(CPUIA64State, rse.logical_dirty[i]),
             cpu_logical_dirty_names[i]);
     }
+    for (unsigned i = 0; i < ARRAY_SIZE(cpu_br); i++) {
+        snprintf(cpu_br_names[i], sizeof(cpu_br_names[i]), "b%u", i);
+        cpu_br[i] = tcg_global_mem_new_i64(
+            tcg_env, offsetof(CPUIA64State, br) + i * sizeof(uint64_t),
+            cpu_br_names[i]);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(cpu_ar); i++) {
+        snprintf(cpu_ar_names[i], sizeof(cpu_ar_names[i]), "ar%u", i);
+        cpu_ar[i] = tcg_global_mem_new_i64(
+            tcg_env, offsetof(CPUIA64State, ar) + i * sizeof(uint64_t),
+            cpu_ar_names[i]);
+    }
+    cpu_pr = tcg_global_mem_new_i64(tcg_env, offsetof(CPUIA64State, pr),
+                                    "pr");
+    cpu_gr_nat = tcg_global_mem_new_i64(
+        tcg_env, offsetof(CPUIA64State, nat.gr_nat), "gr_nat");
+    cpu_psr = tcg_global_mem_new_i64(tcg_env, offsetof(CPUIA64State, psr),
+                                     "psr");
+    cpu_cfm = tcg_global_mem_new_i64(tcg_env, offsetof(CPUIA64State, cfm),
+                                     "cfm");
     cpu_ip = tcg_global_mem_new_i64(tcg_env,
                                     offsetof(CPUIA64State, ip),
                                     "ip");
@@ -615,6 +719,13 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->rewrite_region_last_slot = IA64_SLOT_COUNT - 1;
     ctx->rewrite_region_ops_start = 0;
     memset(&ctx->rewrite_group, 0, sizeof(ctx->rewrite_group));
+    ctx->rewrite_shape = IA64_TR_SHAPE_C;
+    ctx->rewrite_ssa_enabled = false;
+    ctx->rewrite_ssa_inherited = false;
+    for (unsigned i = 0; i < ARRAY_SIZE(ctx->nat_state); i++) {
+        ctx->nat_state[i] = i == 0 ? IA64_TR_NAT_KNOWN_CLEAR :
+                                     IA64_TR_NAT_UNKNOWN;
+    }
     ctx->rewrite_plan = NULL;
     ctx->rewrite_plan_capacity = 0;
     ctx->rewrite_plan_count = 0;
@@ -629,9 +740,11 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->rewrite_scratch_active = false;
     ctx->rewrite_control_flow_exit = false;
     ctx->source_overlay_known_clear = !ctx->typed_group_active;
+    ctx->source_frontier_maybe_changed = false;
+    ctx->restart_ri_maybe_dirty = false;
     ctx->alat_may_active =
-        !ia64_tr_alat_empty_specialization_enabled() ||
         (ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE) != 0;
+    ctx->iipa_emitted_bundle = UINT64_MAX;
     ctx->perf_tb_id = ia64_perf_enabled() ? ia64_perf_register_tb() : 0;
     ctx->profile_end_reason = IA64_PROFILE_TB_END_OTHER;
     memset(&ctx->profile_shape, 0, sizeof(ctx->profile_shape));
@@ -657,8 +770,8 @@ static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
 
     ctx->retired_bundle_count = tcg_temp_new_i32();
     tcg_gen_movi_i32(ctx->retired_bundle_count, 0);
-    ctx->state_cache_available = ia64_tr_state_cache_enabled();
-    ctx->state_cache_active = false;
+    ctx->state_cache_available = true;
+    ctx->state_cache_active = true;
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exec(tcg_constant_i32(ctx->perf_tb_id));
     }
@@ -671,14 +784,13 @@ static void ia64_tr_note_retired_bundle(DisasContext *ctx)
                      ctx->retired_bundle_count, 1);
 }
 
-static size_t ia64_tr_static_gr_offset(DisasContext *ctx, uint8_t reg)
+static TCGv_i64 ia64_tr_static_gr_global(DisasContext *ctx, uint8_t reg)
 {
-    if (reg >= 16 && reg < IA64_STATIC_GR_COUNT &&
-        (ctx->base.tb->flags & IA64_TB_FLAG_BN) != 0) {
-        return offsetof(CPUIA64State, banked_gr) +
-               (reg - 16) * sizeof(uint64_t);
+    g_assert(reg < IA64_STATIC_GR_COUNT);
+    if (reg >= 16 && (ctx->base.tb->flags & IA64_TB_FLAG_BN) != 0) {
+        return cpu_banked_gr[reg - 16];
     }
-    return offsetof(CPUIA64State, gr) + reg * sizeof(uint64_t);
+    return cpu_static_gr[reg];
 }
 
 static bool ia64_tr_select_static_gr(DisasContext *ctx, uint8_t reg)
@@ -709,8 +821,8 @@ static TCGv_i64 ia64_tr_ensure_static_gr(DisasContext *ctx, uint8_t reg)
         ctx->static_gr[reg] = tcg_temp_new_i64();
     }
     if ((ctx->static_gr_valid & bit) == 0) {
-        tcg_gen_ld_i64(ctx->static_gr[reg], tcg_env,
-                       ia64_tr_static_gr_offset(ctx, reg));
+        tcg_gen_mov_i64(ctx->static_gr[reg],
+                        ia64_tr_static_gr_global(ctx, reg));
         ctx->static_gr_valid |= bit;
         ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
@@ -730,9 +842,7 @@ static TCGv_i64 ia64_tr_ensure_br(DisasContext *ctx, uint8_t reg)
         ctx->br[reg] = tcg_temp_new_i64();
     }
     if ((ctx->br_valid & bit) == 0) {
-        tcg_gen_ld_i64(ctx->br[reg], tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(ctx->br[reg], cpu_br[reg]);
         ctx->br_valid |= bit;
         ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
@@ -753,9 +863,7 @@ static TCGv_i64 ia64_tr_ensure_ar(DisasContext *ctx, uint8_t reg)
         ctx->ar[reg] = tcg_temp_new_i64();
     }
     if ((ctx->ar_valid[word] & bit) == 0) {
-        tcg_gen_ld_i64(ctx->ar[reg], tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(ctx->ar[reg], cpu_ar[reg]);
         ctx->ar_valid[word] |= bit;
         ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
@@ -773,7 +881,7 @@ static TCGv_i64 ia64_tr_ensure_pr(DisasContext *ctx)
         ctx->pr = tcg_temp_new_i64();
     }
     if (!ctx->pr_valid) {
-        tcg_gen_ld_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(ctx->pr, cpu_pr);
         ctx->pr_valid = true;
         ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
@@ -791,8 +899,7 @@ static TCGv_i64 ia64_tr_ensure_gr_nat(DisasContext *ctx)
         ctx->gr_nat = tcg_temp_new_i64();
     }
     if (!ctx->gr_nat_valid) {
-        tcg_gen_ld_i64(ctx->gr_nat, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_mov_i64(ctx->gr_nat, cpu_gr_nat);
         ctx->gr_nat_valid = true;
         ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_LOAD, 1);
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 1);
@@ -829,16 +936,14 @@ static void ia64_tr_sync_state_cache_dirty(
     while (gr != 0) {
         unsigned reg = ctz32(gr);
 
-        tcg_gen_st_i64(ctx->static_gr[reg], tcg_env,
-                       ia64_tr_static_gr_offset(ctx, reg));
+        tcg_gen_mov_i64(ia64_tr_static_gr_global(ctx, reg),
+                        ctx->static_gr[reg]);
         gr &= gr - 1;
     }
     while (br != 0) {
         unsigned reg = ctz32(br);
 
-        tcg_gen_st_i64(ctx->br[reg], tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(cpu_br[reg], ctx->br[reg]);
         br &= br - 1;
     }
     for (unsigned word = 0; word < ARRAY_SIZE(dirty->ar); word++) {
@@ -847,18 +952,15 @@ static void ia64_tr_sync_state_cache_dirty(
         while (ar != 0) {
             unsigned reg = word * 64 + ctz64(ar);
 
-            tcg_gen_st_i64(ctx->ar[reg], tcg_env,
-                           offsetof(CPUIA64State, ar) +
-                           reg * sizeof(uint64_t));
+            tcg_gen_mov_i64(cpu_ar[reg], ctx->ar[reg]);
             ar &= ar - 1;
         }
     }
     if (dirty->pr) {
-        tcg_gen_st_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(cpu_pr, ctx->pr);
     }
     if (dirty->gr_nat) {
-        tcg_gen_st_i64(ctx->gr_nat, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_mov_i64(cpu_gr_nat, ctx->gr_nat);
     }
 }
 
@@ -887,16 +989,14 @@ static void ia64_tr_reload_state_cache(DisasContext *ctx)
     while (gr != 0) {
         unsigned reg = ctz32(gr);
 
-        tcg_gen_ld_i64(ctx->static_gr[reg], tcg_env,
-                       ia64_tr_static_gr_offset(ctx, reg));
+        tcg_gen_mov_i64(ctx->static_gr[reg],
+                        ia64_tr_static_gr_global(ctx, reg));
         gr &= gr - 1;
     }
     while (br != 0) {
         unsigned reg = ctz32(br);
 
-        tcg_gen_ld_i64(ctx->br[reg], tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(ctx->br[reg], cpu_br[reg]);
         br &= br - 1;
     }
     for (unsigned word = 0; word < ARRAY_SIZE(ctx->ar_valid); word++) {
@@ -905,18 +1005,15 @@ static void ia64_tr_reload_state_cache(DisasContext *ctx)
         while (ar != 0) {
             unsigned reg = word * 64 + ctz64(ar);
 
-            tcg_gen_ld_i64(ctx->ar[reg], tcg_env,
-                           offsetof(CPUIA64State, ar) +
-                           reg * sizeof(uint64_t));
+            tcg_gen_mov_i64(ctx->ar[reg], cpu_ar[reg]);
             ar &= ar - 1;
         }
     }
     if (ctx->pr_valid) {
-        tcg_gen_ld_i64(ctx->pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(ctx->pr, cpu_pr);
     }
     if (ctx->gr_nat_valid) {
-        tcg_gen_ld_i64(ctx->gr_nat, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_mov_i64(ctx->gr_nat, cpu_gr_nat);
     }
 }
 
@@ -965,24 +1062,12 @@ static void ia64_tr_flush_retired_bundles(DisasContext *ctx)
         return;
     }
 
-    if (!ia64_tr_retire_fast_guard_enabled()) {
-        gen_helper_retire_translated_bundles(tcg_env,
-                                             ctx->retired_bundle_count);
-        tcg_gen_movi_i32(ctx->retired_bundle_count, 0);
-        return;
-    }
-
     /*
-     * retire_translated_bundles() can leave the TB only for an enabled
-     * external interrupt.  Its own first two requirements are the target's
-     * cached pending bit and PSR.i.  Keep the full helper as the authority for
-     * vector/TPR selection, but avoid a host helper call at every ordinary TB
-     * boundary when either cheap prerequisite is false.
-     *
-     * The benchmark TB flag is the translation-time equivalent of
-     * ia64_benchmark_retire()'s runtime active test.  On the bypass arm we
-     * therefore account inline; on the slow arm the unchanged helper accounts
-     * exactly once.
+     * The target helper owns the enabled-interrupt exit, while the common
+     * masked/no-pending path remains two cheap tests and no helper call.  This
+     * guard is required for IA-64's masked-pending chaining contract: relying
+     * on CPU_INTERRUPT_HARD alone forces needless main-loop exits while an
+     * interrupt is pending but not architecturally deliverable.
      */
     retire_only = gen_new_label();
     done = gen_new_label();
@@ -1029,7 +1114,7 @@ static void ia64_tr_retire_bundles_deferred_interrupt(
     tcg_gen_movi_i32(ctx->retired_bundle_count, 0);
 }
 
-static void ia64_tr_commit_ip(uint64_t ip)
+static void ia64_tr_commit_ip(DisasContext *ctx, uint64_t ip)
 {
     tcg_gen_movi_i64(cpu_ip, ip);
     /*
@@ -1038,19 +1123,30 @@ static void ia64_tr_commit_ip(uint64_t ip)
      * merely dropping ri_dirty can expose an older PSR slot at the next TB
      * boundary and restart the sequential bundle in slot 1 or 2.
      */
-    ia64_tr_clear_restart_ri();
+    if (ctx->restart_ri_maybe_dirty ||
+        ia64_tcg_tb_flags_ri(ctx->base.tb->flags) != 0) {
+        ia64_tr_clear_restart_ri();
+    }
 }
 
-static void ia64_tr_commit_ip_value(TCGv_i64 ip)
+static void ia64_tr_commit_ip_value(DisasContext *ctx, TCGv_i64 ip)
 {
     tcg_gen_mov_i64(cpu_ip, ip);
-    ia64_tr_clear_restart_ri();
+    if (ctx->restart_ri_maybe_dirty ||
+        ia64_tcg_tb_flags_ri(ctx->base.tb->flags) != 0) {
+        ia64_tr_clear_restart_ri();
+    }
 }
 
 static void ia64_tr_store_source_visibility_state(DisasContext *ctx,
                                                   bool group_start,
                                                   bool typed_active)
 {
+    bool entry_group_start =
+        (ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START) != 0;
+    bool entry_typed_active =
+        (ctx->base.tb->flags & IA64_TB_FLAG_TYPED_GROUP) != 0;
+
     g_assert(!group_start || !typed_active);
     if (group_start && !ctx->source_overlay_known_clear) {
         tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
@@ -1060,6 +1156,13 @@ static void ia64_tr_store_source_visibility_state(DisasContext *ctx,
                        offsetof(CPUIA64State,
                                 issue_group.saved_gr_mask) +
                        sizeof(uint64_t));
+        tcg_gen_st_i64(
+            tcg_constant_i64(0), tcg_env,
+            offsetof(CPUIA64State, issue_group.check_gr_forward_mask));
+        tcg_gen_st_i64(
+            tcg_constant_i64(0), tcg_env,
+            offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+                sizeof(uint64_t));
         tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                         offsetof(CPUIA64State,
                                  issue_group.saved_br_mask));
@@ -1086,8 +1189,22 @@ static void ia64_tr_store_source_visibility_state(DisasContext *ctx,
                        offsetof(CPUIA64State,
                                 issue_group.saved_fr_mask) +
                        sizeof(uint64_t));
-        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
-        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 11);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 13);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 13);
+    }
+    /*
+     * Normal dispatch enters with instruction_group_dirty clear and with the
+     * two source-frontier fields represented by the TB flags.  If no emitted
+     * fault/safepoint publication changed that runtime image, re-storing the
+     * same values on every direct arm is not materialization; it is dead
+     * durable traffic.  A first unchained exit can therefore use the existing
+     * image, while synchronize_from_tb remains the authority for a chained
+     * TB that is interrupted between blocks.
+     */
+    if (!ctx->source_frontier_maybe_changed &&
+        group_start == entry_group_start &&
+        typed_active == entry_typed_active) {
+        return;
     }
     tcg_gen_st8_i32(tcg_constant_i32(typed_active), tcg_env,
                     offsetof(CPUIA64State, issue_group.typed_active));
@@ -1115,9 +1232,11 @@ static void ia64_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
                        source_visibility);
 }
 
-static void ia64_tr_publish_restart_ri(uint8_t start_slot)
+static void ia64_tr_publish_restart_ri(DisasContext *ctx,
+                                       uint8_t start_slot)
 {
     g_assert(start_slot < IA64_SLOT_COUNT);
+    ctx->restart_ri_maybe_dirty = true;
     tcg_gen_st8_i32(tcg_constant_i32(start_slot), tcg_env,
                     offsetof(CPUIA64State, ri));
     /*
@@ -1145,7 +1264,7 @@ static void ia64_tr_emit_invalid_template(DisasContext *ctx,
 
     ia64_tr_sync_state_cache(ctx);
     tcg_gen_movi_i64(cpu_ip, pc);
-    ia64_tr_publish_fault_state(pc, start_slot, IA64_SLOT_TYPE_INVALID,
+    ia64_tr_publish_fault_state(ctx, pc, start_slot, IA64_SLOT_TYPE_INVALID,
                                 bundle->slot[start_slot],
                                 ctx->instruction_group_start);
     gen_helper_raise_illegal_operation(tcg_env);
@@ -1184,8 +1303,7 @@ static void ia64_tr_read_logical_gr_nat(TCGv_i64 dest, uint8_t reg)
 {
     unsigned index = ia64_tr_logical_gr_index(reg);
 
-    tcg_gen_shri_i64(dest, cpu_logical_nat[index >> 6], index & 63);
-    tcg_gen_andi_i64(dest, dest, 1);
+    tcg_gen_extract_i64(dest, cpu_logical_nat[index >> 6], index & 63, 1);
 }
 
 static void ia64_tr_write_logical_gr_nat(DisasContext *ctx, uint8_t reg,
@@ -1224,7 +1342,7 @@ static void ia64_tr_load_static_gr(DisasContext *ctx, TCGv_i64 dest,
         }
     }
 
-    tcg_gen_ld_i64(dest, tcg_env, ia64_tr_static_gr_offset(ctx, reg));
+    tcg_gen_mov_i64(dest, ia64_tr_static_gr_global(ctx, reg));
 }
 
 static void ia64_tr_store_static_gr(DisasContext *ctx, uint8_t reg,
@@ -1253,7 +1371,7 @@ static void ia64_tr_store_static_gr(DisasContext *ctx, uint8_t reg,
         return;
     }
 
-    tcg_gen_st_i64(value, tcg_env, ia64_tr_static_gr_offset(ctx, reg));
+    tcg_gen_mov_i64(ia64_tr_static_gr_global(ctx, reg), value);
 }
 
 static TCGCond ia64_tr_compare_cond(uint8_t relation)
@@ -1325,13 +1443,13 @@ static void ia64_tr_write_pr_const(DisasContext *ctx, uint8_t predicate,
         pr = ctx->state_cache_active ? ia64_tr_ensure_pr(ctx) :
                                       ia64_tr_scratch_i64(ctx);
         if (!ctx->state_cache_active) {
-            tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+            tcg_gen_mov_i64(pr, cpu_pr);
         }
         tcg_gen_ori_i64(pr, pr, 1);
         if (ctx->state_cache_active) {
             ctx->pr_dirty = true;
         } else {
-            tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+            tcg_gen_mov_i64(cpu_pr, pr);
         }
         return;
     }
@@ -1341,7 +1459,7 @@ static void ia64_tr_write_pr_const(DisasContext *ctx, uint8_t predicate,
     bit = ia64_tr_scratch_i64(ctx);
     ia64_tr_predicate_bit(ctx, bit, predicate);
     if (!ctx->state_cache_active) {
-        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(pr, cpu_pr);
     }
     if (value) {
         tcg_gen_or_i64(pr, pr, bit);
@@ -1352,7 +1470,7 @@ static void ia64_tr_write_pr_const(DisasContext *ctx, uint8_t predicate,
     if (ctx->state_cache_active) {
         ctx->pr_dirty = true;
     } else {
-        tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(cpu_pr, pr);
     }
 }
 
@@ -1374,7 +1492,7 @@ static void ia64_tr_write_pr_bool(DisasContext *ctx, uint8_t predicate,
     selected = ia64_tr_scratch_i64(ctx);
     ia64_tr_predicate_bit(ctx, bit, predicate);
     if (!ctx->state_cache_active) {
-        tcg_gen_ld_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(pr, cpu_pr);
     }
     tcg_gen_andc_i64(pr, pr, bit);
     tcg_gen_neg_i64(selected, value);
@@ -1384,7 +1502,7 @@ static void ia64_tr_write_pr_bool(DisasContext *ctx, uint8_t predicate,
     if (ctx->state_cache_active) {
         ctx->pr_dirty = true;
     } else {
-        tcg_gen_st_i64(pr, tcg_env, offsetof(CPUIA64State, pr));
+        tcg_gen_mov_i64(cpu_pr, pr);
     }
 }
 
@@ -1416,13 +1534,10 @@ static void ia64_tr_read_static_gr_nat(DisasContext *ctx, TCGv_i64 dest,
     }
 
     if (ctx->state_cache_active) {
-        tcg_gen_mov_i64(dest, ia64_tr_ensure_gr_nat(ctx));
+        tcg_gen_extract_i64(dest, ia64_tr_ensure_gr_nat(ctx), reg % 64, 1);
     } else {
-        tcg_gen_ld_i64(dest, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_extract_i64(dest, cpu_gr_nat, reg % 64, 1);
     }
-    tcg_gen_shri_i64(dest, dest, reg % 64);
-    tcg_gen_andi_i64(dest, dest, 1);
 }
 
 static void ia64_tr_gr_ref_init(IA64TrGrRef *ref, uint8_t reg)
@@ -1470,27 +1585,25 @@ static void ia64_tr_write_gr_nat(DisasContext *ctx, uint8_t reg,
         return;
     }
 
-    TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
+    TCGv_i64 nat;
     TCGv_i64 bit = ia64_tr_scratch_i64(ctx);
     TCGv_i64 selected = ia64_tr_scratch_i64(ctx);
 
     tcg_gen_movi_i64(bit, UINT64_C(1) << reg);
     if (ctx->state_cache_active) {
-        tcg_gen_mov_i64(nat, ia64_tr_ensure_gr_nat(ctx));
+        nat = ia64_tr_ensure_gr_nat(ctx);
     } else {
-        tcg_gen_ld_i64(nat, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        nat = ia64_tr_scratch_i64(ctx);
+        tcg_gen_mov_i64(nat, cpu_gr_nat);
     }
     tcg_gen_andc_i64(nat, nat, bit);
     tcg_gen_neg_i64(selected, value);
     tcg_gen_and_i64(selected, selected, bit);
     tcg_gen_or_i64(nat, nat, selected);
     if (ctx->state_cache_active) {
-        tcg_gen_mov_i64(ctx->gr_nat, nat);
         ctx->gr_nat_dirty = true;
     } else {
-        tcg_gen_st_i64(nat, tcg_env,
-                       offsetof(CPUIA64State, nat.gr_nat));
+        tcg_gen_mov_i64(cpu_gr_nat, nat);
     }
 }
 
@@ -1542,7 +1655,8 @@ static int ia64_tr_data_mmu_index(DisasContext *ctx)
     return ia64_tcg_data_mmu_index_for_tb_flags(ctx->base.tb->flags);
 }
 
-static void ia64_tr_publish_fault_state(uint64_t pc, uint8_t slot_index,
+static void ia64_tr_publish_fault_state(DisasContext *ctx, uint64_t pc,
+                                        uint8_t slot_index,
                                         uint8_t slot_type, uint64_t raw,
                                         bool group_start)
 {
@@ -1553,6 +1667,8 @@ static void ia64_tr_publish_fault_state(uint64_t pc, uint8_t slot_index,
      * ISR.sp/ed for speculative loads.  The bundle-finish helper republishes
      * PSR.ri and clears the flag.
      */
+    ctx->source_frontier_maybe_changed = true;
+    ctx->restart_ri_maybe_dirty = true;
     tcg_gen_st8_i32(tcg_constant_i32(slot_index), tcg_env,
                     offsetof(CPUIA64State, ri));
     tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
@@ -1590,9 +1706,7 @@ static void ia64_tr_load_br(DisasContext *ctx, TCGv_i64 value, uint8_t reg)
     if (ctx->state_cache_active) {
         tcg_gen_mov_i64(value, ia64_tr_ensure_br(ctx, reg));
     } else {
-        tcg_gen_ld_i64(value, tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(value, cpu_br[reg]);
     }
 }
 
@@ -1608,9 +1722,7 @@ static void ia64_tr_store_br(DisasContext *ctx, uint8_t reg, TCGv_i64 value)
         ctx->br_valid |= bit;
         ctx->br_dirty |= bit;
     } else {
-        tcg_gen_st_i64(value, tcg_env,
-                       offsetof(CPUIA64State, br) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(cpu_br[reg], value);
     }
 }
 
@@ -1624,9 +1736,7 @@ static void ia64_tr_load_ar(DisasContext *ctx, TCGv_i64 value, uint8_t reg)
     if (ctx->state_cache_active) {
         tcg_gen_mov_i64(value, ia64_tr_ensure_ar(ctx, reg));
     } else {
-        tcg_gen_ld_i64(value, tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(value, cpu_ar[reg]);
     }
 }
 
@@ -1636,6 +1746,12 @@ static void ia64_tr_group_load_ordinary_ar(DisasContext *ctx,
     IA64TrInstructionTransaction *instruction =
         ctx->rewrite_group.current;
 
+    if (ctx->rewrite_group.ssa.enabled) {
+        ia64_tr_ssa_ensure_entry_ar(ctx, reg);
+        tcg_gen_mov_i64(value, ctx->rewrite_group.ssa.entry_ar[reg]);
+        return;
+    }
+
     g_assert(ctx->rewrite_group.active && instruction != NULL &&
              (instruction->source_ar[reg >> 6] &
               (UINT64_C(1) << (reg & 63))) != 0);
@@ -1644,10 +1760,41 @@ static void ia64_tr_group_load_ordinary_ar(DisasContext *ctx,
         value, tcg_env, tcg_constant_i32(reg), value);
 }
 
+static void ia64_tr_group_load_ordered_ar_effect(DisasContext *ctx,
+                                                 TCGv_i64 value, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    if (ssa->enabled) {
+        ia64_tr_ssa_ensure_live_ar(ctx, reg);
+        tcg_gen_mov_i64(value, ssa->live_ar[reg]);
+        return;
+    }
+
+    /* Shape C already publishes each successful effect to current state while
+       preserving the ordinary entry image separately. */
+    ia64_tr_load_ar(ctx, value, reg);
+}
+
 static void ia64_tr_store_ar(DisasContext *ctx, uint8_t reg, TCGv_i64 value)
 {
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    if (ssa->enabled && ctx->rewrite_group.active && !ssa->materializing) {
+        IA64TrInstructionTransaction *instruction =
+            ctx->rewrite_group.current;
+        IA64TrArEffect *write;
+
+        g_assert(instruction != NULL &&
+                 (instruction->dest_ar[reg >> 6] &
+                  (UINT64_C(1) << (reg & 63))) != 0);
+        write = ia64_tr_group_prepare_ordered_ar_effect(
+            ctx, reg, instruction->qualifier == NULL);
+        ia64_tr_group_stage_ordered_ar_effect(ctx, write, value);
+        return;
+    }
     if (ctx->rewrite_group.active &&
-        ctx->rewrite_group.current != NULL) {
+        ctx->rewrite_group.current != NULL && !ssa->materializing) {
         TCGv_i64 entry_value = ia64_tr_scratch_i64(ctx);
 
         ia64_tr_load_ar(ctx, entry_value, reg);
@@ -1671,9 +1818,7 @@ static void ia64_tr_store_ar(DisasContext *ctx, uint8_t reg, TCGv_i64 value)
         ctx->ar_valid[word] |= bit;
         ctx->ar_dirty[word] |= bit;
     } else {
-        tcg_gen_st_i64(value, tcg_env,
-                       offsetof(CPUIA64State, ar) +
-                       reg * sizeof(uint64_t));
+        tcg_gen_mov_i64(cpu_ar[reg], value);
     }
 }
 
@@ -1706,7 +1851,7 @@ static void ia64_tr_emit_gr_alat_invalidate(DisasContext *ctx,
     tcg_gen_ld_i32(valid, tcg_env,
                    offsetof(CPUIA64State, alat.valid_mask));
     tcg_gen_brcondi_i32(TCG_COND_EQ, valid, 0, done);
-    ia64_tr_commit_ip(pc);
+    ia64_tr_commit_ip(ctx, pc);
     gen_helper_gr_alat_invalidate_mask(tcg_env, dest_mask, dest_mask_hi);
     gen_set_label(done);
 }
@@ -1752,11 +1897,13 @@ static intptr_t ia64_tr_group_saved_nat_offset(uint8_t reg)
  * deliberately not the interface for the SDM's explicitly forwarded values
  * (for example alloc results or checked-load dependencies).
  */
-static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
-                                                TCGv_i64 value,
-                                                TCGv_i64 nat, uint8_t reg)
+static void ia64_tr_group_load_entry_gr_pair(DisasContext *ctx,
+                                              TCGv_i64 *valuep,
+                                              TCGv_i64 *natp, uint8_t reg)
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    TCGv_i64 value = *valuep;
+    TCGv_i64 nat = *natp;
     TCGv_i64 live_value;
     TCGv_i64 live_nat;
     TCGv_i64 saved_value;
@@ -1765,6 +1912,12 @@ static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
     unsigned half;
     uint64_t bit;
 
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_ensure_entry_gr(ctx, reg);
+        *valuep = group->ssa.entry_gr[reg];
+        *natp = group->ssa.entry_nat[reg];
+        return;
+    }
     if (reg == 0) {
         tcg_gen_movi_i64(value, 0);
         tcg_gen_movi_i64(nat, 0);
@@ -1813,12 +1966,105 @@ static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
                         saved_nat, live_nat);
 }
 
+/*
+ * A successful check-load miss is the one integer producer whose dependent
+ * GR consumers may bypass the immutable group-entry view.  The explicit
+ * physical provenance mask selects the ordered live SSA value; every other
+ * source continues to use ia64_tr_group_load_entry_gr_pair() above.  The
+ * mask is durable only when an open group crosses a real TB/page/migration
+ * boundary.
+ */
+static void ia64_tr_group_load_ordinary_gr_pair(DisasContext *ctx,
+                                                 TCGv_i64 *valuep,
+                                                 TCGv_i64 *natp, uint8_t reg)
+{
+    IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    unsigned half = reg >> 6;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+    TCGv_i64 forward;
+
+    ia64_tr_group_load_entry_gr_pair(ctx, valuep, natp, reg);
+    if (reg == 0) {
+        return;
+    }
+
+    if (group->ssa.enabled) {
+        IA64TrGroupSSA *ssa = &group->ssa;
+        TCGv_i64 selected_value;
+        TCGv_i64 selected_nat;
+
+        if ((ssa->check_gr_forward_may[half] & bit) == 0) {
+            return;
+        }
+        ia64_tr_ssa_ensure_live_gr(ctx, reg);
+        forward = ia64_tr_scratch_i64(ctx);
+        selected_value = tcg_temp_new_i64();
+        selected_nat = tcg_temp_new_i64();
+        tcg_gen_andi_i64(
+            forward, ia64_tr_ssa_ensure_check_gr_forward_mask(ssa, half),
+            bit);
+        tcg_gen_movcond_i64(TCG_COND_NE, selected_value, forward,
+                            tcg_constant_i64(0), ssa->live_gr[reg], *valuep);
+        tcg_gen_movcond_i64(TCG_COND_NE, selected_nat, forward,
+                            tcg_constant_i64(0), ssa->live_nat[reg], *natp);
+        *valuep = selected_value;
+        *natp = selected_nat;
+        return;
+    }
+
+    if (!group->check_gr_forward_may_nonzero) {
+        return;
+    }
+    {
+        TCGv_i64 live_value = ia64_tr_scratch_i64(ctx);
+        TCGv_i64 live_nat = ia64_tr_scratch_i64(ctx);
+
+        forward = ia64_tr_scratch_i64(ctx);
+        ia64_tr_load_static_gr_pair(ctx, live_value, live_nat, reg);
+        tcg_gen_ld_i64(
+            forward, tcg_env,
+            offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+                half * sizeof(uint64_t));
+        tcg_gen_andi_i64(forward, forward, bit);
+        tcg_gen_movcond_i64(TCG_COND_NE, *valuep, forward,
+                            tcg_constant_i64(0), live_value, *valuep);
+        tcg_gen_movcond_i64(TCG_COND_NE, *natp, forward,
+                            tcg_constant_i64(0), live_nat, *natp);
+    }
+}
+
+static IA64TrNatState ia64_tr_group_ordinary_gr_nat_state(
+    DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+
+    if (!ssa->enabled) {
+        return IA64_TR_NAT_UNKNOWN;
+    }
+    if ((ssa->check_gr_forward_may[reg >> 6] & bit) == 0) {
+        return ssa->entry_nat_state[reg];
+    }
+    /*
+     * The physical forwarding predicate is dynamic.  Compile-time NaT
+     * certainty therefore has to hold for both the immutable entry image and
+     * the explicitly forwarded live check-load result.
+     */
+    return ia64_tr_nat_join(ssa->entry_nat_state[reg],
+                            ssa->live_nat_state[reg]);
+}
+
 static void ia64_tr_group_load_ordinary_br(DisasContext *ctx,
                                            TCGv_i64 value, uint8_t reg)
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     uint8_t bit = 1u << reg;
 
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_ensure_entry_br(ctx, reg);
+        tcg_gen_mov_i64(value, group->ssa.entry_br[reg]);
+        return;
+    }
     g_assert(group->active && reg < IA64_BR_COUNT);
     if ((group->br_may_written & bit) == 0) {
         ia64_tr_load_br(ctx, value, reg);
@@ -1854,6 +2100,11 @@ static void ia64_tr_group_load_ordinary_pr_image(DisasContext *ctx,
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
 
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_ensure_entry_pr(ctx);
+        tcg_gen_mov_i64(value, group->ssa.entry_pr);
+        return;
+    }
     g_assert(group->active);
     if (group->pr_may_written == 0) {
         if (ctx->state_cache_active) {
@@ -1979,6 +2230,31 @@ static void ia64_tr_group_update_branch_forward_br(
     ctx->source_overlay_known_clear = false;
 }
 
+static void ia64_tr_group_update_check_forward_gr(
+    DisasContext *ctx, uint8_t reg, bool eligible)
+{
+    IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    unsigned half = reg >> 6;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+    TCGv_i64 mask = ia64_tr_scratch_i64(ctx);
+
+    g_assert(group->active && group->current != NULL && reg != 0);
+    tcg_gen_ld_i64(
+        mask, tcg_env,
+        offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+            half * sizeof(uint64_t));
+    tcg_gen_andi_i64(mask, mask, ~bit);
+    if (eligible) {
+        tcg_gen_ori_i64(mask, mask, bit);
+    }
+    tcg_gen_st_i64(
+        mask, tcg_env,
+        offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+            half * sizeof(uint64_t));
+    group->check_gr_forward_may_nonzero = true;
+    ctx->source_overlay_known_clear = false;
+}
+
 /*
  * Branches are the sole PR consumers that may bypass the ordinary source
  * epoch.  The persisted physical mask records actual eligible writes; a bit
@@ -1999,6 +2275,23 @@ static void ia64_tr_group_load_branch_predicate(DisasContext *ctx,
 
     if (predicate == 0) {
         tcg_gen_movi_i64(value, 1);
+        return;
+    }
+    if (ctx->rewrite_group.ssa.enabled) {
+        IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+        ia64_tr_ssa_ensure_entry_pr(ctx);
+        ia64_tr_ssa_ensure_branch_pr_forward_mask(ssa);
+        ia64_tr_ssa_ensure_live_pr(ctx);
+        bit = ia64_tr_scratch_i64(ctx);
+        ia64_tr_predicate_bit(ctx, bit, predicate);
+        forward = ia64_tr_scratch_i64(ctx);
+        selected = ia64_tr_scratch_i64(ctx);
+        tcg_gen_and_i64(forward, ssa->branch_pr_forward_mask, bit);
+        tcg_gen_movcond_i64(TCG_COND_NE, selected, forward,
+                            tcg_constant_i64(0), ssa->live_pr,
+                            ssa->entry_pr);
+        tcg_gen_and_i64(value, selected, bit);
         return;
     }
     g_assert(instruction != NULL &&
@@ -2043,6 +2336,19 @@ static void ia64_tr_group_load_branch_br(DisasContext *ctx, TCGv_i64 value,
 
     g_assert(instruction != NULL && reg < IA64_BR_COUNT &&
              instruction->branch_source_br == bit);
+    if (ctx->rewrite_group.ssa.enabled) {
+        IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+        ia64_tr_ssa_ensure_entry_br(ctx, reg);
+        ia64_tr_ssa_ensure_branch_br_forward_mask(ssa);
+        ia64_tr_ssa_ensure_live_br(ctx, reg);
+        forward = ia64_tr_scratch_i64(ctx);
+        tcg_gen_andi_i64(forward, ssa->branch_br_forward_mask, bit);
+        tcg_gen_movcond_i64(TCG_COND_NE, value, forward,
+                            tcg_constant_i64(0), ssa->live_br[reg],
+                            ssa->entry_br[reg]);
+        return;
+    }
     forward = ia64_tr_scratch_i64(ctx);
     live = ia64_tr_scratch_i64(ctx);
     ordinary = ia64_tr_scratch_i64(ctx);
@@ -2061,6 +2367,11 @@ static void ia64_tr_group_load_ordinary_pfs(DisasContext *ctx,
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
 
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_ensure_entry_ar(ctx, IA64_AR_PFS);
+        tcg_gen_mov_i64(value, group->ssa.entry_ar[IA64_AR_PFS]);
+        return;
+    }
     g_assert(group->active);
     if (!group->pfs_may_saved) {
         ia64_tr_load_ar(ctx, value, IA64_AR_PFS);
@@ -2096,6 +2407,19 @@ static void ia64_tr_group_load_branch_pfs(DisasContext *ctx, TCGv_i64 value)
     TCGv_i64 ordinary;
 
     g_assert(instruction != NULL && instruction->branch_source_pfs);
+    if (ctx->rewrite_group.ssa.enabled) {
+        IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+        ia64_tr_ssa_ensure_entry_ar(ctx, IA64_AR_PFS);
+        ia64_tr_ssa_ensure_branch_pfs_forwarded(ssa);
+        ia64_tr_ssa_ensure_live_ar(ctx, IA64_AR_PFS);
+        tcg_gen_movcond_i64(TCG_COND_NE, value,
+                            ssa->branch_pfs_forwarded,
+                            tcg_constant_i64(0),
+                            ssa->live_ar[IA64_AR_PFS],
+                            ssa->entry_ar[IA64_AR_PFS]);
+        return;
+    }
     forward = ia64_tr_scratch_i64(ctx);
     live = ia64_tr_scratch_i64(ctx);
     ordinary = ia64_tr_scratch_i64(ctx);
@@ -2114,6 +2438,12 @@ static void ia64_tr_group_write_pfs(DisasContext *ctx, TCGv_i64 value,
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     TCGLabel *already_saved = NULL;
 
+    if (group->ssa.enabled) {
+        ia64_tr_store_ar(ctx, IA64_AR_PFS, value);
+        tcg_gen_movi_i64(
+            ia64_tr_ssa_ensure_branch_pfs_forwarded(&group->ssa), 1);
+        return;
+    }
     g_assert(group->active && group->current != NULL);
     if (!group->pfs_must_saved) {
         if (group->pfs_may_saved) {
@@ -2299,6 +2629,81 @@ static void ia64_tr_group_clear_ordinary_source_overlay(DisasContext *ctx)
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     unsigned clears = 4;
 
+    /* A fresh fast group never published a durable source image. */
+    if (group->ssa.enabled) {
+        IA64TrGroupSSA *ssa = &group->ssa;
+
+        if (!ssa->inherited && !ssa->durable_materialized) {
+            return;
+        }
+        if (!ssa->inherited) {
+            unsigned sparse_clears = 4;
+
+            for (unsigned half = 0; half < 2; half++) {
+                if (ssa->written_gr[half] == 0) {
+                    continue;
+                }
+                tcg_gen_st_i64(
+                    tcg_constant_i64(0), tcg_env,
+                    offsetof(CPUIA64State, issue_group.saved_gr_mask) +
+                    half * sizeof(uint64_t));
+                sparse_clears++;
+            }
+            for (unsigned half = 0; half < 2; half++) {
+                if (ssa->check_gr_forward_mask[half] == NULL) {
+                    continue;
+                }
+                tcg_gen_st_i64(
+                    tcg_constant_i64(0), tcg_env,
+                    offsetof(CPUIA64State,
+                             issue_group.check_gr_forward_mask) +
+                        half * sizeof(uint64_t));
+                sparse_clears++;
+            }
+            if (ssa->written_br != 0) {
+                tcg_gen_st8_i32(
+                    tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, issue_group.saved_br_mask));
+                sparse_clears++;
+            }
+            if (ssa->written_pr) {
+                tcg_gen_st8_i32(
+                    tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, issue_group.pr_saved));
+                sparse_clears++;
+            }
+            if (ia64_tr_ssa_bit(ssa->written_ar, IA64_AR_PFS)) {
+                tcg_gen_st8_i32(
+                    tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, issue_group.pfs_saved));
+                sparse_clears++;
+            }
+            tcg_gen_st8_i32(
+                tcg_constant_i32(0), tcg_env,
+                offsetof(CPUIA64State, issue_group.saved_ar_count));
+            tcg_gen_st_i64(
+                tcg_constant_i64(0), tcg_env,
+                offsetof(CPUIA64State,
+                         issue_group.branch_pr_forward_mask));
+            tcg_gen_st8_i32(
+                tcg_constant_i32(0), tcg_env,
+                offsetof(CPUIA64State,
+                         issue_group.branch_br_forward_mask));
+            tcg_gen_st8_i32(
+                tcg_constant_i32(0), tcg_env,
+                offsetof(CPUIA64State,
+                         issue_group.branch_pfs_forwarded));
+            tcg_gen_st8_i32(
+                tcg_constant_i32(0), tcg_env,
+                offsetof(CPUIA64State, issue_group.typed_active));
+            ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR,
+                                sparse_clears);
+            ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE,
+                                sparse_clears);
+            return;
+        }
+    }
+
     if (group->gr_may_saved[0] != 0) {
         clears++;
         tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
@@ -2346,6 +2751,16 @@ static void ia64_tr_group_clear_ordinary_source_overlay(DisasContext *ctx)
             tcg_constant_i32(0), tcg_env,
             offsetof(CPUIA64State, issue_group.branch_pfs_forwarded));
     }
+    if (group->check_gr_forward_may_nonzero) {
+        clears += 2;
+        tcg_gen_st_i64(
+            tcg_constant_i64(0), tcg_env,
+            offsetof(CPUIA64State, issue_group.check_gr_forward_mask));
+        tcg_gen_st_i64(
+            tcg_constant_i64(0), tcg_env,
+            offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+                sizeof(uint64_t));
+    }
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                     offsetof(CPUIA64State, issue_group.saved_ar_count));
     tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
@@ -2357,6 +2772,725 @@ static void ia64_tr_group_clear_ordinary_source_overlay(DisasContext *ctx)
                     offsetof(CPUIA64State, issue_group.typed_active));
     ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, clears);
     ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, clears);
+}
+
+static bool ia64_tr_ssa_bit(const uint64_t mask[2], uint8_t reg)
+{
+    return (mask[reg >> 6] & (UINT64_C(1) << (reg & 63))) != 0;
+}
+
+static void ia64_tr_ssa_set_bit(uint64_t mask[2], uint8_t reg)
+{
+    mask[reg >> 6] |= UINT64_C(1) << (reg & 63);
+}
+
+static IA64TrNatState ia64_tr_nat_join(IA64TrNatState left,
+                                       IA64TrNatState right)
+{
+    return left == right ? left : IA64_TR_NAT_UNKNOWN;
+}
+
+static IA64TrNatState ia64_tr_nat_or(IA64TrNatState left,
+                                     IA64TrNatState right)
+{
+    if (left == IA64_TR_NAT_KNOWN_SET ||
+        right == IA64_TR_NAT_KNOWN_SET) {
+        return IA64_TR_NAT_KNOWN_SET;
+    }
+    if (left == IA64_TR_NAT_UNKNOWN || right == IA64_TR_NAT_UNKNOWN) {
+        return IA64_TR_NAT_UNKNOWN;
+    }
+    return IA64_TR_NAT_KNOWN_CLEAR;
+}
+
+static void ia64_tr_ssa_begin(DisasContext *ctx, bool inherited)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    memset(ssa, 0, sizeof(*ssa));
+    ssa->enabled = true;
+    ssa->inherited = inherited;
+    ctx->rewrite_ssa_inherited = inherited;
+    if (inherited) {
+        for (unsigned half = 0; half < 2; half++) {
+            ssa->check_gr_forward_may[half] = UINT64_MAX;
+            ssa->check_gr_forward_mask[half] = tcg_temp_new_i64();
+            tcg_gen_ld_i64(
+                ssa->check_gr_forward_mask[half], tcg_env,
+                offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+                    half * sizeof(uint64_t));
+        }
+        ssa->branch_pr_forward_mask = tcg_temp_new_i64();
+        ssa->branch_br_forward_mask = tcg_temp_new_i64();
+        ssa->branch_pfs_forwarded = tcg_temp_new_i64();
+        tcg_gen_ld_i64(
+            ssa->branch_pr_forward_mask, tcg_env,
+            offsetof(CPUIA64State, issue_group.branch_pr_forward_mask));
+        tcg_gen_ld8u_i64(
+            ssa->branch_br_forward_mask, tcg_env,
+            offsetof(CPUIA64State, issue_group.branch_br_forward_mask));
+        tcg_gen_ld8u_i64(
+            ssa->branch_pfs_forwarded, tcg_env,
+            offsetof(CPUIA64State, issue_group.branch_pfs_forwarded));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 5);
+    }
+}
+
+static TCGv_i64 ia64_tr_ssa_ensure_check_gr_forward_mask(
+    IA64TrGroupSSA *ssa, unsigned half)
+{
+    g_assert(half < 2);
+    if (ssa->check_gr_forward_mask[half] == NULL) {
+        g_assert(!ssa->inherited);
+        ssa->check_gr_forward_mask[half] = tcg_temp_new_i64();
+        tcg_gen_movi_i64(ssa->check_gr_forward_mask[half], 0);
+    }
+    return ssa->check_gr_forward_mask[half];
+}
+
+static TCGv_i64 ia64_tr_ssa_ensure_branch_pr_forward_mask(
+    IA64TrGroupSSA *ssa)
+{
+    if (ssa->branch_pr_forward_mask == NULL) {
+        g_assert(!ssa->inherited);
+        ssa->branch_pr_forward_mask = tcg_temp_new_i64();
+        tcg_gen_movi_i64(ssa->branch_pr_forward_mask, 0);
+    }
+    return ssa->branch_pr_forward_mask;
+}
+
+static TCGv_i64 ia64_tr_ssa_ensure_branch_br_forward_mask(
+    IA64TrGroupSSA *ssa)
+{
+    if (ssa->branch_br_forward_mask == NULL) {
+        g_assert(!ssa->inherited);
+        ssa->branch_br_forward_mask = tcg_temp_new_i64();
+        tcg_gen_movi_i64(ssa->branch_br_forward_mask, 0);
+    }
+    return ssa->branch_br_forward_mask;
+}
+
+static TCGv_i64 ia64_tr_ssa_ensure_branch_pfs_forwarded(
+    IA64TrGroupSSA *ssa)
+{
+    if (ssa->branch_pfs_forwarded == NULL) {
+        g_assert(!ssa->inherited);
+        ssa->branch_pfs_forwarded = tcg_temp_new_i64();
+        tcg_gen_movi_i64(ssa->branch_pfs_forwarded, 0);
+    }
+    return ssa->branch_pfs_forwarded;
+}
+
+static TCGv_i64 ia64_tr_ssa_ensure_pending_alat_gr_mask(
+    IA64TrGroupSSA *ssa, unsigned half)
+{
+    g_assert(half < 2);
+    if (ssa->pending_alat_gr_mask[half] == NULL) {
+        ssa->pending_alat_gr_mask[half] = tcg_temp_new_i64();
+        tcg_gen_movi_i64(ssa->pending_alat_gr_mask[half], 0);
+    }
+    return ssa->pending_alat_gr_mask[half];
+}
+
+static void ia64_tr_ssa_flush_alat_gr_effects(DisasContext *ctx)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    TCGv_i64 low;
+    TCGv_i64 high;
+
+    if (!ssa->enabled || !ctx->alat_may_active ||
+        (ssa->pending_alat_gr_mask[0] == NULL &&
+         ssa->pending_alat_gr_mask[1] == NULL)) {
+        return;
+    }
+    low = ssa->pending_alat_gr_mask[0] != NULL ?
+          ssa->pending_alat_gr_mask[0] : tcg_constant_i64(0);
+    high = ssa->pending_alat_gr_mask[1] != NULL ?
+           ssa->pending_alat_gr_mask[1] : tcg_constant_i64(0);
+    ia64_tr_emit_gr_alat_invalidate(ctx, low, high,
+                                    ctx->rewrite_group.current != NULL ?
+                                    ctx->rewrite_group.current->address :
+                                    ctx->base.pc_next);
+    /* Later instructions start a new immutable accumulation chain. */
+    ssa->pending_alat_gr_mask[0] = NULL;
+    ssa->pending_alat_gr_mask[1] = NULL;
+}
+
+static void ia64_tr_ssa_ensure_entry_gr(DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    TCGv_i64 value = NULL;
+    TCGv_i64 nat = NULL;
+
+    if (ia64_tr_ssa_bit(ssa->entry_gr_valid, reg)) {
+        return;
+    }
+    ssa->entry_nat_state[reg] = reg == 0 ? IA64_TR_NAT_KNOWN_CLEAR :
+                                           ctx->nat_state[reg];
+    if (reg == 0) {
+        value = tcg_constant_i64(0);
+        nat = tcg_constant_i64(0);
+    } else if (!ssa->inherited) {
+        value = tcg_temp_new_i64();
+        nat = tcg_temp_new_i64();
+        ia64_tr_load_static_gr_pair(ctx, value, nat, reg);
+        if (ssa->entry_nat_state[reg] == IA64_TR_NAT_KNOWN_CLEAR) {
+            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_CLEAR, 1);
+        } else if (ssa->entry_nat_state[reg] == IA64_TR_NAT_KNOWN_SET) {
+            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_SET, 1);
+        } else {
+            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_UNKNOWN, 1);
+            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_LOAD, 1);
+        }
+    } else {
+        TCGv_i64 live_value = tcg_temp_new_i64();
+        TCGv_i64 live_nat = tcg_temp_new_i64();
+        TCGv_i64 saved_value = tcg_temp_new_i64();
+        TCGv_i64 saved_nat = tcg_temp_new_i64();
+        TCGv_i64 valid = tcg_temp_new_i64();
+        intptr_t mask_offset =
+            offsetof(CPUIA64State, issue_group.saved_gr_mask) +
+            (reg >> 6) * sizeof(uint64_t);
+
+        value = tcg_temp_new_i64();
+        nat = tcg_temp_new_i64();
+        ia64_tr_load_static_gr_pair(ctx, live_value, live_nat, reg);
+        tcg_gen_ld_i64(saved_value, tcg_env,
+                       ia64_tr_group_saved_gr_offset(reg));
+        tcg_gen_ld_i64(saved_nat, tcg_env,
+                       ia64_tr_group_saved_nat_offset(reg));
+        tcg_gen_ld_i64(valid, tcg_env, mask_offset);
+        tcg_gen_andi_i64(valid, valid, UINT64_C(1) << (reg & 63));
+        tcg_gen_movcond_i64(TCG_COND_NE, value, valid,
+                            tcg_constant_i64(0), saved_value, live_value);
+        tcg_gen_movcond_i64(TCG_COND_NE, nat, valid,
+                            tcg_constant_i64(0), saved_nat, live_nat);
+        ssa->entry_nat_state[reg] = IA64_TR_NAT_UNKNOWN;
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 3);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
+        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
+    }
+    ssa->entry_gr[reg] = value;
+    ssa->entry_nat[reg] = nat;
+    ia64_tr_ssa_set_bit(ssa->entry_gr_valid, reg);
+}
+
+static void ia64_tr_ssa_ensure_live_gr(DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    if (ia64_tr_ssa_bit(ssa->live_gr_valid, reg)) {
+        return;
+    }
+    ia64_tr_ssa_ensure_entry_gr(ctx, reg);
+    ssa->live_gr[reg] = tcg_temp_new_i64();
+    ssa->live_nat[reg] = tcg_temp_new_i64();
+    if (ssa->inherited) {
+        ia64_tr_load_static_gr_pair(
+            ctx, ssa->live_gr[reg], ssa->live_nat[reg], reg);
+        ssa->live_nat_state[reg] = IA64_TR_NAT_UNKNOWN;
+    } else {
+        tcg_gen_mov_i64(ssa->live_gr[reg], ssa->entry_gr[reg]);
+        tcg_gen_mov_i64(ssa->live_nat[reg], ssa->entry_nat[reg]);
+        ssa->live_nat_state[reg] = ssa->entry_nat_state[reg];
+    }
+    ia64_tr_ssa_set_bit(ssa->live_gr_valid, reg);
+}
+
+static void ia64_tr_ssa_ensure_entry_br(DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    uint8_t bit = 1u << reg;
+
+    if ((ssa->entry_br_valid & bit) != 0) {
+        return;
+    }
+    if (!ssa->inherited) {
+        if (ctx->rewrite_shape == IA64_TR_SHAPE_A) {
+            ssa->entry_br[reg] = ia64_tr_ensure_br(ctx, reg);
+        } else {
+            ssa->entry_br[reg] = tcg_temp_new_i64();
+            ia64_tr_load_br(ctx, ssa->entry_br[reg], reg);
+        }
+    } else {
+        TCGv_i64 live = tcg_temp_new_i64();
+        TCGv_i64 saved = tcg_temp_new_i64();
+        TCGv_i64 valid = tcg_temp_new_i64();
+
+        ssa->entry_br[reg] = tcg_temp_new_i64();
+        ia64_tr_load_br(ctx, live, reg);
+        tcg_gen_ld_i64(saved, tcg_env,
+                       offsetof(CPUIA64State, issue_group.saved_br) +
+                       reg * sizeof(uint64_t));
+        tcg_gen_ld8u_i64(valid, tcg_env,
+                         offsetof(CPUIA64State,
+                                  issue_group.saved_br_mask));
+        tcg_gen_andi_i64(valid, valid, bit);
+        tcg_gen_movcond_i64(TCG_COND_NE, ssa->entry_br[reg], valid,
+                            tcg_constant_i64(0), saved, live);
+    }
+    ssa->entry_br_valid |= bit;
+}
+
+static void ia64_tr_ssa_ensure_live_br(DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    uint8_t bit = 1u << reg;
+
+    if ((ssa->live_br_valid & bit) != 0) {
+        return;
+    }
+    ia64_tr_ssa_ensure_entry_br(ctx, reg);
+    ssa->live_br[reg] = tcg_temp_new_i64();
+    if (ssa->inherited) {
+        ia64_tr_load_br(ctx, ssa->live_br[reg], reg);
+    } else {
+        tcg_gen_mov_i64(ssa->live_br[reg], ssa->entry_br[reg]);
+    }
+    ssa->live_br_valid |= bit;
+}
+
+static void ia64_tr_ssa_ensure_entry_pr(DisasContext *ctx)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    if (ssa->entry_pr_valid) {
+        return;
+    }
+    ssa->entry_pr = tcg_temp_new_i64();
+    if (!ssa->inherited) {
+        tcg_gen_mov_i64(ssa->entry_pr, ia64_tr_ensure_pr(ctx));
+    } else {
+        TCGv_i64 saved = tcg_temp_new_i64();
+        TCGv_i64 valid = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(saved, tcg_env,
+                       offsetof(CPUIA64State, issue_group.saved_pr));
+        tcg_gen_ld8u_i64(valid, tcg_env,
+                         offsetof(CPUIA64State, issue_group.pr_saved));
+        tcg_gen_movcond_i64(TCG_COND_NE, ssa->entry_pr, valid,
+                            tcg_constant_i64(0), saved,
+                            ia64_tr_ensure_pr(ctx));
+    }
+    tcg_gen_ori_i64(ssa->entry_pr, ssa->entry_pr, 1);
+    ssa->entry_pr_valid = true;
+}
+
+static void ia64_tr_ssa_ensure_live_pr(DisasContext *ctx)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    if (ssa->live_pr_valid) {
+        return;
+    }
+    ia64_tr_ssa_ensure_entry_pr(ctx);
+    ssa->live_pr = tcg_temp_new_i64();
+    if (ssa->inherited) {
+        tcg_gen_mov_i64(ssa->live_pr, ia64_tr_ensure_pr(ctx));
+    } else {
+        tcg_gen_mov_i64(ssa->live_pr, ssa->entry_pr);
+    }
+    ssa->live_pr_valid = true;
+}
+
+static void ia64_tr_ssa_ensure_entry_ar(DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    unsigned word = reg >> 6;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+
+    if ((ssa->entry_ar_valid[word] & bit) != 0) {
+        return;
+    }
+    if (!ssa->inherited && reg != IA64_AR_UNAT &&
+        ctx->rewrite_shape == IA64_TR_SHAPE_A) {
+        ssa->entry_ar[reg] = ia64_tr_ensure_ar(ctx, reg);
+    } else {
+        ssa->entry_ar[reg] = tcg_temp_new_i64();
+        ia64_tr_load_ar(ctx, ssa->entry_ar[reg], reg);
+    }
+    if (ssa->inherited) {
+        if (reg == IA64_AR_PFS) {
+            TCGv_i64 saved = tcg_temp_new_i64();
+            TCGv_i64 valid = tcg_temp_new_i64();
+
+            tcg_gen_ld_i64(
+                saved, tcg_env,
+                offsetof(CPUIA64State, issue_group.saved_pfs));
+            tcg_gen_ld8u_i64(
+                valid, tcg_env,
+                offsetof(CPUIA64State, issue_group.pfs_saved));
+            tcg_gen_movcond_i64(
+                TCG_COND_NE, ssa->entry_ar[reg], valid,
+                tcg_constant_i64(0), saved, ssa->entry_ar[reg]);
+        } else {
+            gen_helper_data_plane_ar_select(
+                ssa->entry_ar[reg], tcg_env, tcg_constant_i32(reg),
+                ssa->entry_ar[reg]);
+        }
+    }
+    ssa->entry_ar_valid[word] |= bit;
+}
+
+static void ia64_tr_ssa_ensure_live_ar(DisasContext *ctx, uint8_t reg)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    unsigned word = reg >> 6;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+
+    if ((ssa->live_ar_valid[word] & bit) != 0) {
+        return;
+    }
+    ia64_tr_ssa_ensure_entry_ar(ctx, reg);
+    ssa->live_ar[reg] = tcg_temp_new_i64();
+    if (ssa->inherited) {
+        ia64_tr_load_ar(ctx, ssa->live_ar[reg], reg);
+    } else {
+        tcg_gen_mov_i64(ssa->live_ar[reg], ssa->entry_ar[reg]);
+    }
+    ssa->live_ar_valid[word] |= bit;
+}
+
+static void ia64_tr_ssa_capture_safepoint(DisasContext *ctx,
+                                          IA64TrSafepointMap *map)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    memset(map, 0, sizeof(*map));
+    if (!ssa->enabled) {
+        return;
+    }
+    map->gr[0] = ssa->dirty_gr[0];
+    map->gr[1] = ssa->dirty_gr[1];
+    map->br = ssa->dirty_br;
+    map->ar[0] = ssa->dirty_ar[0];
+    map->ar[1] = ssa->dirty_ar[1];
+    map->pr = ssa->dirty_pr ? UINT64_MAX : 0;
+    map->cfm = ssa->dirty_cfm;
+}
+
+static void ia64_tr_ssa_materialize_map(DisasContext *ctx,
+                                        const IA64TrSafepointMap *map,
+                                        bool consume_dirty)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    unsigned commits = 0;
+
+    if (!ssa->enabled) {
+        return;
+    }
+    ssa->materializing = true;
+    for (unsigned half = 0; half < 2; half++) {
+        uint64_t pending = map->gr[half];
+
+        while (pending != 0) {
+            uint8_t reg = half * 64 + ctz64(pending);
+            IA64TrGrRef ref;
+
+            ia64_tr_gr_ref_init(&ref, reg);
+            ia64_tr_store_static_gr_ref_pair(
+                ctx, &ref, ssa->live_gr[reg], ssa->live_nat[reg]);
+            ctx->nat_state[reg] = ssa->live_nat_state[reg];
+            pending &= pending - 1;
+            commits++;
+        }
+    }
+    {
+        uint8_t pending = map->br;
+
+        while (pending != 0) {
+            uint8_t reg = ctz32(pending);
+
+            ia64_tr_store_br(ctx, reg, ssa->live_br[reg]);
+            pending &= pending - 1;
+            commits++;
+        }
+    }
+    for (unsigned word = 0; word < 2; word++) {
+        uint64_t pending = map->ar[word];
+
+        while (pending != 0) {
+            uint8_t reg = word * 64 + ctz64(pending);
+
+            if (ctx->state_cache_active && reg != IA64_AR_UNAT) {
+                uint64_t bit = UINT64_C(1) << (reg & 63);
+
+                /*
+                 * The SSA live value is a persistent TB temporary.  Rename
+                 * the resident AR handle to it instead of copying through a
+                 * second cache temporary before the eventual architectural
+                 * store.
+                 */
+                ctx->ar[reg] = ssa->live_ar[reg];
+                ctx->ar_valid[word] |= bit;
+                ctx->ar_dirty[word] |= bit;
+            } else {
+                ia64_tr_store_ar(ctx, reg, ssa->live_ar[reg]);
+            }
+            pending &= pending - 1;
+            commits++;
+        }
+    }
+    if (map->pr != 0) {
+        tcg_gen_mov_i64(ia64_tr_ensure_pr(ctx), ssa->live_pr);
+        ctx->pr_dirty = true;
+        commits++;
+    }
+    if (map->cfm) {
+        tcg_gen_mov_i64(cpu_cfm, ssa->live_cfm);
+        commits++;
+    }
+    ssa->materializing = false;
+    ia64_tr_profile_add(ctx, IA64_PROFILE_FINAL_COMMIT, commits);
+    if (consume_dirty) {
+        ssa->dirty_gr[0] &= ~map->gr[0];
+        ssa->dirty_gr[1] &= ~map->gr[1];
+        ssa->dirty_br &= ~map->br;
+        ssa->dirty_ar[0] &= ~map->ar[0];
+        ssa->dirty_ar[1] &= ~map->ar[1];
+        if (map->pr != 0) {
+            ssa->dirty_pr = false;
+        }
+        if (map->cfm) {
+            ssa->dirty_cfm = false;
+        }
+    }
+}
+
+static void ia64_tr_ssa_materialize_dirty(DisasContext *ctx)
+{
+    IA64TrSafepointMap map;
+
+    ia64_tr_ssa_flush_alat_gr_effects(ctx);
+    ia64_tr_ssa_capture_safepoint(ctx, &map);
+    ia64_tr_ssa_materialize_map(ctx, &map, true);
+}
+
+static void ia64_tr_ssa_materialize_safepoint(DisasContext *ctx)
+{
+    IA64TrSafepointMap map;
+
+    ia64_tr_ssa_flush_alat_gr_effects(ctx);
+    ia64_tr_ssa_capture_safepoint(ctx, &map);
+    /* The exceptional/helper arm may be skipped by generated control flow. */
+    ia64_tr_ssa_materialize_map(ctx, &map, false);
+}
+
+static void ia64_tr_ssa_materialize_continuation(DisasContext *ctx)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+    unsigned saved = 0;
+
+    g_assert(ssa->enabled);
+    ia64_tr_ssa_materialize_dirty(ctx);
+    /* Sparse AR preservation helpers require an explicit durable owner. */
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                    offsetof(CPUIA64State, issue_group.typed_active));
+
+    for (unsigned half = 0; half < 2; half++) {
+        uint64_t pending = ssa->written_gr[half];
+
+        while (pending != 0) {
+            uint8_t reg = half * 64 + ctz64(pending);
+
+            tcg_gen_st_i64(ssa->entry_gr[reg], tcg_env,
+                           ia64_tr_group_saved_gr_offset(reg));
+            tcg_gen_st_i64(ssa->entry_nat[reg], tcg_env,
+                           ia64_tr_group_saved_nat_offset(reg));
+            pending &= pending - 1;
+            saved += 2;
+        }
+        if (ssa->written_gr[half] != 0) {
+            intptr_t offset =
+                offsetof(CPUIA64State, issue_group.saved_gr_mask) +
+                half * sizeof(uint64_t);
+
+            if (ssa->inherited) {
+                TCGv_i64 mask = tcg_temp_new_i64();
+
+                tcg_gen_ld_i64(mask, tcg_env, offset);
+                tcg_gen_ori_i64(mask, mask, ssa->written_gr[half]);
+                tcg_gen_st_i64(mask, tcg_env, offset);
+            } else {
+                tcg_gen_st_i64(tcg_constant_i64(ssa->written_gr[half]),
+                               tcg_env, offset);
+            }
+            saved++;
+        }
+    }
+    if (ssa->written_br != 0) {
+        uint8_t pending = ssa->written_br;
+
+        while (pending != 0) {
+            uint8_t reg = ctz32(pending);
+
+            tcg_gen_st_i64(
+                ssa->entry_br[reg], tcg_env,
+                offsetof(CPUIA64State, issue_group.saved_br) +
+                reg * sizeof(uint64_t));
+            pending &= pending - 1;
+            saved++;
+        }
+        if (ssa->inherited) {
+            TCGv_i64 mask = tcg_temp_new_i64();
+
+            tcg_gen_ld8u_i64(
+                mask, tcg_env,
+                offsetof(CPUIA64State, issue_group.saved_br_mask));
+            tcg_gen_ori_i64(mask, mask, ssa->written_br);
+            tcg_gen_st8_i64(
+                mask, tcg_env,
+                offsetof(CPUIA64State, issue_group.saved_br_mask));
+        } else {
+            tcg_gen_st8_i32(
+                tcg_constant_i32(ssa->written_br), tcg_env,
+                offsetof(CPUIA64State, issue_group.saved_br_mask));
+        }
+        saved++;
+    }
+    if (ssa->written_pr) {
+        tcg_gen_st_i64(ssa->entry_pr, tcg_env,
+                       offsetof(CPUIA64State, issue_group.saved_pr));
+        tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                        offsetof(CPUIA64State, issue_group.pr_saved));
+        saved += 2;
+    }
+    for (unsigned word = 0; word < 2; word++) {
+        uint64_t pending = ssa->written_ar[word];
+
+        while (pending != 0) {
+            uint8_t reg = word * 64 + ctz64(pending);
+
+            if (reg == IA64_AR_PFS) {
+                tcg_gen_st_i64(
+                    ssa->entry_ar[reg], tcg_env,
+                    offsetof(CPUIA64State, issue_group.saved_pfs));
+                tcg_gen_st8_i32(
+                    tcg_constant_i32(1), tcg_env,
+                    offsetof(CPUIA64State, issue_group.pfs_saved));
+                saved += 2;
+            } else {
+                gen_helper_data_plane_ar_preserve(
+                    tcg_env, tcg_constant_i32(reg), ssa->entry_ar[reg]);
+                saved++;
+            }
+            pending &= pending - 1;
+        }
+    }
+    for (unsigned half = 0; half < 2; half++) {
+        if (ssa->check_gr_forward_mask[half] == NULL) {
+            continue;
+        }
+        tcg_gen_st_i64(
+            ssa->check_gr_forward_mask[half], tcg_env,
+            offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+                half * sizeof(uint64_t));
+        saved++;
+    }
+    if (ssa->branch_pr_forward_mask != NULL) {
+        tcg_gen_st_i64(
+            ssa->branch_pr_forward_mask, tcg_env,
+            offsetof(CPUIA64State, issue_group.branch_pr_forward_mask));
+        saved++;
+    }
+    if (ssa->branch_br_forward_mask != NULL) {
+        tcg_gen_st8_i64(
+            ssa->branch_br_forward_mask, tcg_env,
+            offsetof(CPUIA64State, issue_group.branch_br_forward_mask));
+        saved++;
+    }
+    if (ssa->branch_pfs_forwarded != NULL) {
+        tcg_gen_st8_i64(
+            ssa->branch_pfs_forwarded, tcg_env,
+            offsetof(CPUIA64State, issue_group.branch_pfs_forwarded));
+        saved++;
+    }
+
+    ssa->durable_materialized = true;
+    ctx->source_overlay_known_clear = false;
+    ia64_tr_profile_add(ctx, IA64_PROFILE_DURABLE_MATERIALIZATION, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_DURABLE_BYTES,
+                        saved * sizeof(uint64_t));
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, saved);
+}
+
+/*
+ * Define every immutable group-entry operand, and every live operand selected
+ * by dynamic architectural forwarding, before an instruction's runtime
+ * qualifier can split control flow.  The planner, rather than a lazy load in
+ * an emitter, owns this placement: a source first encountered in a nullified
+ * instruction must still have a definition on the false predecessor because
+ * a differently predicated instruction later in the same issue group may
+ * consume that value.  These are side-effect-free architectural state reads;
+ * guest memory and faulting work remain behind their guards.
+ */
+static void ia64_tr_ssa_prime_instruction_sources(
+    DisasContext *ctx, const IA64TrInstructionPlan *plan)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    g_assert(ssa->enabled);
+    for (unsigned half = 0; half < 2; half++) {
+        uint64_t pending = plan->source_gr[half];
+
+        while (pending != 0) {
+            uint8_t reg = half * 64 + ctz64(pending);
+            uint64_t bit = UINT64_C(1) << (reg & 63);
+
+            ia64_tr_ssa_ensure_entry_gr(ctx, reg);
+            if ((ssa->check_gr_forward_may[half] & bit) != 0) {
+                ia64_tr_ssa_ensure_live_gr(ctx, reg);
+            }
+            pending &= pending - 1;
+        }
+    }
+    {
+        uint8_t pending = plan->source_br | plan->branch_source_br;
+
+        while (pending != 0) {
+            uint8_t reg = ctz32(pending);
+
+            ia64_tr_ssa_ensure_entry_br(ctx, reg);
+            if ((plan->branch_source_br & (1u << reg)) != 0) {
+                ia64_tr_ssa_ensure_live_br(ctx, reg);
+            }
+            pending &= pending - 1;
+        }
+    }
+    for (unsigned word = 0; word < 2; word++) {
+        uint64_t pending = plan->source_ar[word];
+
+        while (pending != 0) {
+            uint8_t reg = word * 64 + ctz64(pending);
+
+            /*
+             * A non-PFS mov r=ar source is owned by the architectural read
+             * helper.  In particular, AR.ITC synchronizes against the virtual
+             * clock at the instruction, and RSE ARs select their canonical
+             * state there.  Hoisting an env-backed mirror into the immutable
+             * entry image would both cross the predicate and discard the
+             * helper's value.  The lowering installs the first successful
+             * helper result as the group-entry value instead.
+             */
+            if (plan->opcode == IA64_OP_MOV_ARGR &&
+                reg != IA64_AR_PFS) {
+                pending &= pending - 1;
+                continue;
+            }
+            ia64_tr_ssa_ensure_entry_ar(ctx, reg);
+            pending &= pending - 1;
+        }
+    }
+    if ((plan->source_pr | plan->branch_source_pr) != 0) {
+        ia64_tr_ssa_ensure_entry_pr(ctx);
+    }
+    if (plan->branch_source_pr != 0) {
+        ia64_tr_ssa_ensure_live_pr(ctx);
+    }
+    if (plan->branch_source_pfs) {
+        ia64_tr_ssa_ensure_entry_ar(ctx, IA64_AR_PFS);
+        ia64_tr_ssa_ensure_live_ar(ctx, IA64_AR_PFS);
+    }
 }
 
 static void ia64_tr_group_begin_instruction(
@@ -2375,6 +3509,9 @@ static void ia64_tr_group_begin_instruction(
     g_assert(plan->address == insn->address && plan->slot == insn->slot);
     if (!group->active) {
         g_assert(group->instruction_count == 0);
+        if (ctx->rewrite_ssa_enabled) {
+            ia64_tr_ssa_begin(ctx, !insn->starts_group);
+        }
         if (insn->starts_group) {
             /*
              * A control-flow split can conservatively leave the translation
@@ -2385,7 +3522,7 @@ static void ia64_tr_group_begin_instruction(
              * makes debug and release builds follow the same path instead of
              * relying on an assertion-only invariant.
              */
-            if (!ctx->source_overlay_known_clear) {
+            if (!group->ssa.enabled && !ctx->source_overlay_known_clear) {
                 ia64_tr_store_source_visibility_state(ctx, true, false);
                 ctx->source_overlay_known_clear = true;
             }
@@ -2402,6 +3539,7 @@ static void ia64_tr_group_begin_instruction(
             group->pr_may_saved = false;
             group->pr_must_saved = false;
             group->branch_forward_may_nonzero = false;
+            group->check_gr_forward_may_nonzero = false;
             group->branch_br_forward_may_nonzero = false;
             group->pfs_may_saved = false;
             group->pfs_must_saved = false;
@@ -2421,6 +3559,7 @@ static void ia64_tr_group_begin_instruction(
             group->pr_may_saved = true;
             group->pr_must_saved = false;
             group->branch_forward_may_nonzero = true;
+            group->check_gr_forward_may_nonzero = true;
             group->branch_br_forward_may_nonzero = true;
             group->pfs_may_saved = true;
             group->pfs_must_saved = false;
@@ -2444,8 +3583,11 @@ static void ia64_tr_group_begin_instruction(
         tcg_set_insn_start_param(
             ctx->base.insn_start, 2,
             source_visibility | IA64_INSN_START_TYPED_GROUP);
-        tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
-                        offsetof(CPUIA64State, issue_group.typed_active));
+        if (!group->ssa.enabled) {
+            tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                            offsetof(CPUIA64State,
+                                     issue_group.typed_active));
+        }
         ctx->typed_group_active = true;
     }
 
@@ -2455,6 +3597,10 @@ static void ia64_tr_group_begin_instruction(
     instruction->slot = insn->slot;
     memcpy(instruction->dest_gr, plan->dest_gr,
            sizeof(instruction->dest_gr));
+    memcpy(instruction->forward_gr, plan->forward_gr,
+           sizeof(instruction->forward_gr));
+    g_assert((instruction->forward_gr[0] & ~instruction->dest_gr[0]) == 0 &&
+             (instruction->forward_gr[1] & ~instruction->dest_gr[1]) == 0);
     memcpy(instruction->preserve_gr, plan->preserve_gr,
            sizeof(instruction->preserve_gr));
     memcpy(instruction->must_gr, plan->must_gr,
@@ -2481,19 +3627,45 @@ static void ia64_tr_group_begin_instruction(
     instruction->forward_pfs = plan->forward_pfs;
     instruction->branch_source_pfs = plan->branch_source_pfs;
     instruction->must_pfs = plan->must_pfs;
-    if (!ia64_tr_psr_finish_specialization_enabled() ||
-        (ctx->base.tb->flags & IA64_TB_FLAG_PSR_FINISH) != 0) {
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_PSR_ONESHOT) != 0) {
         if (group->pre_psr == NULL) {
             group->pre_psr = tcg_temp_new_i64();
         }
         instruction->pre_psr = group->pre_psr;
-        tcg_gen_ld_i64(instruction->pre_psr, tcg_env,
-                       offsetof(CPUIA64State, psr));
+        tcg_gen_mov_i64(instruction->pre_psr, cpu_psr);
+    }
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_PSR_IC) != 0) {
+        uint64_t bundle_ip = insn->address &
+            ~(uint64_t)(IA64_BUNDLE_SIZE - 1);
+
+        if (ctx->iipa_emitted_bundle != bundle_ip) {
+            instruction->publish_iipa = true;
+            ctx->iipa_emitted_bundle = bundle_ip;
+        }
     }
     group->current = instruction;
     ctx->rewrite_i64_scratch_count = 0;
     ctx->rewrite_i32_scratch_count = 0;
     ctx->rewrite_scratch_active = true;
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_prime_instruction_sources(ctx, plan);
+        for (unsigned word = 0; word < 2; word++) {
+            uint64_t pending = instruction->dest_ar[word];
+
+            while (pending != 0) {
+                uint8_t reg = word * 64 + ctz64(pending);
+
+                /*
+                 * Every predicated AR definition is an old/new SSA merge.
+                 * Seed the live output before its runtime guard so a false
+                 * path and a later continuation never expose an undefined
+                 * TCG temporary.
+                 */
+                ia64_tr_ssa_ensure_live_ar(ctx, reg);
+                pending &= pending - 1;
+            }
+        }
+    }
 }
 
 static IA64TrGrWrite *ia64_tr_group_prepare_gr(DisasContext *ctx,
@@ -2518,8 +3690,40 @@ static IA64TrGrWrite *ia64_tr_group_prepare_gr(DisasContext *ctx,
     write->must_write =
         (instruction->must_gr[reg >= 64] &
          (UINT64_C(1) << (reg % 64))) != 0;
+    write->forward_to_dependent =
+        (instruction->forward_gr[reg >= 64] &
+         (UINT64_C(1) << (reg % 64))) != 0;
     g_assert((instruction->dest_gr[reg >= 64] &
               (UINT64_C(1) << (reg % 64))) != 0);
+    write->ssa = group->ssa.enabled;
+    if (write->ssa) {
+        IA64TrGroupSSA *ssa = &group->ssa;
+
+        ia64_tr_ssa_ensure_entry_gr(ctx, reg);
+        /* A Shape-A/B definition is a unique SSA value for this group. */
+        write->value = tcg_temp_new_i64();
+        write->nat = tcg_temp_new_i64();
+        write->dependent_forwarded = NULL;
+        if (write->forward_to_dependent) {
+            write->dependent_forwarded = tcg_temp_new_i64();
+            tcg_gen_movi_i64(write->dependent_forwarded, 0);
+        }
+        write->written = NULL;
+        if (!write->must_write) {
+            ia64_tr_ssa_ensure_live_gr(ctx, reg);
+            write->previous_value = ssa->live_gr[reg];
+            write->previous_nat = ssa->live_nat[reg];
+            tcg_gen_mov_i64(write->value, write->previous_value);
+            tcg_gen_mov_i64(write->nat, write->previous_nat);
+            write->previous_nat_state = ssa->live_nat_state[reg];
+        } else {
+            write->previous_value = NULL;
+            write->previous_nat = NULL;
+            write->previous_nat_state = ssa->entry_nat_state[reg];
+        }
+        write->nat_state = write->previous_nat_state;
+        return write;
+    }
     if (group->gr_value[index] == NULL) {
         group->gr_value[index] = tcg_temp_new_i64();
         group->gr_nat[index] = tcg_temp_new_i64();
@@ -2565,7 +3769,73 @@ static void ia64_tr_group_stage_gr(IA64TrGrWrite *write,
     }
     tcg_gen_mov_i64(write->value, value);
     tcg_gen_mov_i64(write->nat, nat);
-    if (!write->must_write) {
+    if (write->dependent_forwarded != NULL) {
+        tcg_gen_movi_i64(write->dependent_forwarded, 1);
+    }
+    write->nat_state = IA64_TR_NAT_UNKNOWN;
+    if (!write->ssa && !write->must_write) {
+        tcg_gen_movi_i64(write->written, 1);
+    }
+}
+
+static IA64TrArEffect *ia64_tr_group_prepare_ordered_ar_effect(
+    DisasContext *ctx, uint8_t reg, bool must_write)
+{
+    IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    IA64TrInstructionTransaction *instruction = group->current;
+    IA64TrArEffect *write;
+    uint64_t bit = UINT64_C(1) << (reg & 63);
+
+    g_assert(instruction != NULL);
+    g_assert(instruction->ar_effect_count <
+             ARRAY_SIZE(instruction->ar_effect));
+    g_assert((instruction->dest_ar[reg >> 6] & bit) != 0);
+    write = &instruction->ar_effect[instruction->ar_effect_count++];
+    write->reg = reg;
+    write->ssa = group->ssa.enabled;
+    write->must_write = must_write;
+    if (write->ssa) {
+        ia64_tr_ssa_ensure_live_ar(ctx, reg);
+        write->previous_value = group->ssa.live_ar[reg];
+        write->value = tcg_temp_new_i64();
+        if (!must_write) {
+            /* Keep the candidate defined on the qualifier-false predecessor;
+               retirement still emits the explicit old/new SSA merge. */
+            tcg_gen_mov_i64(write->value, write->previous_value);
+        }
+    }
+    return write;
+}
+
+static void ia64_tr_group_stage_ordered_ar_effect(
+    DisasContext *ctx, IA64TrArEffect *write, TCGv_i64 value)
+{
+    g_assert(write != NULL);
+    if (write->ssa) {
+        tcg_gen_mov_i64(write->value, value);
+    } else {
+        ia64_tr_store_ar(ctx, write->reg, value);
+    }
+}
+
+static void ia64_tr_group_stage_gr_known(IA64TrGrWrite *write,
+                                         TCGv_i64 value,
+                                         IA64TrNatState nat_state)
+{
+    if (write == NULL) {
+        return;
+    }
+    g_assert(nat_state != IA64_TR_NAT_UNKNOWN);
+    tcg_gen_mov_i64(write->value, value);
+    tcg_gen_movi_i64(write->nat,
+                     nat_state == IA64_TR_NAT_KNOWN_SET);
+    if (write->dependent_forwarded != NULL) {
+        tcg_gen_movi_i64(write->dependent_forwarded, 1);
+    }
+    write->nat_state = write->ssa && !write->must_write ?
+                       ia64_tr_nat_join(write->previous_nat_state, nat_state) :
+                       nat_state;
+    if (!write->ssa && !write->must_write) {
         tcg_gen_movi_i64(write->written, 1);
     }
 }
@@ -2588,6 +3858,22 @@ static IA64TrBrWrite *ia64_tr_group_prepare_br(DisasContext *ctx,
     write->preserve_source = (instruction->preserve_br & bit) != 0;
     write->must_write = (instruction->must_br & bit) != 0;
     write->forward_to_branch = (instruction->forward_br & bit) != 0;
+    write->ssa = group->ssa.enabled;
+    if (write->ssa) {
+        IA64TrGroupSSA *ssa = &group->ssa;
+
+        ia64_tr_ssa_ensure_entry_br(ctx, reg);
+        write->value = tcg_temp_new_i64();
+        if (!write->must_write) {
+            ia64_tr_ssa_ensure_live_br(ctx, reg);
+            write->previous_value = ssa->live_br[reg];
+            tcg_gen_mov_i64(write->value, write->previous_value);
+        } else {
+            write->previous_value = NULL;
+        }
+        write->written = NULL;
+        return write;
+    }
     if (group->br_value[index] == NULL) {
         group->br_value[index] = tcg_temp_new_i64();
     }
@@ -2611,7 +3897,7 @@ static IA64TrBrWrite *ia64_tr_group_prepare_br(DisasContext *ctx,
 static void ia64_tr_group_stage_br(IA64TrBrWrite *write, TCGv_i64 value)
 {
     tcg_gen_mov_i64(write->value, value);
-    if (!write->must_write) {
+    if (!write->ssa && !write->must_write) {
         tcg_gen_movi_i64(write->written, 1);
     }
 }
@@ -2637,6 +3923,33 @@ static IA64TrPrWrite *ia64_tr_group_prepare_pr(DisasContext *ctx,
         (instruction->must_pr & (UINT64_C(1) << predicate)) != 0;
     g_assert((instruction->dest_pr &
               (UINT64_C(1) << predicate)) != 0);
+    write->ssa = group->ssa.enabled;
+    if (write->ssa) {
+        IA64TrGroupSSA *ssa = &group->ssa;
+
+        ia64_tr_ssa_ensure_live_pr(ctx);
+        write->written = NULL;
+        write->forward_to_branch =
+            (instruction->forward_pr &
+             (UINT64_C(1) << predicate)) != 0;
+        write->physical_bit = ia64_tr_scratch_i64(ctx);
+        ia64_tr_predicate_bit(ctx, write->physical_bit, predicate);
+        /* A Shape-A/B predicate definition owns an immutable producer. */
+        write->value = tcg_temp_new_i64();
+        if (!write->must_write) {
+            TCGv_i64 selected = ia64_tr_scratch_i64(ctx);
+
+            write->previous_value = tcg_temp_new_i64();
+            tcg_gen_and_i64(selected, ssa->live_pr,
+                            write->physical_bit);
+            tcg_gen_setcondi_i64(TCG_COND_NE, write->previous_value,
+                                 selected, 0);
+            tcg_gen_mov_i64(write->value, write->previous_value);
+        } else {
+            write->previous_value = NULL;
+        }
+        return write;
+    }
     if (group->pr_value[index] == NULL) {
         group->pr_value[index] = tcg_temp_new_i64();
     }
@@ -2665,7 +3978,7 @@ static void ia64_tr_group_stage_pr_bool(IA64TrPrWrite *write,
         return;
     }
     tcg_gen_mov_i64(write->value, value);
-    if (!write->must_write) {
+    if (!write->ssa && !write->must_write) {
         tcg_gen_movi_i64(write->written, 1);
     }
 }
@@ -2698,6 +4011,23 @@ ia64_tr_group_prepare_pr_image(DisasContext *ctx, uint64_t mask)
     write->active = true;
     write->mask = mask;
     write->must_write = (instruction->must_pr & mask) == mask;
+    write->ssa = group->ssa.enabled;
+    if (write->ssa) {
+        IA64TrGroupSSA *ssa = &group->ssa;
+
+        ia64_tr_ssa_ensure_live_pr(ctx);
+        write->written = NULL;
+        write->forward_bits = instruction->forward_pr & mask;
+        /* Packed predicate images are SSA producers too, not scratch slots. */
+        write->value = tcg_temp_new_i64();
+        if (!write->must_write) {
+            write->previous_value = ssa->live_pr;
+            tcg_gen_mov_i64(write->value, write->previous_value);
+        } else {
+            write->previous_value = NULL;
+        }
+        return write;
+    }
     if (group->pr_image_value == NULL) {
         group->pr_image_value = tcg_temp_new_i64();
     }
@@ -2726,7 +4056,7 @@ static void ia64_tr_group_stage_pr_image(IA64TrPrImageWrite *write,
         return;
     }
     tcg_gen_mov_i64(write->value, value);
-    if (!write->must_write) {
+    if (!write->ssa && !write->must_write) {
         tcg_gen_movi_i64(write->written, 1);
     }
 }
@@ -2753,17 +4083,267 @@ static void ia64_tr_write_pr_image_masked(DisasContext *ctx,
     }
 }
 
+/*
+ * A predicated definition has two runtime predecessors.  Keep the producer
+ * payload and the old live value separate, then emit the explicit SSA merge
+ * after the qualifier label.  Renaming a conditionally redefined temporary
+ * as the live value hides this phi from TCG and is not a valid issue-group SSA
+ * representation, even when the candidate was seeded with the old payload.
+ */
+static TCGv_i64 ia64_tr_ssa_merge_write(
+    IA64TrInstructionTransaction *instruction, bool must_write,
+    TCGv_i64 candidate, TCGv_i64 previous)
+{
+    TCGv_i64 merged;
+
+    if (must_write || instruction->qualifier == NULL) {
+        return candidate;
+    }
+    g_assert(previous != NULL);
+    merged = tcg_temp_new_i64();
+    tcg_gen_movcond_i64(TCG_COND_NE, merged, instruction->qualifier,
+                        tcg_constant_i64(0), candidate, previous);
+    return merged;
+}
+
 static void ia64_tr_group_retire_instruction(
     DisasContext *ctx, IA64TrInstructionTransaction *instruction)
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
+    IA64TrGroupSSA *ssa = &group->ssa;
     TCGv_i64 dest_mask = NULL;
     TCGv_i64 dest_mask_hi = NULL;
     unsigned writes = instruction->gr_count + instruction->br_count +
-                      instruction->pr_count +
+                      instruction->pr_count + instruction->ar_effect_count +
                       instruction->pr_image.active;
 
     ia64_tr_profile_add(ctx, IA64_PROFILE_STAGED_WRITE, writes);
+
+    if (ssa->enabled) {
+        /*
+         * Shape A/B retirement is an SSA rename, not an architectural
+         * transaction.  Qualifier-false paths retained the old live value in
+         * prepare, so the merge has no runtime `written' flag or validity
+         * branch.  The dirty map is the sole publication contract.
+         */
+        for (unsigned i = 0; i < instruction->gr_count; i++) {
+            IA64TrGrWrite *write = &instruction->gr[i];
+            unsigned half = write->reg >= 64;
+            uint64_t bit = UINT64_C(1) << (write->reg % 64);
+            TCGv_i64 value;
+            TCGv_i64 nat;
+
+            g_assert(write->ssa);
+            value = ia64_tr_ssa_merge_write(
+                instruction, write->must_write, write->value,
+                write->previous_value);
+            nat = ia64_tr_ssa_merge_write(
+                instruction, write->must_write, write->nat,
+                write->previous_nat);
+            ssa->live_gr[write->reg] = value;
+            ssa->live_nat[write->reg] = nat;
+            ia64_tr_ssa_set_bit(ssa->live_gr_valid, write->reg);
+            ssa->live_nat_state[write->reg] = write->nat_state;
+            ssa->dirty_gr[half] |= bit;
+            ssa->written_gr[half] |= bit;
+            if (ctx->alat_may_active) {
+                TCGv_i64 previous =
+                    ia64_tr_ssa_ensure_pending_alat_gr_mask(ssa, half);
+                TCGv_i64 next = tcg_temp_new_i64();
+
+                if (write->must_write) {
+                    tcg_gen_ori_i64(next, previous, bit);
+                } else {
+                    TCGv_i64 committed_bit = tcg_temp_new_i64();
+
+                    g_assert(instruction->qualifier != NULL);
+                    tcg_gen_shli_i64(committed_bit,
+                                     instruction->qualifier,
+                                     write->reg % 64);
+                    tcg_gen_or_i64(next, previous, committed_bit);
+                }
+                ssa->pending_alat_gr_mask[half] = next;
+            }
+            if (write->forward_to_dependent ||
+                ssa->check_gr_forward_mask[half] != NULL) {
+                TCGv_i64 previous =
+                    ia64_tr_ssa_ensure_check_gr_forward_mask(ssa, half);
+                TCGv_i64 next;
+
+                if (write->forward_to_dependent) {
+                    TCGv_i64 forwarded = tcg_temp_new_i64();
+
+                    tcg_gen_ori_i64(forwarded, previous, bit);
+                    next = tcg_temp_new_i64();
+                    g_assert(write->dependent_forwarded != NULL);
+                    tcg_gen_movcond_i64(
+                        TCG_COND_NE, next, write->dependent_forwarded,
+                        tcg_constant_i64(0), forwarded, previous);
+                    ssa->check_gr_forward_may[half] |= bit;
+                } else {
+                    TCGv_i64 candidate = tcg_temp_new_i64();
+
+                    tcg_gen_andi_i64(candidate, previous, ~bit);
+                    next = ia64_tr_ssa_merge_write(
+                        instruction, write->must_write, candidate, previous);
+                    if (write->must_write) {
+                        ssa->check_gr_forward_may[half] &= ~bit;
+                    }
+                }
+                ssa->check_gr_forward_mask[half] = next;
+            }
+        }
+        for (unsigned i = 0; i < instruction->br_count; i++) {
+            IA64TrBrWrite *write = &instruction->br[i];
+            uint8_t bit = 1u << write->reg;
+            TCGv_i64 value;
+
+            g_assert(write->ssa);
+            value = ia64_tr_ssa_merge_write(
+                instruction, write->must_write, write->value,
+                write->previous_value);
+            ssa->live_br[write->reg] = value;
+            ssa->live_br_valid |= bit;
+            ssa->dirty_br |= bit;
+            ssa->written_br |= bit;
+            if (write->forward_to_branch ||
+                ssa->branch_br_forward_mask != NULL) {
+                TCGv_i64 previous =
+                    ia64_tr_ssa_ensure_branch_br_forward_mask(ssa);
+                TCGv_i64 candidate = tcg_temp_new_i64();
+
+                tcg_gen_andi_i64(candidate, previous, (uint8_t)~bit);
+                if (write->forward_to_branch) {
+                    tcg_gen_ori_i64(candidate, candidate, bit);
+                }
+                ssa->branch_br_forward_mask = ia64_tr_ssa_merge_write(
+                    instruction, write->must_write, candidate, previous);
+            }
+        }
+        for (unsigned i = 0; i < instruction->pr_count; i++) {
+            IA64TrPrWrite *write = &instruction->pr[i];
+            TCGv_i64 value;
+            TCGv_i64 previous_pr;
+            TCGv_i64 next_pr;
+            TCGv_i64 cleared;
+            TCGv_i64 selected = ia64_tr_scratch_i64(ctx);
+
+            g_assert(write->ssa);
+            ia64_tr_ssa_ensure_live_pr(ctx);
+            value = ia64_tr_ssa_merge_write(
+                instruction, write->must_write, write->value,
+                write->previous_value);
+            previous_pr = ssa->live_pr;
+            cleared = tcg_temp_new_i64();
+            next_pr = tcg_temp_new_i64();
+            tcg_gen_neg_i64(selected, value);
+            tcg_gen_and_i64(selected, selected, write->physical_bit);
+            tcg_gen_andc_i64(cleared, previous_pr, write->physical_bit);
+            tcg_gen_or_i64(next_pr, cleared, selected);
+            tcg_gen_ori_i64(next_pr, next_pr, 1);
+            ssa->live_pr = next_pr;
+            ssa->dirty_pr = true;
+            ssa->written_pr = true;
+            if (write->forward_to_branch ||
+                ssa->branch_pr_forward_mask != NULL) {
+                TCGv_i64 previous =
+                    ia64_tr_ssa_ensure_branch_pr_forward_mask(ssa);
+                TCGv_i64 candidate = tcg_temp_new_i64();
+
+                tcg_gen_andc_i64(candidate, previous,
+                                 write->physical_bit);
+                if (write->forward_to_branch) {
+                    tcg_gen_or_i64(candidate, candidate,
+                                   write->physical_bit);
+                }
+                ssa->branch_pr_forward_mask = ia64_tr_ssa_merge_write(
+                    instruction, write->must_write, candidate, previous);
+            }
+        }
+        if (instruction->pr_image.active) {
+            IA64TrPrImageWrite *write = &instruction->pr_image;
+            TCGv_i64 value;
+            TCGv_i64 previous_pr;
+            TCGv_i64 cleared;
+            TCGv_i64 next_pr;
+            TCGv_i64 selected = ia64_tr_scratch_i64(ctx);
+
+            g_assert(write->ssa);
+            ia64_tr_ssa_ensure_live_pr(ctx);
+            value = ia64_tr_ssa_merge_write(
+                instruction, write->must_write, write->value,
+                write->previous_value);
+            previous_pr = ssa->live_pr;
+            cleared = tcg_temp_new_i64();
+            next_pr = tcg_temp_new_i64();
+            tcg_gen_andi_i64(selected, value, write->mask);
+            tcg_gen_andi_i64(cleared, previous_pr, ~write->mask);
+            tcg_gen_or_i64(next_pr, cleared, selected);
+            tcg_gen_ori_i64(next_pr, next_pr, 1);
+            ssa->live_pr = next_pr;
+            ssa->dirty_pr = true;
+            ssa->written_pr = true;
+            if (write->forward_bits != 0 ||
+                ssa->branch_pr_forward_mask != NULL) {
+                TCGv_i64 previous =
+                    ia64_tr_ssa_ensure_branch_pr_forward_mask(ssa);
+                TCGv_i64 candidate = tcg_temp_new_i64();
+
+                tcg_gen_andi_i64(candidate, previous, ~write->mask);
+                if (write->forward_bits != 0) {
+                    tcg_gen_ori_i64(candidate, candidate,
+                                    write->forward_bits);
+                }
+                ssa->branch_pr_forward_mask = ia64_tr_ssa_merge_write(
+                    instruction, write->must_write, candidate, previous);
+            }
+        }
+        for (unsigned i = 0; i < instruction->ar_effect_count; i++) {
+            IA64TrArEffect *write = &instruction->ar_effect[i];
+            unsigned word = write->reg >> 6;
+            uint64_t bit = UINT64_C(1) << (write->reg & 63);
+
+            g_assert(write->ssa);
+            ssa->live_ar[write->reg] = ia64_tr_ssa_merge_write(
+                instruction, write->must_write, write->value,
+                write->previous_value);
+            ssa->live_ar_valid[word] |= bit;
+            ssa->dirty_ar[word] |= bit;
+            ssa->written_ar[word] |= bit;
+        }
+        for (unsigned word = 0; word < 2; word++) {
+            uint64_t pending = instruction->dest_ar[word] &
+                               ~ssa->written_ar[word];
+
+            while (pending != 0) {
+                uint8_t reg = word * 64 + ctz64(pending);
+                uint64_t bit = UINT64_C(1) << (reg & 63);
+
+                ia64_tr_ssa_ensure_live_ar(ctx, reg);
+                ia64_tr_load_ar(ctx, ssa->live_ar[reg], reg);
+                ssa->dirty_ar[word] |= bit;
+                ssa->written_ar[word] |= bit;
+                pending &= pending - 1;
+            }
+        }
+        if (instruction->post_alat_active) {
+            TCGLabel *skip = gen_new_label();
+
+            ia64_tr_ssa_flush_alat_gr_effects(ctx);
+            tcg_gen_brcondi_i64(TCG_COND_EQ,
+                                instruction->post_alat_record, 0, skip);
+            gen_helper_data_plane_alat_record(
+                tcg_env, instruction->post_alat_address,
+                tcg_constant_i32(instruction->post_alat_target),
+                tcg_constant_i32(instruction->post_alat_width),
+                tcg_constant_i32(instruction->post_alat_target_type),
+                tcg_constant_i32(instruction->post_alat_memory_class));
+            gen_set_label(skip);
+            ctx->alat_may_active = true;
+        }
+        return;
+    }
+
     ia64_tr_profile_add(ctx, IA64_PROFILE_FINAL_COMMIT, writes);
 
     if (instruction->gr_count != 0) {
@@ -2789,6 +4369,8 @@ static void ia64_tr_group_retire_instruction(
         }
         ia64_tr_store_static_gr_ref_pair(ctx, &ref, write->value,
                                          write->nat);
+        ia64_tr_group_update_check_forward_gr(
+            ctx, write->reg, write->forward_to_dependent);
         if (write->reg < 64) {
             tcg_gen_ori_i64(dest_mask, dest_mask,
                             UINT64_C(1) << write->reg);
@@ -2955,29 +4537,27 @@ static void ia64_tr_group_finish_instruction_success(
      * Nullified instructions also retire successfully and consume the latch.
      */
     if (instruction->pre_psr != NULL) {
-        TCGLabel *skip_iipa = gen_new_label();
         TCGLabel *skip_ed = gen_new_label();
         TCGLabel *skip_suppression = gen_new_label();
         TCGv_i64 psr = ia64_tr_scratch_i64(ctx);
 
         tcg_gen_brcondi_i64(TCG_COND_TSTEQ, instruction->pre_psr,
                             IA64_TR_PSR_ED_BIT, skip_ed);
-        tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+        tcg_gen_mov_i64(psr, cpu_psr);
         tcg_gen_andi_i64(psr, psr, ~IA64_TR_PSR_ED_BIT);
-        tcg_gen_st_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+        tcg_gen_mov_i64(cpu_psr, psr);
         gen_set_label(skip_ed);
         tcg_gen_brcondi_i64(TCG_COND_TSTEQ, instruction->pre_psr,
                             IA64_TR_PSR_FAULT_SUPPRESSION_MASK,
                             skip_suppression);
         gen_helper_clear_fault_suppression(tcg_env, instruction->pre_psr);
         gen_set_label(skip_suppression);
-        tcg_gen_brcondi_i64(TCG_COND_TSTEQ, instruction->pre_psr,
-                            IA64_TR_PSR_IC_BIT, skip_iipa);
+    }
+    if (instruction->publish_iipa) {
         tcg_gen_st_i64(tcg_constant_i64(insn->address &
                                         ~(uint64_t)(IA64_BUNDLE_SIZE - 1)),
                        tcg_env,
                        offsetof(CPUIA64State, last_successful_bundle));
-        gen_set_label(skip_iipa);
     }
     instruction->pre_psr = NULL;
     for (unsigned i = 0; i < instruction->gr_count; i++) {
@@ -3014,6 +4594,9 @@ static void ia64_tr_group_publish_prefix_for_noreturn_fault(DisasContext *ctx)
     */
     ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
     ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_FAULT, 1);
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_materialize_safepoint(ctx);
+    }
     ia64_tr_sync_state_cache(ctx);
     ia64_tr_group_clear_ordinary_source_overlay(ctx);
 }
@@ -3024,7 +4607,10 @@ static void ia64_tr_group_close(DisasContext *ctx)
 
     g_assert(group->active && group->current == NULL &&
              group->instruction_count != 0);
-    /* Finish-success already retired every result; a stop must not replay it. */
+    /* Finish-success renamed every result; a stop publishes only dirty state. */
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_materialize_dirty(ctx);
+    }
     ia64_tr_group_clear_ordinary_source_overlay(ctx);
     ctx->typed_group_active = false;
     ctx->source_overlay_known_clear = true;
@@ -3043,10 +4629,12 @@ static void ia64_tr_group_close(DisasContext *ctx)
     group->pr_may_saved = false;
     group->pr_must_saved = false;
     group->branch_forward_may_nonzero = false;
+    group->check_gr_forward_may_nonzero = false;
     group->branch_br_forward_may_nonzero = false;
     group->pfs_may_saved = false;
     group->pfs_must_saved = false;
     group->branch_pfs_forward_may_nonzero = false;
+    memset(&group->ssa, 0, sizeof(group->ssa));
 }
 
 /*
@@ -3060,13 +4648,17 @@ static void ia64_tr_group_suspend_for_typed_continuation(DisasContext *ctx)
 
     g_assert(group->active && group->current == NULL &&
              group->instruction_count != 0 && ctx->typed_group_active);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_DURABLE_MATERIALIZATION, 1);
-    ia64_tr_profile_add(
-        ctx, IA64_PROFILE_DURABLE_BYTES,
-        (ctpop64(group->gr_may_saved[0]) +
-         ctpop64(group->gr_may_saved[1])) * 16 +
-        ctpop32(group->br_may_saved) * 8 + group->pr_may_saved * 8 +
-        group->pfs_may_saved * 8);
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_materialize_continuation(ctx);
+    } else {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_DURABLE_MATERIALIZATION, 1);
+        ia64_tr_profile_add(
+            ctx, IA64_PROFILE_DURABLE_BYTES,
+            (ctpop64(group->gr_may_saved[0]) +
+             ctpop64(group->gr_may_saved[1])) * 16 +
+            ctpop32(group->br_may_saved) * 8 + group->pr_may_saved * 8 +
+            group->pfs_may_saved * 8);
+    }
     group->active = false;
     group->instruction_count = 0;
 }
@@ -3110,7 +4702,7 @@ static void ia64_tr_emit_decoded_illegal_operation(
      */
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_raise_illegal_operation(tcg_env);
@@ -3129,6 +4721,9 @@ static void ia64_tr_group_publish_state_for_returning_helper(
      */
     ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
     ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_HELPER, 1);
+    if (group->ssa.enabled) {
+        ia64_tr_ssa_materialize_safepoint(ctx);
+    }
     ia64_tr_sync_state_cache(ctx);
 }
 
@@ -3138,7 +4733,7 @@ static void ia64_tr_emit_decoded_privileged_operation(
     /* RFI has not retired; export only its already-successful group prefix. */
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_raise_privileged_operation(tcg_env);
@@ -5373,6 +6968,11 @@ static void ia64_tr_rewrite_plan_data_plane(
             plan, insn->r1,
             must_write && descriptor->memory_class != 8 &&
             descriptor->memory_class != 9);
+        if (descriptor->memory_class == 8 ||
+            descriptor->memory_class == 9) {
+            plan->forward_gr[insn->r1 >= 64] |=
+                ia64_tr_nonzero_register_bit(insn->r1);
+        }
         if (update) {
             ia64_tr_plan_gr_destination(plan, insn->r3, must_write);
         }
@@ -6147,7 +7747,7 @@ static void ia64_tr_profile_group_census(DisasContext *ctx)
         }
     }
 
-    if (rse || system || ctx->base.plugin_enabled) {
+    if (ctx->rewrite_shape == IA64_TR_SHAPE_C) {
         shape->counter[IA64_PROFILE_SHAPE_C_GROUP]++;
         shape->counter[IA64_PROFILE_SHAPE_C_SLOT] += slots;
         if (rse) {
@@ -6157,7 +7757,7 @@ static void ia64_tr_profile_group_census(DisasContext *ctx)
         } else {
             shape->counter[IA64_PROFILE_SHAPE_C_OBSERVATION]++;
         }
-    } else if (complete && !memory && !helper) {
+    } else if (ctx->rewrite_shape == IA64_TR_SHAPE_A) {
         shape->counter[IA64_PROFILE_SHAPE_A_GROUP]++;
         shape->counter[IA64_PROFILE_SHAPE_A_SLOT] += slots;
     } else {
@@ -6248,6 +7848,59 @@ static void ia64_tr_perf_plan_census(DisasContext *ctx)
     }
 }
 
+static void ia64_tr_select_execution_shape(DisasContext *ctx)
+{
+    bool complete;
+    bool boundary = false;
+    bool foundational = true;
+    bool durable_mode;
+
+    g_assert(ctx->rewrite_plan_emit_count != 0);
+    complete = ctx->rewrite_plan[ctx->rewrite_plan_emit_count - 1].stop_after ||
+               ctx->rewrite_plan[ctx->rewrite_plan_emit_count - 1]
+                   .unconditional_noreturn;
+
+    for (unsigned i = 0; i < ctx->rewrite_plan_emit_count; i++) {
+        const IA64TrInstructionPlan *plan = &ctx->rewrite_plan[i];
+        const IA64OpcodeTraits *traits =
+            ia64_opcode_traits_for(plan->opcode);
+
+        if (ia64_tr_decoded_system(plan->opcode) != NULL ||
+            ia64_tr_decoded_data_plane(plan->opcode) != NULL ||
+            ia64_tr_decoded_fp_compute(plan->opcode) != NULL ||
+            ia64_tr_decoded_is_rse_spine(plan->opcode) ||
+            ia64_tr_decoded_is_rfi(plan->opcode)) {
+            foundational = false;
+        }
+        if (ia64_tr_decoded_is_ordinary_integer_memory(plan->opcode)) {
+            boundary = true;
+        }
+        if (traits == NULL || traits->family == NULL ||
+            traits->lowering_owner == IA64_OPCODE_OWNER_FOCUSED_HELPER ||
+            traits->family->tb_behavior != IA64_OPCODE_TB_CONTINUE) {
+            boundary = true;
+        }
+    }
+
+    /* Shape C is reserved for an actually durable observation mode or a
+       state family that has no SSA representation.  A non-empty ALAT is
+       ordinary architectural state: GR commits carry exact destination masks,
+       stores invalidate by address, and advanced loads record after retirement.
+       It therefore cannot select the durable transaction by itself. */
+    durable_mode = ctx->base.plugin_enabled ||
+        (ctx->base.tb->flags & (IA64_TB_FLAG_INSN_DEBUG_ACTIVE |
+                                IA64_TB_FLAG_DATA_DEBUG_ACTIVE)) != 0;
+    ctx->rewrite_ssa_enabled = foundational && !durable_mode;
+    if (!foundational || durable_mode) {
+        ctx->rewrite_shape = IA64_TR_SHAPE_C;
+    } else if (!ctx->typed_group_active && complete && !boundary) {
+        ctx->rewrite_shape = IA64_TR_SHAPE_A;
+    } else {
+        /* Branch/helper/TB/page boundaries, including resumed open groups. */
+        ctx->rewrite_shape = IA64_TR_SHAPE_B;
+    }
+}
+
 static void ia64_tr_rewrite_plan_finalize(DisasContext *ctx,
                                           unsigned segment_bundles)
 {
@@ -6265,6 +7918,7 @@ static void ia64_tr_rewrite_plan_finalize(DisasContext *ctx,
     }
     g_assert(ctx->rewrite_plan_emit_count != 0);
     IA64_PERF_ADD(IA64_PERF_PLAN_USE, ctx->rewrite_plan_emit_count);
+    ia64_tr_select_execution_shape(ctx);
 
     /*
      * Lookahead is an admission proof, not a durable source-visibility
@@ -6746,6 +8400,8 @@ static void ia64_tr_prime_decoded_instruction_state(
 static TCGLabel *ia64_tr_emit_decoded_predicate_guard(
     DisasContext *ctx, const IA64Instruction *insn)
 {
+    IA64TrInstructionTransaction *instruction =
+        ctx->rewrite_group.current;
     TCGLabel *skip;
     TCGv_i64 predicate;
 
@@ -6756,6 +8412,8 @@ static TCGLabel *ia64_tr_emit_decoded_predicate_guard(
     skip = gen_new_label();
     predicate = ia64_tr_scratch_i64(ctx);
     ia64_tr_group_load_ordinary_predicate(ctx, predicate, insn->qp);
+    g_assert(instruction != NULL && instruction->qualifier == NULL);
+    instruction->qualifier = predicate;
     tcg_gen_brcondi_i64(TCG_COND_EQ, predicate, 0, skip);
     return skip;
 }
@@ -6766,7 +8424,7 @@ static void ia64_tr_emit_decoded_register_nat_consumption_isr(
     /* The current PR image remains staged; only the ordered prefix retires. */
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_raise_register_nat_consumption(
@@ -6785,7 +8443,7 @@ static void ia64_tr_emit_decoded_data_nat_consumption(
 {
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_raise_data_register_nat_consumption(
@@ -6798,7 +8456,7 @@ static void ia64_tr_emit_decoded_unaligned_data_reference(
 {
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_data_unaligned_pre_access(
@@ -6922,9 +8580,12 @@ static void ia64_tr_publish_decoded_memory_access(
      * twice.  Never manufacture can_do_io in the middle of the instruction.
      */
     translator_io_start(&ctx->base);
+    if (ctx->rewrite_group.ssa.enabled) {
+        ia64_tr_ssa_materialize_safepoint(ctx);
+    }
     ia64_tr_sync_state_cache(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     switch (insn->opcode) {
@@ -6955,8 +8616,7 @@ static void ia64_tr_emit_decoded_data_debug_pre_access(
      * debug work in the normal inactive shape.  Every guest PSR writer is an
      * existing TB endpoint, so the TB key is authoritative for all slots.
      */
-    if (ia64_tr_debug_fast_guard_enabled() &&
-        (ctx->base.tb->flags & IA64_TB_FLAG_DATA_DEBUG_ACTIVE) == 0) {
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_DATA_DEBUG_ACTIVE) == 0) {
         return;
     }
     gen_helper_data_debug_pre_access(
@@ -6971,6 +8631,15 @@ static void ia64_tr_emit_decoded_store_alat_invalidate(
     TCGLabel *done = gen_new_label();
     TCGv_i32 valid = ia64_tr_scratch_i32(ctx);
 
+    /*
+     * The TB-entry flag proves that an initially empty ALAT needs no store
+     * invalidation.  An earlier advanced load in this same TB can install the
+     * first entry, however, so every later store must follow the translator's
+     * monotonic may-active state rather than reusing the entry-only fact.
+     */
+    if (!ctx->alat_may_active) {
+        return;
+    }
     tcg_gen_ld_i32(valid, tcg_env,
                    offsetof(CPUIA64State, alat.valid_mask));
     tcg_gen_brcondi_i32(TCG_COND_EQ, valid, 0, done);
@@ -7018,6 +8687,17 @@ static void ia64_tr_emit_decoded_ordinary_integer_memory(
     if (update) {
         base_write = ia64_tr_group_prepare_gr(ctx, insn->r3);
     }
+    if (ctx->rewrite_group.ssa.enabled) {
+        /*
+         * The memory instruction is a real Shape-B observation point.  Commit
+         * the already-successful prefix once before any target/NaT/alignment
+         * fault arm, while immutable entry SSA continues to serve later
+         * ordinary reads.  Consuming the dirty map here prevents every fault
+         * block from cloning the same architectural stores.
+         */
+        ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
+        ia64_tr_ssa_materialize_dirty(ctx);
+    }
     skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
 
     if (load) {
@@ -7034,14 +8714,14 @@ static void ia64_tr_emit_decoded_ordinary_integer_memory(
     result = ia64_tr_scratch_i64(ctx);
     updated = ia64_tr_scratch_i64(ctx);
 
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     if (load && insn->reg_base_update) {
         if (insn->r2 == insn->r3) {
             tcg_gen_mov_i64(operand, base);
             tcg_gen_mov_i64(operand_nat, base_nat);
         } else {
             ia64_tr_group_load_ordinary_gr_pair(
-                ctx, operand, operand_nat, insn->r2);
+                ctx, &operand, &operand_nat, insn->r2);
         }
     } else if (!load) {
         if (insn->r2 == insn->r3) {
@@ -7049,7 +8729,7 @@ static void ia64_tr_emit_decoded_ordinary_integer_memory(
             tcg_gen_mov_i64(operand_nat, base_nat);
         } else {
             ia64_tr_group_load_ordinary_gr_pair(
-                ctx, operand, operand_nat, insn->r2);
+                ctx, &operand, &operand_nat, insn->r2);
         }
     } else {
         tcg_gen_movi_i64(operand, 0);
@@ -7076,7 +8756,8 @@ static void ia64_tr_emit_decoded_ordinary_integer_memory(
         if (insn->mem_acquire) {
             tcg_gen_mb(TCG_BAR_LDAQ | TCG_MO_LD_LD | TCG_MO_LD_ST);
         }
-        ia64_tr_group_stage_gr(target_write, result, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            target_write, result, IA64_TR_NAT_KNOWN_CLEAR);
     } else {
         if (insn->mem_release) {
             tcg_gen_mb(TCG_BAR_STRL | TCG_MO_LD_ST | TCG_MO_ST_ST);
@@ -7093,8 +8774,8 @@ static void ia64_tr_emit_decoded_ordinary_integer_memory(
             ia64_tr_group_stage_gr(base_write, updated, operand_nat);
         } else {
             tcg_gen_addi_i64(updated, base, insn->imm);
-            ia64_tr_group_stage_gr(base_write, updated,
-                                   tcg_constant_i64(0));
+            ia64_tr_group_stage_gr_known(
+                base_write, updated, IA64_TR_NAT_KNOWN_CLEAR);
         }
     }
     ia64_tr_finish_faulting_slot();
@@ -7183,16 +8864,16 @@ static void ia64_tr_emit_decoded_data_plane_integer_load(
         ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r3);
     }
 
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     ia64_tr_group_load_ordinary_gr_pair(
-        ctx, old_target, old_target_nat, insn->r1);
+                ctx, &old_target, &old_target_nat, insn->r1);
     if (insn->reg_base_update) {
         if (insn->r2 == insn->r3) {
             tcg_gen_mov_i64(increment, base);
             tcg_gen_mov_i64(increment_nat, base_nat);
         } else {
             ia64_tr_group_load_ordinary_gr_pair(
-                ctx, increment, increment_nat, insn->r2);
+                ctx, &increment, &increment_nat, insn->r2);
         }
     } else {
         tcg_gen_movi_i64(increment, (uint64_t)insn->imm);
@@ -7259,8 +8940,8 @@ static void ia64_tr_emit_decoded_data_plane_integer_load(
     tcg_gen_br(done);
 
     gen_set_label(advanced_zero);
-    ia64_tr_group_stage_gr(
-        target_write, tcg_constant_i64(0), tcg_constant_i64(0));
+    ia64_tr_group_stage_gr_known(
+        target_write, tcg_constant_i64(0), IA64_TR_NAT_KNOWN_CLEAR);
 
     gen_set_label(done);
     if (update) {
@@ -7284,6 +8965,7 @@ static void ia64_tr_emit_decoded_data_plane_integer_spill(
 {
     bool update = insn->imm_base_update;
     IA64TrGrWrite *base_write = NULL;
+    IA64TrArEffect *unat_write = NULL;
     TCGLabel *skip;
     TCGv_i64 base = ia64_tr_scratch_i64(ctx);
     TCGv_i64 base_nat = ia64_tr_scratch_i64(ctx);
@@ -7304,17 +8986,21 @@ static void ia64_tr_emit_decoded_data_plane_integer_spill(
     if (update) {
         base_write = ia64_tr_group_prepare_gr(ctx, insn->r3);
     }
+    if (descriptor->width == 8) {
+        unat_write = ia64_tr_group_prepare_ordered_ar_effect(
+            ctx, IA64_AR_UNAT, insn->qp == 0);
+    }
     skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
     if (update) {
         ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r3);
     }
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     if (insn->r2 == insn->r3) {
         tcg_gen_mov_i64(value, base);
         tcg_gen_mov_i64(value_nat, base_nat);
     } else {
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, value, value_nat, insn->r2);
+                ctx, &value, &value_nat, insn->r2);
     }
     ia64_tr_emit_decoded_memory_nat_check(
         ctx, insn, base_nat, MMU_DATA_STORE, true);
@@ -7338,7 +9024,7 @@ static void ia64_tr_emit_decoded_data_plane_integer_spill(
         TCGv_i64 clear = ia64_tr_scratch_i64(ctx);
         TCGv_i64 next = ia64_tr_scratch_i64(ctx);
 
-        ia64_tr_group_load_ordinary_ar(ctx, unat, IA64_AR_UNAT);
+        ia64_tr_group_load_ordered_ar_effect(ctx, unat, IA64_AR_UNAT);
         tcg_gen_shri_i64(bitpos, base, 3);
         tcg_gen_andi_i64(bitpos, bitpos, 0x3f);
         tcg_gen_shl_i64(bit, tcg_constant_i64(1), bitpos);
@@ -7346,12 +9032,12 @@ static void ia64_tr_emit_decoded_data_plane_integer_spill(
         tcg_gen_andc_i64(clear, unat, bit);
         tcg_gen_movcond_i64(TCG_COND_NE, next, value_nat,
                             tcg_constant_i64(0), set, clear);
-        ia64_tr_store_ar(ctx, IA64_AR_UNAT, next);
+        ia64_tr_group_stage_ordered_ar_effect(ctx, unat_write, next);
     }
     if (update) {
         tcg_gen_addi_i64(updated, base, insn->imm);
-        ia64_tr_group_stage_gr(
-            base_write, updated, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            base_write, updated, IA64_TR_NAT_KNOWN_CLEAR);
     }
     ia64_tr_finish_faulting_slot();
     ia64_tr_finish_predicate_guard(skip);
@@ -7387,7 +9073,7 @@ static void ia64_tr_emit_decoded_data_plane_atomic(
     target_write = ia64_tr_group_prepare_gr(ctx, insn->r1);
     skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
     ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r1);
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     if (descriptor->kind == IA64_TR_DATA_PLANE_FETCHADD && !fetch_register) {
         tcg_gen_movi_i64(value, (uint64_t)insn->imm);
         tcg_gen_movi_i64(value_nat, 0);
@@ -7396,7 +9082,7 @@ static void ia64_tr_emit_decoded_data_plane_atomic(
         tcg_gen_mov_i64(value_nat, base_nat);
     } else {
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, value, value_nat, insn->r2);
+                ctx, &value, &value_nat, insn->r2);
     }
     ia64_tr_emit_decoded_memory_nat_check(
         ctx, insn, base_nat,
@@ -7450,7 +9136,8 @@ static void ia64_tr_emit_decoded_data_plane_atomic(
     if (insn->mem_acquire) {
         tcg_gen_mb(TCG_BAR_LDAQ | TCG_MO_LD_LD | TCG_MO_LD_ST);
     }
-    ia64_tr_group_stage_gr(target_write, old, tcg_constant_i64(0));
+    ia64_tr_group_stage_gr_known(
+        target_write, old, IA64_TR_NAT_KNOWN_CLEAR);
     ia64_tr_finish_faulting_slot();
     ia64_tr_finish_predicate_guard(skip);
 }
@@ -7481,7 +9168,7 @@ static void ia64_tr_emit_decoded_data_plane_wide(
     if (descriptor->kind == IA64_TR_DATA_PLANE_WIDE_LOAD) {
         ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r1);
     }
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     ia64_tr_emit_decoded_memory_nat_check(
         ctx, insn, base_nat,
         descriptor->kind == IA64_TR_DATA_PLANE_WIDE_LOAD ?
@@ -7520,8 +9207,8 @@ static void ia64_tr_emit_decoded_data_plane_wide(
         if (insn->mem_acquire) {
             tcg_gen_mb(TCG_BAR_LDAQ | TCG_MO_LD_LD | TCG_MO_LD_ST);
         }
-        ia64_tr_group_stage_gr(
-            target_write, low, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            target_write, low, IA64_TR_NAT_KNOWN_CLEAR);
         ia64_tr_store_ar(ctx, IA64_AR_CSD, high);
     } else {
         TCGv_i64 low = ia64_tr_scratch_i64(ctx);
@@ -7531,7 +9218,7 @@ static void ia64_tr_emit_decoded_data_plane_wide(
         bool big_endian = (ctx->base.tb->flags & IA64_TB_FLAG_BE) != 0;
 
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, low, low_nat, insn->r2);
+                ctx, &low, &low_nat, insn->r2);
         ia64_tr_emit_decoded_memory_nat_check(
             ctx, insn, low_nat, MMU_DATA_STORE, false);
         ia64_tr_group_load_ordinary_ar(ctx, high, IA64_AR_CSD);
@@ -7591,8 +9278,8 @@ static void ia64_tr_emit_decoded_data_plane_cmp8xchg16(
     target_write = ia64_tr_group_prepare_gr(ctx, insn->r1);
     skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
     ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r1);
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
-    ia64_tr_group_load_ordinary_gr_pair(ctx, low, low_nat, insn->r2);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &low, &low_nat, insn->r2);
     ia64_tr_emit_decoded_memory_nat_check(
         ctx, insn, base_nat,
         IA64_EXCEPTION_ACCESS_SEMAPHORE, true);
@@ -7623,7 +9310,8 @@ static void ia64_tr_emit_decoded_data_plane_cmp8xchg16(
     if (insn->mem_acquire) {
         tcg_gen_mb(TCG_BAR_LDAQ | TCG_MO_LD_LD | TCG_MO_LD_ST);
     }
-    ia64_tr_group_stage_gr(target_write, old, tcg_constant_i64(0));
+    ia64_tr_group_stage_gr_known(
+        target_write, old, IA64_TR_NAT_KNOWN_CLEAR);
     ia64_tr_finish_faulting_slot();
     ia64_tr_finish_predicate_guard(skip);
 }
@@ -7663,7 +9351,7 @@ static void ia64_tr_emit_decoded_data_plane_cache_control(
         TCGv_i64 base_nat = ia64_tr_scratch_i64(ctx);
 
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, base, base_nat, insn->r3);
+                ctx, &base, &base_nat, insn->r3);
         ia64_tr_emit_decoded_memory_nat_check(
             ctx, insn, base_nat,
             IA64_EXCEPTION_ACCESS_FC_READ_NON_ACCESS, false);
@@ -7720,14 +9408,14 @@ static void ia64_tr_emit_decoded_data_plane_lfetch(
     increment = ia64_tr_scratch_i64(ctx);
     increment_nat = ia64_tr_scratch_i64(ctx);
     updated = ia64_tr_scratch_i64(ctx);
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     if (insn->reg_base_update) {
         if (insn->r2 == insn->r3) {
             tcg_gen_mov_i64(increment, base);
             tcg_gen_mov_i64(increment_nat, base_nat);
         } else {
             ia64_tr_group_load_ordinary_gr_pair(
-                ctx, increment, increment_nat, insn->r2);
+                ctx, &increment, &increment_nat, insn->r2);
         }
     } else {
         tcg_gen_movi_i64(increment, 0);
@@ -7805,7 +9493,7 @@ static void ia64_tr_emit_decoded_checked_branch_split(
             TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
 
             ia64_tr_group_load_ordinary_gr_pair(
-                ctx, ignored, nat, insn->r2);
+                ctx, &ignored, &nat, insn->r2);
             tcg_gen_mov_i64(failed, nat);
         }
     } else {
@@ -7823,6 +9511,7 @@ static void ia64_tr_emit_decoded_checked_branch_split(
     gen_set_label(skip_check);
 
     ia64_tr_group_finish_instruction_success(ctx, insn);
+    ia64_tr_ssa_capture_safepoint(ctx, &arm->safepoint);
     if (insn->stop_after) {
         ia64_tr_group_close(ctx);
     }
@@ -7972,7 +9661,7 @@ static void ia64_tr_emit_decoded_disabled_fp_regs(
     /* The helper may deliver a pre-result Disabled FP Register fault. */
     ia64_tr_sync_state_cache(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_data_plane_fp_check_disabled_set(
@@ -8224,7 +9913,7 @@ static void ia64_tr_emit_decoded_setf_exact(
     nat = ia64_tr_scratch_i64(ctx);
     low = ia64_tr_scratch_i64(ctx);
     high = ia64_tr_scratch_i64(ctx);
-    ia64_tr_group_load_ordinary_gr_pair(ctx, value, nat, insn->r2);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r2);
     if (insn->opcode == IA64_OP_SETF_SIG) {
         tcg_gen_mov_i64(low, value);
         tcg_gen_movi_i64(high, UINT64_C(0x1003e));
@@ -8247,7 +9936,7 @@ static void ia64_tr_emit_reserved_register_field(
 {
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_raise_reserved_register_field(tcg_env);
@@ -8806,14 +10495,14 @@ static void ia64_tr_emit_decoded_data_plane_fp_load(
         ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r3);
     }
 
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
     if (insn->reg_base_update) {
         if (insn->r2 == insn->r3) {
             tcg_gen_mov_i64(increment, base);
             tcg_gen_mov_i64(increment_nat, base_nat);
         } else {
             ia64_tr_group_load_ordinary_gr_pair(
-                ctx, increment, increment_nat, insn->r2);
+                ctx, &increment, &increment_nat, insn->r2);
         }
     } else {
         tcg_gen_movi_i64(increment, (uint64_t)insn->imm);
@@ -8996,7 +10685,7 @@ static void ia64_tr_emit_decoded_data_plane_fp_store(
     if (update) {
         ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r3);
     }
-    ia64_tr_group_load_ordinary_gr_pair(ctx, base, base_nat, insn->r3);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat, insn->r3);
 
     /* Disabled FR has priority over base NaT, which in turn has priority over
        a source NaTVal. */
@@ -9084,8 +10773,8 @@ static void ia64_tr_emit_decoded_data_plane_fp_store(
     ia64_tr_emit_decoded_store_alat_invalidate(ctx, base, payload);
     if (update) {
         tcg_gen_addi_i64(updated, base, insn->imm);
-        ia64_tr_group_stage_gr(
-            base_write, updated, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            base_write, updated, IA64_TR_NAT_KNOWN_CLEAR);
     }
 
     gen_set_label(done);
@@ -9114,7 +10803,8 @@ static void ia64_tr_emit_decoded_pr_move(DisasContext *ctx,
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
         image = ia64_tr_scratch_i64(ctx);
         ia64_tr_group_load_ordinary_pr_image(ctx, image);
-        ia64_tr_group_stage_gr(gr_write, image, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            gr_write, image, IA64_TR_NAT_KNOWN_CLEAR);
         ia64_tr_finish_predicate_guard(skip);
         return;
     }
@@ -9130,7 +10820,7 @@ static void ia64_tr_emit_decoded_pr_move(DisasContext *ctx,
         pr_write = ia64_tr_group_prepare_pr_image(ctx, mask);
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
         /* This ordinary source read is required even for an encoded mask 0. */
-        ia64_tr_group_load_ordinary_gr_pair(ctx, value, nat, insn->r1);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
         tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
         ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
         gen_set_label(nat_clear);
@@ -9168,7 +10858,8 @@ static void ia64_tr_emit_decoded_br_move(DisasContext *ctx,
 
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
         ia64_tr_group_load_ordinary_br(ctx, value, insn->r2);
-        ia64_tr_group_stage_gr(gr_write, value, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            gr_write, value, IA64_TR_NAT_KNOWN_CLEAR);
         ia64_tr_finish_predicate_guard(skip);
         return;
     }
@@ -9181,7 +10872,7 @@ static void ia64_tr_emit_decoded_br_move(DisasContext *ctx,
         TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
 
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
-        ia64_tr_group_load_ordinary_gr_pair(ctx, value, nat, insn->r1);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
         tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
         ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
         gen_set_label(nat_clear);
@@ -9195,7 +10886,7 @@ static void ia64_tr_publish_application_helper_state(
 {
     ia64_tr_group_publish_state_for_returning_helper(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
 }
@@ -9236,7 +10927,7 @@ static void ia64_tr_emit_application_write_value_check(
     tcg_gen_brcondi_i32(TCG_COND_NE, valid, 0, valid_value);
     ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_raise_reserved_register_field(tcg_env);
@@ -9293,9 +10984,23 @@ static void ia64_tr_emit_decoded_application_move(
             gen_helper_application_register_read(
                 value, tcg_env, tcg_constant_i32(insn->r2));
             ia64_tr_reload_state_cache(ctx);
+            if (ctx->rewrite_group.ssa.enabled) {
+                IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+                unsigned word = insn->r2 >> 6;
+                uint64_t bit = UINT64_C(1) << (insn->r2 & 63);
+
+                if ((ssa->entry_ar_valid[word] & bit) != 0) {
+                    tcg_gen_mov_i64(value, ssa->entry_ar[insn->r2]);
+                } else {
+                    ssa->entry_ar[insn->r2] = tcg_temp_new_i64();
+                    tcg_gen_mov_i64(ssa->entry_ar[insn->r2], value);
+                    ssa->entry_ar_valid[word] |= bit;
+                }
+            }
             ia64_tr_finish_faulting_slot();
         }
-        ia64_tr_group_stage_gr(gr_write, value, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            gr_write, value, IA64_TR_NAT_KNOWN_CLEAR);
         ia64_tr_finish_predicate_guard(skip);
         return;
     }
@@ -9327,7 +11032,7 @@ static void ia64_tr_emit_decoded_application_move(
                 tcg_env, tcg_constant_i32(insn->r2));
             ia64_tr_reload_state_cache(ctx);
         }
-        ia64_tr_group_load_ordinary_gr_pair(ctx, value, nat, insn->r1);
+    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
         tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
         ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
         gen_set_label(nat_clear);
@@ -9475,7 +11180,7 @@ static void ia64_tr_emit_decoded_integer_compare(
     } else {
         g_assert(compare->source == IA64_TR_COMPARE_SOURCE_REGISTER);
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, left, left_nat, insn->r2);
+                ctx, &left, &left_nat, insn->r2);
     }
 
     if (compare->source == IA64_TR_COMPARE_SOURCE_REGISTER &&
@@ -9484,7 +11189,7 @@ static void ia64_tr_emit_decoded_integer_compare(
         tcg_gen_mov_i64(right_nat, left_nat);
     } else {
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, right, right_nat, insn->r3);
+                ctx, &right, &right_nat, insn->r3);
     }
     if (compare->source == IA64_TR_COMPARE_SOURCE_REGISTER) {
         tcg_gen_or_i64(source_nat, left_nat, right_nat);
@@ -9494,13 +11199,24 @@ static void ia64_tr_emit_decoded_integer_compare(
     }
 
     if (insn->compare_width == 4) {
+        TCGv_i64 narrowed_left = ia64_tr_scratch_i64(ctx);
+        TCGv_i64 narrowed_right = ia64_tr_scratch_i64(ctx);
+
+        /*
+         * Ordinary SSA loads may return the immutable group-entry handle
+         * directly.  CMP4 normalization is local to this instruction: never
+         * narrow that shared handle in place, because a later slot in the
+         * issue group must still observe the full 64-bit entry value.
+         */
         if (ia64_tr_compare_relation_is_signed(compare->relation)) {
-            tcg_gen_ext32s_i64(left, left);
-            tcg_gen_ext32s_i64(right, right);
+            tcg_gen_ext32s_i64(narrowed_left, left);
+            tcg_gen_ext32s_i64(narrowed_right, right);
         } else {
-            tcg_gen_ext32u_i64(left, left);
-            tcg_gen_ext32u_i64(right, right);
+            tcg_gen_ext32u_i64(narrowed_left, left);
+            tcg_gen_ext32u_i64(narrowed_right, right);
         }
+        left = narrowed_left;
+        right = narrowed_right;
     }
 
     tcg_gen_setcond_i64(ia64_tr_compare_cond(compare->relation),
@@ -9616,14 +11332,14 @@ static void ia64_tr_emit_decoded_predicate_test(
     switch (test->kind) {
     case IA64_TR_PREDICATE_TEST_BIT:
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, source, source_nat, insn->r3);
+                ctx, &source, &source_nat, insn->r3);
         tcg_gen_shri_i64(result, source, insn->imm);
         tcg_gen_andi_i64(result, result, 1);
         tcg_gen_mov_i64(source_unavailable, source_nat);
         break;
     case IA64_TR_PREDICATE_TEST_NAT:
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, source, source_nat, insn->r3);
+                ctx, &source, &source_nat, insn->r3);
         tcg_gen_andi_i64(result, source_nat, 1);
         tcg_gen_movi_i64(source_unavailable, 0);
         break;
@@ -10115,6 +11831,7 @@ static void ia64_tr_emit_decoded_packed(
     IA64TrGrWrite *write;
     TCGLabel *skip;
     unsigned source_count;
+    IA64TrNatState result_nat_state = IA64_TR_NAT_KNOWN_CLEAR;
 
     g_assert(descriptor != NULL &&
              ia64_tr_decoded_is_supported_packed(insn));
@@ -10125,9 +11842,9 @@ static void ia64_tr_emit_decoded_packed(
         ia64_tr_emit_decoded_memory_target_check(ctx, insn, insn->r1);
     }
 
-    result = ia64_tr_scratch_i64(ctx);
-    result_nat = ia64_tr_scratch_i64(ctx);
-    tcg_gen_movi_i64(result_nat, 0);
+    result = write != NULL && write->ssa && write->must_write ?
+             write->value : ia64_tr_scratch_i64(ctx);
+    result_nat = NULL;
     source_count = ia64_tr_decoded_sources(insn, source_regs);
     g_assert(source_count >= 1 && source_count <= descriptor->source_count &&
              source_count <= ARRAY_SIZE(source));
@@ -10148,12 +11865,47 @@ static void ia64_tr_emit_decoded_packed(
         source[i] = ia64_tr_scratch_i64(ctx);
         source_nat[i] = ia64_tr_scratch_i64(ctx);
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, source[i], source_nat[i], source_regs[i]);
-        tcg_gen_or_i64(result_nat, result_nat, source_nat[i]);
+                ctx, &source[i], &source_nat[i], source_regs[i]);
+        if (ctx->rewrite_group.ssa.enabled) {
+            result_nat_state = ia64_tr_nat_or(
+                result_nat_state,
+                ia64_tr_group_ordinary_gr_nat_state(ctx, source_regs[i]));
+        } else {
+            result_nat_state = IA64_TR_NAT_UNKNOWN;
+        }
     }
     ia64_tr_emit_decoded_packed_compute(
         ctx, insn, descriptor, result, source);
-    ia64_tr_group_stage_gr(write, result, result_nat);
+    if (result_nat_state == IA64_TR_NAT_UNKNOWN) {
+        for (unsigned i = 0; i < source_count; i++) {
+            bool duplicate = false;
+
+            for (unsigned j = 0; j < i; j++) {
+                duplicate |= source_regs[j] == source_regs[i];
+            }
+            if (duplicate ||
+                (ctx->rewrite_group.ssa.enabled &&
+                 ia64_tr_group_ordinary_gr_nat_state(
+                     ctx, source_regs[i]) ==
+                 IA64_TR_NAT_KNOWN_CLEAR)) {
+                continue;
+            }
+            if (result_nat == NULL) {
+                result_nat = source_nat[i];
+            } else {
+                TCGv_i64 combined =
+                    write != NULL && write->ssa && write->must_write ?
+                    write->nat : ia64_tr_scratch_i64(ctx);
+
+                tcg_gen_or_i64(combined, result_nat, source_nat[i]);
+                result_nat = combined;
+            }
+        }
+        g_assert(result_nat != NULL);
+        ia64_tr_group_stage_gr(write, result, result_nat);
+    } else {
+        ia64_tr_group_stage_gr_known(write, result, result_nat_state);
+    }
     ia64_tr_finish_predicate_guard(skip);
 }
 
@@ -10167,7 +11919,7 @@ static void ia64_tr_system_validate(DisasContext *ctx,
     if (insn->status == IA64_DECODE_RESERVED_FIELD) {
         ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
         tcg_gen_movi_i64(cpu_ip, insn->address);
-        ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                     ia64_tr_decoded_slot_type(insn->unit),
                                     insn->raw, insn->starts_group);
         gen_helper_raise_reserved_register_field(tcg_env);
@@ -10179,7 +11931,24 @@ static void ia64_tr_system_validate(DisasContext *ctx,
 static void ia64_tr_system_load_gr(DisasContext *ctx, uint8_t reg,
                                    TCGv_i64 value, TCGv_i64 nat)
 {
-    ia64_tr_group_load_ordinary_gr_pair(ctx, value, nat, reg);
+    TCGv_i64 source_value = value;
+    TCGv_i64 source_nat = nat;
+
+    /*
+     * The SSA accessor can return immutable entry/forward handles by
+     * replacing its pointer arguments.  System-plane callers require their
+     * preallocated argument temporaries to be populated, so copy the selected
+     * values explicitly instead of losing the replacement in this wrapper's
+     * local C variables.
+     */
+    ia64_tr_group_load_ordinary_gr_pair(
+        ctx, &source_value, &source_nat, reg);
+    if (source_value != value) {
+        tcg_gen_mov_i64(value, source_value);
+    }
+    if (source_nat != nat) {
+        tcg_gen_mov_i64(nat, source_nat);
+    }
 }
 
 static uint64_t ia64_tr_system_nat_isr_extra(
@@ -10266,7 +12035,7 @@ static void ia64_tr_emit_decoded_system(
      */
     ia64_tr_group_publish_state_for_returning_helper(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_system_preflight(tcg_env,
@@ -10480,7 +12249,7 @@ static void ia64_tr_emit_decoded_system(
      */
     ia64_tr_group_publish_state_for_returning_helper(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_helper_system_plane(result, tcg_env,
@@ -10511,6 +12280,7 @@ static void ia64_tr_emit_decoded_instruction(
     TCGv_i64 source_nat[3] = { NULL, };
     TCGv_i64 result_nat;
     IA64TrGrWrite *gr_write;
+    IA64TrNatState result_nat_state = IA64_TR_NAT_KNOWN_CLEAR;
 
     if (ia64_tr_decoded_is_noop(insn->opcode)) {
         return;
@@ -10640,12 +12410,12 @@ static void ia64_tr_emit_decoded_instruction(
     ia64_tr_prime_decoded_instruction_state(ctx, insn);
     gr_write = ia64_tr_group_prepare_gr(ctx, insn->r1);
     skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
-    result = ia64_tr_scratch_i64(ctx);
+    result = gr_write != NULL && gr_write->ssa && gr_write->must_write ?
+             gr_write->value : ia64_tr_scratch_i64(ctx);
     source[0] = ia64_tr_scratch_i64(ctx);
     source[1] = ia64_tr_scratch_i64(ctx);
     source[2] = ia64_tr_scratch_i64(ctx);
-    result_nat = ia64_tr_scratch_i64(ctx);
-    tcg_gen_movi_i64(result_nat, 0);
+    result_nat = NULL;
 
     source_count = ia64_tr_decoded_sources(insn, source_regs);
     for (unsigned i = 0; i < source_count; i++) {
@@ -10664,8 +12434,14 @@ static void ia64_tr_emit_decoded_instruction(
         }
         source_nat[i] = ia64_tr_scratch_i64(ctx);
         ia64_tr_group_load_ordinary_gr_pair(
-            ctx, source[i], source_nat[i], source_regs[i]);
-        tcg_gen_or_i64(result_nat, result_nat, source_nat[i]);
+                ctx, &source[i], &source_nat[i], source_regs[i]);
+        if (ctx->rewrite_group.ssa.enabled) {
+            result_nat_state = ia64_tr_nat_or(
+                result_nat_state,
+                ia64_tr_group_ordinary_gr_nat_state(ctx, source_regs[i]));
+        } else {
+            result_nat_state = IA64_TR_NAT_UNKNOWN;
+        }
     }
 
     switch (insn->opcode) {
@@ -10845,17 +12621,43 @@ static void ia64_tr_emit_decoded_instruction(
         g_assert_not_reached();
     }
 
-    ia64_tr_group_stage_gr(gr_write, result, result_nat);
+    if (result_nat_state == IA64_TR_NAT_UNKNOWN) {
+        for (unsigned i = 0; i < source_count; i++) {
+            bool duplicate = false;
+
+            for (unsigned j = 0; j < i; j++) {
+                duplicate |= source_regs[j] == source_regs[i];
+            }
+            if (duplicate ||
+                (ctx->rewrite_group.ssa.enabled &&
+                 ia64_tr_group_ordinary_gr_nat_state(
+                     ctx, source_regs[i]) ==
+                 IA64_TR_NAT_KNOWN_CLEAR)) {
+                continue;
+            }
+            if (result_nat == NULL) {
+                result_nat = source_nat[i];
+            } else {
+                TCGv_i64 combined =
+                    gr_write != NULL && gr_write->ssa &&
+                    gr_write->must_write ?
+                    gr_write->nat : ia64_tr_scratch_i64(ctx);
+
+                tcg_gen_or_i64(combined, result_nat, source_nat[i]);
+                result_nat = combined;
+            }
+        }
+        g_assert(result_nat != NULL);
+        ia64_tr_group_stage_gr(gr_write, result, result_nat);
+    } else {
+        ia64_tr_group_stage_gr_known(gr_write, result, result_nat_state);
+    }
     ia64_tr_finish_predicate_guard(skip);
 }
 
 static void ia64_tr_clear_restart_ri(void)
 {
-    TCGv_i64 psr = tcg_temp_new_i64();
-
-    tcg_gen_ld_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
-    tcg_gen_andi_i64(psr, psr, ~IA64_PSR_RI_MASK);
-    tcg_gen_st_i64(psr, tcg_env, offsetof(CPUIA64State, psr));
+    tcg_gen_andi_i64(cpu_psr, cpu_psr, ~IA64_PSR_RI_MASK);
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                     offsetof(CPUIA64State, ri));
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
@@ -10970,7 +12772,7 @@ static bool ia64_tr_emit_decoded_rse_spine(
     }
 
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     switch (insn->opcode) {
@@ -10982,7 +12784,8 @@ static bool ia64_tr_emit_decoded_rse_spine(
         packed |= (uint32_t)insn->r1 << 18;
         gen_helper_rse_alloc(old_pfs, tcg_env, tcg_constant_i32(packed));
         ia64_tr_finish_faulting_slot();
-        ia64_tr_group_stage_gr(write, old_pfs, tcg_constant_i64(0));
+        ia64_tr_group_stage_gr_known(
+            write, old_pfs, IA64_TR_NAT_KNOWN_CLEAR);
         break;
     }
     case IA64_OP_COVER:
@@ -11028,13 +12831,11 @@ static void ia64_tr_emit_system_main_loop_exit(DisasContext *ctx,
     ia64_tr_sync_state_cache(ctx);
     ia64_tr_store_source_visibility_state(
         ctx, ctx->instruction_group_start, ctx->typed_group_active);
-    /* A PSR-writing helper may have materialized the transient fault RI. */
-    ia64_tr_clear_restart_ri();
     if (next_slot < IA64_SLOT_COUNT) {
-        ia64_tr_commit_ip(bundle_pc);
-        ia64_tr_publish_restart_ri(next_slot);
+        ia64_tr_commit_ip(ctx, bundle_pc);
+    ia64_tr_publish_restart_ri(ctx, next_slot);
     } else {
-        ia64_tr_commit_ip(bundle_pc + IA64_BUNDLE_SIZE);
+        ia64_tr_commit_ip(ctx, bundle_pc + IA64_BUNDLE_SIZE);
     }
     ia64_tr_flush_retired_bundles(ctx);
     ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_MAIN);
@@ -11187,7 +12988,7 @@ static bool ia64_tr_try_decoded_bundle(DisasContext *ctx,
             }
         }
         ctx->instruction_group_start = fallthrough_group_start;
-        g_assert(!ctx->state_cache_active);
+        g_assert(ctx->state_cache_active);
         g_assert(ia64_tr_group_is_empty(ctx));
         ia64_tr_emit_decoded_branch_cfg_exits(
             ctx, branch_arm, branch_count, has_fallthrough,
@@ -11271,7 +13072,7 @@ static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
 
         ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_EXIT, 1);
         ia64_tr_sync_state_cache(ctx);
-        ia64_tr_commit_ip(target);
+        ia64_tr_commit_ip(ctx, target);
         ia64_tr_flush_retired_bundles(ctx);
         ia64_tr_emit_exit_request_guard(main_loop_exit);
         ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_DIRECT);
@@ -11283,19 +13084,41 @@ static void ia64_tr_emit_fallthrough_exit(DisasContext *ctx, uint64_t target)
         ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_MAIN);
         tcg_gen_exit_tb(NULL, 0);
     } else {
-        ia64_tr_commit_ip(target);
+        ia64_tr_commit_ip(ctx, target);
         ia64_tr_emit_main_loop_exit(ctx);
     }
 }
 
-static void ia64_tr_store_typed_taken_visibility_state(void)
+static void ia64_tr_store_typed_taken_visibility_state(DisasContext *ctx)
 {
     /* A taken branch always starts a fresh issue group at RI=0. */
+    if (ctx->rewrite_ssa_enabled && !ctx->rewrite_ssa_inherited) {
+        if (!ctx->source_frontier_maybe_changed &&
+            (ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START) != 0 &&
+            (ctx->base.tb->flags & IA64_TB_FLAG_TYPED_GROUP) == 0) {
+            return;
+        }
+        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                        offsetof(CPUIA64State, issue_group.typed_active));
+        tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                        offsetof(CPUIA64State, instruction_group_start));
+        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                        offsetof(CPUIA64State, instruction_group_dirty));
+        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 3);
+        return;
+    }
     tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
                    offsetof(CPUIA64State, issue_group.saved_gr_mask));
     tcg_gen_st_i64(tcg_constant_i64(0), tcg_env,
                    offsetof(CPUIA64State, issue_group.saved_gr_mask) +
                    sizeof(uint64_t));
+    tcg_gen_st_i64(
+        tcg_constant_i64(0), tcg_env,
+        offsetof(CPUIA64State, issue_group.check_gr_forward_mask));
+    tcg_gen_st_i64(
+        tcg_constant_i64(0), tcg_env,
+        offsetof(CPUIA64State, issue_group.check_gr_forward_mask) +
+            sizeof(uint64_t));
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                     offsetof(CPUIA64State, issue_group.saved_br_mask));
     tcg_gen_st8_i32(
@@ -11324,6 +13147,8 @@ static void ia64_tr_store_typed_taken_visibility_state(void)
                     offsetof(CPUIA64State, instruction_group_start));
     tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
                     offsetof(CPUIA64State, instruction_group_dirty));
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 13);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 16);
 }
 
 /*
@@ -11340,15 +13165,12 @@ static void ia64_tr_emit_typed_direct_branch_exit(
 
     if (taken) {
         g_assert(instruction_group_start && !typed_group_active);
-        ia64_tr_store_typed_taken_visibility_state();
-        ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
-        ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
+        ia64_tr_store_typed_taken_visibility_state(ctx);
     } else {
         ia64_tr_store_source_visibility_state(
             ctx, instruction_group_start, typed_group_active);
     }
-    ia64_tr_clear_restart_ri();
-    ia64_tr_commit_ip(target);
+    ia64_tr_commit_ip(ctx, target);
     if (taken && arm != NULL && arm->taken_trap) {
         TCGLabel *no_trap = gen_new_label();
         TCGv_i64 psr = tcg_temp_new_i64();
@@ -11394,11 +13216,8 @@ static void ia64_tr_emit_typed_indirect_branch_exit(DisasContext *ctx,
 {
     TCGLabel *main_loop_exit = gen_new_label();
 
-    ia64_tr_store_typed_taken_visibility_state();
-    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
-    ia64_tr_clear_restart_ri();
-    ia64_tr_commit_ip_value(target);
+    ia64_tr_store_typed_taken_visibility_state(ctx);
+    ia64_tr_commit_ip_value(ctx, target);
     ia64_tr_flush_retired_bundles(ctx);
     ia64_tr_emit_exit_request_guard(main_loop_exit);
     ia64_tr_profile_emit(ctx, IA64_PROFILE_EXIT_LOOKUP);
@@ -11436,11 +13255,8 @@ static void ia64_tr_emit_typed_return_exit(DisasContext *ctx,
     TCGv_i64 psr_lp = tcg_temp_new_i64();
 
     ia64_tr_require_helper(opcode, IA64_OPCODE_HELPER_RETURN_FRAME);
-    ia64_tr_store_typed_taken_visibility_state();
-    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
-    ia64_tr_clear_restart_ri();
-    ia64_tr_commit_ip_value(target);
+    ia64_tr_store_typed_taken_visibility_state(ctx);
+    ia64_tr_commit_ip_value(ctx, target);
     /* Count the retired branch without permitting asynchronous observation. */
     ia64_tr_retire_bundles_deferred_interrupt(ctx);
 
@@ -11473,10 +13289,17 @@ static void ia64_tr_emit_typed_return_exit(DisasContext *ctx,
 
 static void ia64_tr_split_state_cache_at_typed_branch(DisasContext *ctx)
 {
+    if (ctx->rewrite_ssa_enabled) {
+        ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
+        if (ctx->rewrite_group.ssa.enabled) {
+            ia64_tr_ssa_materialize_dirty(ctx);
+        }
+        ia64_tr_sync_state_cache(ctx);
+        return;
+    }
     if (ctx->state_cache_active) {
         ia64_tr_sync_state_cache(ctx);
         ia64_tr_invalidate_state_cache(ctx);
-        ctx->state_cache_active = false;
     }
 }
 
@@ -11538,16 +13361,14 @@ static void ia64_tr_emit_decoded_rfi(DisasContext *ctx,
     ia64_tr_emit_decoded_privileged_operation(ctx, insn);
     gen_set_label(cpl_zero);
 
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     ia64_tr_group_finish_instruction_success(ctx, insn);
     ia64_tr_group_close(ctx);
     ia64_tr_split_state_cache_at_typed_branch(ctx);
 
-    ia64_tr_store_typed_taken_visibility_state();
-    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 11);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 15);
+    ia64_tr_store_typed_taken_visibility_state(ctx);
         ia64_tr_note_retired_bundle(ctx);
     ia64_tr_retire_bundles_deferred_interrupt(ctx);
     gen_helper_rfi(tcg_env, tcg_constant_i64(insn->address));
@@ -11567,7 +13388,6 @@ static void ia64_tr_emit_call_frame_transition(DisasContext *ctx,
                                                IA64Opcode opcode)
 {
     /* The returning helper may rewrite every frame-dependent global. */
-    g_assert(!ctx->state_cache_active);
     ia64_tr_require_helper(opcode, IA64_OPCODE_HELPER_CALL_FRAME);
     gen_helper_enter_call_frame(tcg_env);
 }
@@ -11645,31 +13465,28 @@ static void ia64_tr_emit_decoded_loop_branch_split(
     ia64_tr_profile_add(ctx, IA64_PROFILE_BRANCH_INLINE_DIRECT, 1);
 
     if (insn->opcode == IA64_OP_BR_CLOOP) {
-        TCGv_i64 lc = ia64_tr_scratch_i64(ctx);
+        TCGv_i64 lc = ia64_tr_ensure_ar(ctx, IA64_AR_LC);
         TCGv_i64 lc_nonzero = ia64_tr_scratch_i64(ctx);
         TCGv_i64 decremented = ia64_tr_scratch_i64(ctx);
-        TCGLabel *skip_decrement = gen_new_label();
+        TCGv_i64 next_lc = ia64_tr_scratch_i64(ctx);
 
-        ia64_tr_load_ar(ctx, lc, IA64_AR_LC);
         tcg_gen_setcondi_i64(TCG_COND_NE, lc_nonzero, lc, 0);
         tcg_gen_mov_i64(taken, lc_nonzero);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, lc_nonzero, 0,
-                            skip_decrement);
         tcg_gen_subi_i64(decremented, lc, 1);
-        ia64_tr_store_ar(ctx, IA64_AR_LC, decremented);
-        gen_set_label(skip_decrement);
+        tcg_gen_movcond_i64(TCG_COND_NE, next_lc, lc_nonzero,
+                            tcg_constant_i64(0), decremented, lc);
+        ia64_tr_store_ar(ctx, IA64_AR_LC, next_lc);
     } else {
         IA64TrPrWrite *p63 = ia64_tr_group_prepare_pr(ctx, 63);
-        TCGv_i64 ec = ia64_tr_scratch_i64(ctx);
+        TCGv_i64 ec = ia64_tr_ensure_ar(ctx, IA64_AR_EC);
         TCGv_i64 ec_nonzero = ia64_tr_scratch_i64(ctx);
         TCGv_i64 ec_gt_one = ia64_tr_scratch_i64(ctx);
         TCGv_i64 active = ia64_tr_scratch_i64(ctx);
         TCGv_i64 decrement_ec = ia64_tr_scratch_i64(ctx);
         TCGv_i64 decremented = ia64_tr_scratch_i64(ctx);
-        TCGLabel *skip_ec_decrement = gen_new_label();
+        TCGv_i64 next_ec = ia64_tr_scratch_i64(ctx);
 
         rotate = ia64_tr_scratch_i64(ctx);
-        ia64_tr_load_ar(ctx, ec, IA64_AR_EC);
         tcg_gen_setcondi_i64(TCG_COND_NE, ec_nonzero, ec, 0);
         tcg_gen_setcondi_i64(TCG_COND_GTU, ec_gt_one, ec, 1);
 
@@ -11687,30 +13504,27 @@ static void ia64_tr_emit_decoded_loop_branch_split(
             tcg_gen_andc_i64(decrement_ec, ec_nonzero, predicate_true);
             ia64_tr_group_stage_pr_const(p63, false);
         } else {
-            TCGv_i64 lc = ia64_tr_scratch_i64(ctx);
+            TCGv_i64 lc = ia64_tr_ensure_ar(ctx, IA64_AR_LC);
             TCGv_i64 lc_nonzero = ia64_tr_scratch_i64(ctx);
             TCGv_i64 decrement_lc = ia64_tr_scratch_i64(ctx);
-            TCGLabel *skip_lc_decrement = gen_new_label();
+            TCGv_i64 next_lc = ia64_tr_scratch_i64(ctx);
 
-            ia64_tr_load_ar(ctx, lc, IA64_AR_LC);
             tcg_gen_setcondi_i64(TCG_COND_NE, lc_nonzero, lc, 0);
             tcg_gen_or_i64(active, lc_nonzero, ec_gt_one);
             tcg_gen_or_i64(rotate, lc_nonzero, ec_nonzero);
             tcg_gen_andc_i64(decrement_ec, ec_nonzero, lc_nonzero);
             ia64_tr_group_stage_pr_bool(p63, lc_nonzero);
 
-            tcg_gen_brcondi_i64(TCG_COND_EQ, lc_nonzero, 0,
-                                skip_lc_decrement);
             tcg_gen_subi_i64(decrement_lc, lc, 1);
-            ia64_tr_store_ar(ctx, IA64_AR_LC, decrement_lc);
-            gen_set_label(skip_lc_decrement);
+            tcg_gen_movcond_i64(TCG_COND_NE, next_lc, lc_nonzero,
+                                tcg_constant_i64(0), decrement_lc, lc);
+            ia64_tr_store_ar(ctx, IA64_AR_LC, next_lc);
         }
 
-        tcg_gen_brcondi_i64(TCG_COND_EQ, decrement_ec, 0,
-                            skip_ec_decrement);
         tcg_gen_subi_i64(decremented, ec, 1);
-        ia64_tr_store_ar(ctx, IA64_AR_EC, decremented);
-        gen_set_label(skip_ec_decrement);
+        tcg_gen_movcond_i64(TCG_COND_NE, next_ec, decrement_ec,
+                            tcg_constant_i64(0), decremented, ec);
+        ia64_tr_store_ar(ctx, IA64_AR_EC, next_ec);
         if (insn->opcode == IA64_OP_BR_CEXIT ||
             insn->opcode == IA64_OP_BR_WEXIT) {
             tcg_gen_xori_i64(taken, active, 1);
@@ -11721,6 +13535,7 @@ static void ia64_tr_emit_decoded_loop_branch_split(
 
     /* Retire p63 through the normal transaction while the old RRB owns it. */
     ia64_tr_group_finish_instruction_success(ctx, insn);
+    ia64_tr_ssa_capture_safepoint(ctx, &arm->safepoint);
     if (insn->stop_after) {
         ia64_tr_group_close(ctx);
     }
@@ -11731,6 +13546,7 @@ static void ia64_tr_emit_decoded_loop_branch_split(
 
         tcg_gen_brcondi_i64(TCG_COND_EQ, rotate, 0, skip_rotation);
         gen_helper_rotate_modulo_registers(tcg_env);
+        ia64_tr_reload_state_cache(ctx);
         gen_set_label(skip_rotation);
     }
     tcg_gen_brcondi_i64(TCG_COND_NE, taken, 0, arm->taken);
@@ -11805,12 +13621,13 @@ static bool ia64_tr_emit_decoded_return_split(
     tcg_gen_andi_i64(arm->indirect_target, arm->indirect_target,
                      ~UINT64_C(0xf));
     ia64_tr_group_load_branch_pfs(ctx, arm->return_pfs);
-    ia64_tr_publish_fault_state(insn->address, insn->slot,
+    ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
     gen_set_label(skip_return);
 
     ia64_tr_group_finish_instruction_success(ctx, insn);
+    ia64_tr_ssa_capture_safepoint(ctx, &arm->safepoint);
     if (insn->stop_after || unconditional) {
         ia64_tr_group_close(ctx);
     }
@@ -11900,18 +13717,24 @@ static bool ia64_tr_emit_decoded_call_split(
     link_write = ia64_tr_group_prepare_br(ctx, insn->b1);
     g_assert(link_write != NULL && !link_write->forward_to_branch);
     ia64_tr_group_load_branch_predicate(ctx, predicate, insn->qp);
-    tcg_gen_brcondi_i64(TCG_COND_EQ, predicate, 0, skip_call);
     if (indirect) {
+        /*
+         * Define the dynamic target on both CFG predecessors.  The value is
+         * consumed only by the taken arm, but TCG register allocation does
+         * not infer that correlation from the predicate split.
+         */
         ia64_tr_group_load_branch_br(
             ctx, arm->indirect_target, insn->b2);
         tcg_gen_andi_i64(arm->indirect_target, arm->indirect_target,
                          ~UINT64_C(0xf));
     }
+    tcg_gen_brcondi_i64(TCG_COND_EQ, predicate, 0, skip_call);
     ia64_tr_group_stage_br(
         link_write, tcg_constant_i64(bundle_ip + IA64_BUNDLE_SIZE));
     gen_set_label(skip_call);
 
     ia64_tr_group_finish_instruction_success(ctx, insn);
+    ia64_tr_ssa_capture_safepoint(ctx, &arm->safepoint);
     if (insn->stop_after || unconditional) {
         ia64_tr_group_close(ctx);
     }
@@ -11953,6 +13776,7 @@ static bool ia64_tr_emit_decoded_branch_split(
         ia64_tr_profile_add(ctx, IA64_PROFILE_BRANCH_INLINE_DIRECT, 1);
     }
     ia64_tr_group_finish_instruction_success(ctx, insn);
+    ia64_tr_ssa_capture_safepoint(ctx, &arm->safepoint);
 
     /* A stop closes both arms; p0 has only the fresh-target arm. */
     if (insn->stop_after || unconditional) {
@@ -12011,6 +13835,7 @@ static void ia64_tr_emit_decoded_fchkf_split(
     tcg_gen_and_i64(condition, condition, predicate);
 
     ia64_tr_group_finish_instruction_success(ctx, insn);
+    ia64_tr_ssa_capture_safepoint(ctx, &arm->safepoint);
     if (insn->stop_after) {
         ia64_tr_group_close(ctx);
     }
@@ -12097,8 +13922,7 @@ static void ia64_tr_emit_instruction_debug_guard(
      * matcher.  Every guest PSR writer is already a TB endpoint, so no earlier
      * slot can silently change this shape.
      */
-    if (ia64_tr_debug_fast_guard_enabled() &&
-        (ctx->base.tb->flags & IA64_TB_FLAG_INSN_DEBUG_ACTIVE) == 0) {
+    if ((ctx->base.tb->flags & IA64_TB_FLAG_INSN_DEBUG_ACTIVE) == 0) {
         return;
     }
     matched = tcg_temp_new_i32();
@@ -12109,7 +13933,7 @@ static void ia64_tr_emit_instruction_debug_guard(
     tcg_gen_brcondi_i32(TCG_COND_EQ, matched, 0, resume);
     tcg_gen_movi_i64(cpu_ip, pc);
     ia64_tr_publish_fault_state(
-        pc, start_slot, slot_type,
+        ctx, pc, start_slot, slot_type,
         bundle->slot[start_slot], ctx->instruction_group_start);
     gen_helper_raise_instruction_debug(tcg_env);
     gen_set_label(resume);
@@ -12119,7 +13943,7 @@ static void ia64_tr_emit_firmware_call_gate(DisasContext *ctx, uint64_t pc)
 {
     ia64_tr_sync_state_cache(ctx);
     ia64_tr_flush_retired_bundles(ctx);
-    ia64_tr_publish_restart_ri(0);
+    ia64_tr_publish_restart_ri(ctx, 0);
     gen_helper_firmware_call_gate(tcg_env, tcg_constant_i64(pc),
                                   tcg_constant_i64(pc));
     ia64_tr_invalidate_state_cache(ctx);
@@ -12155,10 +13979,6 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
         return;
     }
 
-    if (ctx->state_cache_available && !ctx->state_cache_active &&
-        ctx->base.num_insns >= ia64_tr_state_cache_min_bundles()) {
-        ctx->state_cache_active = true;
-    }
     ia64_tr_profile_add(ctx, IA64_PROFILE_BUNDLE_EXECUTED, 1);
     if ((ctx->base.tb->flags & IA64_TB_FLAG_ALAT_ACTIVE) != 0) {
         ia64_tr_profile_add(ctx, IA64_PROFILE_ALAT_ACTIVE_BUNDLE, 1);

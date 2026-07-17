@@ -221,21 +221,6 @@ void HELPER(gr_alat_invalidate_mask)(CPUIA64State *env, uint64_t mask_lo,
     }
 }
 
-void HELPER(retire_translated_bundles)(CPUIA64State *env,
-                                       uint32_t bundle_count)
-{
-    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_OTHER);
-    if (bundle_count == 0) {
-        return;
-    }
-
-    ia64_benchmark_retire(env, bundle_count);
-    if (ia64_external_interrupt_enabled(env)) {
-        IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
-        cpu_loop_exit(env_cpu(env));
-    }
-}
-
 static unsigned ia64_arch_psr_cpl(uint64_t psr)
 {
     return (psr & IA64_PSR_CPL_MASK) >> IA64_PSR_CPL_SHIFT;
@@ -423,4 +408,18 @@ G_NORETURN void HELPER(raise_lower_privilege_transfer_trap)(
 G_NORETURN void HELPER(raise_taken_branch_trap)(CPUIA64State *env)
 {
     ia64_arch_raise_branch_trap(env, IA64_EXCEPTION_TAKEN_BRANCH_TRAP);
+}
+void HELPER(retire_translated_bundles)(CPUIA64State *env,
+                                       uint32_t bundle_count)
+{
+    IA64_PROFILE_HELPER(IA64_PROFILE_HELPER_OTHER);
+    if (bundle_count == 0) {
+        return;
+    }
+
+    ia64_benchmark_retire(env, bundle_count);
+    if (ia64_external_interrupt_enabled(env)) {
+        IA64_PERF_INC(IA64_PERF_CPU_LOOP_EXIT);
+        cpu_loop_exit(env_cpu(env));
+    }
 }

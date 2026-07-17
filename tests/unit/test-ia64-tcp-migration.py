@@ -266,10 +266,10 @@ def run_tcp_migration(qemu: Path) -> str:
                         initial_stop
                     )
                 )
-            breakpoint = H._gdb_rsp_command(gdb, "Z0,20,10")
+            breakpoint = H._gdb_rsp_command(gdb, "Z0,50,10")
             if breakpoint != "OK":
                 raise H.HarnessError(
-                    "source GDB stub rejected checkpoint 0x20: {}".format(
+                    "source GDB stub rejected checkpoint 0x50: {}".format(
                         breakpoint
                     )
                 )
@@ -286,13 +286,18 @@ def run_tcp_migration(qemu: Path) -> str:
                 _hmp_checked(source_monitor, "info registers")
             )
             H._require(
-                checkpoint.ip == 0x20 and
+                checkpoint.ip == 0x50 and
                 checkpoint.gr[1] == 5 and checkpoint.gr[2] == 0 and
-                checkpoint.gr[3] == 0 and checkpoint.gr[4] == 9 and
+                checkpoint.gr[16] == program.data[0].value and
+                checkpoint.gr[17] ==
+                    (program.data[0].value + 4) & ((1 << 64) - 1) and
+                checkpoint.gr[18] == 0 and
+                checkpoint.nat_low == 0 and checkpoint.nat_high == 0 and
                 not checkpoint.exception_pending,
-                "source did not capture the open typed prefix exactly",
+                "source did not capture the open check-forward prefix "
+                "exactly",
             )
-            removed = H._gdb_rsp_command(gdb, "z0,20,10")
+            removed = H._gdb_rsp_command(gdb, "z0,50,10")
             if removed != "OK":
                 raise H.HarnessError(
                     "source GDB stub could not remove checkpoint: {}".format(
@@ -319,7 +324,9 @@ def run_tcp_migration(qemu: Path) -> str:
             restored = H.parse_snapshot(
                 _hmp_checked(destination_monitor, "info registers")
             )
-            differences = H.snapshot_differences(checkpoint, restored)
+            differences = H.successful_snapshot_differences(
+                checkpoint, restored
+            )
             H._require(
                 not differences,
                 "TCP destination did not restore the exact checkpoint:\n  "
@@ -328,20 +335,27 @@ def run_tcp_migration(qemu: Path) -> str:
 
             final = _wait_for_terminal(destination_monitor, program)
             H._require(
-                not final.exception_pending and final.ip == 0x30 and
+                not final.exception_pending and final.ip == 0x60 and
                 final.gr[1] == 5 and final.gr[2] == 0 and
-                final.gr[3] == 7 and final.gr[4] == 9,
-                "TCP continuation lost the saved ordinary-source view: "
-                "IP=0x{:x} r1=0x{:x} r2=0x{:x} r3=0x{:x} r4=0x{:x}"
+                final.gr[16] == program.data[0].value and
+                final.gr[17] ==
+                    (program.data[0].value + 4) & ((1 << 64) - 1) and
+                final.gr[18] ==
+                    (program.data[0].value + 8) & ((1 << 64) - 1) and
+                final.nat_low == 0 and final.nat_high == 0,
+                "TCP continuation lost the ordinary-entry or check-forward "
+                "view: IP=0x{:x} r1=0x{:x} r2=0x{:x} r16=0x{:x} "
+                "r17=0x{:x} r18=0x{:x} NaT=0x{:x}:0x{:x}"
                 .format(
                     final.ip, final.gr[1], final.gr[2],
-                    final.gr[3], final.gr[4],
+                    final.gr[16], final.gr[17], final.gr[18],
+                    final.nat_high, final.nat_low,
                 ),
             )
             result_detail = (
                 "distinct source/destination PIDs {}/{} completed true TCP "
-                "migration; open-group IP 0x20 restored exactly and resumed "
-                "to IP 0x30 with r1/r2/r3/r4=5/0/7/9"
+                "migration; open-group IP 0x50 restored exact immutable-entry "
+                "and check-forward state and resumed to IP 0x60"
                 .format(source_process.pid, destination_process.pid)
             )
         except Exception as exc:
