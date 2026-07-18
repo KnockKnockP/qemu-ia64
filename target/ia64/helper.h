@@ -62,10 +62,15 @@ DEF_HELPER_3(system_preflight, void, env, i32, i32)
 DEF_HELPER_6(system_plane, i64, env, i32, i32, i32, i64, i64)
 DEF_HELPER_3(application_register_preflight, void, env, i32, i32)
 DEF_HELPER_2(application_register_write_legality, void, env, i32)
+DEF_HELPER_3(application_register_legality_status, i32, env, i32, i32)
+DEF_HELPER_3(application_register_privilege_status, i32, env, i32, i32)
+DEF_HELPER_FLAGS_2(raise_application_register_fault, TCG_CALL_NO_RETURN,
+                   noreturn, env, i32)
 DEF_HELPER_2(application_register_read, i64, env, i32)
 DEF_HELPER_FLAGS_2(application_register_write_value_valid, TCG_CALL_NO_RWG,
                    i32, i32, i64)
 DEF_HELPER_3(application_register_write, void, env, i32, i64)
+DEF_HELPER_3(application_register_write_committed, void, env, i32, i64)
 DEF_HELPER_FLAGS_2(raise_data_register_nat_consumption, TCG_CALL_NO_RETURN,
                    noreturn, env, i32)
 DEF_HELPER_FLAGS_3(raise_unaligned_data_reference, TCG_CALL_NO_RETURN,

@@ -742,6 +742,37 @@ def test_nat_propagation(harness: ModuleType, qemu: Path) -> str:
     return "PSAD propagates a real ld8.fill NaT through the staged GR/NaT pair"
 
 
+def test_generated_density(harness: ModuleType, qemu: Path) -> str:
+    cases = make_cases()
+    matrices = (
+        build_matrix(harness, "packed density matrix A", cases[:27], True),
+        build_matrix(harness, "packed density matrix B", cases[27:], False),
+    )
+    lines: List[str] = []
+    for label, matrix in zip(("packed_integer_A", "packed_integer_B"),
+                             matrices):
+        trace_pc = matrix.direct_trace_ips[0]
+        snapshot, row, operations = harness._density_profile_program(
+            qemu, matrix.program, trace_pc, trace_pc,
+            one_bundle_per_tb=True,
+        )
+        if snapshot.ip != matrix.program.terminal_ip or \
+                snapshot.exception_pending:
+            raise AssertionError(label + " density run failed architecturally")
+        for reg, expected in matrix.expected.items():
+            if snapshot.gr[reg] != expected:
+                raise AssertionError(
+                    "{} density rerun r{} expected 0x{:016x}, got "
+                    "0x{:016x}".format(
+                        label, reg, expected, snapshot.gr[reg]
+                    )
+                )
+        if int(row["integer"]) < 1:
+            raise AssertionError(label + " row lacks a packed integer slot")
+        lines.append(harness._density_line(label, row, operations))
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qemu", type=Path, required=True)
@@ -752,6 +783,7 @@ def main() -> int:
     tests = [
         ("54-row packed semantic matrix", test_semantic_matrix),
         ("packed NaT propagation", test_nat_propagation),
+        ("packed family generated-code density", test_generated_density),
     ]
     print("TAP version 13")
     print("1..{}".format(len(tests)))
@@ -760,7 +792,8 @@ def main() -> int:
         try:
             detail = function(harness, args.qemu.resolve())
             print("ok {} - {}".format(number, name))
-            print("# " + detail)
+            for line in detail.splitlines():
+                print("# " + line)
         except Exception as exc:
             failed = True
             print("not ok {} - {}".format(number, name))

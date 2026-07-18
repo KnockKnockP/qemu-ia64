@@ -529,10 +529,11 @@ def check_application_register_plane(root: Path) -> None:
     )
     read_arm = lowering[lowering.index(
         "if (insn->opcode == IA64_OP_MOV_ARGR)"):
-        lowering.index("    {\n        TCGLabel *nat_clear")]
+        lowering.index("        uint64_t expected[2]")]
     require(read_arm.index("ia64_tr_emit_decoded_predicate_guard") <
             read_arm.index("ia64_tr_emit_application_target_check") <
-            read_arm.index("gen_helper_application_register_preflight") <
+            read_arm.index("ia64_tr_emit_application_legality") <
+            read_arm.index("ia64_tr_emit_application_privilege") <
             read_arm.index("gen_helper_application_register_read"),
             "MOV_ARGR target/selector/read fault order drifted")
     target_check = section(
@@ -547,16 +548,27 @@ def check_application_register_plane(root: Path) -> None:
             "MOV_ARGR no longer rejects r0/out-of-frame targets")
 
     write_arm = lowering[lowering.index(
-        "    {\n        TCGLabel *nat_clear"):]
-    legality = write_arm.index("gen_helper_application_register_write_legality")
+        "    {\n        TCGv_i64 value"):]
+    legality = write_arm.index(
+        "ia64_tr_emit_application_legality(ctx, insn, true)")
     source = write_arm.index("ia64_tr_group_load_ordinary_gr_pair", legality)
-    nat = write_arm.index("ia64_tr_emit_decoded_register_nat_consumption", source)
+    nat = write_arm.index("ia64_tr_emit_decoded_register_nat_check", source)
     value = write_arm.index("ia64_tr_emit_application_write_value_check", nat)
     pfs_write = write_arm.index("ia64_tr_group_write_pfs", value)
-    generic_write = write_arm.index("gen_helper_application_register_write", nat)
+    privilege = write_arm.index(
+        "ia64_tr_emit_application_privilege(ctx, insn, true)", value)
+    committed_write = write_arm.index(
+        "gen_helper_application_register_write_committed", privilege)
     require(legality < source < nat < value < pfs_write and
-            legality < source < nat < generic_write,
-            "MOV_GRAR legality/NaT/value/write ordering drifted")
+            legality < source < nat < value < privilege < committed_write,
+            "MOV_GRAR legality/NaT/value/privilege/write ordering drifted")
+    for token in (
+            "ia64_tr_application_write_contract",
+            "ia64_tr_apply_application_write_post",
+            "ia64_tr_finish_faulting_slot",
+    ):
+        require(token in write_arm,
+                "MOV_GRAR exact helper contract lost " + token)
     require("instruction->forward_pfs ==" in write_arm and
             "instruction->must_pfs ==" in write_arm,
             "MOV_GRAR PFS overlay assertions disappeared")

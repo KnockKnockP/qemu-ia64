@@ -71,12 +71,76 @@ static const char * const ia64_profile_counter_names[] = {
     [IA64_PROFILE_SHAPE_B_SLOT] = "shape.b.slot",
     [IA64_PROFILE_SHAPE_C_GROUP] = "shape.c.group",
     [IA64_PROFILE_SHAPE_C_SLOT] = "shape.c.slot",
-    [IA64_PROFILE_SHAPE_C_OPEN_TB] = "shape.c.reason.open_tb",
-    [IA64_PROFILE_SHAPE_C_PAGE] = "shape.c.reason.page",
-    [IA64_PROFILE_SHAPE_C_RSE] = "shape.c.reason.rse",
-    [IA64_PROFILE_SHAPE_C_SYSTEM] = "shape.c.reason.system",
-    [IA64_PROFILE_SHAPE_C_OBSERVATION] = "shape.c.reason.observation",
-    [IA64_PROFILE_SHAPE_C_OTHER] = "shape.c.reason.other",
+    [IA64_PROFILE_SHAPE_C_RSE_GROUP] = "shape.c.reason.rse.group",
+    [IA64_PROFILE_SHAPE_C_RSE_SLOT] = "shape.c.reason.rse.slot",
+    [IA64_PROFILE_SHAPE_C_RFI_GROUP] = "shape.c.reason.rfi.group",
+    [IA64_PROFILE_SHAPE_C_RFI_SLOT] = "shape.c.reason.rfi.slot",
+    [IA64_PROFILE_SHAPE_C_SYSTEM_GROUP] = "shape.c.reason.system.group",
+    [IA64_PROFILE_SHAPE_C_SYSTEM_SLOT] = "shape.c.reason.system.slot",
+    [IA64_PROFILE_SHAPE_C_DATA_MEMORY_GROUP] =
+        "shape.c.reason.data_memory.group",
+    [IA64_PROFILE_SHAPE_C_DATA_MEMORY_SLOT] =
+        "shape.c.reason.data_memory.slot",
+    [IA64_PROFILE_SHAPE_C_DATA_NONMEMORY_GROUP] =
+        "shape.c.reason.data_nonmemory.group",
+    [IA64_PROFILE_SHAPE_C_DATA_NONMEMORY_SLOT] =
+        "shape.c.reason.data_nonmemory.slot",
+    [IA64_PROFILE_SHAPE_C_FLOATING_GROUP] =
+        "shape.c.reason.floating.group",
+    [IA64_PROFILE_SHAPE_C_FLOATING_SLOT] =
+        "shape.c.reason.floating.slot",
+    [IA64_PROFILE_SHAPE_C_PLUGIN_GROUP] = "shape.c.reason.plugin.group",
+    [IA64_PROFILE_SHAPE_C_PLUGIN_SLOT] = "shape.c.reason.plugin.slot",
+    [IA64_PROFILE_SHAPE_C_INSN_DEBUG_GROUP] =
+        "shape.c.reason.instruction_debug.group",
+    [IA64_PROFILE_SHAPE_C_INSN_DEBUG_SLOT] =
+        "shape.c.reason.instruction_debug.slot",
+    [IA64_PROFILE_SHAPE_C_DATA_DEBUG_GROUP] =
+        "shape.c.reason.data_debug.group",
+    [IA64_PROFILE_SHAPE_C_DATA_DEBUG_SLOT] =
+        "shape.c.reason.data_debug.slot",
+    [IA64_PROFILE_SHAPE_C_DURABLE_OPEN_GROUP] =
+        "shape.c.reason.durable_open_group.group",
+    [IA64_PROFILE_SHAPE_C_DURABLE_OPEN_SLOT] =
+        "shape.c.reason.durable_open_group.slot",
+    [IA64_PROFILE_SHAPE_C_UNSUPPORTED_TRAITS_GROUP] =
+        "shape.c.reason.unsupported_traits.group",
+    [IA64_PROFILE_SHAPE_C_UNSUPPORTED_TRAITS_SLOT] =
+        "shape.c.reason.unsupported_traits.slot",
+    [IA64_PROFILE_SHAPE_C_UNKNOWN_GROUP] = "shape.c.reason.unknown.group",
+    [IA64_PROFILE_SHAPE_C_UNKNOWN_SLOT] = "shape.c.reason.unknown.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SLOT] =
+        "ordinary_nonmemory.slot.total",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_A_SLOT] =
+        "ordinary_nonmemory.shape.a.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_B_SLOT] =
+        "ordinary_nonmemory.shape.b.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_SLOT] =
+        "ordinary_nonmemory.shape.c.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_RSE_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.rse.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_RFI_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.rfi.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_SYSTEM_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.system.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DATA_MEMORY_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.data_memory.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DATA_NONMEMORY_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.data_nonmemory.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_FLOATING_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.floating.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_PLUGIN_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.plugin.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_INSN_DEBUG_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.instruction_debug.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DATA_DEBUG_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.data_debug.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DURABLE_OPEN_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.durable_open_group.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_UNSUPPORTED_TRAITS_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.unsupported_traits.slot",
+    [IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_UNKNOWN_SLOT] =
+        "ordinary_nonmemory.shape.c.reason.unknown.slot",
     [IA64_PROFILE_GROUP_TB_CROSSING] = "group.crossing.tb",
     [IA64_PROFILE_GROUP_PAGE_CROSSING] = "group.crossing.page",
     [IA64_PROFILE_GROUP_SAFEPOINT] = "group.safepoint",
@@ -109,7 +173,7 @@ static const char * const ia64_profile_counter_names[] = {
     [IA64_PROFILE_NAT_UNKNOWN] = "nat.unknown",
     [IA64_PROFILE_NAT_DYNAMIC_LOAD] = "nat.dynamic_load",
     [IA64_PROFILE_NAT_DYNAMIC_BRANCH] = "nat.dynamic_branch",
-    [IA64_PROFILE_NAT_FAULT] = "nat.fault",
+    [IA64_PROFILE_NAT_FAULT] = "nat.direct_known_set_fault",
     [IA64_PROFILE_NAT_LATTICE_INVALIDATE] = "nat.lattice_invalidate",
     [IA64_PROFILE_NAT_RSE_UNKNOWN] = "nat.rse_unknown",
     [IA64_PROFILE_ALAT_EMPTY_TB] = "alat.empty.tb",
@@ -373,6 +437,17 @@ static void ia64_profile_dump(void)
         ia64_profile_print_rate(ia64_profile_counter_names[i],
                                 total.counter[i], bundles);
     }
+    {
+        uint64_t ordinary =
+            total.counter[IA64_PROFILE_ORDINARY_NONMEMORY_SLOT];
+        uint64_t fast =
+            total.counter[IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_A_SLOT] +
+            total.counter[IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_B_SLOT];
+
+        fprintf(stderr,
+                "[ia64-profile] ordinary_nonmemory.shape_ab.percent=%.6f\n",
+                ordinary == 0 ? 0.0 : 100.0 * fast / ordinary);
+    }
     for (unsigned i = 1; i < IA64_PROFILE_TB_LENGTH_COUNT; i++) {
         if (total.tb_length[i] != 0) {
             fprintf(stderr,
@@ -485,24 +560,52 @@ static void ia64_profile_dump(void)
                     &ia64_profile_shapes[best_slot];
                 uint64_t weighted = ia64_profile_scaled(
                     best_exec, UINT64_C(1) << ia64_profile_shift);
+                uint32_t overlay_save =
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_GR] +
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_NAT] +
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_PR] +
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_BR] +
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_PFS] +
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_AR] +
+                    shape->counter[IA64_PROFILE_OVERLAY_SAVE_FR];
 
                 fprintf(stderr,
                     "[ia64-profile] top.%u=pc:0x%016" PRIx64
                     ",flags:0x%08x,executions:%" PRIu64
                     ",bundles:%u,slots:%u,"
                     "generated:%u,optimized:%u,host_bytes:%u,"
+                    "generated_env_load:%u,generated_env_store:%u,"
+                    "generated_branch:%u,generated_helper:%u,"
+                    "generated_qemu_load:%u,generated_qemu_store:%u,"
                     "env_load:%u,env_store:%u,branch:%u,helper:%u,"
-                    "qemu_load:%u,qemu_store:%u,integer:%u,predicate:%u,"
+                    "qemu_load:%u,qemu_store:%u,"
+                    "arch_load:%u,arch_store:%u,overlay_save:%u,"
+                    "overlay_validity:%u,overlay_clear:%u,"
+                    "durable_materialization:%u,durable_bytes:%u,"
+                    "integer:%u,predicate:%u,"
                     "branch_slots:%u,memory:%u,loop:%u,end:%s\n",
                     rank + 1, shape->pc, shape->flags, weighted,
                     shape->counter[IA64_PROFILE_BUNDLE_EXECUTED],
                     shape->counter[IA64_PROFILE_SLOT_EXECUTED],
                     shape->generated.total, shape->optimized.total,
-                    shape->host_bytes, shape->optimized.env_load,
+                    shape->host_bytes,
+                    shape->generated.env_load, shape->generated.env_store,
+                    shape->generated.conditional_branch,
+                    shape->generated.helper_call,
+                    shape->generated.qemu_load,
+                    shape->generated.qemu_store,
+                    shape->optimized.env_load,
                     shape->optimized.env_store,
                     shape->optimized.conditional_branch,
                     shape->optimized.helper_call, shape->optimized.qemu_load,
                     shape->optimized.qemu_store,
+                    shape->counter[IA64_PROFILE_ARCH_LOAD],
+                    shape->counter[IA64_PROFILE_ARCH_STORE], overlay_save,
+                    shape->counter[IA64_PROFILE_OVERLAY_VALIDITY_LOAD] +
+                        shape->counter[IA64_PROFILE_OVERLAY_VALIDITY_BRANCH],
+                    shape->counter[IA64_PROFILE_OVERLAY_CLEAR],
+                    shape->counter[IA64_PROFILE_DURABLE_MATERIALIZATION],
+                    shape->counter[IA64_PROFILE_DURABLE_BYTES],
                     shape->counter[IA64_PROFILE_COMMON_INTEGER_SLOT],
                     shape->counter[IA64_PROFILE_COMMON_PREDICATE_SLOT],
                     shape->counter[IA64_PROFILE_COMMON_BRANCH_SLOT],
@@ -511,6 +614,16 @@ static void ia64_profile_dump(void)
                         shape->end_reason < IA64_PROFILE_TB_END_COUNT ?
                             ia64_profile_tb_end_names[shape->end_reason] :
                             "invalid");
+                for (unsigned helper = 0;
+                     helper < ia64_profile_exact_helper_count; helper++) {
+                    if (shape->exact_helper[helper] != 0) {
+                        fprintf(stderr,
+                                "[ia64-profile] top.%u.helper.%s=%u\n",
+                                rank + 1,
+                                ia64_profile_exact_helper_names[helper],
+                                shape->exact_helper[helper]);
+                    }
+                }
             }
         }
     }

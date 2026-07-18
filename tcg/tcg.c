@@ -6557,8 +6557,13 @@ static void tcg_out_st_helper_args(TCGContext *s, const TCGLabelQemuLdst *ldst,
 static void tcg_codegen_record_helper(TCGCodegenStats *stats,
                                       const char *name)
 {
+    static const char unnamed_dynamic_callback[] = "plugin_callback";
     unsigned i;
 
+    /* Plugin callbacks intentionally use anonymous TCGHelperInfo records. */
+    if (name == NULL) {
+        name = unnamed_dynamic_callback;
+    }
     for (i = 0; i < stats->helper_count; i++) {
         if (stats->helper[i].name == name ||
             strcmp(stats->helper[i].name, name) == 0) {

@@ -4146,7 +4146,8 @@ def _loader_arguments(program: Program) -> List[str]:
     return arguments
 
 
-def _child_environment(state_cache: bool = False) -> Dict[str, str]:
+def _child_environment(state_cache: bool = False,
+                       extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     environment = os.environ.copy()
     # Strip inherited debug/performance knobs so every case starts from the
     # production typed translator configuration.
@@ -4161,6 +4162,8 @@ def _child_environment(state_cache: bool = False) -> Dict[str, str]:
                 "VIBTANIUM_TCG_STATE_CACHE_GRS": "8",
             }
         )
+    if extra:
+        environment.update(extra)
     return environment
 
 
@@ -5417,8 +5420,9 @@ def _require_typed_application_move_restart_trace(
     _require_typed_direct_trace(trace, readback_ip)
 
     writer_helpers = (
-        "application_register_write_legality",
-        "application_register_write",
+        "application_register_legality_status",
+        "application_register_privilege_status",
+        "application_register_write_committed",
     )
     for helper in writer_helpers:
         if not re.search(
@@ -5437,7 +5441,8 @@ def _require_typed_application_move_restart_trace(
             "got {}".format(readback_ip, len(readback_sections))
         )
     readback = readback_sections[0]
-    for helper in ("application_register_preflight",
+    for helper in ("application_register_legality_status",
+                   "application_register_privilege_status",
                    "application_register_read"):
         if not re.search(
                 r"(?m)^\s*call {},[^\n]*env,\$0x41(?:,|\s*$)".format(
@@ -5508,12 +5513,20 @@ def run_program(qemu: Path, program: Program,
                 ] = (),
                 typed_return_traces: Sequence[Tuple[int, int]] = (),
                 typed_rfi_traces: Sequence[int] = (),
-                typed_pfs_move_traces: Sequence[
-                    Tuple[int, bool, bool, bool, bool]
-                ] = (),
-                one_bundle_per_tb: bool = False,
-                state_cache: bool = False) -> Snapshot:
+                 typed_pfs_move_traces: Sequence[
+                     Tuple[int, bool, bool, bool, bool]
+                 ] = (),
+                 one_bundle_per_tb: bool = False,
+                 state_cache: bool = False,
+                 extra_args: Sequence[str] = (),
+                 extra_env: Optional[Dict[str, str]] = None,
+                 graceful_quit: bool = False,
+                 profile_second_pass: bool = False,
+                 required_output_patterns: Sequence[str] = (),
+                 output_capture: Optional[List[str]] = None,
+                 trace_capture: Optional[List[str]] = None) -> Snapshot:
     port = _free_tcp_port()
+    gdb_port = _free_tcp_port() if profile_second_pass else 0
     monitor_spec = (
         "tcp:127.0.0.1:{},server=on,wait=off,nodelay=on".format(port)
     )
@@ -5543,6 +5556,12 @@ def run_program(qemu: Path, program: Program,
         # is stronger than merely crossing a host opcode-buffer threshold and
         # directly exercises the migrated issue-group continuation state.
         arguments.extend(("-accel", "tcg,one-insn-per-tb=on"))
+    if profile_second_pass:
+        arguments.extend((
+            "-gdb",
+            "tcp:127.0.0.1:{},server=on,wait=off".format(gdb_port),
+        ))
+    arguments.extend(extra_args)
     arguments.extend(_loader_arguments(program))
 
     trace_directory: Optional[tempfile.TemporaryDirectory] = None
@@ -5559,7 +5578,8 @@ def run_program(qemu: Path, program: Program,
             typed_pfs_move_traces or
             typed_visibility_states or internal_stop_handoffs or
             automatic_segment_trace_ips or
-            overlay_dependency_trace is not None):
+            overlay_dependency_trace is not None or
+            trace_capture is not None):
         trace_directory = tempfile.TemporaryDirectory(
             prefix="ia64-typed-trace-"
         )
@@ -5572,9 +5592,11 @@ def run_program(qemu: Path, program: Program,
 
     process: Optional[subprocess.Popen] = None
     monitor: Optional[socket.socket] = None
+    gdb: Optional[socket.socket] = None
     snapshot: Optional[Snapshot] = None
     failure: Optional[Exception] = None
     process_output = ""
+    quit_sent = False
 
     try:
         process = subprocess.Popen(
@@ -5585,7 +5607,7 @@ def run_program(qemu: Path, program: Program,
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_child_environment(state_cache=state_cache),
+            env=_child_environment(state_cache=state_cache, extra=extra_env),
             creationflags=creationflags,
         )
         monitor = _connect_monitor(process, port)
@@ -5616,24 +5638,96 @@ def run_program(qemu: Path, program: Program,
                     "unavailable" if last_ip is None else "0x{:x}".format(last_ip),
                 )
             )
+        if profile_second_pass:
+            # The production profile deliberately reports code-generation
+            # statistics from the ordinary (uninstrumented) TB.  Execute the
+            # program once with collection disabled so those TBs exist, then
+            # enable collection, restore the entry IP through the GDB register
+            # interface, and require a complete second traversal.
+            _hmp_command(
+                monitor,
+                "qom-set /machine/unattached/device[0] "
+                "x-production-profile-active true",
+            )
+            gdb = _connect_gdb(process, gdb_port)
+            initial_stop = _gdb_rsp_command(gdb, "?")
+            if not initial_stop.startswith("T"):
+                raise HarnessError(
+                    "profile second pass GDB attach did not report a stop: "
+                    + initial_stop
+                )
+            _gdb_write_u64(gdb, IA64_GDB_IP_REGNUM, program.entry)
+            gdb.close()
+            gdb = None
+            profile_deadline = time.monotonic() + PROGRAM_TIMEOUT
+            while time.monotonic() < profile_deadline:
+                _hmp_command(monitor, "cont")
+                time.sleep(0.01)
+                _hmp_command(monitor, "stop")
+                candidate = parse_snapshot(
+                    _hmp_command(monitor, "info registers")
+                )
+                if candidate.ip == program.terminal_ip:
+                    snapshot = candidate
+                    break
+            else:
+                raise HarnessError(
+                    "profile second pass did not leave and return to "
+                    "terminal IP 0x{:x}".format(program.terminal_ip)
+                )
     except Exception as exc:  # Preserve diagnostics while always cleaning up.
         failure = exc
     finally:
+        if gdb is not None:
+            try:
+                gdb.close()
+            except OSError:
+                pass
+        if monitor is not None:
+            try:
+                if graceful_quit and process is not None and \
+                        process.poll() is None:
+                    monitor.sendall(b"quit\n")
+                    quit_sent = True
+            except OSError:
+                pass
+        if process is not None:
+            try:
+                if quit_sent:
+                    try:
+                        process_output, _ = process.communicate(
+                            timeout=PROCESS_EXIT_TIMEOUT
+                        )
+                    except subprocess.TimeoutExpired:
+                        process_output = _terminate_child(process)
+                else:
+                    process_output = _terminate_child(process)
+            except Exception as cleanup_exc:
+                if failure is None:
+                    failure = cleanup_exc
         if monitor is not None:
             try:
                 monitor.close()
             except OSError:
                 pass
-        if process is not None:
-            try:
-                process_output = _terminate_child(process)
-            except Exception as cleanup_exc:
-                if failure is None:
-                    failure = cleanup_exc
+
+    if output_capture is not None:
+        output_capture.append(process_output)
+    if failure is None:
+        for pattern in required_output_patterns:
+            if re.search(pattern, process_output, re.MULTILINE) is None:
+                failure = HarnessError(
+                    "QEMU output lacks required runtime evidence {!r}".format(
+                        pattern
+                    )
+                )
+                break
 
     if failure is None and trace_path is not None:
         try:
             trace = trace_path.read_text(encoding="utf-8", errors="replace")
+            if trace_capture is not None:
+                trace_capture.append(trace)
             if typed_fault_trace_ip is not None:
                 _require_typed_fault_trace(trace, typed_fault_trace_ip)
             if typed_nat_fault_trace_ip is not None:
@@ -5695,6 +5789,8 @@ def run_program(qemu: Path, program: Program,
 
     if failure is not None:
         detail = "{}".format(failure)
+        if process is not None and process.returncode is not None:
+            detail += "\nQEMU status: {}".format(process.returncode)
         if process_output.strip():
             detail += "\nQEMU output:\n" + process_output.strip()
         raise HarnessError(detail) from failure
@@ -9867,6 +9963,511 @@ def test_effectful_application_read_ssa(qemu: Path) -> str:
     )
 
 
+def wp1_observation_mode_program() -> Program:
+    fault = cmp_rr(12, 12, 0, 0, "eq")
+    return Program(
+        name="WP1 plugin/icount/replay state-helper-branch-fault coverage",
+        bundles=(
+            *_interruption_collection_setup(),
+            Bundle(0x30, 0x01, nop_m(), adds(10, 5, 0),
+                   adds(11, 7, 0)),
+            Bundle(0x40, 0x03, nop_m(), nop_i(),
+                   mov_i_grar(IA64_AR_LC, 10)),
+            Bundle(0x50, 0x01, nop_m(), mov_argr(12, IA64_AR_LC),
+                   nop_i()),
+            Bundle(0x60, 0x11, nop_m(), nop_i(), br_cond(0x60, 0x80)),
+            Bundle(0x70, 0x01, nop_m(), adds(21, 99, 0), nop_i()),
+            Bundle(0x80, 0x01, nop_m(), adds(20, 77, 0), fault),
+            _illegal_vector_spin(),
+        ),
+        terminal_ip=IA64_GENERAL_EXCEPTION_VECTOR,
+    )
+
+
+def _profile_counter(output: str, name: str) -> int:
+    match = re.search(
+        r"(?m)^\[ia64-profile\] {}=([0-9]+)$".format(re.escape(name)),
+        output,
+    )
+    if match is None:
+        raise HarnessError("production profile lacks counter " + name)
+    return int(match.group(1))
+
+
+def _profile_top_rows(output: str) -> List[Dict[str, object]]:
+    rows: Dict[int, Dict[str, object]] = {}
+    for match in re.finditer(
+            r"(?m)^\[ia64-profile\] top\.([0-9]+)=(.+)$", output):
+        rank = int(match.group(1))
+        row: Dict[str, object] = {"rank": rank, "helpers": {}}
+        for field in match.group(2).split(","):
+            key, value = field.split(":", 1)
+            try:
+                row[key] = int(value, 0)
+            except ValueError:
+                row[key] = value
+        rows[rank] = row
+    for match in re.finditer(
+            r"(?m)^\[ia64-profile\] top\.([0-9]+)\.helper\.([^=]+)="
+            r"([0-9]+)$", output):
+        rank = int(match.group(1))
+        if rank in rows:
+            helpers = rows[rank]["helpers"]
+            assert isinstance(helpers, dict)
+            helpers[match.group(2)] = int(match.group(3))
+    return [rows[rank] for rank in sorted(rows)]
+
+
+def _density_profile_program(
+        qemu: Path, program: Program, profile_pc: int, trace_pc: int, *,
+        one_bundle_per_tb: bool = False) -> Tuple[Snapshot, Dict[str, object],
+                                                 Tuple[str, ...]]:
+    output: List[str] = []
+    trace: List[str] = []
+    snapshot = run_program(
+        qemu, program,
+        one_bundle_per_tb=one_bundle_per_tb,
+        extra_env={
+            "VIBTANIUM_IA64_PROD_PROFILE": "1",
+            "VIBTANIUM_IA64_PROFILE_AUTOSTART": "0",
+            "VIBTANIUM_IA64_PROFILE_SAMPLE_SHIFT": "0",
+        },
+        graceful_quit=True,
+        profile_second_pass=True,
+        output_capture=output,
+        trace_capture=trace,
+    )
+    candidates = [
+        row for row in _profile_top_rows(output[0])
+        if row.get("pc") == profile_pc
+    ]
+    _require(bool(candidates),
+             "density profile lacks TB row at 0x{:x}".format(profile_pc))
+    row = max(candidates, key=lambda candidate: (
+        int(candidate.get("bundles", 0)),
+        int(candidate.get("optimized", 0)),
+        int(candidate.get("executions", 0)),
+    ))
+    _require(int(row["generated"]) > 0 and int(row["optimized"]) > 0 and
+             int(row["host_bytes"]) > 0,
+             "density row has no generated/optimized/host code")
+    helpers = row["helpers"]
+    assert isinstance(helpers, dict)
+    for forbidden in ("exec_bundle", "exec_slot", "raw_slot_dispatch"):
+        _require(forbidden not in helpers,
+                 "density row reached generic helper " + forbidden)
+
+    section = _tcg_op_sections(trace[0], trace_pc)[0]
+    _require(re.search(
+        r"(?m)^\s*call (?:exec_bundle|exec_slot|raw_slot_dispatch),",
+        section,
+    ) is None, "TCG dump contains a generic execution dispatcher")
+    operations = tuple(sorted(set(re.findall(
+        r"(?m)^\s+([a-z][a-z0-9_]*)\b", section
+    ))))
+    _require(bool(operations), "TCG dump contains no operations")
+    return snapshot, row, operations
+
+
+def _density_line(families: str, row: Dict[str, object],
+                  operations: Sequence[str]) -> str:
+    helpers = row["helpers"]
+    assert isinstance(helpers, dict)
+    helper_text = "+".join(
+        "{}:{}".format(name, count)
+        for name, count in sorted(helpers.items())
+    ) or "none"
+    return (
+        "density.families={};pc=0x{:x};generated={};optimized={};"
+        "host_bytes={};gen_env={}/{};opt_env={}/{};gen_branch={};"
+        "opt_branch={};gen_helper={};opt_helper={};arch={}/{};"
+        "overlay={}/{}/{};durable={}/{};helpers={};tcg_ops={}"
+    ).format(
+        families, int(row["pc"]), row["generated"], row["optimized"],
+        row["host_bytes"], row["generated_env_load"],
+        row["generated_env_store"], row["env_load"], row["env_store"],
+        row["generated_branch"], row["branch"], row["generated_helper"],
+        row["helper"], row["arch_load"], row["arch_store"],
+        row["overlay_save"], row["overlay_validity"], row["overlay_clear"],
+        row["durable_materialization"], row["durable_bytes"], helper_text,
+        "+".join(operations),
+    )
+
+
+def test_generated_code_density_families(qemu: Path) -> str:
+    return_program, _ = typed_return_clean_program("p0")
+    cases = (
+        ("scalar_integer_arithmetic", core_program(), 0x10, 0x10, False,
+         {"integer": 2}, ()),
+        ("integer_logical_and_shift", scalar_shift_bitfield_program(),
+         0x70, 0x70, False, {"integer": 8}, ()),
+        ("compares|predicate_production", predicate_compare_program(),
+         0x10, 0x30, False, {"predicate": 4}, ()),
+        ("predicate_consumption|predicated_false", predicate_compare_program(),
+         0x50, 0x70, False, {"integer": 6, "predicate": 4}, ()),
+        ("BR_moves", branch_register_move_program(), 0x50, 0x50, False,
+         {"integer": 10}, ()),
+        ("AR_and_PFS_moves", pfs_register_move_program(), 0x50, 0x80,
+         False, {"integer": 10}, ()),
+        ("Shape_B_helper_boundary", application_move_forced_tb_ri_program(),
+         0x10, 0x20, False, {"integer": 4},
+         ("application_register_legality_status",
+          "application_register_privilege_status",
+          "application_register_write_committed",
+          "application_register_read")),
+        ("direct_branch|Shape_B_branch_boundary",
+         same_bundle_branch_forward_true_program(), 0x10, 0x10, False,
+         {"branch_slots": 1, "predicate": 2}, ()),
+        ("indirect_branch", indirect_branch_forwarding_program(),
+         0x10, 0x30, False, {"branch_slots": 1}, ()),
+        ("loop_branch_no_region", loop_first_taken_suppression_program(),
+         0x10, 0x50, False, {"loop": 1, "branch_slots": 3}, ()),
+        ("call", b3_backward_forwarded_call_program(), 0x40, 0x40, False,
+         {"branch_slots": 1}, ("enter_call_frame",)),
+        ("return", return_program, 0x40, 0x90, False,
+         {"branch_slots": 1}, ("return_frame_from_pfs",)),
+        ("same_group_RAW|same_group_WAW|aliases|explicit_forwarding",
+         ordinary_source_overlay_program(), 0x10, 0x20, False,
+         {"integer": 10, "predicate": 3}, ()),
+        ("TB_limit_boundary", long_no_stop_scalar_program(16),
+         0x60, 0x60, False, {"integer": 5}, ()),
+        ("forced_TB_boundary", long_no_stop_scalar_program(5),
+         0x20, 0x20, True, {"integer": 1}, ()),
+        ("page_limit_boundary", page_crossing_overlay_continuation_program(),
+         0x1000, 0x1000, False,
+         {"integer": 2, "branch_slots": 1}, ()),
+    )
+    lines: List[str] = []
+    for (families, program, profile_pc, trace_pc, force_tb, minimums,
+         expected_helpers) in cases:
+        snapshot, row, operations = _density_profile_program(
+            qemu, program, profile_pc, trace_pc,
+            one_bundle_per_tb=force_tb,
+        )
+        _require(snapshot.ip == program.terminal_ip and
+                 not snapshot.exception_pending,
+                 families + " density program failed architecturally")
+        for field, minimum in minimums.items():
+            _require(int(row[field]) >= minimum,
+                     "{} density row has {}={} below {}".format(
+                         families, field, row[field], minimum))
+        helpers = row["helpers"]
+        assert isinstance(helpers, dict)
+        for helper in expected_helpers:
+            _require(helper in helpers,
+                     families + " lacks expected helper " + helper)
+        lines.append(_density_line(families, row, operations))
+    return "\n".join(lines)
+
+
+def test_exact_helper_contracts(qemu: Path) -> str:
+    program = Program(
+        name="exact application-helper state contract",
+        bundles=(
+            Bundle(0x10, 0x03, nop_m(), adds(2, 5, 0),
+                   adds(10, 0x55, 0)),
+            Bundle(0x20, 0x03, nop_m(), cmp_rr(6, 7, 0, 0, "eq"),
+                   mov_grbr(2, 10)),
+            Bundle(0x30, 0x03, nop_m(), mov_i_grar(IA64_AR_LC, 2),
+                   nop_i()),
+            Bundle(0x40, 0x03, nop_m(), mov_argr(12, IA64_AR_LC),
+                   mov_brgr(13, 2)),
+            Bundle(0x50, 0x03, nop_m(), adds(14, 0x77, 0, qp=6),
+                   adds(15, 1, 10)),
+            spin_bundle(0x60),
+        ),
+        terminal_ip=0x60,
+    )
+    trace: List[str] = []
+    snapshot = run_program(qemu, program, trace_capture=trace)
+    _require(not snapshot.exception_pending and
+             snapshot.gr[12] == 5 and snapshot.gr[13] == 0x55 and
+             snapshot.gr[14] == 0x77 and snapshot.gr[15] == 0x56 and
+             snapshot.br[2] == 0x55 and (snapshot.pr & (1 << 6)) != 0 and
+             snapshot.cfm == 0 and snapshot.nat_low == 0 and
+             snapshot.nat_high == 0,
+             "exact helper contract corrupted unrelated GR/BR/PR/CFM/NaT "
+             "state or failed to expose AR.LC")
+
+    profile_output: List[str] = []
+    profile_snapshot = run_program(
+        qemu, program,
+        extra_env={
+            "VIBTANIUM_IA64_PROD_PROFILE": "1",
+            "VIBTANIUM_IA64_PROFILE_SAMPLE_SHIFT": "0",
+        },
+        graceful_quit=True,
+        output_capture=profile_output,
+    )
+    _require(not profile_snapshot.exception_pending and
+             _profile_counter(profile_output[0],
+                              "shape.c.reason.system.slot") == 0 and
+             _profile_counter(profile_output[0],
+                              "ordinary_nonmemory.shape.b.slot") > 0,
+             "application-register helper group did not select Shape B")
+
+    write_section = _tcg_op_sections(trace[0], 0x30)[0]
+    read_section = _tcg_op_sections(trace[0], 0x40)[0]
+    write_preflight = write_section.split(
+        "call application_register_legality_status,", 1
+    )[0]
+    read_preflight = read_section.split(
+        "call application_register_legality_status,", 1
+    )[0]
+    read_observation = read_section.split(
+        "call application_register_read,", 1
+    )[0].rsplit("call application_register_privilege_status,", 1)[-1]
+    # Exclude the taken no-return fault arm: it is an actual architectural
+    # observation boundary and deliberately publishes the complete prefix.
+    read_observation = read_observation.rsplit("set_label ", 1)[-1]
+    store_pattern = (
+        r"(?m)^\s*(?:st[a-z0-9_]* .*env|"
+        r"mov_i64 (?:r[0-9]+|b[0-9]+|ar[0-9]+|gr_nat|pr),)"
+    )
+    _require(re.search(store_pattern, write_preflight) is None and
+             re.search(store_pattern, read_preflight) is None,
+             "ordinary application helper preflight materialized "
+             "unrelated architectural state")
+    exact_ar_stores = re.findall(
+        r"(?m)^\s*mov_i64 (ar[0-9]+),", read_observation
+    )
+    _require(exact_ar_stores == ["ar65"],
+             "application read did not materialize exactly dirty AR.LC: " +
+             repr(exact_ar_stores))
+    for required in (
+            "call application_register_legality_status,",
+            "call application_register_privilege_status,",
+            "call application_register_write_committed,"):
+        _require(required in write_section,
+                 "write helper trace lacks exact contract call " + required)
+    for required in (
+            "call application_register_legality_status,",
+            "call application_register_privilege_status,",
+            "call application_register_read,"):
+        _require(required in read_section,
+                 "read helper trace lacks exact contract call " + required)
+    return (
+        "AR.LC helper read/write preserves unrelated GR, BR, PR, CFM, NaT "
+        "and forwarding state; TCG traces contain no architectural store "
+        "before either ordinary legality check, then materialize exactly "
+        "dirty AR.LC before the read and use the committed/read contracts; "
+        "the production census reports the helper groups as Shape B"
+    )
+
+
+def test_nat_emission_accounting(qemu: Path) -> str:
+    known = Program(
+        name="known-clear NaT compile lattice",
+        bundles=(
+            Bundle(0x10, 0x03, nop_m(), adds(10, 0x80, 0), nop_i()),
+            Bundle(0x20, 0x03, nop_m(), mov_grbr(1, 10), nop_i()),
+            Bundle(0x30, 0x03, nop_m(), mov_brgr(11, 1), nop_i()),
+            spin_bundle(0x40),
+        ),
+        terminal_ip=0x40,
+    )
+    unknown = Program(
+        name="unknown NaT runtime lattice",
+        bundles=(
+            Bundle(0x10, 0x03, nop_m(), mov_grbr(1, 10), nop_i()),
+            Bundle(0x20, 0x03, nop_m(), mov_brgr(11, 1), nop_i()),
+            spin_bundle(0x30),
+        ),
+        terminal_ip=0x30,
+    )
+
+    known_trace: List[str] = []
+    known_snapshot = run_program(qemu, known, trace_capture=known_trace)
+    _require(known_snapshot.gr[11] == 0x80,
+             "known-clear BR move produced the wrong architectural value")
+    known_section = _tcg_op_sections(known_trace[0], 0x20)[0]
+    for forbidden in (
+            r"\bgr_nat\b", r"(?m)^\s*brcond_",
+            r"(?m)^\s*call raise_register_nat_consumption,"):
+        _require(re.search(forbidden, known_section) is None,
+                 "KNOWN_CLEAR emitted forbidden NaT load/branch/fault: " +
+                 forbidden)
+
+    unknown_trace: List[str] = []
+    unknown_snapshot = run_program(qemu, unknown, trace_capture=unknown_trace)
+    _require(unknown_snapshot.gr[11] == 0,
+             "unknown-clear BR move produced the wrong architectural value")
+    unknown_section = _tcg_op_sections(unknown_trace[0], 0x10)[0]
+    for required in (
+            r"\bgr_nat\b", r"(?m)^\s*brcond_i64 ",
+            r"(?m)^\s*call raise_register_nat_consumption,"):
+        _require(re.search(required, unknown_section) is not None,
+                 "UNKNOWN did not emit its exact NaT load/test/fault arm: " +
+                 required)
+
+    profile_env = {
+        "VIBTANIUM_IA64_PROD_PROFILE": "1",
+        "VIBTANIUM_IA64_PROFILE_SAMPLE_SHIFT": "0",
+    }
+    known_output: List[str] = []
+    run_program(qemu, known, extra_env=profile_env, graceful_quit=True,
+                output_capture=known_output)
+    _require(_profile_counter(known_output[0], "nat.known_clear") >= 1,
+             "KNOWN_CLEAR selection was not counted")
+    _require(_profile_counter(known_output[0], "nat.unknown") ==
+             _profile_counter(known_output[0], "nat.dynamic_load") and
+             _profile_counter(known_output[0], "nat.dynamic_branch") == 0,
+             "emitted NaT read counters do not match the unrelated UNKNOWN "
+             "entry captures in the known-clear program")
+
+    unknown_output: List[str] = []
+    run_program(qemu, unknown, extra_env=profile_env, graceful_quit=True,
+                output_capture=unknown_output)
+    _require(_profile_counter(unknown_output[0], "nat.unknown") >= 1 and
+             _profile_counter(unknown_output[0], "nat.dynamic_load") >= 1 and
+             _profile_counter(unknown_output[0], "nat.dynamic_branch") >= 1,
+             "UNKNOWN counters do not describe the emitted load/test")
+    return (
+        "KNOWN_CLEAR emits neither a gr_nat load nor runtime branch, while "
+        "UNKNOWN emits and counts the exact dynamic load/test/fault arm"
+    )
+
+
+def _require_wp1_observation_mode(snapshot: Snapshot, mode: str) -> None:
+    _require_illegal_operation(
+        snapshot,
+        fault_ip=0x80,
+        fault_slot=2,
+        fault_raw=cmp_rr(12, 12, 0, 0, "eq"),
+        collection_enabled=True,
+        expected_iipa=0x80,
+    )
+    _require(snapshot.gr[10] == 5 and snapshot.gr[11] == 7,
+             "{} lost resident arithmetic state".format(mode))
+    _require(snapshot.gr[12] == 5,
+             "{} helper materialization/readback failed".format(mode))
+    _require(snapshot.gr[20] == 77 and snapshot.gr[21] == 0,
+             "{} branch/fault prefix or suffix visibility failed".format(
+                 mode
+             ))
+
+
+SHAPE_C_REASONS = (
+    "rse", "rfi", "system", "data_memory", "data_nonmemory", "floating",
+    "plugin", "instruction_debug", "data_debug", "durable_open_group",
+    "unsupported_traits", "unknown",
+)
+
+
+def _require_shape_profile(output: str, *, require_plugin: bool) -> None:
+    for unit in ("group", "slot"):
+        shape_c = _profile_counter(output, "shape.c." + unit)
+        reasons = sum(
+            _profile_counter(
+                output, "shape.c.reason.{}.{}".format(reason, unit)
+            )
+            for reason in SHAPE_C_REASONS
+        )
+        _require(shape_c == reasons,
+                 "Shape C {} total {} differs from exact reasons {}"
+                 .format(unit, shape_c, reasons))
+    _require(_profile_counter(
+        output, "shape.c.reason.unknown.group") == 0 and
+        _profile_counter(output, "shape.c.reason.unknown.slot") == 0,
+        "Shape C unknown fallback was exercised")
+
+    ordinary_total = _profile_counter(
+        output, "ordinary_nonmemory.slot.total")
+    ordinary_a = _profile_counter(
+        output, "ordinary_nonmemory.shape.a.slot")
+    ordinary_b = _profile_counter(
+        output, "ordinary_nonmemory.shape.b.slot")
+    ordinary_c = _profile_counter(
+        output, "ordinary_nonmemory.shape.c.slot")
+    _require(ordinary_total == ordinary_a + ordinary_b + ordinary_c,
+             "ordinary non-memory Shape A/B/C denominator is inconsistent")
+    ordinary_reasons = sum(
+        _profile_counter(
+            output,
+            "ordinary_nonmemory.shape.c.reason.{}.slot".format(reason),
+        )
+        for reason in SHAPE_C_REASONS
+    )
+    _require(ordinary_c == ordinary_reasons,
+             "ordinary non-memory Shape C reasons do not sum to Shape C")
+    if require_plugin:
+        _require(_profile_counter(
+            output, "shape.c.reason.plugin.slot") > 0,
+            "plugin execution did not select the plugin Shape C reason")
+    else:
+        _require(ordinary_total > 0 and
+                 100.0 * (ordinary_a + ordinary_b) / ordinary_total >= 90.0,
+                 "ordinary non-memory Shape A/B execution is below 90%")
+
+
+def test_plugin_icount_replay_runtime(qemu: Path) -> str:
+    program = wp1_observation_mode_program()
+    plugin = qemu.parent / "tests" / "tcg" / "plugins" / "libinsn.dll"
+
+    if not plugin.is_file():
+        raise HarnessError(
+            "plugin runtime gate requires built {}".format(plugin)
+        )
+    profile_env = {
+        "VIBTANIUM_IA64_PROD_PROFILE": "1",
+        "VIBTANIUM_IA64_PROFILE_SAMPLE_SHIFT": "0",
+    }
+    plugin_output: List[str] = []
+    plugin_snapshot = run_program(
+        qemu, program,
+        extra_args=("-d", "plugin", "-plugin", str(plugin)),
+        extra_env=profile_env,
+        graceful_quit=True,
+        required_output_patterns=(r"(?m)(?:cpu 0|total) insns: [1-9][0-9]*",),
+        output_capture=plugin_output,
+    )
+    _require_wp1_observation_mode(plugin_snapshot, "plugin")
+    _require_shape_profile(plugin_output[0], require_plugin=True)
+
+    icount_output: List[str] = []
+    icount_snapshot = run_program(
+        qemu, program,
+        extra_args=("-icount", "shift=0,align=off,sleep=off"),
+        extra_env=profile_env,
+        graceful_quit=True,
+        output_capture=icount_output,
+    )
+    _require_wp1_observation_mode(icount_snapshot, "icount")
+    _require_shape_profile(icount_output[0], require_plugin=False)
+
+    with tempfile.TemporaryDirectory(prefix="ia64-wp1-replay-") as temp:
+        rrfile = Path(temp) / "wp1.rr"
+        record_args = (
+            "-icount", "shift=auto,rr=record,rrfile={}".format(rrfile),
+        )
+        replay_args = (
+            "-icount", "shift=auto,rr=replay,rrfile={}".format(rrfile),
+        )
+        recorded = run_program(
+            qemu, program, extra_args=record_args, graceful_quit=True
+        )
+        _require_wp1_observation_mode(recorded, "replay-record")
+        _require(rrfile.is_file() and rrfile.stat().st_size > 0,
+                 "record mode did not produce a replay stream")
+        replayed = run_program(
+            qemu, program, extra_args=replay_args, graceful_quit=True
+        )
+        _require_wp1_observation_mode(replayed, "replay")
+        _require(recorded.gr == replayed.gr and
+                 recorded.pr == replayed.pr and
+                 recorded.cr_iip == replayed.cr_iip and
+                 recorded.cr_iipa == replayed.cr_iipa and
+                 recorded.cr_ipsr == replayed.cr_ipsr,
+                 "record/replay architectural snapshots diverged")
+
+    return (
+        "plugin callbacks, fixed icount, and deterministic record/replay all "
+        "execute resident arithmetic, exact application-register helper "
+        "state, a direct branch, precise successful fault prefix, suppressed "
+        "suffix, and the full-TCG exception exit"
+    )
+
+
 def test_stopped_predicate_handoff(qemu: Path) -> str:
     """A stop must publish compare predicates to a predicated suffix/branch."""
     program = Program(
@@ -9974,7 +10575,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..30")
+    print("1..34")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -10006,6 +10607,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 28 - same-TB empty-to-active ALAT transition")
         print("not ok 29 - helper-owned application-read SSA")
         print("not ok 30 - stopped predicate handoff")
+        print("not ok 31 - plugin, icount and replay runtime")
+        print("not ok 32 - emitted NaT lattice accounting")
+        print("not ok 33 - family-wide generated-code density")
+        print("not ok 34 - exact helper contracts")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -10054,13 +10659,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("helper-owned application-read SSA",
          test_effectful_application_read_ssa),
         ("stopped predicate handoff", test_stopped_predicate_handoff),
+        ("plugin, icount and replay runtime",
+         test_plugin_icount_replay_runtime),
+        ("emitted NaT lattice accounting", test_nat_emission_accounting),
+        ("family-wide generated-code density",
+         test_generated_code_density_families),
+        ("exact helper contracts", test_exact_helper_contracts),
     )
     failures = 0
     for index, (name, test) in enumerate(tests, start=1):
         try:
             detail = test(qemu)
             print("ok {} - {}".format(index, name))
-            print("# " + detail)
+            for line in detail.splitlines():
+                print("# " + line)
         except Exception as exc:
             failures += 1
             print("not ok {} - {}".format(index, name))

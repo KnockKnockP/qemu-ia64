@@ -128,6 +128,24 @@ typedef enum IA64TrExecutionShape {
     IA64_TR_SHAPE_C,
 } IA64TrExecutionShape;
 
+/* The selector owns this reason.  Profiling consumes the selected value
+ * instead of independently guessing why Shape C was chosen. */
+typedef enum IA64TrShapeCReason {
+    IA64_TR_SHAPE_C_REASON_NONE,
+    IA64_TR_SHAPE_C_REASON_RSE,
+    IA64_TR_SHAPE_C_REASON_RFI,
+    IA64_TR_SHAPE_C_REASON_SYSTEM,
+    IA64_TR_SHAPE_C_REASON_DATA_MEMORY,
+    IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY,
+    IA64_TR_SHAPE_C_REASON_FLOATING,
+    IA64_TR_SHAPE_C_REASON_PLUGIN,
+    IA64_TR_SHAPE_C_REASON_INSN_DEBUG,
+    IA64_TR_SHAPE_C_REASON_DATA_DEBUG,
+    IA64_TR_SHAPE_C_REASON_DURABLE_OPEN,
+    IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS,
+    IA64_TR_SHAPE_C_REASON_UNKNOWN,
+} IA64TrShapeCReason;
+
 /*
  * Compact translation-time deoptimization map.  Values live in the group's
  * SSA arrays; this map records only the resources that a particular boundary
@@ -141,6 +159,38 @@ typedef struct IA64TrSafepointMap {
     uint8_t br;
     bool cfm;
 } IA64TrSafepointMap;
+
+typedef enum IA64TrHelperState {
+    IA64_TR_HELPER_STATE_GR         = 1U << 0,
+    IA64_TR_HELPER_STATE_NAT        = 1U << 1,
+    IA64_TR_HELPER_STATE_PR         = 1U << 2,
+    IA64_TR_HELPER_STATE_BR         = 1U << 3,
+    IA64_TR_HELPER_STATE_AR         = 1U << 4,
+    IA64_TR_HELPER_STATE_CFM        = 1U << 5,
+    IA64_TR_HELPER_STATE_PSR        = 1U << 6,
+    IA64_TR_HELPER_STATE_RSE        = 1U << 7,
+    IA64_TR_HELPER_STATE_ALAT       = 1U << 8,
+    IA64_TR_HELPER_STATE_FORWARDING = 1U << 9,
+    IA64_TR_HELPER_STATE_RESTART    = 1U << 10,
+    IA64_TR_HELPER_STATE_TIMER      = 1U << 11,
+} IA64TrHelperState;
+
+/* Returning helpers reachable from Shape A/B have an executable contract.
+ * The state-class masks document architectural reads/writes/invalidation;
+ * the sparse maps drive the only pre-call publication and post-call reloads.
+ * A no-return fault arm is separately marked as an observation boundary. */
+typedef struct IA64TrHelperContract {
+    const char *name;
+    uint32_t reads;
+    uint32_t writes;
+    uint32_t invalidates;
+    IA64TrSafepointMap materialize;
+    IA64TrSafepointMap reload;
+    bool may_fault;
+    bool no_return;
+    bool observation_boundary;
+    bool preserves_forwarding;
+} IA64TrHelperContract;
 
 /*
  * Fast issue-group state.  Entry values are immutable ordinary-source SSA;
@@ -375,6 +425,7 @@ typedef struct DisasContext {
     size_t rewrite_region_ops_start;
     IA64TrGroupTransaction rewrite_group;
     IA64TrExecutionShape rewrite_shape;
+    IA64TrShapeCReason rewrite_shape_c_reason;
     bool rewrite_ssa_enabled;
     bool rewrite_ssa_inherited;
     IA64TrNatState nat_state[IA64_GR_COUNT];
@@ -468,6 +519,9 @@ static void ia64_tr_ssa_ensure_entry_pr(DisasContext *ctx);
 static void ia64_tr_ssa_ensure_live_pr(DisasContext *ctx);
 static void ia64_tr_ssa_ensure_entry_ar(DisasContext *ctx, uint8_t reg);
 static void ia64_tr_ssa_ensure_live_ar(DisasContext *ctx, uint8_t reg);
+static void ia64_tr_ssa_materialize_map(DisasContext *ctx,
+                                        const IA64TrSafepointMap *map,
+                                        bool consume_dirty);
 static IA64TrArEffect *ia64_tr_group_prepare_ordered_ar_effect(
     DisasContext *ctx, uint8_t reg, bool must_write);
 static void ia64_tr_group_stage_ordered_ar_effect(
@@ -511,6 +565,7 @@ static bool ia64_tr_emit_decoded_return_split(
 static void ia64_tr_emit_decoded_rfi(DisasContext *ctx,
                                      const IA64Instruction *insn);
 static void ia64_tr_split_state_cache_at_typed_branch(DisasContext *ctx);
+static void ia64_tr_validate_helper_contract_inventory(void);
 static void ia64_tr_system_validate(DisasContext *ctx,
                                     const IA64Instruction *insn);
 static void ia64_tr_emit_decoded_branch_cfg_exits(
@@ -675,9 +730,11 @@ void ia64_translate_init(void)
 }
 
 static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
-                                       CPUState *cs)
+                                        CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
+
+    ia64_tr_validate_helper_contract_inventory();
     int bound;
 
     ctx->base.is_jmp = DISAS_NEXT;
@@ -720,6 +777,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *dcbase,
     ctx->rewrite_region_ops_start = 0;
     memset(&ctx->rewrite_group, 0, sizeof(ctx->rewrite_group));
     ctx->rewrite_shape = IA64_TR_SHAPE_C;
+    ctx->rewrite_shape_c_reason = IA64_TR_SHAPE_C_REASON_UNKNOWN;
     ctx->rewrite_ssa_enabled = false;
     ctx->rewrite_ssa_inherited = false;
     for (unsigned i = 0; i < ARRAY_SIZE(ctx->nat_state); i++) {
@@ -775,6 +833,66 @@ static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
     if (ia64_perf_enabled()) {
         gen_helper_perf_tb_exec(tcg_constant_i32(ctx->perf_tb_id));
     }
+}
+
+static void ia64_tr_nat_emit_state(DisasContext *ctx,
+                                   IA64TrNatState state)
+{
+    switch (state) {
+    case IA64_TR_NAT_KNOWN_CLEAR:
+        ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_CLEAR, 1);
+        IA64_PERF_INC(IA64_PERF_NAT_KNOWN_CLEAR);
+        break;
+    case IA64_TR_NAT_KNOWN_SET:
+        ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_SET, 1);
+        IA64_PERF_INC(IA64_PERF_NAT_KNOWN_SET);
+        break;
+    case IA64_TR_NAT_UNKNOWN:
+        ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_UNKNOWN, 1);
+        IA64_PERF_INC(IA64_PERF_NAT_UNKNOWN);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void ia64_tr_nat_emit_dynamic_load(DisasContext *ctx, uint32_t count)
+{
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_LOAD, count);
+    IA64_PERF_ADD(IA64_PERF_NAT_DYNAMIC_LOAD, count);
+}
+
+static void ia64_tr_nat_emit_dynamic_branch(DisasContext *ctx)
+{
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_BRANCH, 1);
+    IA64_PERF_INC(IA64_PERF_NAT_DYNAMIC_BRANCH);
+}
+
+static void ia64_tr_nat_emit_direct_fault(DisasContext *ctx)
+{
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_FAULT, 1);
+    IA64_PERF_INC(IA64_PERF_NAT_FAULT);
+}
+
+static void ia64_tr_nat_invalidate_stacked_lattice(DisasContext *ctx)
+{
+    uint32_t transitions = 0;
+
+    for (unsigned reg = IA64_STATIC_GR_COUNT;
+         reg < ARRAY_SIZE(ctx->nat_state); reg++) {
+        if (ctx->nat_state[reg] != IA64_TR_NAT_UNKNOWN) {
+            ctx->nat_state[reg] = IA64_TR_NAT_UNKNOWN;
+            transitions++;
+        }
+    }
+    if (transitions == 0) {
+        return;
+    }
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_LATTICE_INVALIDATE,
+                        transitions);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_RSE_UNKNOWN, transitions);
+    IA64_PERF_ADD(IA64_PERF_NAT_LATTICE_INVALIDATE, transitions);
+    IA64_PERF_ADD(IA64_PERF_NAT_RSE_UNKNOWN, transitions);
 }
 
 static void ia64_tr_note_retired_bundle(DisasContext *ctx)
@@ -1126,6 +1244,405 @@ static void ia64_tr_commit_ip(DisasContext *ctx, uint64_t ip)
     if (ctx->restart_ri_maybe_dirty ||
         ia64_tcg_tb_flags_ri(ctx->base.tb->flags) != 0) {
         ia64_tr_clear_restart_ri();
+    }
+}
+
+static void ia64_tr_reload_state_cache_map(
+    DisasContext *ctx, const IA64TrSafepointMap *map)
+{
+    uint32_t gr = ctx->static_gr_valid & (uint32_t)map->gr[0];
+    uint8_t br = ctx->br_valid & map->br;
+
+    while (gr != 0) {
+        unsigned reg = ctz32(gr);
+
+        tcg_gen_mov_i64(ctx->static_gr[reg],
+                        ia64_tr_static_gr_global(ctx, reg));
+        gr &= gr - 1;
+    }
+    while (br != 0) {
+        unsigned reg = ctz32(br);
+
+        tcg_gen_mov_i64(ctx->br[reg], cpu_br[reg]);
+        br &= br - 1;
+    }
+    for (unsigned word = 0; word < ARRAY_SIZE(ctx->ar_valid); word++) {
+        uint64_t ar = ctx->ar_valid[word] & map->ar[word];
+
+        while (ar != 0) {
+            unsigned reg = word * 64 + ctz64(ar);
+
+            tcg_gen_mov_i64(ctx->ar[reg], cpu_ar[reg]);
+            ar &= ar - 1;
+        }
+    }
+    if (ctx->pr_valid && map->pr != 0) {
+        tcg_gen_mov_i64(ctx->pr, cpu_pr);
+    }
+    if (ctx->gr_nat_valid && (map->gr[0] | map->gr[1]) != 0) {
+        tcg_gen_mov_i64(ctx->gr_nat, cpu_gr_nat);
+    }
+}
+
+static void ia64_tr_sync_state_cache_map(
+    DisasContext *ctx, const IA64TrSafepointMap *map)
+{
+    IA64TrStateCacheDirty dirty = {
+        .static_gr = ctx->static_gr_dirty & (uint32_t)map->gr[0],
+        .br = ctx->br_dirty & map->br,
+        .ar = {
+            ctx->ar_dirty[0] & map->ar[0],
+            ctx->ar_dirty[1] & map->ar[1],
+        },
+        .pr = ctx->pr_dirty && map->pr != 0,
+        .gr_nat = ctx->gr_nat_dirty &&
+                  (map->gr[0] | map->gr[1]) != 0,
+    };
+    uint32_t writebacks =
+        ctpop32(dirty.static_gr) + ctpop32(dirty.br) +
+        ctpop64(dirty.ar[0]) + ctpop64(dirty.ar[1]) +
+        dirty.pr + dirty.gr_nat;
+
+    if (writebacks == 0) {
+        return;
+    }
+    ia64_tr_profile_add(ctx, IA64_PROFILE_GROUP_SAFEPOINT, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_SYNC_HELPER, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_SYNC, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_RESIDENT_WRITEBACK, writebacks);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_STATE_CACHE_DIRTY_WRITEBACK,
+                        writebacks);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, writebacks);
+    ia64_tr_sync_state_cache_dirty(ctx, &dirty);
+}
+
+static void ia64_tr_apply_helper_pre_contract(
+    DisasContext *ctx, const IA64TrHelperContract *contract)
+{
+    IA64TrSafepointMap dirty_ssa;
+
+    g_assert(contract != NULL && !contract->no_return &&
+             !contract->observation_boundary);
+    dirty_ssa = contract->materialize;
+    if (ctx->rewrite_group.ssa.enabled) {
+        IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+        dirty_ssa.gr[0] &= ssa->dirty_gr[0];
+        dirty_ssa.gr[1] &= ssa->dirty_gr[1];
+        dirty_ssa.br &= ssa->dirty_br;
+        dirty_ssa.ar[0] &= ssa->dirty_ar[0];
+        dirty_ssa.ar[1] &= ssa->dirty_ar[1];
+        dirty_ssa.pr = ssa->dirty_pr ? dirty_ssa.pr : 0;
+        dirty_ssa.cfm = ssa->dirty_cfm && dirty_ssa.cfm;
+    }
+    ia64_tr_ssa_materialize_map(ctx, &dirty_ssa, false);
+    ia64_tr_sync_state_cache_map(ctx, &contract->materialize);
+}
+
+static void ia64_tr_apply_helper_post_contract(
+    DisasContext *ctx, const IA64TrHelperContract *contract)
+{
+    g_assert(contract != NULL && !contract->no_return &&
+             !contract->observation_boundary);
+    ia64_tr_reload_state_cache_map(ctx, &contract->reload);
+}
+
+static void ia64_tr_contract_add_ar(IA64TrSafepointMap *map, uint32_t reg)
+{
+    g_assert(reg < IA64_AR_COUNT);
+    map->ar[reg >> 6] |= UINT64_C(1) << (reg & 63);
+}
+
+static IA64TrHelperContract ia64_tr_application_legality_contract(
+    uint32_t selector)
+{
+    IA64TrHelperContract contract = {
+        .name = "application_register_legality_status",
+        .preserves_forwarding = true,
+    };
+
+    if (selector == IA64_AR_BSPSTORE || selector == IA64_AR_RNAT) {
+        contract.reads |= IA64_TR_HELPER_STATE_RSE;
+    }
+    return contract;
+}
+
+static IA64TrHelperContract ia64_tr_application_privilege_contract(void)
+{
+    IA64TrHelperContract contract = {
+        .name = "application_register_privilege_status",
+        .reads = IA64_TR_HELPER_STATE_PSR,
+        .preserves_forwarding = true,
+    };
+
+    return contract;
+}
+
+static IA64TrHelperContract ia64_tr_application_read_contract(
+    uint32_t selector)
+{
+    IA64TrHelperContract contract = {
+        .name = "application_register_read",
+        .reads = IA64_TR_HELPER_STATE_AR |
+                 IA64_TR_HELPER_STATE_FORWARDING,
+        .preserves_forwarding = true,
+    };
+
+    ia64_tr_contract_add_ar(&contract.materialize, selector);
+    switch (selector) {
+    case IA64_AR_RSC:
+    case IA64_AR_BSP:
+    case IA64_AR_BSPSTORE:
+    case IA64_AR_RNAT:
+        contract.reads |= IA64_TR_HELPER_STATE_RSE;
+        break;
+    case IA64_AR_UNAT:
+        contract.reads |= IA64_TR_HELPER_STATE_NAT;
+        break;
+    case IA64_AR_ITC:
+        contract.reads |= IA64_TR_HELPER_STATE_TIMER;
+        contract.writes |= IA64_TR_HELPER_STATE_AR |
+                           IA64_TR_HELPER_STATE_TIMER;
+        contract.invalidates |= IA64_TR_HELPER_STATE_AR |
+                                IA64_TR_HELPER_STATE_TIMER;
+        ia64_tr_contract_add_ar(&contract.reload, selector);
+        break;
+    default:
+        break;
+    }
+    return contract;
+}
+
+static IA64TrHelperContract ia64_tr_application_write_contract(
+    uint32_t selector)
+{
+    IA64TrHelperContract contract = {
+        .name = "application_register_write_committed",
+        .reads = IA64_TR_HELPER_STATE_AR |
+                 IA64_TR_HELPER_STATE_FORWARDING,
+        .writes = IA64_TR_HELPER_STATE_AR |
+                  IA64_TR_HELPER_STATE_FORWARDING,
+        .invalidates = IA64_TR_HELPER_STATE_AR,
+        .preserves_forwarding = true,
+    };
+
+    ia64_tr_contract_add_ar(&contract.materialize, selector);
+    ia64_tr_contract_add_ar(&contract.reload, selector);
+    switch (selector) {
+    case IA64_AR_RSC:
+        contract.reads |= IA64_TR_HELPER_STATE_PSR |
+                          IA64_TR_HELPER_STATE_RSE;
+        contract.writes |= IA64_TR_HELPER_STATE_RSE;
+        contract.invalidates |= IA64_TR_HELPER_STATE_RSE;
+        break;
+    case IA64_AR_BSPSTORE:
+        contract.reads |= IA64_TR_HELPER_STATE_RSE |
+                          IA64_TR_HELPER_STATE_NAT;
+        contract.writes |= IA64_TR_HELPER_STATE_RSE |
+                           IA64_TR_HELPER_STATE_NAT;
+        contract.invalidates |= IA64_TR_HELPER_STATE_RSE |
+                                IA64_TR_HELPER_STATE_NAT;
+        ia64_tr_contract_add_ar(&contract.materialize, IA64_AR_BSP);
+        ia64_tr_contract_add_ar(&contract.materialize, IA64_AR_RNAT);
+        ia64_tr_contract_add_ar(&contract.reload, IA64_AR_BSP);
+        ia64_tr_contract_add_ar(&contract.reload, IA64_AR_RNAT);
+        break;
+    case IA64_AR_RNAT:
+        contract.reads |= IA64_TR_HELPER_STATE_RSE |
+                          IA64_TR_HELPER_STATE_NAT;
+        contract.writes |= IA64_TR_HELPER_STATE_RSE |
+                           IA64_TR_HELPER_STATE_NAT;
+        contract.invalidates |= IA64_TR_HELPER_STATE_RSE |
+                                IA64_TR_HELPER_STATE_NAT;
+        break;
+    case IA64_AR_UNAT:
+        contract.reads |= IA64_TR_HELPER_STATE_NAT;
+        contract.writes |= IA64_TR_HELPER_STATE_NAT;
+        contract.invalidates |= IA64_TR_HELPER_STATE_NAT;
+        break;
+    case IA64_AR_ITC:
+        contract.reads |= IA64_TR_HELPER_STATE_TIMER;
+        contract.writes |= IA64_TR_HELPER_STATE_TIMER;
+        contract.invalidates |= IA64_TR_HELPER_STATE_TIMER;
+        break;
+    default:
+        break;
+    }
+    return contract;
+}
+
+static const IA64TrHelperContract ia64_tr_rotate_contract = {
+    .name = "rotate_modulo_registers",
+    .reads = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+             IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_CFM |
+             IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT |
+             IA64_TR_HELPER_STATE_FORWARDING,
+    .writes = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+              IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_CFM |
+              IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT |
+              IA64_TR_HELPER_STATE_FORWARDING,
+    .invalidates = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+                   IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_CFM |
+                   IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT |
+                   IA64_TR_HELPER_STATE_FORWARDING,
+    .reload = { .pr = UINT64_MAX },
+    .preserves_forwarding = true,
+};
+
+static const IA64TrHelperContract ia64_tr_application_fault_contract = {
+    .name = "raise_application_register_fault",
+    .reads = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+             IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_BR |
+             IA64_TR_HELPER_STATE_AR | IA64_TR_HELPER_STATE_CFM |
+             IA64_TR_HELPER_STATE_PSR | IA64_TR_HELPER_STATE_RSE |
+             IA64_TR_HELPER_STATE_ALAT | IA64_TR_HELPER_STATE_FORWARDING |
+             IA64_TR_HELPER_STATE_RESTART,
+    .materialize = {
+        .gr = { UINT64_MAX, UINT64_MAX },
+        .ar = { UINT64_MAX, UINT64_MAX },
+        .pr = UINT64_MAX,
+        .br = UINT8_MAX,
+        .cfm = true,
+    },
+    .may_fault = true,
+    .no_return = true,
+    .observation_boundary = true,
+    .preserves_forwarding = true,
+};
+
+/* Complete returning-helper inventory for Shape A/B.  Branch/exit helpers
+ * receive already-published state from the typed branch split; contracts with
+ * an empty sparse map neither spill nor reload unrelated resident values. */
+static const IA64TrHelperContract ia64_tr_helper_contract_inventory[] = {
+    {
+        .name = "clear_fault_suppression",
+        .reads = IA64_TR_HELPER_STATE_PSR,
+        .writes = IA64_TR_HELPER_STATE_PSR,
+        .invalidates = IA64_TR_HELPER_STATE_PSR,
+        .preserves_forwarding = true,
+    }, {
+        .name = "gr_alat_invalidate_mask",
+        .reads = IA64_TR_HELPER_STATE_ALAT,
+        .writes = IA64_TR_HELPER_STATE_ALAT,
+        .invalidates = IA64_TR_HELPER_STATE_ALAT,
+        .preserves_forwarding = true,
+    }, {
+        .name = "data_plane_ar_preserve",
+        .reads = IA64_TR_HELPER_STATE_AR |
+                 IA64_TR_HELPER_STATE_FORWARDING,
+        .writes = IA64_TR_HELPER_STATE_FORWARDING,
+        .preserves_forwarding = true,
+    }, {
+        .name = "data_plane_ar_select",
+        .reads = IA64_TR_HELPER_STATE_AR |
+                 IA64_TR_HELPER_STATE_FORWARDING,
+        .preserves_forwarding = true,
+    }, {
+        .name = "rotate_modulo_registers",
+        .reads = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+                 IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_CFM |
+                 IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT |
+                 IA64_TR_HELPER_STATE_FORWARDING,
+        .writes = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+                  IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_CFM |
+                  IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT |
+                  IA64_TR_HELPER_STATE_FORWARDING,
+        .invalidates = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+                       IA64_TR_HELPER_STATE_PR | IA64_TR_HELPER_STATE_CFM |
+                       IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT |
+                       IA64_TR_HELPER_STATE_FORWARDING,
+        .reload = { .pr = UINT64_MAX },
+        .preserves_forwarding = true,
+    }, {
+        .name = "enter_call_frame",
+        .reads = IA64_TR_HELPER_STATE_CFM | IA64_TR_HELPER_STATE_RSE |
+                 IA64_TR_HELPER_STATE_ALAT,
+        .writes = IA64_TR_HELPER_STATE_CFM | IA64_TR_HELPER_STATE_RSE |
+                  IA64_TR_HELPER_STATE_ALAT,
+        .invalidates = IA64_TR_HELPER_STATE_CFM |
+                       IA64_TR_HELPER_STATE_RSE |
+                       IA64_TR_HELPER_STATE_ALAT,
+        .may_fault = true,
+        .observation_boundary = true,
+        .preserves_forwarding = true,
+    }, {
+        .name = "return_frame_from_pfs",
+        .reads = IA64_TR_HELPER_STATE_PSR | IA64_TR_HELPER_STATE_CFM |
+                 IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT,
+        .writes = IA64_TR_HELPER_STATE_PSR | IA64_TR_HELPER_STATE_CFM |
+                  IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_ALAT,
+        .invalidates = IA64_TR_HELPER_STATE_PSR |
+                       IA64_TR_HELPER_STATE_CFM |
+                       IA64_TR_HELPER_STATE_RSE |
+                       IA64_TR_HELPER_STATE_ALAT,
+        .may_fault = true,
+        .observation_boundary = true,
+        .preserves_forwarding = true,
+    }, {
+        .name = "complete_rse_frame_loads",
+        .reads = IA64_TR_HELPER_STATE_PSR | IA64_TR_HELPER_STATE_RSE |
+                 IA64_TR_HELPER_STATE_RESTART,
+        .writes = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+                  IA64_TR_HELPER_STATE_RSE | IA64_TR_HELPER_STATE_RESTART,
+        .invalidates = IA64_TR_HELPER_STATE_GR | IA64_TR_HELPER_STATE_NAT |
+                       IA64_TR_HELPER_STATE_RSE,
+        .may_fault = true,
+        .observation_boundary = true,
+        .preserves_forwarding = true,
+    }, {
+        .name = "return_chain_ok",
+        .reads = IA64_TR_HELPER_STATE_PSR |
+                 IA64_TR_HELPER_STATE_TIMER,
+        .writes = IA64_TR_HELPER_STATE_TIMER,
+        .invalidates = IA64_TR_HELPER_STATE_TIMER,
+        .preserves_forwarding = true,
+    }, {
+        .name = "retire_translated_bundles",
+        .reads = IA64_TR_HELPER_STATE_PSR |
+                 IA64_TR_HELPER_STATE_TIMER,
+        .writes = IA64_TR_HELPER_STATE_TIMER,
+        .invalidates = IA64_TR_HELPER_STATE_TIMER,
+        .may_fault = true,
+        .observation_boundary = true,
+        .preserves_forwarding = true,
+    },
+};
+
+static void ia64_tr_validate_helper_contract_inventory(void)
+{
+    for (unsigned i = 0;
+         i < ARRAY_SIZE(ia64_tr_helper_contract_inventory); i++) {
+        const IA64TrHelperContract *contract =
+            &ia64_tr_helper_contract_inventory[i];
+
+        g_assert(contract->name != NULL && contract->name[0] != '\0');
+        g_assert(!contract->no_return || contract->observation_boundary);
+    }
+    g_assert(strcmp(ia64_tr_rotate_contract.name,
+                    "rotate_modulo_registers") == 0);
+}
+
+static void ia64_tr_apply_application_write_post(
+    DisasContext *ctx, const IA64TrHelperContract *contract)
+{
+    IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
+
+    ia64_tr_apply_helper_post_contract(ctx, contract);
+    if (!ssa->enabled) {
+        return;
+    }
+    for (unsigned word = 0; word < 2; word++) {
+        uint64_t ar = contract->reload.ar[word] & ssa->live_ar_valid[word];
+
+        while (ar != 0) {
+            uint8_t reg = word * 64 + ctz64(ar);
+            uint64_t bit = UINT64_C(1) << (reg & 63);
+
+            tcg_gen_mov_i64(ssa->live_ar[reg], cpu_ar[reg]);
+            ssa->dirty_ar[word] |= bit;
+            ssa->written_ar[word] |= bit;
+            ar &= ar - 1;
+        }
     }
 }
 
@@ -1921,16 +2438,16 @@ static void ia64_tr_group_load_entry_gr_pair(DisasContext *ctx,
     if (reg == 0) {
         tcg_gen_movi_i64(value, 0);
         tcg_gen_movi_i64(nat, 0);
-        ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_CLEAR, 1);
+        ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_KNOWN_CLEAR);
         return;
     }
-    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_UNKNOWN, 1);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_LOAD, 1);
     g_assert(group->active);
     half = reg >= 64;
     bit = UINT64_C(1) << (reg % 64);
     if ((group->gr_may_written[half] & bit) == 0) {
         ia64_tr_load_static_gr_pair(ctx, value, nat, reg);
+        ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_UNKNOWN);
+        ia64_tr_nat_emit_dynamic_load(ctx, 1);
         return;
     }
     if ((group->gr_must_saved[half] & bit) != 0) {
@@ -1939,6 +2456,8 @@ static void ia64_tr_group_load_entry_gr_pair(DisasContext *ctx,
         tcg_gen_ld_i64(nat, tcg_env,
                        ia64_tr_group_saved_nat_offset(reg));
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 2);
+        ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_UNKNOWN);
+        ia64_tr_nat_emit_dynamic_load(ctx, 1);
         return;
     }
 
@@ -1958,7 +2477,8 @@ static void ia64_tr_group_load_entry_gr_pair(DisasContext *ctx,
     ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 3);
     ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
     ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_BRANCH, 1);
+    ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_UNKNOWN);
+    ia64_tr_nat_emit_dynamic_load(ctx, 2);
     tcg_gen_andi_i64(mask, mask, bit);
     tcg_gen_movcond_i64(TCG_COND_NE, value, mask, tcg_constant_i64(0),
                         saved_value, live_value);
@@ -2930,17 +3450,24 @@ static void ia64_tr_ssa_ensure_entry_gr(DisasContext *ctx, uint8_t reg)
     if (reg == 0) {
         value = tcg_constant_i64(0);
         nat = tcg_constant_i64(0);
+        ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_KNOWN_CLEAR);
     } else if (!ssa->inherited) {
         value = tcg_temp_new_i64();
-        nat = tcg_temp_new_i64();
-        ia64_tr_load_static_gr_pair(ctx, value, nat, reg);
+        ia64_tr_load_static_gr(ctx, value, reg);
+        ia64_tr_nat_emit_state(ctx, ssa->entry_nat_state[reg]);
         if (ssa->entry_nat_state[reg] == IA64_TR_NAT_KNOWN_CLEAR) {
-            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_CLEAR, 1);
-        } else if (ssa->entry_nat_state[reg] == IA64_TR_NAT_KNOWN_SET) {
-            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_KNOWN_SET, 1);
+            nat = tcg_constant_i64(0);
+        } else if (ssa->entry_nat_state[reg] ==
+                   IA64_TR_NAT_KNOWN_SET) {
+            nat = tcg_constant_i64(1);
         } else {
-            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_UNKNOWN, 1);
-            ia64_tr_profile_add(ctx, IA64_PROFILE_NAT_DYNAMIC_LOAD, 1);
+            nat = tcg_temp_new_i64();
+            if (ia64_tr_gr_is_stacked(reg)) {
+                ia64_tr_read_logical_gr_nat(nat, reg);
+            } else {
+                ia64_tr_read_static_gr_nat(ctx, nat, reg);
+            }
+            ia64_tr_nat_emit_dynamic_load(ctx, 1);
         }
     } else {
         TCGv_i64 live_value = tcg_temp_new_i64();
@@ -2969,6 +3496,8 @@ static void ia64_tr_ssa_ensure_entry_gr(DisasContext *ctx, uint8_t reg)
         ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_LOAD, 3);
         ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_LOAD, 1);
         ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_VALIDITY_BRANCH, 1);
+        ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_UNKNOWN);
+        ia64_tr_nat_emit_dynamic_load(ctx, 2);
     }
     ssa->entry_gr[reg] = value;
     ssa->entry_nat[reg] = nat;
@@ -2989,6 +3518,8 @@ static void ia64_tr_ssa_ensure_live_gr(DisasContext *ctx, uint8_t reg)
         ia64_tr_load_static_gr_pair(
             ctx, ssa->live_gr[reg], ssa->live_nat[reg], reg);
         ssa->live_nat_state[reg] = IA64_TR_NAT_UNKNOWN;
+        ia64_tr_nat_emit_state(ctx, IA64_TR_NAT_UNKNOWN);
+        ia64_tr_nat_emit_dynamic_load(ctx, 1);
     } else {
         tcg_gen_mov_i64(ssa->live_gr[reg], ssa->entry_gr[reg]);
         tcg_gen_mov_i64(ssa->live_nat[reg], ssa->entry_nat[reg]);
@@ -7645,6 +8176,154 @@ static void ia64_tr_rewrite_plan_append_bundle(
     }
 }
 
+static bool ia64_tr_plan_is_memory(const IA64TrInstructionPlan *plan)
+{
+    const IA64OpcodeTraits *traits = ia64_opcode_traits_for(plan->opcode);
+    uint32_t states;
+
+    if (traits == NULL || traits->family == NULL) {
+        return false;
+    }
+    states = traits->family->sources | traits->family->destinations;
+    return (states & IA64_OPCODE_STATE_MEMORY) != 0 ||
+           (traits->family->may_fault & IA64_OPCODE_FAULT_MEMORY) != 0;
+}
+
+static IA64TrShapeCReason ia64_tr_plan_shape_c_reason(
+    const IA64TrInstructionPlan *plan)
+{
+    const IA64OpcodeTraits *traits = ia64_opcode_traits_for(plan->opcode);
+
+    /* Application-register moves are the representative Shape-B helper
+     * boundary for WP1.  Their selector-exact contracts publish/reload only
+     * the addressed AR/RSE subset, so they must not force the whole group
+     * back to the durable Shape-C transaction. */
+    if (plan->opcode == IA64_OP_MOV_ARGR ||
+        plan->opcode == IA64_OP_MOV_GRAR) {
+        return IA64_TR_SHAPE_C_REASON_NONE;
+    }
+    if (ia64_tr_decoded_is_rse_spine(plan->opcode)) {
+        return IA64_TR_SHAPE_C_REASON_RSE;
+    }
+    if (ia64_tr_decoded_is_rfi(plan->opcode)) {
+        return IA64_TR_SHAPE_C_REASON_RFI;
+    }
+    if (ia64_tr_decoded_system(plan->opcode) != NULL) {
+        return IA64_TR_SHAPE_C_REASON_SYSTEM;
+    }
+    if (ia64_tr_decoded_data_plane(plan->opcode) != NULL) {
+        return ia64_tr_plan_is_memory(plan) ?
+               IA64_TR_SHAPE_C_REASON_DATA_MEMORY :
+               IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY;
+    }
+    if (ia64_tr_decoded_fp_compute(plan->opcode) != NULL) {
+        return IA64_TR_SHAPE_C_REASON_FLOATING;
+    }
+    if (traits == NULL || traits->family == NULL) {
+        return IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS;
+    }
+    return IA64_TR_SHAPE_C_REASON_NONE;
+}
+
+static IA64ProfileCounter ia64_tr_shape_c_group_counter(
+    IA64TrShapeCReason reason)
+{
+    switch (reason) {
+    case IA64_TR_SHAPE_C_REASON_RSE:
+        return IA64_PROFILE_SHAPE_C_RSE_GROUP;
+    case IA64_TR_SHAPE_C_REASON_RFI:
+        return IA64_PROFILE_SHAPE_C_RFI_GROUP;
+    case IA64_TR_SHAPE_C_REASON_SYSTEM:
+        return IA64_PROFILE_SHAPE_C_SYSTEM_GROUP;
+    case IA64_TR_SHAPE_C_REASON_DATA_MEMORY:
+        return IA64_PROFILE_SHAPE_C_DATA_MEMORY_GROUP;
+    case IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY:
+        return IA64_PROFILE_SHAPE_C_DATA_NONMEMORY_GROUP;
+    case IA64_TR_SHAPE_C_REASON_FLOATING:
+        return IA64_PROFILE_SHAPE_C_FLOATING_GROUP;
+    case IA64_TR_SHAPE_C_REASON_PLUGIN:
+        return IA64_PROFILE_SHAPE_C_PLUGIN_GROUP;
+    case IA64_TR_SHAPE_C_REASON_INSN_DEBUG:
+        return IA64_PROFILE_SHAPE_C_INSN_DEBUG_GROUP;
+    case IA64_TR_SHAPE_C_REASON_DATA_DEBUG:
+        return IA64_PROFILE_SHAPE_C_DATA_DEBUG_GROUP;
+    case IA64_TR_SHAPE_C_REASON_DURABLE_OPEN:
+        return IA64_PROFILE_SHAPE_C_DURABLE_OPEN_GROUP;
+    case IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS:
+        return IA64_PROFILE_SHAPE_C_UNSUPPORTED_TRAITS_GROUP;
+    case IA64_TR_SHAPE_C_REASON_NONE:
+    case IA64_TR_SHAPE_C_REASON_UNKNOWN:
+    default:
+        return IA64_PROFILE_SHAPE_C_UNKNOWN_GROUP;
+    }
+}
+
+static IA64ProfileCounter ia64_tr_shape_c_slot_counter(
+    IA64TrShapeCReason reason)
+{
+    switch (reason) {
+    case IA64_TR_SHAPE_C_REASON_RSE:
+        return IA64_PROFILE_SHAPE_C_RSE_SLOT;
+    case IA64_TR_SHAPE_C_REASON_RFI:
+        return IA64_PROFILE_SHAPE_C_RFI_SLOT;
+    case IA64_TR_SHAPE_C_REASON_SYSTEM:
+        return IA64_PROFILE_SHAPE_C_SYSTEM_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DATA_MEMORY:
+        return IA64_PROFILE_SHAPE_C_DATA_MEMORY_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY:
+        return IA64_PROFILE_SHAPE_C_DATA_NONMEMORY_SLOT;
+    case IA64_TR_SHAPE_C_REASON_FLOATING:
+        return IA64_PROFILE_SHAPE_C_FLOATING_SLOT;
+    case IA64_TR_SHAPE_C_REASON_PLUGIN:
+        return IA64_PROFILE_SHAPE_C_PLUGIN_SLOT;
+    case IA64_TR_SHAPE_C_REASON_INSN_DEBUG:
+        return IA64_PROFILE_SHAPE_C_INSN_DEBUG_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DATA_DEBUG:
+        return IA64_PROFILE_SHAPE_C_DATA_DEBUG_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DURABLE_OPEN:
+        return IA64_PROFILE_SHAPE_C_DURABLE_OPEN_SLOT;
+    case IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS:
+        return IA64_PROFILE_SHAPE_C_UNSUPPORTED_TRAITS_SLOT;
+    case IA64_TR_SHAPE_C_REASON_NONE:
+    case IA64_TR_SHAPE_C_REASON_UNKNOWN:
+    default:
+        return IA64_PROFILE_SHAPE_C_UNKNOWN_SLOT;
+    }
+}
+
+static IA64ProfileCounter ia64_tr_ordinary_shape_c_slot_counter(
+    IA64TrShapeCReason reason)
+{
+    switch (reason) {
+    case IA64_TR_SHAPE_C_REASON_RSE:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_RSE_SLOT;
+    case IA64_TR_SHAPE_C_REASON_RFI:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_RFI_SLOT;
+    case IA64_TR_SHAPE_C_REASON_SYSTEM:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_SYSTEM_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DATA_MEMORY:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DATA_MEMORY_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DATA_NONMEMORY_SLOT;
+    case IA64_TR_SHAPE_C_REASON_FLOATING:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_FLOATING_SLOT;
+    case IA64_TR_SHAPE_C_REASON_PLUGIN:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_PLUGIN_SLOT;
+    case IA64_TR_SHAPE_C_REASON_INSN_DEBUG:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_INSN_DEBUG_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DATA_DEBUG:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DATA_DEBUG_SLOT;
+    case IA64_TR_SHAPE_C_REASON_DURABLE_OPEN:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_DURABLE_OPEN_SLOT;
+    case IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_UNSUPPORTED_TRAITS_SLOT;
+    case IA64_TR_SHAPE_C_REASON_NONE:
+    case IA64_TR_SHAPE_C_REASON_UNKNOWN:
+    default:
+        return IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_UNKNOWN_SLOT;
+    }
+}
+
 /*
  * Translation-only classification of the architecture WP0 is intended to
  * replace.  It deliberately emits no guest code and changes no admission or
@@ -7655,6 +8334,7 @@ static void ia64_tr_profile_group_census(DisasContext *ctx)
 {
     IA64ProfileTbShape *shape = &ctx->profile_shape;
     unsigned slots = ctx->rewrite_plan_emit_count;
+    unsigned ordinary_nonmemory_slots = 0;
     unsigned destinations = 0;
     bool complete;
     bool memory = false;
@@ -7692,6 +8372,11 @@ static void ia64_tr_profile_group_census(DisasContext *ctx)
         slot_memory = (states & IA64_OPCODE_STATE_MEMORY) != 0 ||
                       (traits->family->may_fault &
                        IA64_OPCODE_FAULT_MEMORY) != 0;
+        if (!slot_memory &&
+            ia64_tr_plan_shape_c_reason(plan) ==
+                IA64_TR_SHAPE_C_REASON_NONE) {
+            ordinary_nonmemory_slots++;
+        }
         memory |= slot_memory;
         helper |= traits->lowering_owner == IA64_OPCODE_OWNER_FOCUSED_HELPER;
         control |= traits->family->tb_behavior != IA64_OPCODE_TB_CONTINUE;
@@ -7750,19 +8435,31 @@ static void ia64_tr_profile_group_census(DisasContext *ctx)
     if (ctx->rewrite_shape == IA64_TR_SHAPE_C) {
         shape->counter[IA64_PROFILE_SHAPE_C_GROUP]++;
         shape->counter[IA64_PROFILE_SHAPE_C_SLOT] += slots;
-        if (rse) {
-            shape->counter[IA64_PROFILE_SHAPE_C_RSE]++;
-        } else if (system) {
-            shape->counter[IA64_PROFILE_SHAPE_C_SYSTEM]++;
-        } else {
-            shape->counter[IA64_PROFILE_SHAPE_C_OBSERVATION]++;
-        }
+        shape->counter[ia64_tr_shape_c_group_counter(
+            ctx->rewrite_shape_c_reason)]++;
+        shape->counter[ia64_tr_shape_c_slot_counter(
+            ctx->rewrite_shape_c_reason)] += slots;
     } else if (ctx->rewrite_shape == IA64_TR_SHAPE_A) {
         shape->counter[IA64_PROFILE_SHAPE_A_GROUP]++;
         shape->counter[IA64_PROFILE_SHAPE_A_SLOT] += slots;
     } else {
         shape->counter[IA64_PROFILE_SHAPE_B_GROUP]++;
         shape->counter[IA64_PROFILE_SHAPE_B_SLOT] += slots;
+    }
+
+    shape->counter[IA64_PROFILE_ORDINARY_NONMEMORY_SLOT] +=
+        ordinary_nonmemory_slots;
+    if (ctx->rewrite_shape == IA64_TR_SHAPE_A) {
+        shape->counter[IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_A_SLOT] +=
+            ordinary_nonmemory_slots;
+    } else if (ctx->rewrite_shape == IA64_TR_SHAPE_B) {
+        shape->counter[IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_B_SLOT] +=
+            ordinary_nonmemory_slots;
+    } else {
+        shape->counter[IA64_PROFILE_ORDINARY_NONMEMORY_SHAPE_C_SLOT] +=
+            ordinary_nonmemory_slots;
+        shape->counter[ia64_tr_ordinary_shape_c_slot_counter(
+            ctx->rewrite_shape_c_reason)] += ordinary_nonmemory_slots;
     }
 
     if (!complete) {
@@ -7799,11 +8496,6 @@ static void ia64_tr_perf_plan_census(DisasContext *ctx)
         const IA64TrInstructionPlan *plan = &ctx->rewrite_plan[i];
         const IA64OpcodeTraits *traits =
             ia64_opcode_traits_for(plan->opcode);
-        uint64_t sources = ctpop64(plan->source_gr[0]) +
-                           ctpop64(plan->source_gr[1]);
-
-        ia64_perf_add(IA64_PERF_NAT_UNKNOWN, sources);
-        ia64_perf_add(IA64_PERF_NAT_DYNAMIC_LOAD, sources);
         if (traits == NULL || traits->family == NULL) {
             helper = true;
             continue;
@@ -7815,16 +8507,6 @@ static void ia64_tr_perf_plan_census(DisasContext *ctx)
         helper |= traits->lowering_owner ==
                   IA64_OPCODE_OWNER_FOCUSED_HELPER;
         control |= traits->family->tb_behavior != IA64_OPCODE_TB_CONTINUE;
-        if (((traits->family->sources | traits->family->destinations) &
-             IA64_OPCODE_STATE_RSE) != 0) {
-            ia64_perf_count(IA64_PERF_NAT_RSE_UNKNOWN);
-            ia64_perf_count(IA64_PERF_NAT_LATTICE_INVALIDATE);
-        }
-        if (traits->family->nat_rule == IA64_OPCODE_NAT_NONE) {
-            ia64_perf_add(IA64_PERF_NAT_KNOWN_CLEAR,
-                          ctpop64(plan->dest_gr[0]) +
-                          ctpop64(plan->dest_gr[1]));
-        }
     }
     if (ctx->rewrite_plan_emit_count != 0 &&
         !ctx->rewrite_plan[ctx->rewrite_plan_emit_count - 1].stop_after) {
@@ -7852,8 +8534,7 @@ static void ia64_tr_select_execution_shape(DisasContext *ctx)
 {
     bool complete;
     bool boundary = false;
-    bool foundational = true;
-    bool durable_mode;
+    IA64TrShapeCReason reason = IA64_TR_SHAPE_C_REASON_NONE;
 
     g_assert(ctx->rewrite_plan_emit_count != 0);
     complete = ctx->rewrite_plan[ctx->rewrite_plan_emit_count - 1].stop_after ||
@@ -7864,13 +8545,14 @@ static void ia64_tr_select_execution_shape(DisasContext *ctx)
         const IA64TrInstructionPlan *plan = &ctx->rewrite_plan[i];
         const IA64OpcodeTraits *traits =
             ia64_opcode_traits_for(plan->opcode);
+        IA64TrShapeCReason plan_reason =
+            ia64_tr_plan_shape_c_reason(plan);
 
-        if (ia64_tr_decoded_system(plan->opcode) != NULL ||
-            ia64_tr_decoded_data_plane(plan->opcode) != NULL ||
-            ia64_tr_decoded_fp_compute(plan->opcode) != NULL ||
-            ia64_tr_decoded_is_rse_spine(plan->opcode) ||
-            ia64_tr_decoded_is_rfi(plan->opcode)) {
-            foundational = false;
+        /* The earliest selecting instruction is the primary group reason.
+         * This remains stable when later slots add another Shape-C family. */
+        if (reason == IA64_TR_SHAPE_C_REASON_NONE &&
+            plan_reason != IA64_TR_SHAPE_C_REASON_NONE) {
+            reason = plan_reason;
         }
         if (ia64_tr_decoded_is_ordinary_integer_memory(plan->opcode)) {
             boundary = true;
@@ -7887,17 +8569,33 @@ static void ia64_tr_select_execution_shape(DisasContext *ctx)
        ordinary architectural state: GR commits carry exact destination masks,
        stores invalidate by address, and advanced loads record after retirement.
        It therefore cannot select the durable transaction by itself. */
-    durable_mode = ctx->base.plugin_enabled ||
-        (ctx->base.tb->flags & (IA64_TB_FLAG_INSN_DEBUG_ACTIVE |
-                                IA64_TB_FLAG_DATA_DEBUG_ACTIVE)) != 0;
-    ctx->rewrite_ssa_enabled = foundational && !durable_mode;
-    if (!foundational || durable_mode) {
+    /* Observation modes override an opcode-family reason because they are the
+     * reason even an otherwise ordinary group requires durable state. */
+    if (ctx->base.plugin_enabled) {
+        reason = IA64_TR_SHAPE_C_REASON_PLUGIN;
+    } else if ((ctx->base.tb->flags &
+                IA64_TB_FLAG_INSN_DEBUG_ACTIVE) != 0) {
+        reason = IA64_TR_SHAPE_C_REASON_INSN_DEBUG;
+    } else if ((ctx->base.tb->flags &
+                IA64_TB_FLAG_DATA_DEBUG_ACTIVE) != 0) {
+        reason = IA64_TR_SHAPE_C_REASON_DATA_DEBUG;
+    }
+    ctx->rewrite_shape_c_reason = reason;
+    ctx->rewrite_ssa_enabled = reason == IA64_TR_SHAPE_C_REASON_NONE;
+    if (reason != IA64_TR_SHAPE_C_REASON_NONE) {
         ctx->rewrite_shape = IA64_TR_SHAPE_C;
     } else if (!ctx->typed_group_active && complete && !boundary) {
         ctx->rewrite_shape = IA64_TR_SHAPE_A;
     } else {
         /* Branch/helper/TB/page boundaries, including resumed open groups. */
         ctx->rewrite_shape = IA64_TR_SHAPE_B;
+    }
+    if (ctx->rewrite_shape != IA64_TR_SHAPE_C) {
+        ctx->rewrite_shape_c_reason = IA64_TR_SHAPE_C_REASON_NONE;
+    } else if (ctx->rewrite_shape_c_reason ==
+               IA64_TR_SHAPE_C_REASON_NONE) {
+        /* Defensive accounting: this must stay zero in acceptance evidence. */
+        ctx->rewrite_shape_c_reason = IA64_TR_SHAPE_C_REASON_UNKNOWN;
     }
 }
 
@@ -8437,6 +9135,27 @@ static void ia64_tr_emit_decoded_register_nat_consumption(
     ia64_tr_emit_decoded_register_nat_consumption_isr(ctx, insn, 0);
 }
 
+static void ia64_tr_emit_decoded_register_nat_check(
+    DisasContext *ctx, const IA64Instruction *insn, TCGv_i64 nat,
+    IA64TrNatState state)
+{
+    TCGLabel *nat_clear;
+
+    if (state == IA64_TR_NAT_KNOWN_CLEAR) {
+        return;
+    }
+    if (state == IA64_TR_NAT_KNOWN_SET) {
+        ia64_tr_nat_emit_direct_fault(ctx);
+        ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
+        return;
+    }
+    nat_clear = gen_new_label();
+    ia64_tr_nat_emit_dynamic_branch(ctx);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
+    ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
+    gen_set_label(nat_clear);
+}
+
 static void ia64_tr_emit_decoded_data_nat_consumption(
     DisasContext *ctx, const IA64Instruction *insn,
     int32_t access_type)
@@ -8493,6 +9212,7 @@ static void ia64_tr_emit_decoded_memory_nat_check(
         }
     }
 
+    ia64_tr_nat_emit_dynamic_branch(ctx);
     tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, valid);
     ia64_tr_emit_decoded_data_nat_consumption(
         ctx, insn, exception_access_type);
@@ -10812,7 +11532,6 @@ static void ia64_tr_emit_decoded_pr_move(DisasContext *ctx,
     if (insn->opcode == IA64_OP_MOV_GRPR) {
         uint64_t mask = (uint64_t)insn->imm & ~UINT64_C(1);
         IA64TrPrImageWrite *pr_write;
-        TCGLabel *nat_clear = gen_new_label();
         TCGv_i64 value = ia64_tr_scratch_i64(ctx);
         TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
 
@@ -10820,10 +11539,10 @@ static void ia64_tr_emit_decoded_pr_move(DisasContext *ctx,
         pr_write = ia64_tr_group_prepare_pr_image(ctx, mask);
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
         /* This ordinary source read is required even for an encoded mask 0. */
-    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
-        ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
-        gen_set_label(nat_clear);
+        ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
+        ia64_tr_emit_decoded_register_nat_check(
+            ctx, insn, nat,
+            ia64_tr_group_ordinary_gr_nat_state(ctx, insn->r1));
         ia64_tr_group_stage_pr_image(pr_write, value);
         ia64_tr_finish_predicate_guard(skip);
         return;
@@ -10867,28 +11586,65 @@ static void ia64_tr_emit_decoded_br_move(DisasContext *ctx,
     {
         IA64TrBrWrite *br_write =
             ia64_tr_group_prepare_br(ctx, insn->r2);
-        TCGLabel *nat_clear = gen_new_label();
         TCGv_i64 value = ia64_tr_scratch_i64(ctx);
         TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
 
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
-    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
-        ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
-        gen_set_label(nat_clear);
+        ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
+        ia64_tr_emit_decoded_register_nat_check(
+            ctx, insn, nat,
+            ia64_tr_group_ordinary_gr_nat_state(ctx, insn->r1));
         ia64_tr_group_stage_br(br_write, value);
         ia64_tr_finish_predicate_guard(skip);
     }
 }
 
-static void ia64_tr_publish_application_helper_state(
+static void ia64_tr_publish_application_fault_state(
     DisasContext *ctx, const IA64Instruction *insn)
 {
-    ia64_tr_group_publish_state_for_returning_helper(ctx);
+    g_assert(ia64_tr_application_fault_contract.no_return &&
+             ia64_tr_application_fault_contract.observation_boundary);
+    ia64_tr_group_publish_prefix_for_noreturn_fault(ctx);
     tcg_gen_movi_i64(cpu_ip, insn->address);
     ia64_tr_publish_fault_state(ctx, insn->address, insn->slot,
                                 ia64_tr_decoded_slot_type(insn->unit),
                                 insn->raw, insn->starts_group);
+}
+
+static void ia64_tr_emit_application_legality(
+    DisasContext *ctx, const IA64Instruction *insn, bool write)
+{
+    IA64TrHelperContract contract =
+        ia64_tr_application_legality_contract(insn->r2);
+    TCGLabel *valid = gen_new_label();
+    TCGv_i32 status = ia64_tr_scratch_i32(ctx);
+
+    gen_helper_application_register_legality_status(
+        status, tcg_env, tcg_constant_i32(insn->r2),
+        tcg_constant_i32(write));
+    ia64_tr_apply_helper_post_contract(ctx, &contract);
+    tcg_gen_brcondi_i32(TCG_COND_EQ, status, 0, valid);
+    ia64_tr_publish_application_fault_state(ctx, insn);
+    gen_helper_raise_application_register_fault(tcg_env, status);
+    gen_set_label(valid);
+}
+
+static void ia64_tr_emit_application_privilege(
+    DisasContext *ctx, const IA64Instruction *insn, bool write)
+{
+    IA64TrHelperContract contract =
+        ia64_tr_application_privilege_contract();
+    TCGLabel *valid = gen_new_label();
+    TCGv_i32 status = ia64_tr_scratch_i32(ctx);
+
+    gen_helper_application_register_privilege_status(
+        status, tcg_env, tcg_constant_i32(insn->r2),
+        tcg_constant_i32(write));
+    ia64_tr_apply_helper_post_contract(ctx, &contract);
+    tcg_gen_brcondi_i32(TCG_COND_EQ, status, 0, valid);
+    ia64_tr_publish_application_fault_state(ctx, insn);
+    gen_helper_raise_application_register_fault(tcg_env, status);
+    gen_set_label(valid);
 }
 
 static void ia64_tr_emit_application_target_check(
@@ -10972,19 +11728,23 @@ static void ia64_tr_emit_decoded_application_move(
             g_assert(!instruction->branch_source_pfs);
             ia64_tr_group_load_ordinary_pfs(ctx, value);
         } else {
+            IA64TrHelperContract contract =
+                ia64_tr_application_read_contract(insn->r2);
+
             if (insn->r2 == IA64_AR_ITC &&
                 (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) != 0) {
                 translator_io_start(&ctx->base);
             }
-            ia64_tr_publish_application_helper_state(ctx, insn);
-            gen_helper_application_register_preflight(
-                tcg_env, tcg_constant_i32(insn->r2),
-                tcg_constant_i32(0));
-            ia64_tr_reload_state_cache(ctx);
+            ia64_tr_emit_application_legality(ctx, insn, false);
+            ia64_tr_emit_application_privilege(ctx, insn, false);
+            ia64_tr_apply_helper_pre_contract(ctx, &contract);
             gen_helper_application_register_read(
                 value, tcg_env, tcg_constant_i32(insn->r2));
-            ia64_tr_reload_state_cache(ctx);
-            if (ctx->rewrite_group.ssa.enabled) {
+            ia64_tr_apply_helper_post_contract(ctx, &contract);
+            /* AR.ITC is helper-owned time state: each instruction samples
+             * the clock.  It is not an immutable issue-group entry value. */
+            if (ctx->rewrite_group.ssa.enabled &&
+                insn->r2 != IA64_AR_ITC) {
                 IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
                 unsigned word = insn->r2 >> 6;
                 uint64_t bit = UINT64_C(1) << (insn->r2 & 63);
@@ -11006,7 +11766,6 @@ static void ia64_tr_emit_decoded_application_move(
     }
 
     {
-        TCGLabel *nat_clear = gen_new_label();
         TCGv_i64 value = ia64_tr_scratch_i64(ctx);
         TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
         uint64_t expected[2] = { 0, 0 };
@@ -11027,24 +11786,27 @@ static void ia64_tr_emit_decoded_application_move(
                 (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) != 0) {
                 translator_io_start(&ctx->base);
             }
-            ia64_tr_publish_application_helper_state(ctx, insn);
-            gen_helper_application_register_write_legality(
-                tcg_env, tcg_constant_i32(insn->r2));
-            ia64_tr_reload_state_cache(ctx);
+            ia64_tr_emit_application_legality(ctx, insn, true);
         }
-    ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
-        tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear);
-        ia64_tr_emit_decoded_register_nat_consumption(ctx, insn);
-        gen_set_label(nat_clear);
+        ia64_tr_group_load_ordinary_gr_pair(ctx, &value, &nat, insn->r1);
+        ia64_tr_emit_decoded_register_nat_check(
+            ctx, insn, nat,
+            ia64_tr_group_ordinary_gr_nat_state(ctx, insn->r1));
         if (insn->r2 == IA64_AR_PFS) {
             ia64_tr_emit_application_write_value_check(
                 ctx, insn, insn->r2, value);
             ia64_tr_group_write_pfs(ctx, value, instruction->must_pfs);
         } else {
-            ia64_tr_publish_application_helper_state(ctx, insn);
-            gen_helper_application_register_write(
+            IA64TrHelperContract contract =
+                ia64_tr_application_write_contract(insn->r2);
+
+            ia64_tr_emit_application_write_value_check(
+                ctx, insn, insn->r2, value);
+            ia64_tr_emit_application_privilege(ctx, insn, true);
+            ia64_tr_apply_helper_pre_contract(ctx, &contract);
+            gen_helper_application_register_write_committed(
                 tcg_env, tcg_constant_i32(insn->r2), value);
-            ia64_tr_reload_state_cache(ctx);
+            ia64_tr_apply_application_write_post(ctx, &contract);
             ia64_tr_finish_faulting_slot();
         }
         ia64_tr_finish_predicate_guard(skip);
@@ -12180,6 +12942,7 @@ static void ia64_tr_emit_decoded_system(
         descriptor->nat_policy != IA64_TR_SYSTEM_NAT_PROPAGATE_ADDRESS) {
         nat_clear = gen_new_label();
         tcg_gen_or_i64(any_nat, nat0, nat1);
+        ia64_tr_nat_emit_dynamic_branch(ctx);
         tcg_gen_brcondi_i64(TCG_COND_EQ, any_nat, 0, nat_clear);
         ia64_tr_emit_decoded_register_nat_consumption_isr(
             ctx, insn, ia64_tr_system_nat_isr_extra(descriptor, insn));
@@ -13546,7 +14309,8 @@ static void ia64_tr_emit_decoded_loop_branch_split(
 
         tcg_gen_brcondi_i64(TCG_COND_EQ, rotate, 0, skip_rotation);
         gen_helper_rotate_modulo_registers(tcg_env);
-        ia64_tr_reload_state_cache(ctx);
+        ia64_tr_nat_invalidate_stacked_lattice(ctx);
+        ia64_tr_apply_helper_post_contract(ctx, &ia64_tr_rotate_contract);
         gen_set_label(skip_rotation);
     }
     tcg_gen_brcondi_i64(TCG_COND_NE, taken, 0, arm->taken);

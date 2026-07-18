@@ -845,6 +845,48 @@ void HELPER(application_register_write_legality)(CPUIA64State *env,
     ia64_system_validate_ar_legality(env, selector, true);
 }
 
+enum {
+    IA64_APPLICATION_REGISTER_OK,
+    IA64_APPLICATION_REGISTER_ILLEGAL,
+    IA64_APPLICATION_REGISTER_PRIVILEGED,
+};
+
+uint32_t HELPER(application_register_legality_status)(CPUIA64State *env,
+                                                       uint32_t selector,
+                                                       uint32_t write)
+{
+    if (selector >= IA64_AR_COUNT || (write && selector == IA64_AR_BSP) ||
+        ((selector == IA64_AR_BSPSTORE || selector == IA64_AR_RNAT) &&
+         (env->rse.rsc & IA64_RSC_MODE_MASK) != 0)) {
+        return IA64_APPLICATION_REGISTER_ILLEGAL;
+    }
+    return IA64_APPLICATION_REGISTER_OK;
+}
+
+uint32_t HELPER(application_register_privilege_status)(CPUIA64State *env,
+                                                        uint32_t selector,
+                                                        uint32_t write)
+{
+    unsigned cpl = ia64_system_cpl(env);
+
+    if ((write && (selector <= 7 || selector == IA64_AR_ITC ||
+                   selector == IA64_AR_RUC) && cpl != 0) ||
+        (!write && (selector == IA64_AR_ITC || selector == IA64_AR_RUC) &&
+         (env->psr & IA64_PSR_SI_BIT) != 0 && cpl != 0)) {
+        return IA64_APPLICATION_REGISTER_PRIVILEGED;
+    }
+    return IA64_APPLICATION_REGISTER_OK;
+}
+
+G_NORETURN void HELPER(raise_application_register_fault)(CPUIA64State *env,
+                                                          uint32_t status)
+{
+    if (status == IA64_APPLICATION_REGISTER_ILLEGAL) {
+        ia64_system_raise_illegal(env);
+    }
+    ia64_system_raise_general(env, 0x20);
+}
+
 uint64_t HELPER(application_register_read)(CPUIA64State *env,
                                            uint32_t selector)
 {
@@ -886,6 +928,16 @@ void HELPER(application_register_write)(CPUIA64State *env,
 {
     ia64_system_validate_ar_write_value(env, selector, value);
     ia64_system_validate_ar_privilege(env, selector, true);
+    ia64_system_preserve_ar_write_sources(env, selector);
+    ia64_write_application_register(env, selector, value);
+}
+
+void HELPER(application_register_write_committed)(CPUIA64State *env,
+                                                   uint32_t selector,
+                                                   uint64_t value)
+{
+    /* Translator callers have already handled legality, privilege and value
+     * faults in explicit cold arms.  This returning helper cannot fault. */
     ia64_system_preserve_ar_write_sources(env, selector);
     ia64_write_application_register(env, selector, value);
 }

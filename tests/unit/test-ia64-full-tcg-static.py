@@ -63,6 +63,8 @@ def main() -> int:
     ), "raw instruction engine API")
     rse_source = path.with_name("rse.c").read_text(encoding="utf-8")
     helper_source = path.with_name("helper.h").read_text(encoding="utf-8")
+    perf_source = path.with_name("perf.c").read_text(encoding="utf-8")
+    profile_source = path.with_name("profile.c").read_text(encoding="utf-8")
     arch_helper_source = path.with_name("arch-helpers.c").read_text(
         encoding="utf-8"
     )
@@ -515,7 +517,7 @@ def main() -> int:
     br_move_lower = section(
         source,
         "static void ia64_tr_emit_decoded_br_move",
-        "static void ia64_tr_publish_application_helper_state",
+        "static void ia64_tr_publish_application_fault_state",
     )
     pfs_ordinary_load = section(
         source,
@@ -541,6 +543,51 @@ def main() -> int:
         source,
         "static void ia64_tr_emit_decoded_application_move",
         "static unsigned ia64_tr_decoded_bitfield_pos",
+    )
+    helper_contract_model = section(
+        source,
+        "typedef enum IA64TrHelperState",
+        "typedef struct IA64TrGroupSSA",
+    )
+    application_contracts = section(
+        source,
+        "static IA64TrHelperContract ia64_tr_application_legality_contract",
+        "static const IA64TrHelperContract ia64_tr_rotate_contract",
+    )
+    helper_contract_inventory = section(
+        source,
+        "static const IA64TrHelperContract ia64_tr_helper_contract_inventory[]",
+        "static void ia64_tr_apply_application_write_post",
+    )
+    helper_sparse_reload = section(
+        source,
+        "static void ia64_tr_reload_state_cache_map",
+        "static void ia64_tr_commit_ip_value",
+    )
+    application_fault_lower = section(
+        source,
+        "static void ia64_tr_publish_application_fault_state",
+        "static void ia64_tr_emit_decoded_application_move",
+    )
+    nat_emission = section(
+        source,
+        "static void ia64_tr_nat_emit_state",
+        "static void ia64_tr_note_retired_bundle",
+    )
+    ssa_entry_gr = section(
+        source,
+        "static void ia64_tr_ssa_ensure_entry_gr(DisasContext *ctx, uint8_t reg)\n{",
+        "static void ia64_tr_ssa_ensure_live_gr",
+    )
+    nat_check = section(
+        source,
+        "static void ia64_tr_emit_decoded_register_nat_check",
+        "static void ia64_tr_emit_decoded_pr_move",
+    )
+    shape_c_system_lower = section(
+        source,
+        "static void ia64_tr_emit_decoded_system",
+        "static void ia64_tr_emit_decoded_instruction",
     )
     typed_bundle = section(
         source,
@@ -2650,7 +2697,7 @@ def main() -> int:
         "            gr_write, image, IA64_TR_NAT_KNOWN_CLEAR)",
         "ia64_tr_group_prepare_pr_image",
         "ia64_tr_group_load_ordinary_gr_pair",
-        "ia64_tr_emit_decoded_register_nat_consumption",
+        "ia64_tr_emit_decoded_register_nat_check",
         "ia64_tr_group_stage_pr_image",
         "IA64_TR_PR_ROTATING_MASK",
     ), "typed packed PR-move lowering")
@@ -2673,7 +2720,7 @@ def main() -> int:
         "ia64_tr_group_stage_gr",
         "ia64_tr_group_prepare_br",
         "ia64_tr_group_load_ordinary_gr_pair",
-        "ia64_tr_emit_decoded_register_nat_consumption",
+        "ia64_tr_emit_decoded_register_nat_check",
         "ia64_tr_group_stage_br",
     ), "typed ordered BR-move lowering")
     forbid(br_move_lower, (
@@ -2700,18 +2747,14 @@ def main() -> int:
     grbr_read = br_move_lower.find(
         "ia64_tr_group_load_ordinary_gr_pair", grbr_guard
     )
-    grbr_nat_branch = br_move_lower.find(
-        "tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0", grbr_read
-    )
-    grbr_fault = br_move_lower.find(
-        "ia64_tr_emit_decoded_register_nat_consumption", grbr_nat_branch
+    grbr_nat_check = br_move_lower.find(
+        "ia64_tr_emit_decoded_register_nat_check", grbr_read
     )
     grbr_stage = br_move_lower.find(
-        "ia64_tr_group_stage_br", grbr_fault
+        "ia64_tr_group_stage_br", grbr_nat_check
     )
     if not (0 <= brgr_guard < brgr_read < brgr_stage < grbr_block <
-            grbr_guard < grbr_read < grbr_nat_branch < grbr_fault <
-            grbr_stage):
+            grbr_guard < grbr_read < grbr_nat_check < grbr_stage):
         raise AssertionError("typed BR moves must qualify before ordinary "
                              "source reads, and mov b=r must fault on NaT "
                              "before staging the BR result")
@@ -2793,13 +2836,18 @@ def main() -> int:
     require(pfs_move_lower, (
         "insn->opcode == IA64_OP_MOV_ARGR",
         "insn->opcode == IA64_OP_MOV_GRAR",
-        "gen_helper_application_register_preflight",
+        "ia64_tr_emit_application_legality",
+        "ia64_tr_emit_application_privilege",
         "gen_helper_application_register_read",
-        "gen_helper_application_register_write",
+        "gen_helper_application_register_write_committed",
+        "ia64_tr_apply_helper_pre_contract",
+        "ia64_tr_application_read_contract",
+        "ia64_tr_application_write_contract",
+        "ia64_tr_apply_application_write_post",
         "ia64_tr_group_load_ordinary_pfs",
         "ia64_tr_group_stage_gr",
         "ia64_tr_group_load_ordinary_gr_pair",
-        "ia64_tr_emit_decoded_register_nat_consumption",
+        "ia64_tr_emit_decoded_register_nat_check",
         "ia64_tr_group_write_pfs",
     ), "typed AR.PFS move lowering")
     forbid(pfs_move_lower, (
@@ -2816,27 +2864,29 @@ def main() -> int:
     argr_stage = pfs_move_lower.find(
         "ia64_tr_group_stage_gr", argr_read
     )
-    grar_block = pfs_move_lower.find("TCGLabel *nat_clear")
+    grar_block = pfs_move_lower.find(
+        "ia64_tr_plan_ar_write_resources(expected, insn->r2)"
+    )
     grar_guard = pfs_move_lower.find(
         "ia64_tr_emit_decoded_predicate_guard(ctx, insn)", grar_block
     )
     grar_read = pfs_move_lower.find(
         "ia64_tr_group_load_ordinary_gr_pair", grar_guard
     )
-    grar_nat_branch = pfs_move_lower.find(
-        "tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0", grar_read
+    grar_nat_check = pfs_move_lower.find(
+        "ia64_tr_emit_decoded_register_nat_check", grar_read
     )
-    grar_fault = pfs_move_lower.find(
-        "ia64_tr_emit_decoded_register_nat_consumption", grar_nat_branch
+    grar_value_check = pfs_move_lower.find(
+        "ia64_tr_emit_application_write_value_check", grar_nat_check
     )
     grar_write = pfs_move_lower.find(
-        "ia64_tr_group_write_pfs", grar_fault
+        "ia64_tr_group_write_pfs", grar_value_check
     )
     grar_guard_end = pfs_move_lower.find(
         "ia64_tr_finish_predicate_guard(skip)", grar_write
     )
     if not (0 <= argr_guard < argr_read < argr_stage < grar_block <
-            grar_guard < grar_read < grar_nat_branch < grar_fault <
+            grar_guard < grar_read < grar_nat_check < grar_value_check <
             grar_write < grar_guard_end):
         raise AssertionError("typed AR.PFS moves must qualify before source "
                              "reads; GR-to-PFS must fault on NaT before the "
@@ -2866,16 +2916,13 @@ def main() -> int:
     pr_source = pr_move_lower.find(
         "ia64_tr_group_load_ordinary_gr_pair", pr_guard
     )
-    pr_nat_branch = pr_move_lower.find(
-        "tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0", pr_source
-    )
-    pr_fault = pr_move_lower.find(
-        "ia64_tr_emit_decoded_register_nat_consumption", pr_nat_branch
+    pr_nat_check = pr_move_lower.find(
+        "ia64_tr_emit_decoded_register_nat_check", pr_source
     )
     pr_stage = pr_move_lower.find(
-        "ia64_tr_group_stage_pr_image", pr_fault
+        "ia64_tr_group_stage_pr_image", pr_nat_check
     )
-    if not (0 <= pr_guard < pr_source < pr_nat_branch < pr_fault < pr_stage):
+    if not (0 <= pr_guard < pr_source < pr_nat_check < pr_stage):
         raise AssertionError("mov pr=r must qualify before reading its "
                              "ordinary GR/NaT source, then fault before its "
                              "packed PR-image write")
@@ -3359,8 +3406,13 @@ def main() -> int:
         source, "static void ia64_tr_select_execution_shape",
         "static void ia64_tr_rewrite_plan_finalize",
     )
+    shape_reason = section(
+        source, "static IA64TrShapeCReason ia64_tr_plan_shape_c_reason",
+        "static IA64ProfileCounter ia64_tr_shape_c_group_counter",
+    )
     shape_c_arm = section(
-        shape_select, "if (!foundational || durable_mode)", "} else if"
+        shape_select, "if (ctx->base.plugin_enabled)",
+        "ctx->rewrite_shape_c_reason = reason;"
     )
     state_cache_gr_policy = section(
         source, "static unsigned ia64_tr_state_cache_gr_limit(void)",
@@ -3476,21 +3528,174 @@ def main() -> int:
     require(state_cache_gr_policy, ("return 0;",),
             "WP0-measured stable-direct static-GR policy")
 
+    require(helper_contract_model, (
+        "IA64_TR_HELPER_STATE_GR", "IA64_TR_HELPER_STATE_NAT",
+        "IA64_TR_HELPER_STATE_PR", "IA64_TR_HELPER_STATE_BR",
+        "IA64_TR_HELPER_STATE_AR", "IA64_TR_HELPER_STATE_CFM",
+        "IA64_TR_HELPER_STATE_PSR", "IA64_TR_HELPER_STATE_RSE",
+        "IA64_TR_HELPER_STATE_ALAT", "IA64_TR_HELPER_STATE_FORWARDING",
+        "IA64_TR_HELPER_STATE_RESTART", "IA64_TR_HELPER_STATE_TIMER",
+        "uint32_t reads", "uint32_t writes", "uint32_t invalidates",
+        "IA64TrSafepointMap materialize", "IA64TrSafepointMap reload",
+        "bool may_fault", "bool no_return", "bool observation_boundary",
+        "bool preserves_forwarding",
+    ), "WP1 exact helper-contract state model")
+    require(application_contracts, (
+        '"application_register_legality_status"',
+        '"application_register_privilege_status"',
+        '"application_register_read"',
+        '"application_register_write_committed"',
+        "IA64_TR_HELPER_STATE_PSR", "IA64_TR_HELPER_STATE_RSE",
+        "IA64_TR_HELPER_STATE_NAT", "IA64_TR_HELPER_STATE_TIMER",
+        "IA64_TR_HELPER_STATE_FORWARDING",
+        "ia64_tr_contract_add_ar(&contract.materialize, selector)",
+        "ia64_tr_contract_add_ar(&contract.reload, selector)",
+        "ia64_tr_contract_add_ar(&contract.reload, IA64_AR_BSP)",
+        "ia64_tr_contract_add_ar(&contract.reload, IA64_AR_RNAT)",
+    ), "selector-exact application-helper contracts")
+    require(source, (
+        "plan->opcode == IA64_OP_MOV_ARGR",
+        "plan->opcode == IA64_OP_MOV_GRAR",
+        "return IA64_TR_SHAPE_C_REASON_NONE",
+    ), "application-register Shape-B selector")
+    for helper in (
+            "clear_fault_suppression", "gr_alat_invalidate_mask",
+            "data_plane_ar_preserve", "data_plane_ar_select",
+            "rotate_modulo_registers", "enter_call_frame",
+            "return_frame_from_pfs", "complete_rse_frame_loads",
+            "return_chain_ok", "retire_translated_bundles"):
+        require(helper_contract_inventory, ('"' + helper + '"',),
+                "Shape-A/B returning-helper inventory")
+    require(helper_contract_inventory, (
+        "g_assert(!contract->no_return || contract->observation_boundary)",
+    ), "returning-helper contract validation")
+    require(helper_sparse_reload, (
+        "ctx->static_gr_dirty & (uint32_t)map->gr[0]",
+        "ctx->br_dirty & map->br",
+        "ctx->ar_dirty[0] & map->ar[0]",
+        "dirty_ssa = contract->materialize",
+        "dirty_ssa.gr[0] &= ssa->dirty_gr[0]",
+        "dirty_ssa.ar[0] &= ssa->dirty_ar[0]",
+        "ia64_tr_ssa_materialize_map(ctx, &dirty_ssa, false)",
+        "ia64_tr_sync_state_cache_map(ctx, &contract->materialize)",
+        "ctx->static_gr_valid & (uint32_t)map->gr[0]",
+        "ctx->br_valid & map->br",
+        "ctx->ar_valid[word] & map->ar[word]",
+        "ctx->pr_valid && map->pr != 0",
+        "ctx->gr_nat_valid && (map->gr[0] | map->gr[1]) != 0",
+        "ia64_tr_reload_state_cache_map(ctx, &contract->reload)",
+    ), "contract-driven sparse helper materialization/reload")
+    forbid(helper_sparse_reload, (
+        "ia64_tr_sync_state_cache(ctx)", "ia64_tr_reload_state_cache(ctx)",
+    ), "contract-driven sparse post-helper reload")
+    require(application_fault_lower, (
+        "ia64_tr_application_fault_contract.no_return",
+        "ia64_tr_application_fault_contract.observation_boundary",
+        "gen_helper_application_register_legality_status",
+        "gen_helper_application_register_privilege_status",
+        "ia64_tr_apply_helper_post_contract(ctx, &contract)",
+        "gen_helper_raise_application_register_fault",
+    ), "cold no-return application fault boundary")
+    forbid(pfs_move_lower, (
+        "ia64_tr_group_publish_state_for_returning_helper",
+        "ia64_tr_sync_state_cache", "ia64_tr_reload_state_cache(ctx)",
+    ), "ordinary Shape-A/B application-helper path")
+    if (source.count(
+            "ia64_tr_group_publish_state_for_returning_helper(ctx);") != 2 or
+            shape_c_system_lower.count(
+                "ia64_tr_group_publish_state_for_returning_helper(ctx);") != 2 or
+            source.count("ia64_tr_reload_state_cache(ctx);") != 2 or
+            shape_c_system_lower.count(
+                "ia64_tr_reload_state_cache(ctx);") != 2):
+        raise AssertionError(
+            "generic full returning-helper synchronization must remain "
+            "confined to the two Shape-C system-plane boundaries"
+        )
+
+    require(nat_emission, (
+        "IA64_PROFILE_NAT_KNOWN_CLEAR", "IA64_PROFILE_NAT_KNOWN_SET",
+        "IA64_PROFILE_NAT_UNKNOWN", "IA64_PROFILE_NAT_DYNAMIC_LOAD",
+        "IA64_PROFILE_NAT_DYNAMIC_BRANCH", "IA64_PROFILE_NAT_FAULT",
+        "IA64_PROFILE_NAT_LATTICE_INVALIDATE",
+        "IA64_PROFILE_NAT_RSE_UNKNOWN",
+        "ctx->nat_state[reg] != IA64_TR_NAT_UNKNOWN",
+    ), "emission-point NaT accounting")
+    require(ssa_entry_gr, (
+        "ia64_tr_nat_emit_state(ctx, ssa->entry_nat_state[reg])",
+        "ssa->entry_nat_state[reg] == IA64_TR_NAT_KNOWN_CLEAR",
+        "nat = tcg_constant_i64(0)",
+        "ssa->entry_nat_state[reg] ==",
+        "IA64_TR_NAT_KNOWN_SET",
+        "nat = tcg_constant_i64(1)",
+        "ia64_tr_nat_emit_dynamic_load(ctx, 1)",
+    ), "compile-time NaT lattice source selection")
+    require(nat_check, (
+        "if (state == IA64_TR_NAT_KNOWN_CLEAR)",
+        "if (state == IA64_TR_NAT_KNOWN_SET)",
+        "ia64_tr_nat_emit_direct_fault(ctx)",
+        "ia64_tr_nat_emit_dynamic_branch(ctx)",
+        "tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, nat_clear)",
+    ), "exact NaT fault/test emission")
+
     require(shape_select, (
-        "foundational && !durable_mode",
+        "ia64_tr_plan_shape_c_reason(plan)",
         "ctx->base.plugin_enabled",
         "IA64_TB_FLAG_INSN_DEBUG_ACTIVE",
         "IA64_TB_FLAG_DATA_DEBUG_ACTIVE",
-        "ia64_tr_decoded_data_plane(plan->opcode) != NULL",
+        "ctx->rewrite_shape_c_reason = reason",
+        "ctx->rewrite_ssa_enabled = reason ==",
+        "IA64_TR_SHAPE_C_REASON_NONE",
+        "IA64_TR_SHAPE_C_REASON_UNKNOWN",
         "ctx->rewrite_shape = IA64_TR_SHAPE_C",
         "!ctx->typed_group_active && complete && !boundary",
         "ctx->rewrite_shape = IA64_TR_SHAPE_A",
         "ctx->rewrite_shape = IA64_TR_SHAPE_B",
     ), "WP1 Shape-A/B/C production classifier")
+    require(shape_reason, (
+        "IA64_TR_SHAPE_C_REASON_RSE",
+        "IA64_TR_SHAPE_C_REASON_RFI",
+        "IA64_TR_SHAPE_C_REASON_SYSTEM",
+        "IA64_TR_SHAPE_C_REASON_DATA_MEMORY",
+        "IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY",
+        "IA64_TR_SHAPE_C_REASON_FLOATING",
+        "IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS",
+    ), "WP1 exact opcode-owned Shape-C reasons")
+    require(shape_select, (
+        "IA64_TR_SHAPE_C_REASON_PLUGIN",
+        "IA64_TR_SHAPE_C_REASON_INSN_DEBUG",
+        "IA64_TR_SHAPE_C_REASON_DATA_DEBUG",
+        "IA64_TR_SHAPE_C_REASON_UNKNOWN",
+    ), "WP1 exact observation-mode Shape-C reasons")
+    require(profile_source, (
+        '"shape.c.reason.rse.group"', '"shape.c.reason.rfi.group"',
+        '"shape.c.reason.system.group"',
+        '"shape.c.reason.data_memory.group"',
+        '"shape.c.reason.data_nonmemory.group"',
+        '"shape.c.reason.floating.group"',
+        '"shape.c.reason.plugin.group"',
+        '"shape.c.reason.instruction_debug.group"',
+        '"shape.c.reason.data_debug.group"',
+        '"shape.c.reason.durable_open_group.group"',
+        '"shape.c.reason.unsupported_traits.group"',
+        '"shape.c.reason.unknown.group"',
+        '"ordinary_nonmemory.slot.total"',
+        '"ordinary_nonmemory.shape.a.slot"',
+        '"ordinary_nonmemory.shape.b.slot"',
+        '"ordinary_nonmemory.shape.c.slot"',
+        "ordinary_nonmemory.shape_ab.percent=%.6f",
+    ), "execution-weighted Shape-C and ordinary-nonmemory report")
+    require(perf_source, (
+        '"tb.execution_ns_max"',
+        "only an upper-bound proxy for event observation",
+        "event request timestamp participates in this measurement",
+    ), "honest TB-duration metric")
+    forbid(perf_source, (
+        "event.observation_latency", "event_observation_latency",
+    ), "honest TB-duration metric")
     forbid(shape_select, (
         "IA64_TB_FLAG_ALAT_ACTIVE", "ctx->alat_may_active ||",
     ), "WP1 active-ALAT-compatible SSA classifier")
-    forbid(shape_c_arm, ("typed_group_active",),
+    forbid(shape_c_arm, ("typed_group_active", "observation"),
            "WP1 inherited ordinary Shape-B classification")
 
     require(ssa_begin, (

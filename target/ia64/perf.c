@@ -174,8 +174,7 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_HOST_CODEGEN_NS] = "host_ns.host_codegen",
     [IA64_PERF_GENERATED_EXECUTION_HOST_NS] = "host_ns.generated_execution",
     [IA64_PERF_GENERATED_EXECUTION_RETURNS] = "generated_execution.returns",
-    [IA64_PERF_EVENT_OBSERVATION_LATENCY_NS_MAX] =
-        "event.observation_latency_ns_max",
+    [IA64_PERF_TB_EXECUTION_NS_MAX] = "tb.execution_ns_max",
     [IA64_PERF_TCG_OP_GENERATED] = "tcg.op.generated",
     [IA64_PERF_TCG_OP_OPTIMIZED] = "tcg.op.optimized",
     [IA64_PERF_TCG_ENV_LOAD_GENERATED] = "tcg.env_load.generated",
@@ -215,7 +214,7 @@ static const char * const ia64_perf_counter_names[IA64_PERF_COUNTER_COUNT] = {
     [IA64_PERF_NAT_UNKNOWN] = "nat.unknown",
     [IA64_PERF_NAT_DYNAMIC_LOAD] = "nat.dynamic_load",
     [IA64_PERF_NAT_DYNAMIC_BRANCH] = "nat.dynamic_branch",
-    [IA64_PERF_NAT_FAULT] = "nat.fault",
+    [IA64_PERF_NAT_FAULT] = "nat.direct_known_set_fault",
     [IA64_PERF_NAT_LATTICE_INVALIDATE] = "nat.lattice_invalidate",
     [IA64_PERF_NAT_RSE_UNKNOWN] = "nat.rse_unknown",
     [IA64_PERF_ALAT_ACTIVE_ENTER] = "alat.active.enter",
@@ -414,7 +413,10 @@ void ia64_perf_record_exec_time(uint64_t elapsed_ns)
     if (ia64_perf_enabled()) {
         ia64_perf_add(IA64_PERF_GENERATED_EXECUTION_HOST_NS, elapsed_ns);
         ia64_perf_count(IA64_PERF_GENERATED_EXECUTION_RETURNS);
-        ia64_perf_max(IA64_PERF_EVENT_OBSERVATION_LATENCY_NS_MAX, elapsed_ns);
+        /* This measures one generated TB invocation.  It is an execution
+         * duration and only an upper-bound proxy for event observation; no
+         * event request timestamp participates in this measurement. */
+        ia64_perf_max(IA64_PERF_TB_EXECUTION_NS_MAX, elapsed_ns);
     }
 }
 
