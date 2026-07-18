@@ -826,6 +826,16 @@ static void ia64_tr_tb_start(DisasContextBase *dcbase, CPUState *cs)
 {
     DisasContext *ctx = container_of(dcbase, DisasContext, base);
 
+    /*
+     * -append is a platform-owned boot transaction.  ELILO publishes r28
+     * only immediately before transferring to Linux, so retry at clean TB
+     * boundaries while the platform reports the append pending.  The
+     * translation-time guard removes the helper from all later TBs after the
+     * one-shot update succeeds.
+     */
+    if (ia64_firmware_linux_cmdline_append_pending()) {
+        gen_helper_firmware_linux_cmdline_append(tcg_env);
+    }
     ctx->retired_bundle_count = tcg_temp_new_i32();
     tcg_gen_movi_i32(ctx->retired_bundle_count, 0);
     ctx->state_cache_available = true;

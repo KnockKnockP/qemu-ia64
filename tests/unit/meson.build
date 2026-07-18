@@ -266,6 +266,12 @@ test('test-ia64-full-tcg-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-platform-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-platform-static.py',
+            '--source-root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-packed-tcg-static', python,
      args: [meson.current_source_dir() / 'test-ia64-packed-tcg-static.py',
             '--source-root', meson.project_source_root()],

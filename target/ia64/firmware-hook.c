@@ -96,6 +96,19 @@ void ia64_firmware_maybe_apply_linux_cmdline_append(CPUIA64State *env)
     }
 }
 
+void HELPER(firmware_linux_cmdline_append)(CPUIA64State *env)
+{
+    CPUState *cpu = env_cpu(env);
+
+    /*
+     * The platform hook probes and, once ELILO has installed boot_params,
+     * updates guest RAM.  Keep that firmware transaction legal at a TB
+     * boundary just as the retired bundle helpers did.
+     */
+    cpu->neg.can_do_io = true;
+    ia64_firmware_maybe_apply_linux_cmdline_append(env);
+}
+
 void ia64_firmware_set_recover_post_load(
     IA64FirmwareRecoverPostLoadFn recover)
 {

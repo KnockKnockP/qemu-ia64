@@ -50,6 +50,7 @@ struct VibtaniumEfiDisplayState {
 
 typedef struct VibtaniumEfiConsole {
     ISADevice *vga;
+    AddressSpace *io_as;
     uint32_t attribute;
     uint32_t cursor_column;
     uint32_t cursor_row;
@@ -407,13 +408,13 @@ static uint32_t efi_console_bg(void)
 
 static void efi_io_write8(hwaddr port, uint8_t value)
 {
-    address_space_stb(&address_space_io, port, value,
+    address_space_stb(efi_console.io_as, port, value,
                       MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
 static uint8_t efi_io_read8(hwaddr port)
 {
-    return address_space_ldub(&address_space_io, port,
+    return address_space_ldub(efi_console.io_as, port,
                               MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
@@ -741,12 +742,14 @@ static void vibtanium_efi_console_system_reset(void *opaque)
     vibtanium_efi_console_enter_graphics_mode();
 }
 
-void vibtanium_efi_console_init(ISADevice *vga)
+void vibtanium_efi_console_init(ISADevice *vga, AddressSpace *io_as)
 {
     DeviceState *dev;
 
+    g_assert(io_as != NULL);
     memset(&efi_console, 0, sizeof(efi_console));
     efi_console.vga = vga;
+    efi_console.io_as = io_as;
     efi_console.attribute = EFI_DEFAULT_ATTRIBUTE;
     efi_console.cursor_visible = true;
     efi_console.initialized = true;

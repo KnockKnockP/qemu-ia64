@@ -1667,7 +1667,7 @@ static void vibtanium_init(MachineState *machine)
     vms->acpi_sci = qdev_get_gpio_in(vms->iosapic, VIBTANIUM_ACPI_SCI_IRQ);
     vibtanium_acpi_init(vms);
     vibtanium_pci_init(vms);
-    vibtanium_efi_console_init(vga);
+    vibtanium_efi_console_init(vga, &vms->pci_io_as);
 
     memory_region_init_ram(&vms->nvram, NULL, "vibtanium.nvram",
                            VIBTANIUM_NVRAM_SIZE, &error_fatal);
