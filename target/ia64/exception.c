@@ -917,6 +917,14 @@ void ia64_deliver_exception(CPUIA64State *env, IA64ExceptionKind kind,
                             vaddr address, int32_t access_type,
                             const char *detail)
 {
+    /*
+     * Most translated faults return through cpu_restore_state(), but helper
+     * faults such as Disabled FP can enter the precise delivery path
+     * directly.  Expand the compact slot token here as well so those faults
+     * observe the same authoritative slot metadata.  Explicit wide
+     * publications carry an invalid token and are therefore left untouched.
+     */
+    ia64_env_restore_current_slot_metadata(env, env->ip);
     ia64_deliver_exception_common(env, kind, address, access_type, detail,
                                   true);
 }
@@ -925,6 +933,8 @@ void ia64_deliver_exception_fast(CPUIA64State *env, IA64ExceptionKind kind,
                                  vaddr address, int32_t access_type,
                                  const char *detail)
 {
+    /* Direct memory helpers do not return through cpu_restore_state(). */
+    ia64_env_restore_current_slot_metadata(env, env->ip);
     ia64_deliver_exception_common(env, kind, address, access_type, detail,
                                    false);
 }

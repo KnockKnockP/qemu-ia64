@@ -543,8 +543,12 @@ static int ia64_env_pre_load(void *opaque)
     env->current_slot_ri = 0;
     env->current_slot_type = 0;
     env->current_slot_speculative_load = false;
+    env->current_slot_prefix_materialized = false;
+    env->current_slot_may_external_access = false;
+    env->current_slot_memory_class = 0;
     env->current_slot_ip = 0;
     env->current_slot_raw = 0;
+    env->current_slot_metadata = 0;
     /* Older streams predate issue-group frontier tracking. */
     ia64_env_begin_source_visibility_epoch(env);
     /* An absent outer collection-state subsection means reset defaults. */
@@ -575,18 +579,10 @@ static bool ia64_issue_group_overlay_needed(void *opaque)
 {
     CPUIA64State *env = opaque;
 
-    return env->issue_group.saved_gr_mask[0] != 0 ||
-           env->issue_group.saved_gr_mask[1] != 0 ||
-           env->issue_group.check_gr_forward_mask[0] != 0 ||
-           env->issue_group.check_gr_forward_mask[1] != 0 ||
-           env->issue_group.saved_br_mask != 0 ||
-           env->issue_group.branch_br_forward_mask != 0 ||
-           env->issue_group.pr_saved ||
-           env->issue_group.branch_pr_forward_mask != 0 ||
-           env->issue_group.pfs_saved ||
-           env->issue_group.branch_pfs_forwarded ||
-           env->issue_group.saved_ar_count != 0 ||
-           env->issue_group.typed_active;
+    /* Successful direct memory may leave an inactive restart image in the
+     * shared storage bank.  Only a typed owner makes that image architectural
+     * issue-group state and therefore migration-visible. */
+    return env->issue_group.typed_active;
 }
 
 static int ia64_issue_group_overlay_post_load(void *opaque, int version_id)
@@ -677,8 +673,9 @@ static bool ia64_issue_group_fr_overlay_needed(void *opaque)
 {
     CPUIA64State *env = opaque;
 
-    return env->issue_group.saved_fr_mask[0] != 0 ||
-           env->issue_group.saved_fr_mask[1] != 0;
+    return env->issue_group.typed_active &&
+           (env->issue_group.saved_fr_mask[0] != 0 ||
+            env->issue_group.saved_fr_mask[1] != 0);
 }
 
 /* Kept as a separate optional subsection so the existing ordinary-source
@@ -735,21 +732,10 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
                      "at a fresh visibility frontier");
         return -EINVAL;
     }
-    if (!env->issue_group.typed_active &&
-        (mask[0] != 0 || mask[1] != 0 || env->issue_group.pr_saved ||
-         env->issue_group.saved_fr_mask[0] != 0 ||
-          env->issue_group.saved_fr_mask[1] != 0 ||
-          env->issue_group.check_gr_forward_mask[0] != 0 ||
-          env->issue_group.check_gr_forward_mask[1] != 0 ||
-         env->issue_group.branch_pr_forward_mask != 0 ||
-         env->issue_group.saved_br_mask != 0 ||
-         env->issue_group.branch_br_forward_mask != 0 ||
-         env->issue_group.pfs_saved ||
-         env->issue_group.branch_pfs_forwarded ||
-         env->issue_group.saved_ar_count != 0)) {
-        error_report("IA-64 migration stream has saved ordinary sources "
-                     "or explicit forwarding without a typed epoch owner");
-        return -EINVAL;
+    if (!env->issue_group.typed_active) {
+        /* Inactive pending-restart storage is neither serialized nor
+         * interpreted as an architectural ordinary-source overlay. */
+        return 0;
     }
     if (mask[0] & 1) {
         error_report("IA-64 migration stream marks immutable GR0 as saved");

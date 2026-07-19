@@ -723,6 +723,8 @@ static void test_check_gr_forward_needed(void)
 
     g_assert_false(ia64_issue_group_overlay_needed(&env));
     env.issue_group.check_gr_forward_mask[1] = UINT64_C(1) << (70 - 64);
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = true;
     g_assert_true(ia64_issue_group_overlay_needed(&env));
 }
 
@@ -732,6 +734,8 @@ static void test_branch_pr_forward_needed(void)
 
     g_assert_false(ia64_issue_group_overlay_needed(&env));
     env.issue_group.branch_pr_forward_mask = UINT64_C(1) << 42;
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = true;
     g_assert_true(ia64_issue_group_overlay_needed(&env));
 }
 
@@ -742,10 +746,13 @@ static void test_pfs_overlay_needed(void)
     env.issue_group.saved_pfs = UINT64_C(0xfeedfacecafebeef);
     g_assert_false(ia64_issue_group_overlay_needed(&env));
     env.issue_group.pfs_saved = true;
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = true;
     g_assert_true(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = false;
     env.issue_group.pfs_saved = false;
     env.issue_group.branch_pfs_forwarded = true;
-    g_assert_true(ia64_issue_group_overlay_needed(&env));
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
 }
 
 static void test_ar_overlay_needed(void)
@@ -757,6 +764,8 @@ static void test_ar_overlay_needed(void)
     env.issue_group.saved_ar_value[0] = UINT64_C(0xfeedfacecafebeef);
     g_assert_false(ia64_issue_group_overlay_needed(&env));
     env.issue_group.saved_ar_count = 1;
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = true;
     g_assert_true(ia64_issue_group_overlay_needed(&env));
 }
 
@@ -772,6 +781,8 @@ static void test_fr_overlay_needed(void)
     g_assert_false(ia64_issue_group_fr_overlay_needed(&env));
 
     env.issue_group.saved_fr_mask[0] = UINT64_C(1) << 2;
+    g_assert_false(ia64_issue_group_fr_overlay_needed(&env));
+    env.issue_group.typed_active = true;
     g_assert_true(ia64_issue_group_fr_overlay_needed(&env));
     env.issue_group.saved_fr_mask[0] = 0;
     env.issue_group.saved_fr_mask[1] = UINT64_C(1) << (127 - 64);
@@ -787,12 +798,15 @@ static void test_br_overlay_needed(void)
     g_assert_false(ia64_issue_group_overlay_needed(&env));
 
     env.issue_group.saved_br_mask = 1u << 2;
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = true;
     g_assert_true(ia64_issue_group_overlay_needed(&env));
+    env.issue_group.typed_active = false;
     env.issue_group.saved_br_mask = 0;
     g_assert_false(ia64_issue_group_overlay_needed(&env));
 
     env.issue_group.branch_br_forward_mask = 1u << 6;
-    g_assert_true(ia64_issue_group_overlay_needed(&env));
+    g_assert_false(ia64_issue_group_overlay_needed(&env));
 }
 
 static void test_combined_overlay(void)
@@ -830,6 +844,34 @@ static void assert_load_rejected(CorruptState corrupt)
 
     init_destination(&destination);
     g_assert_cmpint(load_issue_group(&destination), !=, 0);
+}
+
+static void assert_inactive_storage_ignored(CorruptState populate)
+{
+    CPUIA64State source;
+    CPUIA64State destination;
+
+    init_typed_source(&source);
+    populate(&source);
+    g_assert_false(source.issue_group.typed_active);
+    g_assert_cmpint(save_issue_group(&source), ==, 0);
+
+    init_destination(&destination);
+    g_assert_cmpint(load_issue_group(&destination), ==, 0);
+    g_assert_false(destination.issue_group.typed_active);
+    g_assert_cmphex(destination.issue_group.saved_gr_mask[0], ==, 0);
+    g_assert_cmphex(destination.issue_group.saved_gr_mask[1], ==, 0);
+    g_assert_cmphex(destination.issue_group.check_gr_forward_mask[0], ==, 0);
+    g_assert_cmphex(destination.issue_group.check_gr_forward_mask[1], ==, 0);
+    g_assert_cmpuint(destination.issue_group.saved_br_mask, ==, 0);
+    g_assert_cmpuint(destination.issue_group.branch_br_forward_mask, ==, 0);
+    g_assert_false(destination.issue_group.pr_saved);
+    g_assert_cmphex(destination.issue_group.branch_pr_forward_mask, ==, 0);
+    g_assert_false(destination.issue_group.pfs_saved);
+    g_assert_false(destination.issue_group.branch_pfs_forwarded);
+    g_assert_cmpuint(destination.issue_group.saved_ar_count, ==, 0);
+    g_assert_cmphex(destination.issue_group.saved_fr_mask[0], ==, 0);
+    g_assert_cmphex(destination.issue_group.saved_fr_mask[1], ==, 0);
 }
 
 static void corrupt_fresh_frontier(CPUIA64State *env)
@@ -978,19 +1020,20 @@ static void test_reject_fresh_frontier(void)
     assert_load_rejected(corrupt_fresh_frontier);
 }
 
-static void test_reject_missing_typed_owner(void)
+static void test_ignore_storage_without_typed_owner(void)
 {
-    assert_load_rejected(corrupt_missing_typed_owner);
+    assert_inactive_storage_ignored(corrupt_missing_typed_owner);
+    assert_inactive_storage_ignored(corrupt_forward_without_typed_owner);
+    assert_inactive_storage_ignored(corrupt_br_without_typed_owner);
+    assert_inactive_storage_ignored(corrupt_br_forward_without_typed_owner);
+    assert_inactive_storage_ignored(corrupt_pfs_without_typed_owner);
+    assert_inactive_storage_ignored(corrupt_ar_without_typed_owner);
+    assert_inactive_storage_ignored(corrupt_fr_without_typed_owner);
 }
 
 static void test_reject_forward_at_fresh_frontier(void)
 {
     assert_load_rejected(corrupt_forward_at_fresh_frontier);
-}
-
-static void test_reject_forward_without_typed_owner(void)
-{
-    assert_load_rejected(corrupt_forward_without_typed_owner);
 }
 
 static void test_reject_forward_p0(void)
@@ -1003,19 +1046,9 @@ static void test_reject_br_at_fresh_frontier(void)
     assert_load_rejected(corrupt_br_at_fresh_frontier);
 }
 
-static void test_reject_br_without_typed_owner(void)
-{
-    assert_load_rejected(corrupt_br_without_typed_owner);
-}
-
 static void test_reject_br_forward_at_fresh_frontier(void)
 {
     assert_load_rejected(corrupt_br_forward_at_fresh_frontier);
-}
-
-static void test_reject_br_forward_without_typed_owner(void)
-{
-    assert_load_rejected(corrupt_br_forward_without_typed_owner);
 }
 
 static void test_reject_gr0(void)
@@ -1031,11 +1064,6 @@ static void test_reject_non_boolean_nat(void)
 static void test_reject_pr_without_p0(void)
 {
     assert_load_rejected(corrupt_pr);
-}
-
-static void test_reject_pfs_without_typed_owner(void)
-{
-    assert_load_rejected(corrupt_pfs_without_typed_owner);
 }
 
 static void test_reject_pfs_forward_without_saved_source(void)
@@ -1058,11 +1086,6 @@ static void test_reject_ar_duplicate(void)
     assert_load_rejected(corrupt_ar_duplicate);
 }
 
-static void test_reject_ar_without_typed_owner(void)
-{
-    assert_load_rejected(corrupt_ar_without_typed_owner);
-}
-
 static void test_reject_ar_at_fresh_frontier(void)
 {
     assert_load_rejected(corrupt_ar_at_fresh_frontier);
@@ -1072,11 +1095,6 @@ static void test_reject_fr0_fr1(void)
 {
     assert_load_rejected(corrupt_fr0);
     assert_load_rejected(corrupt_fr1);
-}
-
-static void test_reject_fr_without_typed_owner(void)
-{
-    assert_load_rejected(corrupt_fr_without_typed_owner);
 }
 
 static void test_reject_fr_at_fresh_frontier(void)
@@ -1104,7 +1122,7 @@ static void test_pre_save_reject_fresh_typed(void)
     g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
 }
 
-static void test_pre_save_reject_orphan_overlay(void)
+static void test_pre_save_ignores_inactive_overlay_storage(void)
 {
     CPUIA64State env;
 
@@ -1113,7 +1131,7 @@ static void test_pre_save_reject_orphan_overlay(void)
     env.issue_group.saved_gr_mask[1] = UINT64_C(1) << 7;
     env.issue_group.saved_gr[71] = UINT64_C(0xabcdef0123456789);
     env.issue_group.saved_nat[71] = 0;
-    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
 }
 
 static void test_pre_save_fr_overlay_validation(void)
@@ -1139,7 +1157,7 @@ static void test_pre_save_fr_overlay_validation(void)
 
     init_typed_source(&env);
     corrupt_fr_without_typed_owner(&env);
-    g_assert_cmpint(ia64_env_pre_save(&env), ==, -EINVAL);
+    g_assert_cmpint(ia64_env_pre_save(&env), ==, 0);
 
     init_typed_source(&env);
     corrupt_fr_at_fresh_frontier(&env);
@@ -1933,29 +1951,21 @@ int main(int argc, char **argv)
                     test_fr_overlay_needed);
     g_test_add_func("/ia64/vmstate/reject/fresh-frontier",
                     test_reject_fresh_frontier);
-    g_test_add_func("/ia64/vmstate/reject/missing-typed-owner",
-                    test_reject_missing_typed_owner);
+    g_test_add_func("/ia64/vmstate/inactive-storage/ignored",
+                    test_ignore_storage_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/forward-at-fresh-frontier",
                     test_reject_forward_at_fresh_frontier);
-    g_test_add_func("/ia64/vmstate/reject/forward-without-typed-owner",
-                    test_reject_forward_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/forward-p0",
                     test_reject_forward_p0);
     g_test_add_func("/ia64/vmstate/reject/br-at-fresh-frontier",
                     test_reject_br_at_fresh_frontier);
-    g_test_add_func("/ia64/vmstate/reject/br-without-typed-owner",
-                    test_reject_br_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/br-forward-at-fresh-frontier",
                     test_reject_br_forward_at_fresh_frontier);
-    g_test_add_func("/ia64/vmstate/reject/br-forward-without-typed-owner",
-                    test_reject_br_forward_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/gr0", test_reject_gr0);
     g_test_add_func("/ia64/vmstate/reject/non-boolean-nat",
                     test_reject_non_boolean_nat);
     g_test_add_func("/ia64/vmstate/reject/pr-without-p0",
                     test_reject_pr_without_p0);
-    g_test_add_func("/ia64/vmstate/reject/pfs-without-typed-owner",
-                    test_reject_pfs_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/pfs-forward-without-saved-source",
                     test_reject_pfs_forward_without_saved_source);
     g_test_add_func("/ia64/vmstate/reject/ar-count",
@@ -1964,22 +1974,18 @@ int main(int argc, char **argv)
                     test_reject_ar_index);
     g_test_add_func("/ia64/vmstate/reject/ar-duplicate",
                     test_reject_ar_duplicate);
-    g_test_add_func("/ia64/vmstate/reject/ar-without-typed-owner",
-                    test_reject_ar_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/ar-at-fresh-frontier",
                     test_reject_ar_at_fresh_frontier);
     g_test_add_func("/ia64/vmstate/reject/fr0-fr1",
                     test_reject_fr0_fr1);
-    g_test_add_func("/ia64/vmstate/reject/fr-without-typed-owner",
-                    test_reject_fr_without_typed_owner);
     g_test_add_func("/ia64/vmstate/reject/fr-at-fresh-frontier",
                     test_reject_fr_at_fresh_frontier);
     g_test_add_func("/ia64/vmstate/pre-save/valid-typed",
                     test_pre_save_valid_typed);
     g_test_add_func("/ia64/vmstate/pre-save/reject-fresh-typed",
                     test_pre_save_reject_fresh_typed);
-    g_test_add_func("/ia64/vmstate/pre-save/reject-orphan-overlay",
-                    test_pre_save_reject_orphan_overlay);
+    g_test_add_func("/ia64/vmstate/pre-save/ignore-inactive-overlay-storage",
+                    test_pre_save_ignores_inactive_overlay_storage);
     g_test_add_func("/ia64/vmstate/pre-save/fr-overlay-validation",
                     test_pre_save_fr_overlay_validation);
     g_test_add_func("/ia64/vmstate/pre-save/reject-dirty-breadcrumb",

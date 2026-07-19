@@ -156,7 +156,7 @@ def main() -> int:
     )
     memory_publish = section(
         source,
-        "static void ia64_tr_publish_decoded_memory_access",
+        "static void ia64_tr_publish_decoded_memory_access_common(",
         "static void ia64_tr_emit_decoded_store_alat_invalidate",
     )
     memory_lower = section(
@@ -2440,16 +2440,14 @@ def main() -> int:
         "VMSTATE_UINT64_V(issue_group.branch_pr_forward_mask",
         "VMSTATE_UINT8_V(issue_group.saved_br_mask",
         "VMSTATE_UINT8_V(issue_group.branch_br_forward_mask",
-        "env->issue_group.saved_br_mask != 0",
-        "env->issue_group.branch_br_forward_mask != 0",
+        "return env->issue_group.typed_active;",
+        "Inactive pending-restart storage",
         "branch_pr_forward_mask & 1",
     ), "current migrated branch-forward state")
     require(machine_source, (
         "VMSTATE_UINT64_V(issue_group.saved_pfs, CPUIA64State, 5)",
         "VMSTATE_BOOL_V(issue_group.pfs_saved, CPUIA64State, 5)",
         "VMSTATE_BOOL_V(issue_group.branch_pfs_forwarded",
-        "env->issue_group.pfs_saved ||",
-        "env->issue_group.branch_pfs_forwarded ||",
         "env->issue_group.branch_pfs_forwarded &&",
         "!env->issue_group.pfs_saved",
     ), "current migrated AR.PFS overlay state")
@@ -2955,7 +2953,7 @@ def main() -> int:
     ), "Register NaT Consumption helper declaration")
 
     require(transaction_begin, (
-        "if (!group->ssa.enabled && !ctx->source_overlay_known_clear)",
+        "if (!ctx->source_overlay_known_clear)",
         "ia64_tr_store_source_visibility_state(ctx, true, false)",
         "ctx->source_overlay_known_clear = true",
         "tcg_get_insn_start_param",
@@ -3196,7 +3194,7 @@ def main() -> int:
         "plan->unconditional_noreturn = insn->qp == 0",
     ), "typed ordinary memory transaction-resource planning")
     require(memory_fault_lower, (
-        "ia64_tr_group_publish_prefix_for_noreturn_fault(ctx)",
+        "compact authoritative safepoint",
         "gen_helper_raise_data_register_nat_consumption",
         "gen_helper_raise_unaligned_data_reference",
         "offsetof(CPUIA64State, rse.sof)",
@@ -3211,9 +3209,20 @@ def main() -> int:
     require(memory_publish, (
         "ia64_tr_sync_state_cache(ctx)",
         "tcg_gen_movi_i64(cpu_ip, insn->address)",
-        "ia64_tr_publish_fault_state",
+        "ia64_tr_memory_requires_io_boundary(ctx)",
         "translator_io_start(&ctx->base)",
+        "ia64_current_slot_metadata_pack(",
+        "offsetof(CPUIA64State, current_slot_metadata)",
+        "direct_softmmu_only",
+        "pending_memory_restart",
+        "memory_restart_inline_reg",
+        "memory_restart_complex",
     ), "returning direct-memory fault publication")
+    require(source, (
+        "instruction->memory_safepoint_valid = true",
+        "ia64_tr_ssa_materialize_continuation(\n"
+        "                        ctx, true, !ssa->inherited)",
+    ), "restart-complete memory entry publication")
     forbid(memory_publish, (
         "ia64_tr_group_clear_ordinary_source_overlay",
         "ia64_tr_group_publish_prefix_for_noreturn_fault",
@@ -3225,7 +3234,7 @@ def main() -> int:
         "ia64_tr_emit_decoded_memory_target_check",
         "ia64_tr_group_load_ordinary_gr_pair(ctx, &base, &base_nat",
         "ia64_tr_emit_decoded_memory_nat_check",
-        "ia64_tr_publish_decoded_memory_access",
+        "ia64_tr_publish_decoded_softmmu_access",
         "ia64_tr_emit_decoded_data_debug_pre_access",
         "ia64_tr_emit_decoded_memory_alignment_check",
         "tcg_gen_qemu_ld_i64",
@@ -3259,7 +3268,7 @@ def main() -> int:
         "ia64_tr_emit_decoded_memory_nat_check", memory_source
     )
     memory_access_publish = memory_lower.find(
-        "ia64_tr_publish_decoded_memory_access", memory_nat
+        "ia64_tr_publish_decoded_softmmu_access", memory_nat
     )
     memory_debug = memory_lower.find(
         "ia64_tr_emit_decoded_data_debug_pre_access",
@@ -3484,7 +3493,8 @@ def main() -> int:
     )
     fast_taken_visibility = section(
         taken_visibility,
-        "if (ctx->rewrite_ssa_enabled && !ctx->rewrite_ssa_inherited)",
+        "if (ctx->rewrite_ssa_enabled && !ctx->rewrite_ssa_inherited &&\n"
+        "        ctx->source_overlay_known_clear)",
         "tcg_gen_st_i64(tcg_constant_i64(0), tcg_env",
     )
 
@@ -3655,10 +3665,11 @@ def main() -> int:
         "IA64_TR_SHAPE_C_REASON_RSE",
         "IA64_TR_SHAPE_C_REASON_RFI",
         "IA64_TR_SHAPE_C_REASON_SYSTEM",
-        "IA64_TR_SHAPE_C_REASON_DATA_MEMORY",
         "IA64_TR_SHAPE_C_REASON_DATA_NONMEMORY",
         "IA64_TR_SHAPE_C_REASON_FLOATING",
         "IA64_TR_SHAPE_C_REASON_UNSUPPORTED_TRAITS",
+        "ia64_tr_plan_is_memory(plan) ?\n"
+        "               IA64_TR_SHAPE_C_REASON_NONE",
     ), "WP1 exact opcode-owned Shape-C reasons")
     require(shape_select, (
         "IA64_TR_SHAPE_C_REASON_PLUGIN",
@@ -3842,8 +3853,12 @@ def main() -> int:
         "ia64_tr_ssa_capture_safepoint(ctx, &map)",
         "ia64_tr_ssa_materialize_map(ctx, &map, true)",
         "ia64_tr_ssa_materialize_map(ctx, &map, false)",
-        "ssa->written_gr[half]", "ssa->written_br", "ssa->written_pr",
-        "ssa->written_ar[word]", "IA64_PROFILE_DURABLE_MATERIALIZATION",
+        "restart_complete_entry ? ssa->written_gr[0] : ssa->preserve_gr[0]",
+        "uint64_t pending = save_gr[half]",
+        "restart_complete_entry ? ssa->written_ar[0] : ssa->preserve_ar[0]",
+        "uint64_t pending = save_ar[word]",
+        "ssa->preserve_br", "ssa->preserve_pr",
+        "IA64_PROFILE_DURABLE_MATERIALIZATION",
     ), "WP1 sparse safepoint/continuation materialization")
     require(cpu_header, (
         "uint64_t check_gr_forward_mask[2]",
@@ -3856,16 +3871,23 @@ def main() -> int:
         "No typed check-load forwarding existed in v1-v6 streams",
         "forwards a check-load result",
     ), "WP1 migrated check-load-forward state")
-    if source.count("ia64_tr_ssa_materialize_continuation(ctx)") != 1:
+    if (source.count(
+            "ia64_tr_ssa_materialize_continuation(ctx, false, false)") != 1 or
+            source.count(
+                "ia64_tr_ssa_materialize_continuation(ctx, true, false)") != 1 or
+            source.count(
+                "ia64_tr_ssa_materialize_continuation(\n"
+                "                        ctx, true, !ssa->inherited)") != 1):
         raise AssertionError(
-            "SSA durable continuation must be emitted only by the actual "
-            "open-group TB-boundary path"
+            "SSA durable continuation must have one sparse TB-boundary site "
+            "and two restart-complete memory/returning-helper sites"
         )
     require(fresh_overlay_clear, ("return;",),
             "WP1 zero-durable-traffic fresh Shape A close")
     forbid(fresh_overlay_clear, ("tcg_gen_st", "issue_group."),
            "WP1 zero-durable-traffic fresh Shape A close")
     require(fast_taken_visibility, (
+        "ctx->source_overlay_known_clear",
         "issue_group.typed_active", "instruction_group_start",
         "instruction_group_dirty", "return;",
     ), "WP1 cheap helper-free taken exit")

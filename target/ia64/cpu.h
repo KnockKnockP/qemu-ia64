@@ -579,6 +579,11 @@ typedef struct IA64IssueGroupState {
     bool typed_active;
 } IA64IssueGroupState;
 
+typedef struct IA64MemoryRestartGrEntry {
+    uint64_t value;
+    uint64_t descriptor;
+} IA64MemoryRestartGrEntry;
+
 typedef enum IA64CPUModel {
     IA64_CPU_MODEL_ITANIUM2,
 } IA64CPUModel;
@@ -668,8 +673,20 @@ typedef struct CPUArchState {
     uint8_t current_slot_ri;
     uint8_t current_slot_type;
     bool current_slot_speculative_load;
+    bool current_slot_prefix_materialized;
+    bool current_slot_may_external_access;
+    uint8_t current_slot_memory_class;
     uint64_t current_slot_ip;
     uint64_t current_slot_raw;
+    /*
+     * Direct-TCG memory publishes this packed, non-migrated restore token
+     * with one store.  restore_state_to_opc (or a no-return architectural
+     * helper) expands it into the diagnostic fields above only on the fault
+     * path.  The 41-bit raw slot plus its exact issue-group frontier fit in
+     * one token, so normal RAM does not pay a broad fault-state publication.
+     */
+    uint64_t current_slot_metadata;
+    IA64MemoryRestartGrEntry current_slot_restart_gr[IA64_GR_COUNT];
 
     /*
      * ar[IA64_AR_ITC] caches the clock-backed ITC value and is refreshed by
@@ -847,6 +864,192 @@ static inline unsigned ia64_env_restore_ri(const CPUIA64State *env,
                                            unsigned data_ri)
 {
     return (env->ri_dirty ? env->ri : data_ri) & 3;
+}
+
+#define IA64_CURRENT_SLOT_META_RI_SHIFT          0
+#define IA64_CURRENT_SLOT_META_TYPE_SHIFT        2
+#define IA64_CURRENT_SLOT_META_SPECULATIVE       (UINT64_C(1) << 5)
+#define IA64_CURRENT_SLOT_META_PREFIX            (UINT64_C(1) << 6)
+#define IA64_CURRENT_SLOT_META_EXTERNAL          (UINT64_C(1) << 7)
+#define IA64_CURRENT_SLOT_META_CLASS_SHIFT       8
+#define IA64_CURRENT_SLOT_META_CLASS_MASK        UINT64_C(0xf)
+#define IA64_CURRENT_SLOT_META_GROUP_START       (UINT64_C(1) << 12)
+#define IA64_CURRENT_SLOT_META_RESTART_NAT_OR_HEADER (UINT64_C(1) << 13)
+#define IA64_CURRENT_SLOT_META_RAW_SHIFT         14
+#define IA64_CURRENT_SLOT_META_RAW_MASK          ((UINT64_C(1) << 41) - 1)
+#define IA64_CURRENT_SLOT_META_OVERLAY_CLASSES   (UINT64_C(1) << 55)
+#define IA64_CURRENT_SLOT_META_RESTART_GR_SHIFT  56
+#define IA64_CURRENT_SLOT_META_RESTART_GR_MASK   UINT64_C(0x7f)
+#define IA64_CURRENT_SLOT_META_VALID             (UINT64_C(1) << 63)
+
+#define IA64_CURRENT_SLOT_OVERLAY_GR0             (1u << 0)
+#define IA64_CURRENT_SLOT_OVERLAY_GR1             (1u << 1)
+#define IA64_CURRENT_SLOT_OVERLAY_CHECK_GR0       (1u << 2)
+#define IA64_CURRENT_SLOT_OVERLAY_CHECK_GR1       (1u << 3)
+#define IA64_CURRENT_SLOT_OVERLAY_BR              (1u << 4)
+#define IA64_CURRENT_SLOT_OVERLAY_BRANCH_BR       (1u << 5)
+#define IA64_CURRENT_SLOT_OVERLAY_PR              (1u << 6)
+#define IA64_CURRENT_SLOT_OVERLAY_BRANCH_PR       (1u << 7)
+#define IA64_CURRENT_SLOT_OVERLAY_PFS             (1u << 8)
+#define IA64_CURRENT_SLOT_OVERLAY_BRANCH_PFS      (1u << 9)
+#define IA64_CURRENT_SLOT_OVERLAY_AR              (1u << 10)
+#define IA64_CURRENT_SLOT_OVERLAY_FR0             (1u << 11)
+#define IA64_CURRENT_SLOT_OVERLAY_FR1             (1u << 12)
+
+#define IA64_MEMORY_RESTART_GR_NAT                UINT64_C(1)
+#define IA64_MEMORY_RESTART_GR_REG_SHIFT          1
+#define IA64_MEMORY_RESTART_GR_REG_MASK           UINT64_C(0x7f)
+#define IA64_MEMORY_RESTART_GR_COUNT_SHIFT        8
+#define IA64_MEMORY_RESTART_GR_COUNT_MASK         UINT64_C(0xff)
+#define IA64_MEMORY_RESTART_GR_CLASSES_SHIFT      16
+#define IA64_MEMORY_RESTART_GR_CLASSES_MASK       UINT64_C(0x1fff)
+
+static inline uint64_t ia64_current_slot_metadata_pack(
+    uint8_t ri, uint8_t type, bool speculative, bool prefix,
+    bool external, uint8_t memory_class, bool group_start,
+    bool overlay_classes, uint8_t restart_gr, bool restart_header,
+    uint64_t raw)
+{
+    return IA64_CURRENT_SLOT_META_VALID |
+           ((uint64_t)(ri & 3) << IA64_CURRENT_SLOT_META_RI_SHIFT) |
+           ((uint64_t)(type & 7) << IA64_CURRENT_SLOT_META_TYPE_SHIFT) |
+           (speculative ? IA64_CURRENT_SLOT_META_SPECULATIVE : 0) |
+           (prefix ? IA64_CURRENT_SLOT_META_PREFIX : 0) |
+           (external ? IA64_CURRENT_SLOT_META_EXTERNAL : 0) |
+           (((uint64_t)memory_class & IA64_CURRENT_SLOT_META_CLASS_MASK) <<
+            IA64_CURRENT_SLOT_META_CLASS_SHIFT) |
+           (group_start ? IA64_CURRENT_SLOT_META_GROUP_START : 0) |
+           (restart_header ?
+            IA64_CURRENT_SLOT_META_RESTART_NAT_OR_HEADER : 0) |
+           (overlay_classes ? IA64_CURRENT_SLOT_META_OVERLAY_CLASSES : 0) |
+           (((uint64_t)restart_gr &
+             IA64_CURRENT_SLOT_META_RESTART_GR_MASK) <<
+            IA64_CURRENT_SLOT_META_RESTART_GR_SHIFT) |
+           ((raw & IA64_CURRENT_SLOT_META_RAW_MASK) <<
+            IA64_CURRENT_SLOT_META_RAW_SHIFT);
+}
+
+/* Expand the direct-memory token only while its generated fault bracket is
+ * live.  A successful access clears the token itself.  Expansion marks the
+ * source frontier dirty so the bundle-granular insn_start state cannot
+ * overwrite the slot-precise group state before delivery. */
+static inline void ia64_env_restore_current_slot_metadata(
+    CPUIA64State *env, uint64_t ip)
+{
+    uint64_t metadata = env->current_slot_metadata;
+
+    if ((metadata & IA64_CURRENT_SLOT_META_VALID) == 0) {
+        return;
+    }
+    env->current_slot_valid = true;
+    env->current_slot_ri =
+        (metadata >> IA64_CURRENT_SLOT_META_RI_SHIFT) & 3;
+    env->current_slot_type =
+        (metadata >> IA64_CURRENT_SLOT_META_TYPE_SHIFT) & 7;
+    env->current_slot_speculative_load =
+        (metadata & IA64_CURRENT_SLOT_META_SPECULATIVE) != 0;
+    env->current_slot_prefix_materialized =
+        (metadata & IA64_CURRENT_SLOT_META_PREFIX) != 0;
+    env->current_slot_may_external_access =
+        (metadata & IA64_CURRENT_SLOT_META_EXTERNAL) != 0;
+    env->current_slot_memory_class =
+        (metadata >> IA64_CURRENT_SLOT_META_CLASS_SHIFT) &
+        IA64_CURRENT_SLOT_META_CLASS_MASK;
+    env->current_slot_ip = ip;
+    env->current_slot_raw =
+        (metadata >> IA64_CURRENT_SLOT_META_RAW_SHIFT) &
+        IA64_CURRENT_SLOT_META_RAW_MASK;
+    env->ri = env->current_slot_ri;
+    env->ri_dirty = true;
+    env->instruction_group_start =
+        (metadata & IA64_CURRENT_SLOT_META_GROUP_START) != 0;
+    if ((metadata & IA64_CURRENT_SLOT_META_OVERLAY_CLASSES) != 0) {
+        unsigned inline_reg =
+            (metadata >> IA64_CURRENT_SLOT_META_RESTART_GR_SHIFT) &
+            IA64_CURRENT_SLOT_META_RESTART_GR_MASK;
+        bool nat_or_header =
+            (metadata &
+             IA64_CURRENT_SLOT_META_RESTART_NAT_OR_HEADER) != 0;
+        bool complex = inline_reg == 0 && nat_or_header;
+        uint64_t header = complex ?
+            env->current_slot_restart_gr[0].descriptor : 0;
+        uint16_t classes = complex ?
+            (header >> IA64_MEMORY_RESTART_GR_CLASSES_SHIFT) &
+                IA64_MEMORY_RESTART_GR_CLASSES_MASK :
+            (inline_reg == 0 ? 0 :
+             inline_reg < 64 ? IA64_CURRENT_SLOT_OVERLAY_GR0 :
+                               IA64_CURRENT_SLOT_OVERLAY_GR1);
+        unsigned count = complex ?
+            (header >> IA64_MEMORY_RESTART_GR_COUNT_SHIFT) &
+                IA64_MEMORY_RESTART_GR_COUNT_MASK :
+            (inline_reg != 0);
+
+        count = MIN(count, IA64_GR_COUNT);
+
+        env->issue_group.saved_gr_mask[0] = 0;
+        env->issue_group.saved_gr_mask[1] = 0;
+        if (!complex && inline_reg != 0) {
+            env->issue_group.saved_gr[inline_reg] =
+                env->current_slot_restart_gr[0].value;
+            env->issue_group.saved_nat[inline_reg] =
+                nat_or_header;
+            env->issue_group.saved_gr_mask[inline_reg >> 6] =
+                UINT64_C(1) << (inline_reg & 63);
+            count = 0;
+        }
+        for (unsigned i = 0; i < count; i++) {
+            IA64MemoryRestartGrEntry *entry =
+                &env->current_slot_restart_gr[i];
+            unsigned reg =
+                (entry->descriptor >> IA64_MEMORY_RESTART_GR_REG_SHIFT) &
+                IA64_MEMORY_RESTART_GR_REG_MASK;
+
+            if (reg == 0 || reg >= IA64_GR_COUNT) {
+                continue;
+            }
+            env->issue_group.saved_gr[reg] = entry->value;
+            env->issue_group.saved_nat[reg] =
+                (entry->descriptor & IA64_MEMORY_RESTART_GR_NAT) != 0;
+            env->issue_group.saved_gr_mask[reg >> 6] |=
+                UINT64_C(1) << (reg & 63);
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_CHECK_GR0) == 0) {
+            env->issue_group.check_gr_forward_mask[0] = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_CHECK_GR1) == 0) {
+            env->issue_group.check_gr_forward_mask[1] = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_BR) == 0) {
+            env->issue_group.saved_br_mask = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_BRANCH_BR) == 0) {
+            env->issue_group.branch_br_forward_mask = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_PR) == 0) {
+            env->issue_group.pr_saved = false;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_BRANCH_PR) == 0) {
+            env->issue_group.branch_pr_forward_mask = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_PFS) == 0) {
+            env->issue_group.pfs_saved = false;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_BRANCH_PFS) == 0) {
+            env->issue_group.branch_pfs_forwarded = false;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_AR) == 0) {
+            env->issue_group.saved_ar_count = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_FR0) == 0) {
+            env->issue_group.saved_fr_mask[0] = 0;
+        }
+        if ((classes & IA64_CURRENT_SLOT_OVERLAY_FR1) == 0) {
+            env->issue_group.saved_fr_mask[1] = 0;
+        }
+    }
+    env->issue_group.typed_active =
+        (metadata & IA64_CURRENT_SLOT_META_GROUP_START) == 0;
+    env->instruction_group_dirty = true;
 }
 
 /*

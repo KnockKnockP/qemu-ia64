@@ -10100,15 +10100,19 @@ def test_generated_code_density_families(qemu: Path) -> str:
         ("scalar_integer_arithmetic", core_program(), 0x10, 0x10, False,
          {"integer": 2}, ()),
         ("integer_logical_and_shift", scalar_shift_bitfield_program(),
-         0x70, 0x70, False, {"integer": 8}, ()),
+         0x80, 0x70, False, {"integer": 8}, ()),
         ("compares|predicate_production", predicate_compare_program(),
          0x10, 0x30, False, {"predicate": 4}, ()),
         ("predicate_consumption|predicated_false", predicate_compare_program(),
          0x50, 0x70, False, {"integer": 6, "predicate": 4}, ()),
-        ("BR_moves", branch_register_move_program(), 0x50, 0x50, False,
-         {"integer": 10}, ()),
-        ("AR_and_PFS_moves", pfs_register_move_program(), 0x50, 0x80,
-         False, {"integer": 10}, ()),
+        # WP2 lets the direct RAM setup at the front of these programs remain
+        # in the same normal TB as the move families.  Profile the new owning
+        # TB start while retaining the focused operation trace at the family
+        # bundle itself.
+        ("BR_moves", branch_register_move_program(), 0x10, 0x50, False,
+         {"integer": 7}, ()),
+        ("AR_and_PFS_moves", pfs_register_move_program(), 0x10, 0x80,
+         False, {"integer": 9}, ()),
         ("Shape_B_helper_boundary", application_move_forced_tb_ri_program(),
          0x10, 0x20, False, {"integer": 4},
          ("application_register_legality_status",
@@ -10124,7 +10128,7 @@ def test_generated_code_density_families(qemu: Path) -> str:
          0x10, 0x50, False, {"loop": 1, "branch_slots": 3}, ()),
         ("call", b3_backward_forwarded_call_program(), 0x40, 0x40, False,
          {"branch_slots": 1}, ("enter_call_frame",)),
-        ("return", return_program, 0x40, 0x90, False,
+        ("return", return_program, 0x10, 0x90, False,
          {"branch_slots": 1}, ("return_frame_from_pfs",)),
         ("same_group_RAW|same_group_WAW|aliases|explicit_forwarding",
          ordinary_source_overlay_program(), 0x10, 0x20, False,

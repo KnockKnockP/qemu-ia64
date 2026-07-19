@@ -64,9 +64,11 @@ static void ia64_restore_state_to_opc(CPUState *cs,
                                       const uint64_t *data)
 {
     IA64CPU *cpu = IA64_CPU(cs);
-    unsigned ri = ia64_env_restore_ri(&cpu->env, data[1] & 3);
+    unsigned ri;
 
     cpu->env.ip = data[0];
+    ia64_env_restore_current_slot_metadata(&cpu->env, data[0]);
+    ri = ia64_env_restore_ri(&cpu->env, data[1] & 3);
     ia64_env_restore_source_visibility(&cpu->env, data[2]);
     ia64_env_set_psr(&cpu->env, ia64_psr_with_ri(cpu->env.psr, ri));
 }

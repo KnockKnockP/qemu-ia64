@@ -454,14 +454,19 @@ def check_sources(root: Path) -> None:
         "static void ia64_tr_emit_decoded_unaligned_data_reference(",
         "static void ia64_tr_emit_decoded_memory_nat_check(",
     )
-    publish = unaligned_fault.index(
-        "ia64_tr_group_publish_prefix_for_noreturn_fault(ctx)")
+    exact_ip = unaligned_fault.index(
+        "tcg_gen_movi_i64(cpu_ip, insn->address)")
     preprobe = unaligned_fault.index(
-        "gen_helper_data_unaligned_pre_access", publish)
+        "gen_helper_data_unaligned_pre_access", exact_ip)
     deliver = unaligned_fault.index(
         "gen_helper_raise_unaligned_data_reference", preprobe)
-    require(publish < preprobe < deliver,
-            "unaligned fault arm must publish, translation-probe, then raise")
+    require(exact_ip < preprobe < deliver,
+            "unaligned fault arm must bind exact IP, translation-probe, then raise")
+    require("compact\n     * memory publication" in unaligned_fault,
+            "unaligned fault arm lost its dominating compact safepoint")
+    require("ia64_tr_group_publish_prefix_for_noreturn_fault" not in
+            unaligned_fault,
+            "unaligned fault arm must not republish the committed prefix")
     require("tcg_constant_i32(payload_size)" in unaligned_fault and
             "ia64_tr_data_mmu_index(ctx)" in unaligned_fault,
             "unaligned preprobe lost its full datum span or MMU index")

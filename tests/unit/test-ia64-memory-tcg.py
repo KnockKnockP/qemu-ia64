@@ -51,6 +51,9 @@ IA64_PSR_BE = 1 << 1
 IA64_PSR_AC = 1 << 3
 IA64_ISR_W = 1 << 33
 IA64_ISR_NA = 1 << 35
+IA64_ISR_EI_SHIFT = 41
+VIBTANIUM_IOSAPIC_BASE = 0xFEC00000
+VIBTANIUM_IOSAPIC_VERSION = 0x00170011
 
 
 def _check_gr(reg: int) -> None:
@@ -130,6 +133,19 @@ def store(width: int, r2: int, r3: int, *, qp: int = 0,
         | H.bitfield((encoded >> 7) & 1, 27, 1)
         | H.bitfield((encoded >> 8) & 1, 36, 1)
         | raw
+    )
+
+
+def fc(r3: int, *, qp: int = 0) -> int:
+    """Encode M28 ``fc [r3]`` for instruction-cache coherency."""
+    _check_gr(r3)
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        H.op(1)
+        | H.bitfield(0x30, 27, 6)
+        | H.bitfield(r3, 20, 7)
+        | H.bitfield(qp, 0, 6)
     )
 
 
@@ -294,6 +310,22 @@ def _append_memory(bundles: List[object], address: int, raw: int) -> int:
     return address + 0x10
 
 
+def _movl_bundle(address: int, reg: int, value: int) -> object:
+    """Encode X2 ``movl r1=imm64`` for an MMIO physical address."""
+    value &= H.U64_MASK
+    l_slot = (value >> 22) & H.SLOT_MASK
+    x_slot = (
+        H.bitfield(reg, 6, 7)
+        | H.bitfield(value & 0x7f, 13, 7)
+        | H.bitfield((value >> 21) & 1, 21, 1)
+        | H.bitfield((value >> 16) & 0x1f, 22, 5)
+        | H.bitfield((value >> 7) & 0x1ff, 27, 9)
+        | H.bitfield((value >> 63) & 1, 36, 1)
+        | H.bitfield(6, 37, 4)
+    )
+    return H.Bundle(address, 0x05, H.nop_m(), l_slot, x_slot)
+
+
 def _finish_program(name: str, bundles: List[object], address: int,
                     data: Sequence[object] = ()):
     terminal_ip = address
@@ -303,6 +335,529 @@ def _finish_program(name: str, bundles: List[object], address: int,
         bundles=tuple(bundles),
         terminal_ip=terminal_ip,
         data=tuple(data),
+    )
+
+
+def _require_normal_memory_continuation_trace(
+        trace: str, memory_ip: int, successor_ip: int) -> None:
+    """Require a normal RAM access and its successor in one translated TB.
+
+    This is deliberately a generated-shape assertion, not a throughput proxy:
+    the pre-WP2 translator can execute the same architectural program but
+    necessarily places the successor in a different OP block because every
+    memory bundle requests ``translator_io_start()``.
+    """
+    wanted = {memory_ip, successor_ip}
+    for block in re.split(r"(?m)(?=^OP:[ \t]*$)", trace):
+        translated = {
+            int(value, 16)
+            for value in re.findall(
+                r"(?m)^ ---- ([0-9a-fA-F]{16})\b", block
+            )
+        }
+        if wanted <= translated:
+            H._require(
+                re.search(r"(?m)^\s*qemu_ld_i64\b", block) is not None,
+                "continued memory TB lost its direct SoftMMU load",
+            )
+            H._require(
+                "translator_io_start" not in block,
+                "normal generated memory shape retained an I/O terminator",
+            )
+            return
+    raise H.HarnessError(
+        "ordinary RAM bundle 0x{:x} and successor 0x{:x} were not "
+        "translated in one normal-mode TB".format(memory_ip, successor_ip)
+    )
+
+
+def _require_taken_overlay_clear_trace(combined_trace: str,
+                                       inherited_trace: str,
+                                       branch_ip: int) -> None:
+    """Require the resident taken edge to clear a safepoint-owned overlay."""
+    inherited_sections = H._tcg_op_sections(inherited_trace, branch_ip)
+    combined_sections = H._tcg_op_sections(combined_trace, branch_ip)
+    H._require(len(inherited_sections) == 1 and len(combined_sections) == 1,
+               "taken-overlay witness expected one resident and one inherited "
+               "translation at 0x{:x}".format(branch_ip))
+
+    # Learn the saved-GR-mask offset from the inherited translation's r41
+    # entry/live selection instead of freezing a CPUIA64State layout detail.
+    mask_pattern = re.compile(
+        r"(?m)^\s*ld_i64\s+(?P<temp>[^,\s]+),env,\$"
+        r"(?P<offset>0x[0-9a-fA-F]+)\s*\n"
+        r"\s*and_i64\s+(?P=temp),(?P=temp),\$0x20000000000\s*\n"
+        r"\s*movcond_i64\s+[^,]+,(?P=temp),\$0x0,[^\n]+,ne\s*$"
+    )
+    mask_offsets = {
+        int(match.group("offset"), 16)
+        for match in mask_pattern.finditer(inherited_sections[0])
+    }
+    H._require(len(mask_offsets) == 1,
+               "inherited check-load witness did not expose exactly one r41 "
+               "saved-mask selection: {}".format(
+                   ", ".join("0x{:x}".format(value)
+                             for value in sorted(mask_offsets)) or "none"))
+    mask_offset = next(iter(mask_offsets))
+    zeroed_offsets = {
+        address
+        for operation, address, line in
+        H._tcg_env_memory_accesses(combined_sections[0])
+        if operation == "st_i64" and line.startswith("st_i64 $0x0,")
+    }
+    # The resident publication owns only the r41 half.  Requiring the other
+    # half to be cleared would reintroduce the universal 128-GR cleanup that
+    # the slot-precise continuation is specifically meant to avoid.
+    expected = {mask_offset}
+    H._require(expected <= zeroed_offsets,
+               "resident taken branch after restart publication did not clear "
+               "its published saved-GR mask: missing {}".format(
+                   ", ".join("env+0x{:x}".format(value)
+                             for value in sorted(expected - zeroed_offsets))))
+
+
+def test_normal_ram_continuation(qemu: Path) -> str:
+    memory_ip = 0x20
+    successor_ip = 0x30
+    program = H.Program(
+        name="normal RAM memory continues in a multi-bundle TB",
+        bundles=(
+            H.Bundle(0x10, 0x03, H.nop_m(), H.adds(10, 0x1000, 0),
+                     H.nop_i()),
+            H.Bundle(memory_ip, 0x01, load(8, 20, 10), H.nop_i(),
+                     H.nop_i()),
+            H.Bundle(successor_ip, 0x03, H.nop_m(), H.adds(21, 9, 20),
+                     H.nop_i()),
+            H.spin_bundle(0x40),
+        ),
+        terminal_ip=0x40,
+        data=(H.DataWord(0x1000, DATA_PATTERN, 8),),
+    )
+    trace_capture: List[str] = []
+    snapshot = H.run_program(
+        qemu, program,
+        typed_direct_trace_ips=(memory_ip, successor_ip),
+        trace_capture=trace_capture,
+    )
+    H._require(not snapshot.exception_pending,
+               "normal RAM continuation raised an exception")
+    H._require(snapshot.gr[20] == DATA_PATTERN and
+               snapshot.gr[21] == (DATA_PATTERN + 9) & H.U64_MASK,
+               "normal RAM continuation lost its load or successor result")
+    H._require(len(trace_capture) == 1,
+               "normal RAM continuation did not capture one TCG trace")
+    _require_normal_memory_continuation_trace(
+        trace_capture[0], memory_ip, successor_ip
+    )
+    return (
+        "direct qemu_ld stayed in one normal-mode TB with the following "
+        "bundle and the successor consumed the successful result"
+    )
+
+
+def test_store_update_continuation(qemu: Path) -> str:
+    """Keep a post-increment store live through a no-stop multi-bundle group."""
+    store_ip = 0x60
+    successor_ip = 0x70
+    load_ip = 0x80
+    program = H.Program(
+        name="post-increment store continues in a multi-bundle issue group",
+        bundles=(
+            H.Bundle(0x10, 0x01, H.alloc(31, 16, 16, 0),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(0x20, 0x03, H.nop_m(), H.adds(32, 0x1800, 0),
+                     H.adds(33, 0x5A, 0)),
+            H.Bundle(0x30, 0x03, H.nop_m(), H.adds(34, 0x1800, 0),
+                     H.adds(38, 0x1800, 0)),
+            # Establish an ALAT record, then cross an actual branch/TB edge so
+            # the store continuation is translated with ALAT active at entry.
+            H.Bundle(0x40, 0x0B, H.ld8_advanced(39, 38),
+                     H.nop_m(), H.nop_i()),
+            H.Bundle(0x50, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0x50, store_ip)),
+            # Template 0x00 has no stop: the updated base must remain live,
+            # while later ordinary sources still observe the entry image.
+            H.Bundle(store_ip, 0x00,
+                     store(8, 33, 32, imm_update=8),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(successor_ip, 0x00, H.nop_m(),
+                     H.adds(35, 0, 32), H.adds(36, 1, 33)),
+            # The slot-2 stop closes the group only after another direct
+            # memory safepoint has observed the successful store prefix.
+            H.Bundle(load_ip, 0x01, load(8, 37, 34),
+                     H.nop_i(), H.nop_i()),
+            H.spin_bundle(0x90),
+        ),
+        terminal_ip=0x90,
+        data=(H.DataWord(0x1800, 0, 8),),
+    )
+    trace_capture: List[str] = []
+    snapshot = H.run_program(
+        qemu,
+        program,
+        typed_direct_trace_ips=(store_ip, successor_ip, load_ip),
+        trace_capture=trace_capture,
+    )
+    H._require(not snapshot.exception_pending,
+               "continued post-increment store raised an exception")
+    H._require(snapshot.gr[32] == 0x1808,
+               "continued post-increment store lost its final base")
+    H._require(snapshot.gr[35] == 0x1800,
+               "same-group source did not retain the immutable entry base")
+    H._require(snapshot.gr[36] == 0x5B,
+               "successor arithmetic was lost after the continued store")
+    H._require(snapshot.gr[37] == 0x5A,
+               "continued store/load round trip produced the wrong value")
+    H._require(len(trace_capture) == 1,
+               "store continuation did not capture one TCG trace")
+    _require_normal_memory_continuation_trace(
+        trace_capture[0], store_ip, successor_ip
+    )
+
+    # Reproduce the Debian initramfs handoff that originally distinguished a
+    # resident Shape-B group from the same group serialized at a TB boundary.
+    # Template 0x02 closes the store's group after slot 1, so slot 2 opens a
+    # fresh group.  The following MMB bundle must behave identically whether
+    # that new group remains resident or is inherited through the overlay.
+    handoff = H.Program(
+        name="internal-stop store/check-load/store/branch SSA equivalence",
+        bundles=(
+            H.Bundle(0x10, 0x01, H.alloc(31, 16, 16, 0),
+                     H.nop_i(), H.nop_i()),
+            # The Debian trace runs with PSR.bn=1, so r16/r17 below are the
+            # alternate bank rather than the default static image.
+            H.Bundle(0x20, 0x11, H.nop_m(), H.nop_i(),
+                     H.bitfield(0x0D, 27, 6)),  # bsw.1
+            H.Bundle(0x30, 0x03, H.nop_m(), H.adds(21, 0x1800, 0),
+                     H.adds(24, 0x1900, 0)),
+            H.Bundle(0x40, 0x03, H.nop_m(), H.adds(38, 0x1A00, 0),
+                     H.adds(39, 0x17F0, 0)),
+            H.Bundle(0x50, 0x03, H.nop_m(), H.adds(36, 123, 0),
+                     H.adds(16, 0x82, 0)),
+            # Enter the six-bundle sequence with an active r41 ALAT record.
+            H.Bundle(0x60, 0x0B, H.ld8_advanced(41, 38),
+                     H.nop_m(), H.nop_i()),
+            H.Bundle(0x70, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0x70, 0x90)),
+            H.spin_bundle(0x80),
+            # These six bundles match the resource and stop topology of
+            # 0x4000000000046b90..0x4000000000046be0.
+            H.Bundle(0x90, 0x08, H.adds(21, 0, 21),
+                     H.adds(16, 0, 16), H.nop_i()),
+            H.Bundle(0xA0, 0x09, H.adds(39, 16, 39),
+                     H.adds(17, 1, 0),
+                     H.cmp_imm(7, 6, 123, 36, "eq", width=4)),
+            H.Bundle(0xB0, 0x09, load(8, 14, 21),
+                     H.ld8_advanced(41, 39), H.nop_i()),
+            H.Bundle(0xC0, 0x09, H.nop_m(), H.adds(37, 2, 14),
+                     H.nop_i()),
+            H.Bundle(0xD0, 0x02,
+                     store(1, 16, 14, imm_update=1),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(0xE0, 0x18, H.ld8_check_clear(41, 39),
+                     store(1, 17, 14), H.br_cond(0xE0, 0x120, qp=7)),
+            H.Bundle(0xF0, 0x11, H.nop_m(), H.adds(20, 1, 0),
+                     H.br_cond(0xF0, 0x140)),
+            H.spin_bundle(0x100),
+            H.spin_bundle(0x110),
+            H.Bundle(0x120, 0x11, H.nop_m(), H.adds(20, 2, 0),
+                     H.br_cond(0x120, 0x140)),
+            H.spin_bundle(0x130),
+            H.Bundle(0x140, 0x01, load(2, 22, 24),
+                     H.nop_i(), H.nop_i()),
+            H.spin_bundle(0x150),
+        ),
+        terminal_ip=0x150,
+        data=(
+            H.DataWord(0x1800, 0x1900, 8),
+            H.DataWord(0x1900, 0, 8),
+            H.DataWord(0x1A00, 0x1111111111111111, 8),
+        ),
+    )
+    combined_trace: List[str] = []
+    inherited_trace: List[str] = []
+    combined = H.run_program(qemu, handoff, trace_capture=combined_trace)
+    inherited = H.run_program(qemu, handoff, one_bundle_per_tb=True,
+                              trace_capture=inherited_trace)
+    for mode, result in (("combined", combined), ("inherited", inherited)):
+        H._require(not result.exception_pending,
+                   "{} internal-stop handoff raised an exception".format(mode))
+        H._require(result.ip == handoff.terminal_ip,
+                   "{} internal-stop handoff missed its terminal".format(mode))
+        H._require(result.gr[14] == 0x1901 and result.gr[20] == 2 and
+                   result.gr[22] == 0x0182,
+                   "{} internal-stop handoff produced r14=0x{:x}, marker={}, "
+                   "memory=0x{:x}".format(
+                       mode, result.gr[14], result.gr[20], result.gr[22]))
+    H._require(combined.gr == inherited.gr and
+               combined.pr == inherited.pr and
+               combined.nat_low == inherited.nat_low and
+               combined.nat_high == inherited.nat_high,
+               "resident and inherited internal-stop handoffs diverged")
+    H._require(len(combined_trace) == 1 and len(inherited_trace) == 1,
+               "internal-stop handoff did not capture both TCG traces")
+    _require_taken_overlay_clear_trace(
+        combined_trace[0], inherited_trace[0], 0xE0
+    )
+    return (
+        "a direct post-increment qemu_st continued across two no-stop bundles; "
+        "its final base, immutable group-entry source, successor result, and "
+        "following direct load all matched architectural expectations; the "
+        "Debian-shaped internal-stop/check-load/store/branch group matched its "
+        "one-bundle inherited execution and its taken edge cleared the "
+        "restart-created durable overlay"
+    )
+
+
+def test_store_update_invalidates_alat_before_check(qemu: Path) -> str:
+    """A same-group ``chk.a`` must observe a post-update GR invalidation."""
+    initial_check_ip = 0x40
+    store_ip = 0x70
+    check_ip = 0x80
+    recovery_ip = 0xB0
+    missing_entry_ip = 0xD0
+    program = H.Program(
+        name="post-increment store invalidates ALAT before same-group chk.a",
+        bundles=(
+            H.Bundle(0x10, 0x01, H.alloc(31, 16, 16, 0),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(0x20, 0x03, H.nop_m(), H.adds(38, 0x1800, 0),
+                     H.adds(33, 0x5A, 0)),
+            # The advanced load both installs an ALAT record for static r20
+            # and supplies the address consumed by the following store.
+            H.Bundle(0x30, 0x0B, H.ld8_advanced(20, 38),
+                     H.nop_m(), H.nop_i()),
+            # Prove the record exists before using this test to distinguish
+            # delayed target-GR invalidation from an already-empty ALAT.
+            H.Bundle(initial_check_ip, 0x01,
+                     H.chk_a(20, initial_check_ip, missing_entry_ip),
+                     H.nop_i(), H.nop_i()),
+            # Enter the continuation TB with the ALAT observably active.
+            H.Bundle(0x50, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0x50, store_ip)),
+            H.spin_bundle(0x60),
+            # No stop follows the post-increment store.  Its successful base
+            # write to r20 must invalidate r20's ALAT record before chk.a.
+            H.Bundle(store_ip, 0x00,
+                     store(8, 33, 20, imm_update=8),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(check_ip, 0x01,
+                     H.chk_a(20, check_ip, recovery_ip),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(0x90, 0x03, H.nop_m(), H.adds(34, 0xBAD, 0),
+                     H.nop_i()),
+            H.Bundle(0xA0, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0xA0, 0xE0)),
+            H.Bundle(recovery_ip, 0x03, H.nop_m(), H.adds(34, 1, 0),
+                     H.nop_i()),
+            H.Bundle(0xC0, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0xC0, 0xE0)),
+            H.Bundle(missing_entry_ip, 0x03, H.nop_m(),
+                     H.adds(34, 0xDEAD, 0), H.nop_i()),
+            H.spin_bundle(0xE0),
+        ),
+        terminal_ip=0xE0,
+        data=(
+            H.DataWord(0x1800, 0x1900, 8),
+            H.DataWord(0x1900, 0, 8),
+        ),
+    )
+    trace_capture: List[str] = []
+    snapshot = H.run_program(
+        qemu, program,
+        typed_direct_trace_ips=(store_ip, check_ip),
+        trace_capture=trace_capture,
+    )
+    H._require(not snapshot.exception_pending,
+               "store-update/ALAT-check sequence raised an exception")
+    H._require(
+        len(trace_capture) == 1 and
+        "call gr_alat_invalidate_mask" in trace_capture[0],
+        "store-update/ALAT-check TB omitted its target-GR invalidation",
+    )
+    H._require(
+        trace_capture[0].index("call gr_alat_invalidate_mask") <
+        trace_capture[0].rindex("call data_plane_chk_a"),
+        "store-update target-GR invalidation followed its chk.a observer",
+    )
+    H._require(snapshot.gr[20] == 0x1908,
+               "post-increment store lost its final static base")
+    H._require(snapshot.gr[34] == 1,
+               "chk.a observed a stale ALAT hit after the base GR write")
+    return (
+        "the post-increment store invalidated its active static-GR ALAT "
+        "record before a same-group chk.a, which took the recovery arm"
+    )
+
+
+def test_store_update_code_page_restart(qemu: Path) -> str:
+    """An architecturally synchronized code-page store must run new code."""
+    store_ip = 0x60
+    patched_ip = 0x100
+    dispatch_ip = 0x120
+    original = H.Bundle(
+        patched_ip, 0x11, H.nop_m(), H.adds(20, 1, 0),
+        H.br_cond(patched_ip, dispatch_ip)
+    )
+    replacement = H.Bundle(
+        patched_ip, 0x11, H.nop_m(), H.adds(20, 2, 0),
+        H.br_cond(patched_ip, dispatch_ip)
+    )
+    original_bytes = b"".join(
+        word.to_bytes(8, "little") for word in H.bundle_words(original)
+    )
+    replacement_bytes = b"".join(
+        word.to_bytes(8, "little") for word in H.bundle_words(replacement)
+    )
+    differences = [
+        index for index, pair in enumerate(zip(original_bytes,
+                                                replacement_bytes))
+        if pair[0] != pair[1]
+    ]
+    H._require(differences == [7],
+               "focused SMC bundles no longer differ in exactly byte 7")
+    patch_address = patched_ip + differences[0]
+    patch_value = replacement_bytes[differences[0]]
+
+    program = H.Program(
+        name="post-increment code-page store restarts at its successor",
+        bundles=(
+            H.Bundle(0x10, 0x03, H.nop_m(), H.adds(14, patch_address, 0),
+                     H.adds(18, patch_address, 0)),
+            H.Bundle(0x20, 0x03, H.nop_m(), H.adds(16, patch_value, 0),
+                     H.adds(15, patched_ip, 0)),
+            H.Bundle(0x30, 0x03, H.nop_m(), H.adds(38, 0x1800, 0),
+                     H.adds(23, 0, 0)),
+            H.Bundle(0x40, 0x0B, H.ld8_advanced(21, 38),
+                     H.nop_m(), H.nop_i()),
+            # Execute and cache the original target before modifying it.
+            H.Bundle(0x50, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0x50, patched_ip)),
+            H.Bundle(store_ip, 0x02,
+                     store(1, 16, 14, imm_update=1),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(0x70, 0x01, load(1, 22, 18),
+                     H.adds(23, 1, 0), H.nop_i()),
+            # IA-64 does not make an arbitrary data store immediately
+            # instruction-cache coherent.  Flush the target line, synchronize
+            # instruction-side visibility, then serialize before re-entry.
+            H.Bundle(0x80, 0x01, fc(15), H.nop_i(), H.nop_i()),
+            H.Bundle(0x90, 0x01, H.sync_i(), H.nop_i(), H.nop_i()),
+            H.Bundle(0xA0, 0x01, H.srlz_i(), H.nop_i(), H.nop_i()),
+            H.Bundle(0xB0, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0xB0, patched_ip)),
+            original,
+            H.Bundle(dispatch_ip, 0x03, H.nop_m(),
+                     H.cmp_imm(7, 6, 0, 23, "eq", width=4), H.nop_i()),
+            H.Bundle(0x130, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0x130, store_ip, qp=7)),
+            H.Bundle(0x140, 0x11, H.nop_m(), H.nop_i(),
+                     H.br_cond(0x140, 0x150)),
+            H.spin_bundle(0x150),
+        ),
+        terminal_ip=0x150,
+        data=(H.DataWord(0x1800, 0x1234, 8),),
+    )
+    snapshot = H.run_program(qemu, program)
+    H._require(not snapshot.exception_pending,
+               "code-page store/restart raised an exception")
+    H._require(snapshot.gr[14] == patch_address + 1,
+               "code-page store replayed or lost its base update")
+    H._require(snapshot.gr[22] == patch_value,
+               "code-page store did not update the successor bytes")
+    H._require(snapshot.gr[20] == 2,
+               "execution continued through stale translated code")
+    return (
+        "after the original target was translated, an active-ALAT "
+        "post-increment store patched it and updated its base once; fc, "
+        "sync.i, and srlz.i invalidated the cached target so re-entry executed "
+        "the replacement bundle"
+    )
+
+
+def test_mmio_io_recompile_exactly_once(qemu: Path) -> str:
+    """Force the normal-TB MMIO retry lane and count device callbacks."""
+    program = H.Program(
+        name="MMIO I/O recompile preserves prefix without duplicate access",
+        bundles=(
+            _movl_bundle(0x10, 10, VIBTANIUM_IOSAPIC_BASE),
+            _movl_bundle(0x20, 12, VIBTANIUM_IOSAPIC_BASE + 0x10),
+            H.Bundle(0x30, 0x03, H.nop_m(), H.adds(11, 1, 0),
+                     H.adds(30, 0, 0)),
+            H.Bundle(0x40, 0x03, H.nop_m(), H.adds(31, 0, 0),
+                     H.nop_i()),
+            # Both prefixes deliberately belong to the memory instruction's
+            # issue group.  The first execution reaches cpu_io_recompile;
+            # the CF_MEMI_ONLY retry must begin at the exact memory slot.
+            H.Bundle(0x50, 0x00, H.nop_m(), H.adds(30, 1, 30),
+                     H.nop_i()),
+            H.Bundle(0x60, 0x01, store(4, 11, 10), H.nop_i(), H.nop_i()),
+            H.Bundle(0x70, 0x00, H.nop_m(), H.adds(31, 1, 31),
+                     H.nop_i()),
+            H.Bundle(0x80, 0x01, load(4, 20, 12), H.nop_i(), H.nop_i()),
+            H.Bundle(0x90, 0x03, H.nop_m(), H.adds(21, 1, 20),
+                     H.nop_i()),
+            H.spin_bundle(0xA0),
+        ),
+        terminal_ip=0xA0,
+    )
+    output: List[str] = []
+    snapshot = H.run_program(
+        qemu, program,
+        extra_args=(
+            "-d", "exec",
+            "-trace", "enable=ia64_iosapic_read",
+            "-trace", "enable=ia64_iosapic_write",
+        ),
+        extra_env={"VIBTANIUM_IA64_PERF": "1"},
+        graceful_quit=True,
+        output_capture=output,
+    )
+    H._require(not snapshot.exception_pending,
+               "IOSAPIC MMIO retry program raised an exception")
+    H._require(
+        snapshot.gr[30] == 1 and snapshot.gr[31] == 1,
+        "cpu_io_recompile replayed a successful store/load prefix: "
+        "r30={}/r31={}".format(snapshot.gr[30], snapshot.gr[31]),
+    )
+    H._require(
+        snapshot.gr[20] == VIBTANIUM_IOSAPIC_VERSION and
+        snapshot.gr[21] == VIBTANIUM_IOSAPIC_VERSION + 1,
+        "IOSAPIC MMIO load or its normal successor produced the wrong value",
+    )
+    text = output[0]
+    read_callbacks = len(re.findall(r"(?m)^ia64_iosapic_read\b", text))
+    write_callbacks = len(re.findall(r"(?m)^ia64_iosapic_write\b", text))
+    io_recompiles = len(re.findall(r"cpu_io_recompile: rewound execution", text))
+    mmio_load = re.search(
+        r"(?m)^\[ia64-perf\] ldst\.mmio_load=([0-9]+)\s*$", text
+    )
+    mmio_store = re.search(
+        r"(?m)^\[ia64-perf\] ldst\.mmio_store=([0-9]+)\s*$", text
+    )
+    mmio_load_count = int(mmio_load.group(1)) if mmio_load else -1
+    mmio_store_count = int(mmio_store.group(1)) if mmio_store else -1
+    H._require(
+        read_callbacks == 1 and write_callbacks == 1,
+        "MMIO retry duplicated or suppressed a device callback: "
+        "read={} write={}".format(read_callbacks, write_callbacks),
+    )
+    H._require(
+        io_recompiles == 2,
+        "expected one cpu_io_recompile for each non-final MMIO operation, "
+        "found {}".format(io_recompiles),
+    )
+    H._require(
+        mmio_load_count == 2 and mmio_store_count == 2,
+        "MMIO TLB classification expected pre-access/retry pairs, got {}/{}"
+        .format(mmio_load_count, mmio_store_count),
+    )
+    return (
+        "two non-final IOSAPIC accesses each took cpu_io_recompile once; "
+        "the TLB classified each pre-access/retry pair while device "
+        "tracepoints counted exactly one read and one write; both "
+        "successful issue-group prefixes retired once, and normal execution "
+        "continued to the successor"
     )
 
 
@@ -765,9 +1320,14 @@ def _nat_fault_program(mode: str):
 
 
 def _require_data_nat_fault(snapshot, *, fault_ip: int, fault_raw: int,
-                            kind: str, address_nat: bool) -> None:
+                            kind: str, address_nat: bool,
+                            slot_ri: int = 0) -> None:
     access_bit = H.IA64_ISR_R if kind == "ld" else IA64_ISR_W
-    expected_isr = H.IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION | access_bit
+    expected_isr = (
+        H.IA64_ISR_CODE_REGISTER_NAT_CONSUMPTION
+        | access_bit
+        | (slot_ri << IA64_ISR_EI_SHIFT)
+    )
     if address_nat:
         expected_isr |= IA64_ISR_NA
     H._require(
@@ -794,18 +1354,116 @@ def _require_data_nat_fault(snapshot, *, fault_ip: int, fault_raw: int,
     )
     H._require(
         snapshot.slot_valid and snapshot.slot_ip == fault_ip and
-        snapshot.slot_ri == 0 and
+        snapshot.slot_ri == slot_ri and
         snapshot.slot_type == H.IA64_SLOT_TYPE_M and
         snapshot.slot_raw == (fault_raw & H.SLOT_MASK),
         "ordinary {} data-NaT lost its exact M-slot publication".format(kind),
     )
     H._require(
         (snapshot.cr_ipsr & H.IA64_PSR_IC) != 0 and
-        ((snapshot.cr_ipsr >> H.IA64_PSR_RI_SHIFT) & 3) == 0 and
+        ((snapshot.cr_ipsr >> H.IA64_PSR_RI_SHIFT) & 3) == slot_ri and
         not snapshot.psr_ic_inflight,
         "ordinary {} data-NaT lost collected IC/RI or serialization".format(
             kind
         ),
+    )
+
+
+def test_multi_prefix_slot1_fault(qemu: Path) -> str:
+    """Publish a multi-bundle successful prefix before an RI=1 fault."""
+    bundles: List[object] = list(H._interruption_collection_setup())
+    address = 0x30
+    address = _append_i_setup(
+        bundles,
+        address,
+        (
+            H.adds(1, 1, 0),
+            H.adds(2, 0x1000, 0),
+            H.adds(10, 0x1800, 0),
+            H.adds(12, 0x555, 0),
+            H.adds(13, 0xABC, 0),
+            H.adds(20, 0x55, 0),
+            H.adds(30, 7, 0),
+        ),
+    )
+    bundles.append(H.Bundle(address, 0x01, H.mov_m_grar(36, 1),
+                            H.nop_i(), H.nop_i()))
+    address += 0x10
+    address = _append_memory(bundles, address, H.ld8_fill(14, 2))
+
+    # Start an issue group with a successful externally visible store, BR and
+    # PR definitions.  A following MMI bundle adds another GR prefix in slot
+    # 0, then consumes the NaT address in slot 1.  No prefix may be replayed
+    # and none of the faulting load's destinations may become visible.
+    bundles.append(H.Bundle(
+        address, 0x08,
+        store(8, 13, 10, imm_update=8),
+        H.nop_m(),
+        H.cmp_rr(6, 7, 0, 0, "eq"),
+    ))
+    address += 0x10
+    bundles.append(H.Bundle(
+        address, 0x08,
+        H.adds(30, 1, 30),
+        H.nop_m(),
+        H.mov_grbr(3, 12),
+    ))
+    address += 0x10
+    fault_ip = address
+    fault_raw = load(8, 20, 14, reg_update=12)
+    bundles.append(H.Bundle(
+        fault_ip, 0x09,
+        H.adds(30, 1, 30),
+        fault_raw,
+        H.nop_i(),
+    ))
+    bundles.append(H._exception_vector_spin(
+        H.IA64_REGISTER_NAT_CONSUMPTION_VECTOR
+    ))
+    program = H.Program(
+        name="multi-prefix RI=1 memory fault",
+        bundles=tuple(bundles),
+        terminal_ip=H.IA64_REGISTER_NAT_CONSUMPTION_VECTOR,
+        data=(H.DataWord(0x1000, 0x1FFF, 8),),
+    )
+    snapshot = run_traced(
+        qemu, program,
+        {fault_ip: TraceExpectation("ld", 8)},
+        preserve_fault_slot=True,
+    )
+    _require_data_nat_fault(
+        snapshot,
+        fault_ip=fault_ip,
+        fault_raw=fault_raw,
+        kind="ld",
+        address_nat=True,
+        slot_ri=1,
+    )
+    H._require(
+        snapshot.gr[10] == 0x1808,
+        "successful store base update was lost or replayed",
+    )
+    H._require(
+        snapshot.br[3] == 0x555,
+        "successful prefix BR write was not published",
+    )
+    H._require(
+        (snapshot.pr & ((1 << 6) | (1 << 7))) == (1 << 6),
+        "successful prefix PR write was not published exactly",
+    )
+    H._require(
+        snapshot.gr[30] == 8,
+        "successful prefix GR definition was lost or replayed",
+    )
+    H._require(
+        snapshot.gr[20] == 0x55 and snapshot.gr[14] == 0x1FFF and
+        (snapshot.nat_low & (1 << 14)) != 0,
+        "faulting load committed its destination/base or lost the address NaT",
+    )
+    return (
+        "an RI=1 NaT fault after a multi-bundle store/base, BR, PR, and GR "
+        "prefix published every successful effect once while suppressing the "
+        "faulting load destination and base update"
     )
 
 
@@ -1012,11 +1670,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     qemu = args.qemu.expanduser().resolve()
     tests = (
+        ("normal RAM multi-bundle continuation", test_normal_ram_continuation),
+        ("post-increment store multi-bundle continuation",
+         test_store_update_continuation),
+        ("post-increment store invalidates ALAT before chk.a",
+         test_store_update_invalidates_alat_before_check),
+        ("post-increment code-page store precise restart",
+         test_store_update_code_page_restart),
+        ("MMIO I/O-recompile no-duplicate path",
+         test_mmio_io_recompile_exactly_once),
         ("ordinary load width/update matrix", test_load_update_matrix),
         ("ordinary and release store matrix", test_store_update_matrix),
         ("PSR.be TB-keyed memory", test_endian_tb_keying),
         ("memory aliases and nullification", test_aliases_and_predication),
         ("memory NaT access and priority", test_nat_access_and_priority),
+        ("multi-prefix RI=1 fault precision", test_multi_prefix_slot1_fault),
         ("ordinary memory alignment policy", test_alignment_policy),
     )
 

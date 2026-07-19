@@ -6,6 +6,7 @@
 #include "hw/ia64/vibtanium.h"
 #include "migration/vmstate.h"
 #include "target/ia64/insn.h"
+#include "trace.h"
 
 #define IA64_IOSAPIC_REG_SELECT 0x00
 #define IA64_IOSAPIC_WINDOW     0x10
@@ -111,27 +112,37 @@ static uint64_t ia64_iosapic_read(void *opaque, hwaddr offset, unsigned size)
     IA64IOSAPICState *s = opaque;
     unsigned index;
     bool high;
+    uint64_t value;
 
     if (size != 4) {
-        return UINT32_MAX;
+        value = UINT32_MAX;
+        goto out;
     }
 
     switch (offset) {
     case IA64_IOSAPIC_REG_SELECT:
-        return s->select;
+        value = s->select;
+        break;
     case IA64_IOSAPIC_WINDOW:
         if (s->select == IA64_IOSAPIC_VERSION) {
-            return ((VIBTANIUM_IOSAPIC_REDIRECTION_COUNT - 1) << 16) | 0x11;
+            value = ((VIBTANIUM_IOSAPIC_REDIRECTION_COUNT - 1) << 16) |
+                    0x11;
+        } else if (ia64_iosapic_register_index(s->select, &index, &high)) {
+            value = high ? s->rte_high[index] : s->rte_low[index];
+        } else {
+            value = 0;
         }
-        if (ia64_iosapic_register_index(s->select, &index, &high)) {
-            return high ? s->rte_high[index] : s->rte_low[index];
-        }
-        return 0;
+        break;
     case IA64_IOSAPIC_EOI:
-        return 0;
+        value = 0;
+        break;
     default:
-        return 0;
+        value = 0;
+        break;
     }
+out:
+    trace_ia64_iosapic_read(offset, size, value);
+    return value;
 }
 
 static void ia64_iosapic_write(void *opaque, hwaddr offset,
@@ -141,6 +152,8 @@ static void ia64_iosapic_write(void *opaque, hwaddr offset,
     uint32_t old_low;
     unsigned index;
     bool high;
+
+    trace_ia64_iosapic_write(offset, size, value);
 
     if (size != 4) {
         return;
