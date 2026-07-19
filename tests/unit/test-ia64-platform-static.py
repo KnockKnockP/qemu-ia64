@@ -28,6 +28,13 @@ def main() -> int:
 
     console = (root / "hw/ia64/efi-console.c").read_text(encoding="utf-8")
     machine = (root / "hw/ia64/vibtanium.c").read_text(encoding="utf-8")
+    efi = (root / "hw/ia64/efi.c").read_text(encoding="utf-8")
+    services = (root / "hw/ia64/efi-services.c").read_text(encoding="utf-8")
+    gtk = (root / "ui/gtk.c").read_text(encoding="utf-8")
+    boot_manager = (root / "hw/ia64/efi-boot-manager.c").read_text(
+        encoding="utf-8"
+    )
+    cpu = (root / "target/ia64/cpu.c").read_text(encoding="utf-8")
     firmware_hook = (root / "target/ia64/firmware-hook.c").read_text(
         encoding="utf-8"
     )
@@ -41,7 +48,39 @@ def main() -> int:
     ), "EFI VGA machine-I/O routing")
     require(machine, (
         "vibtanium_efi_console_init(vga, &vms->pci_io_as);",
+        "vibtanium_efi_boot_manager_destroy(vms);",
+        "run_on_cpu(CPU(vms->cpu), vibtanium_cpu_reset_on_cpu",
+        "vibtanium_load_efi_app(vms, machine);",
     ), "Vibtanium EFI VGA I/O-space handoff")
+    require(efi, (
+        'aml_name_decl("_S5", pkg)',
+    ), "Vibtanium ACPI soft-off description")
+    require(efi, (
+        "ia64_firmware_identity_tlb_fill(",
+    ), "EFI image-entry translation handoff")
+    require(services, (
+        "qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);",
+        "qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);",
+    ), "Vibtanium EFI ResetSystem lifecycle dispatch")
+    require(gtk, (
+        "gd_menu_reset(GtkMenuItem *item, void *opaque)",
+        "qmp_system_reset(NULL);",
+        "gd_menu_powerdown(GtkMenuItem *item, void *opaque)",
+        "qmp_system_powerdown(NULL);",
+        "gd_menu_quit(GtkMenuItem *item, void *opaque)",
+        "qmp_quit(NULL);",
+    ), "GTK Machine menu lifecycle dispatch")
+    require(boot_manager, (
+        "if (!bm->choices || bm->choices->len == 0)",
+        "vibtanium_efi_boot_manager_destroy(vms);",
+        "vms->cpu->env.firmware_boot_wait = true;",
+        "vms->cpu->env.firmware_boot_wait = false;",
+    ), "EFI reset-to-image CPU hold")
+    require(cpu, (
+        "if (cpu->env.firmware_boot_wait)",
+        "if (firmware_installed)",
+        "target lookup so this same SoftMMU fill consumes it",
+    ), "IA-64 reset execution-state cleanup")
     forbid(console, (
         "address_space_stb(&address_space_io",
         "address_space_ldub(&address_space_io",

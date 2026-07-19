@@ -708,6 +708,11 @@ typedef struct CPUArchState {
      */
     bool firmware_identity_tlb;
 
+    /* Board firmware may need host-side time to select and load an image
+     * after reset. A halted CPU must not be woken by a stale device interrupt
+     * until that handoff is complete. */
+    bool firmware_boot_wait;
+
     /*
      * Perf-only transient set by a fault-induced cpu_loop_exit and consumed
      * by the next TB translation. It is not serialized.

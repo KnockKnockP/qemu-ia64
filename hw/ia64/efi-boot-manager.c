@@ -551,6 +551,7 @@ static void vibtanium_boot_manager_resume_guest(
     bm->booted = true;
     timer_del(bm->timer);
     vibtanium_efi_console_enable_cursor(false);
+    vms->cpu->env.firmware_boot_wait = false;
     CPU(vms->cpu)->halted = false;
     cpu_resume(CPU(vms->cpu));
 }
@@ -1102,11 +1103,18 @@ bool vibtanium_start_efi_boot_manager(VibtaniumMachineState *vms,
     vms->boot_manager = bm;
 
     vibtanium_boot_manager_rebuild_choices(bm);
+    if (!bm->choices || bm->choices->len == 0) {
+        warn_report("Vibtanium EFI boot manager policy=%s entries=0; "
+                    "continuing without the frontend", policy);
+        vibtanium_efi_boot_manager_destroy(vms);
+        return false;
+    }
     now = qemu_clock_get_ms(QEMU_CLOCK_HOST);
     bm->countdown_active =
         vibtanium_efi_boot_manager_policy_timeout(policy);
     bm->deadline_ms = now + VIBTANIUM_EFI_BOOT_MANAGER_TIMEOUT_MS;
 
+    vms->cpu->env.firmware_boot_wait = true;
     CPU(vms->cpu)->halted = true;
     vibtanium_efi_console_set_input_active(true);
     vibtanium_boot_manager_draw(bm);

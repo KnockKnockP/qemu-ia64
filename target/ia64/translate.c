@@ -2301,11 +2301,11 @@ static void ia64_tr_finish_faulting_slot(void)
                    offsetof(CPUIA64State, current_slot_metadata));
 }
 
+static void ia64_tr_clear_complete_overlay_storage(DisasContext *ctx);
+
 static void ia64_tr_consume_resident_memory_overlay(DisasContext *ctx)
 {
     IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
-    unsigned clears = 1;
-    bool saved_ar = false;
 
     /*
      * A faultable access in a fresh resident Shape-B group temporarily
@@ -2319,88 +2319,18 @@ static void ia64_tr_consume_resident_memory_overlay(DisasContext *ctx)
     if (!ssa->enabled || ssa->inherited || !ssa->durable_materialized) {
         return;
     }
-    for (unsigned half = 0; half < 2; half++) {
-        if (ssa->written_gr[half] != 0) {
-            tcg_gen_st_i64(
-                tcg_constant_i64(0), tcg_env,
-                offsetof(CPUIA64State, issue_group.saved_gr_mask) +
-                    half * sizeof(uint64_t));
-            clears++;
-        }
-        if (ssa->check_gr_forward_mask[half] != NULL) {
-            tcg_gen_st_i64(
-                tcg_constant_i64(0), tcg_env,
-                offsetof(CPUIA64State,
-                         issue_group.check_gr_forward_mask) +
-                    half * sizeof(uint64_t));
-            clears++;
-        }
-    }
-    if (ssa->written_br != 0) {
-        tcg_gen_st8_i32(
-            tcg_constant_i32(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.saved_br_mask));
-        clears++;
-    }
-    if (ssa->written_pr) {
-        tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
-                        offsetof(CPUIA64State, issue_group.pr_saved));
-        clears++;
-    }
-    for (unsigned word = 0; word < 2; word++) {
-        uint64_t ar = ssa->written_ar[word];
-
-        if (word == IA64_AR_PFS / 64 &&
-            (ar & (UINT64_C(1) << (IA64_AR_PFS & 63))) != 0) {
-            tcg_gen_st8_i32(
-                tcg_constant_i32(0), tcg_env,
-                offsetof(CPUIA64State, issue_group.pfs_saved));
-            ar &= ~(UINT64_C(1) << (IA64_AR_PFS & 63));
-            clears++;
-        }
-        saved_ar |= ar != 0;
-    }
-    if (saved_ar) {
-        tcg_gen_st8_i32(
-            tcg_constant_i32(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.saved_ar_count));
-        clears++;
-    }
-    if (ssa->branch_pr_forward_mask != NULL) {
-        tcg_gen_st_i64(
-            tcg_constant_i64(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.branch_pr_forward_mask));
-        clears++;
-    }
-    if (ssa->branch_br_forward_mask != NULL) {
-        tcg_gen_st8_i32(
-            tcg_constant_i32(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.branch_br_forward_mask));
-        clears++;
-    }
-    if (ssa->branch_pfs_forwarded != NULL) {
-        tcg_gen_st8_i32(
-            tcg_constant_i32(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.branch_pfs_forwarded));
-        clears++;
-    }
-    if (ssa->fr_overlay_may_active) {
-        tcg_gen_st_i64(
-            tcg_constant_i64(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.saved_fr_mask));
-        tcg_gen_st_i64(
-            tcg_constant_i64(0), tcg_env,
-            offsetof(CPUIA64State, issue_group.saved_fr_mask) +
-                sizeof(uint64_t));
-        clears += 2;
-    }
+    /* Continuation publication owns a complete validity image, even when
+     * its sparse payload did not mention every register class.  Consuming
+     * only this group's written classes can leave an older inherited BR/GR
+     * bit live while source_overlay_known_clear becomes true. */
+    ia64_tr_clear_complete_overlay_storage(ctx);
     tcg_gen_st8_i32(
         tcg_constant_i32(0), tcg_env,
         offsetof(CPUIA64State, issue_group.typed_active));
     ssa->durable_materialized = false;
     ctx->source_overlay_known_clear = true;
-    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, clears);
-    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, clears);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_OVERLAY_CLEAR, 1);
+    ia64_tr_profile_add(ctx, IA64_PROFILE_ARCH_STORE, 1);
 }
 
 static void ia64_tr_clear_memory_token_at_exit(DisasContext *ctx)
@@ -3358,11 +3288,16 @@ static void ia64_tr_group_clear_ordinary_source_overlay(DisasContext *ctx)
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     unsigned clears = 4;
 
-    /* A fresh fast group never published a durable source image. */
+    /* A fresh fast group never published a durable source image of its own.
+     * It may still have entered while an older inherited image was live,
+     * however.  Only skip the runtime clear when that predecessor storage is
+     * also known clear; otherwise this stop owns clearing the complete stale
+     * validity image before a later mid-group TB can inherit it. */
     if (group->ssa.enabled) {
         IA64TrGroupSSA *ssa = &group->ssa;
 
-        if (!ssa->inherited && !ssa->durable_materialized) {
+        if (!ssa->inherited && !ssa->durable_materialized &&
+            ctx->source_overlay_known_clear) {
             return;
         }
         if (!ssa->inherited) {
@@ -4229,10 +4164,13 @@ static void ia64_tr_ssa_materialize_continuation(
     }
     ia64_tr_ssa_materialize_dirty(ctx);
     if (!pending_memory_restart) {
-        if (!ssa->inherited && !ssa->durable_materialized) {
-            /* Pending memory restart fields are deliberately allowed to stay
-             * inert after success.  A real successor owner must first replace
-             * that storage as a complete validity image. */
+        if (!ssa->inherited) {
+            /* A resident continuation owns a complete validity image.  Do
+             * not use the translation-time durable_materialized bit to skip
+             * this replacement: a prior publication may live on a generated
+             * control-flow arm that did not execute at runtime.  Replacing
+             * the image before each sparse publication prevents an older
+             * inherited class from becoming valid under the new owner. */
             ia64_tr_clear_complete_overlay_storage(ctx);
         }
         /* Sparse AR preservation helpers require an explicit durable owner. */
@@ -4581,6 +4519,15 @@ static void ia64_tr_group_begin_instruction(
              * makes debug and release builds follow the same path instead of
              * relying on an assertion-only invariant.
              */
+            /* Shape C consumes the durable overlay directly.  A fresh
+             * architectural group must therefore replace its validity image
+             * at runtime even when the TB-entry flags describe a clear
+             * frontier: those flags cannot prove that a publication on an
+             * earlier generated control-flow arm executed.  Shape A/B use
+             * resident entry SSA and retain the cheap known-clear fast path. */
+            if (!group->ssa.enabled) {
+                ctx->source_overlay_known_clear = false;
+            }
             if (!ctx->source_overlay_known_clear) {
                 ia64_tr_store_source_visibility_state(ctx, true, false);
                 ctx->source_overlay_known_clear = true;
@@ -6204,8 +6151,6 @@ static bool ia64_tr_decoded_bundle_requires_io_boundary(
     const DisasContext *ctx, const IA64DecodedInstructionBundle *decoded,
     uint8_t accepted_last_slot)
 {
-    (void)ctx;
-
     for (unsigned slot = decoded->start_slot;
          slot <= accepted_last_slot; slot++) {
         const IA64Instruction *insn;
@@ -6226,7 +6171,7 @@ static bool ia64_tr_decoded_bundle_requires_io_boundary(
             return true;
         }
         if (ia64_tr_decoded_is_ordinary_integer_memory(insn->opcode)) {
-            return true;
+            return ia64_tr_memory_requires_io_boundary(ctx);
         }
         descriptor = ia64_tr_decoded_data_plane(insn->opcode);
         if (descriptor == NULL) {
@@ -6245,7 +6190,7 @@ static bool ia64_tr_decoded_bundle_requires_io_boundary(
         case IA64_TR_DATA_PLANE_FP_LOAD_PAIR:
         case IA64_TR_DATA_PLANE_FP_STORE:
         case IA64_TR_DATA_PLANE_LFETCH:
-            return true;
+            return ia64_tr_memory_requires_io_boundary(ctx);
         case IA64_TR_DATA_PLANE_FC:
         case IA64_TR_DATA_PLANE_CHK_S:
             /* Cache invalidation and checked control transfer remain focused
@@ -9256,12 +9201,6 @@ static void ia64_tr_select_execution_shape(DisasContext *ctx)
                 IA64_TB_FLAG_DATA_DEBUG_ACTIVE) != 0) {
         reason = IA64_TR_SHAPE_C_REASON_DATA_DEBUG;
     }
-    if (reason == IA64_TR_SHAPE_C_REASON_NONE) {
-        /* WP2 recovery configuration: retain the typed implementation, but
-         * keep architectural state durable until Shape-B continuation is
-         * revisited against the full guest corpus. */
-        reason = IA64_TR_SHAPE_C_REASON_DURABLE_OPEN;
-    }
     ctx->rewrite_shape_c_reason = reason;
     ctx->rewrite_ssa_enabled = reason == IA64_TR_SHAPE_C_REASON_NONE;
     if (reason != IA64_TR_SHAPE_C_REASON_NONE) {
@@ -10040,12 +9979,9 @@ static void ia64_tr_publish_decoded_memory_access_common(
      * eagerly retired cache prefix without destroying the group-entry source
      * overlay, then publish the exact restart slot before the access.
      */
-    /*
-     * Keep direct SoftMMU memory as the final bundle in this recovery build.
-     * The continuation machinery remains available, but ordinary memory does
-     * not cross a TB until its resident open-group handoff is corrected.
-     */
-    translator_io_start(&ctx->base);
+    if (ia64_tr_memory_requires_io_boundary(ctx)) {
+        translator_io_start(&ctx->base);
+    }
     if (ctx->rewrite_group.ssa.enabled) {
         ia64_tr_ssa_materialize_safepoint(ctx);
     }

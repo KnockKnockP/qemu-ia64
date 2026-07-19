@@ -9,6 +9,7 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "exec/cputlb.h"
 #include "hw/acpi/acpi.h"
 #include "hw/char/serial-mm.h"
 #include "hw/core/cpu.h"
@@ -67,6 +68,16 @@ typedef struct VibtaniumPciBarAllocator {
     uint64_t mem_next;
     uint64_t mem_limit;
 } VibtaniumPciBarAllocator;
+
+static void vibtanium_load_efi_app(VibtaniumMachineState *vms,
+                                   MachineState *machine);
+
+static void vibtanium_cpu_reset_on_cpu(CPUState *cs, run_on_cpu_data data)
+{
+    (void)data;
+    cpu_reset(cs);
+    tlb_flush(cs);
+}
 
 OBJECT_DECLARE_SIMPLE_TYPE(VibtaniumPciHostState, VIBTANIUM_PCI_HOST)
 
@@ -460,9 +471,12 @@ static void vibtanium_reset(MachineState *machine, ResetType type)
 {
     VibtaniumMachineState *vms = VIBTANIUM_MACHINE(machine);
 
+    vibtanium_efi_boot_manager_destroy(vms);
+    run_on_cpu(CPU(vms->cpu), vibtanium_cpu_reset_on_cpu, RUN_ON_CPU_NULL);
     qemu_devices_reset(type);
     vibtanium_configure_firmware_pci(vms);
     vibtanium_efi_console_enter_graphics_mode();
+    vibtanium_load_efi_app(vms, machine);
 }
 
 static void vibtanium_pci_init(VibtaniumMachineState *vms)
@@ -989,7 +1003,7 @@ static void vibtanium_write_guest_blob(CPUIA64State *env, const char *name,
     address_space_flush_icache_range(&address_space_memory, addr, size);
 }
 
-static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
+static bool vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                                        MachineState *machine,
                                        VibtaniumEfiImage *image,
                                        const VibtaniumEfiBlockDevice *boot_media)
@@ -1034,7 +1048,7 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                                     image->size);
         warn_report("vibtanium EFI image commit skipped because CPU state "
                     "is already initialized");
-        return;
+        return false;
     }
 
     ia64_diag_record_efi_commit(&vms->cpu->env, "begin",
@@ -1107,6 +1121,7 @@ static void vibtanium_commit_efi_image(VibtaniumMachineState *vms,
                 (uint64_t)VIBTANIUM_EFI_CON_OUT,
                 (uint64_t)VIBTANIUM_EFI_LOADED_IMAGE);
     warn_report("Vibtanium EFI entered the full IA-64 TCG execution engine");
+    return true;
 }
 
 static void vibtanium_warn_frontier(VibtaniumEfiFrontierKind kind,
@@ -1151,6 +1166,7 @@ bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
 {
     Error *local_err = NULL;
     VibtaniumEfiImage image;
+    bool committed;
 
     if (!machine->kernel_filename) {
         return false;
@@ -1164,10 +1180,13 @@ bool vibtanium_load_explicit_efi_app(VibtaniumMachineState *vms,
         exit(1);
     }
 
-    vibtanium_commit_efi_image(vms, machine, &image, NULL);
-    vibtanium_trace_loader_frontier(&image);
+    committed = vibtanium_commit_efi_image(vms, machine, &image, NULL);
+
+    if (committed) {
+        vibtanium_trace_loader_frontier(&image);
+    }
     vibtanium_efi_image_destroy(&image);
-    return true;
+    return committed;
 }
 
 bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
@@ -1177,6 +1196,7 @@ bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
     Error *local_err = NULL;
     VibtaniumEfiImage image;
     VibtaniumEfiBlockDevice bit_media;
+    bool committed;
 
     if (!vms->built_in_test) {
         return false;
@@ -1203,10 +1223,13 @@ bool vibtanium_load_builtin_bit(VibtaniumMachineState *vms,
     warn_report("vibtanium EFI boot manager selected embedded BIT "
                 "image-bytes=%zu media-bytes=%" PRIu64,
                 vibtanium_efi_bit_blob_size, bit_media.size);
-    vibtanium_commit_efi_image(vms, machine, &image, &bit_media);
-    vibtanium_trace_loader_frontier(&image);
+    committed = vibtanium_commit_efi_image(vms, machine, &image, &bit_media);
+
+    if (committed) {
+        vibtanium_trace_loader_frontier(&image);
+    }
     vibtanium_efi_image_destroy(&image);
-    return true;
+    return committed;
 #else
     (void)vms;
     (void)machine;
@@ -1323,6 +1346,7 @@ bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
     char source[384];
     const char *kind = entry ? "boot-entry" : "discovery";
     const char *boot_path = path && *path ? path : VIBTANIUM_EFI_FALLBACK_PATH;
+    bool committed;
 
     if (!vibtanium_efi_media_read_path(dev, boot_path,
                                        &file_data, &file_size, source,
@@ -1385,13 +1409,16 @@ bool vibtanium_try_media_efi_app(VibtaniumMachineState *vms,
                 cached_dev.name ? cached_dev.name : "<unnamed>",
                 cached_dev.size);
 
-    vibtanium_commit_efi_image(vms, machine, &image, &cached_dev);
-    if (entry) {
-        vibtanium_queue_nvram_drivers(vms);
+    committed = vibtanium_commit_efi_image(vms, machine, &image, &cached_dev);
+
+    if (committed) {
+        if (entry) {
+            vibtanium_queue_nvram_drivers(vms);
+        }
+        vibtanium_trace_loader_frontier(&image);
     }
-    vibtanium_trace_loader_frontier(&image);
     vibtanium_efi_image_destroy(&image);
-    return true;
+    return committed;
 }
 
 bool vibtanium_try_boot_entry_on_media(VibtaniumMachineState *vms,

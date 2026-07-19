@@ -1340,12 +1340,27 @@ static GArray *build_acpi_dsdt_table(void)
     };
     Aml *dsdt;
     Aml *scope;
+    Aml *pkg;
 
     acpi_table_begin(&table, table_data);
     dsdt = init_aml_allocator();
     scope = aml_scope("_SB");
     aml_append(scope, build_acpi_pci0_device());
     aml_append(dsdt, scope);
+
+    /* ACPI System State Package: PM1a_CNT SLP_TYP 0 is the soft-off state
+     * implemented by acpi_pm1_cnt_init().  Without _S5, generic IA-64 Linux
+     * has no platform pm_power_off hook and can only park the CPU in PAL_HALT.
+     */
+    scope = aml_scope("\\");
+    pkg = aml_package(4);
+    aml_append(pkg, aml_int(0)); /* PM1a_CNT.SLP_TYP */
+    aml_append(pkg, aml_int(0)); /* PM1b_CNT is not implemented. */
+    aml_append(pkg, aml_int(0)); /* reserved */
+    aml_append(pkg, aml_int(0)); /* reserved */
+    aml_append(scope, aml_name_decl("_S5", pkg));
+    aml_append(dsdt, scope);
+
     g_array_append_vals(table_data, dsdt->buf->data, dsdt->buf->len);
     acpi_table_end(NULL, &table);
     free_aml_allocator();
@@ -1789,6 +1804,8 @@ bool vibtanium_efi_cpu_is_pristine_for_handoff(const CPUIA64State *env)
 bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
                                const VibtaniumEfiImage *image)
 {
+    IA64TranslateResult translation;
+
     if (!env || !image) {
         return false;
     }
@@ -1818,6 +1835,11 @@ bool vibtanium_efi_prepare_cpu(CPUIA64State *env,
     env->ar[IA64_AR_BSPSTORE] = env->rse.bspstore;
     env->ar[IA64_AR_KR0] = VIBTANIUM_IO_PORT_BASE;
     ia64_firmware_identity_tlb_set(env, true);
+    if (!ia64_firmware_identity_tlb_fill(
+            env, image->entry, MMU_INST_FETCH,
+            ia64_tcg_mmu_index_for_psr(env->psr, true), &translation)) {
+        return false;
+    }
     vibtanium_efi_loader_benchmark_start();
     return true;
 }

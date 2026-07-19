@@ -13,6 +13,7 @@
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "system/rtc.h"
+#include "system/runstate.h"
 #include "system/system.h"
 #include "target/ia64/insn.h"
 #include "target/ia64/mem.h"
@@ -4721,6 +4722,19 @@ static uint64_t efi_dispatch_runtime_service(CPUIA64State *env, unsigned index)
     case 9: /* GetNextHighMonotonicCount */
         return efi_runtime_get_next_high_mono_count(env);
     case 10: /* ResetSystem */
+        switch (ia64_read_gr(env, 32)) {
+        case 0: /* EfiResetCold */
+        case 1: /* EfiResetWarm */
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            break;
+        case 2: /* EfiResetShutdown */
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+            break;
+        default: /* EfiResetPlatformSpecific or an invalid reset type. */
+            return VIBTANIUM_EFI_UNSUPPORTED;
+        }
+        /* The request stops the current vCPU.  Per UEFI, ResetSystem does
+         * not return after a supported request. */
         return VIBTANIUM_EFI_SUCCESS;
     default:
         return VIBTANIUM_EFI_UNSUPPORTED;

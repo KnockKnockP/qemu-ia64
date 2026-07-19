@@ -130,6 +130,9 @@ static bool ia64_cpu_has_work(CPUState *cs)
 {
     IA64CPU *cpu = IA64_CPU(cs);
 
+    if (cpu->env.firmware_boot_wait) {
+        return false;
+    }
     return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) ||
            ia64_external_interrupt_enabled(&cpu->env);
 }
@@ -237,6 +240,8 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                     "  CFM %016" PRIx64 "\n",
                  ia64_env_psr(env), env->pr, env->cfm);
     qemu_fprintf(f, "PSR.IC-INFLIGHT %u\n", env->psr_ic_inflight);
+    qemu_fprintf(f, "FIRMWARE IDENTITY-TLB %u  BOOT-WAIT %u\n",
+                 env->firmware_identity_tlb, env->firmware_boot_wait);
     qemu_fprintf(f, "RSE RSC %016" PRIx64 "  BSP %016" PRIx64
                     "  BSPSTORE %016" PRIx64 "  BSPLOAD %016" PRIx64
                     "  RNAT %016" PRIx64
@@ -334,15 +339,14 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
             initial_kind, access_type);
 
         /* A serialized IC=0 data miss is delivered before any walk/install. */
-        if (!data_nested &&
-            !ia64_firmware_identity_tlb_fill(&cpu->env, address, access_type,
-                                             mmu_idx, &result) &&
-            ia64_vhpt_walk_runtime_enabled()) {
-            vhpt_status = rse_access ?
-                ia64_try_rse_vhpt_walk(&cpu->env, cs->as, address,
-                                       access_type) :
-                ia64_try_vhpt_walk(&cpu->env, cs->as, address, access_type);
-            if (vhpt_status == IA64_VHPT_WALK_INSTALLED) {
+        if (!data_nested) {
+            bool firmware_installed = ia64_firmware_identity_tlb_fill(
+                &cpu->env, address, access_type, mmu_idx, &result);
+
+            if (firmware_installed) {
+                /* The assist installs an architectural TC entry. Re-run the
+                 * target lookup so this same SoftMMU fill consumes it rather
+                 * than delivering the miss it just resolved. */
                 if (rse_access) {
                     ia64_translate_rse_address_no_detail(
                         &cpu->env, address, access_type, mmu_idx, false,
@@ -352,8 +356,25 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                         &cpu->env, address, access_type, mmu_idx, false,
                         &result);
                 }
-            } else if (vhpt_status == IA64_VHPT_WALK_FAULT) {
-                exception_kind = IA64_EXCEPTION_VHPT_TRANSLATION;
+            } else if (ia64_vhpt_walk_runtime_enabled()) {
+                vhpt_status = rse_access ?
+                    ia64_try_rse_vhpt_walk(&cpu->env, cs->as, address,
+                                           access_type) :
+                    ia64_try_vhpt_walk(&cpu->env, cs->as, address,
+                                       access_type);
+                if (vhpt_status == IA64_VHPT_WALK_INSTALLED) {
+                    if (rse_access) {
+                        ia64_translate_rse_address_no_detail(
+                            &cpu->env, address, access_type, mmu_idx, false,
+                            &result);
+                    } else {
+                        ia64_translate_address_no_detail(
+                            &cpu->env, address, access_type, mmu_idx, false,
+                            &result);
+                    }
+                } else if (vhpt_status == IA64_VHPT_WALK_FAULT) {
+                    exception_kind = IA64_EXCEPTION_VHPT_TRANSLATION;
+                }
             }
         }
     }

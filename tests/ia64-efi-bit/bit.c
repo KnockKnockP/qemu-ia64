@@ -969,10 +969,6 @@ static bool test_runtime_services(void)
                 call2(rt->fn[RT_CONVERT_POINTER], 0, (uint64_t)&pointer) ==
                     EFI_SUCCESS &&
                 pointer == (0xe000000000000000UL | (uint64_t)g_st));
-    ok &= check_status("efi RuntimeServices ResetSystem no-op",
-                       call4(rt->fn[RT_RESET_SYSTEM], 0, 0, 0, 0),
-                       EFI_SUCCESS);
-
     call5(rt->fn[RT_SET_VARIABLE], (uint64_t)bit_var_name,
           (uint64_t)&bit_variable_guid, 0, 0, 0);
     return ok;

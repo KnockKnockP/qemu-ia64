@@ -3023,28 +3023,118 @@ def call_frame_architectural_program() -> Program:
                    br_call(0xc0, 0x120, 2)),
             spin_bundle(0xd0),
 
+            # Grow the callee frame before consuming its inherited inputs,
+            # matching normal compiled-function entry.  The remapped output
+            # value/NaT pairs must survive this second RSE mapping transition.
+            Bundle(0x120, 0x01, alloc(31, 8, 8, 0), nop_i(), nop_i()),
             # Project the remapped output value/NaT pairs into static GRs so
             # HMP can observe both.  Read back the packed PFS and live EC.
-            Bundle(0x120, 0x03, nop_m(), adds(20, 0, 32),
+            Bundle(0x130, 0x03, nop_m(), adds(20, 0, 32),
                    adds(21, 0, 33)),
-            Bundle(0x130, 0x01, nop_m(), mov_argr(22, 64),
+            Bundle(0x140, 0x01, nop_m(), mov_argr(22, 64),
                    mov_argr(23, 66)),
             # A stale ALAT entry for caller r32 would incorrectly fall
             # through.  Correct frame-entry invalidation takes recovery.
-            Bundle(0x140, 0x01, chk_a(32, 0x140, 0x170),
+            Bundle(0x150, 0x01, chk_a(32, 0x150, 0x180),
                    nop_i(), nop_i()),
-            Bundle(0x150, 0x01, nop_m(), adds(24, 2, 0), nop_i()),
-            Bundle(0x160, 0x11, nop_m(), nop_i(),
-                   br_cond(0x160, 0x180)),
-            Bundle(0x170, 0x01, nop_m(), adds(24, 1, 0), nop_i()),
-            spin_bundle(0x180),
+            Bundle(0x160, 0x01, nop_m(), adds(24, 2, 0), nop_i()),
+            Bundle(0x170, 0x11, nop_m(), nop_i(),
+                   br_cond(0x170, 0x190)),
+            Bundle(0x180, 0x01, nop_m(), adds(24, 1, 0), nop_i()),
+            spin_bundle(0x190),
         ),
-        terminal_ip=0x180,
+        terminal_ip=0x190,
         data=(
             DataWord(0x1800, pfs_cpl3, 8),
             DataWord(0x1810, output_nat_value, 8),
             DataWord(0x1820, advanced_value, 8),
         ),
+    )
+
+
+def call_alloc_output_handoff_program() -> Program:
+    """Carry the first output of a SOL15 frame through call and alloc."""
+    return Program(
+        name="stopped SOL15 output survives store, call, and callee alloc",
+        bundles=(
+            Bundle(0x10, 0x01, alloc(31, 20, 15, 0), nop_i(), nop_i()),
+            Bundle(0x20, 0x01, nop_m(), adds(8, 0x666, 0),
+                   adds(9, 0x1000, 0)),
+            # r47 is caller output zero.  Its stopped value must be resident
+            # before the following Shape-B store/call bundle enters helpers.
+            Bundle(0x30, 0x01, nop_m(), adds(47, 0, 8), nop_i()),
+            Bundle(0x40, 0x11, st8(8, 9), nop_i(),
+                   br_call(0x40, 0x80, 2)),
+            # A compiled callee normally grows its inherited input frame
+            # before consuming r32.  Preserve the value across both remaps.
+            Bundle(0x80, 0x01, alloc(31, 11, 11, 1), nop_i(), nop_i()),
+            Bundle(0x90, 0x01, nop_m(), adds(20, 0, 32), nop_i()),
+            spin_bundle(0xa0),
+        ),
+        terminal_ip=0xa0,
+    )
+
+
+def call_return_caller_local_program() -> Program:
+    """Preserve a same-group loaded caller local through call and return."""
+    return Program(
+        name="loaded call-prefix local survives callee alloc and return",
+        bundles=(
+            # Enter the function under test with a nonzero physical frame
+            # base, as a real nested kernel call does.
+            Bundle(0x10, 0x01, alloc(31, 35, 35, 0), nop_i(), nop_i()),
+            Bundle(0x20, 0x11, nop_m(), nop_i(),
+                   br_call(0x20, 0x100, 0)),
+            spin_bundle(0x30),
+
+            Bundle(0x100, 0x01, alloc(45, 20, 15, 0),
+                   mov_brgr(44, 0), nop_i()),
+            Bundle(0x110, 0x01, nop_m(), adds(15, 0x1000, 0),
+                   adds(11, 0x1008, 0)),
+            Bundle(0x120, 0x01, nop_m(), nop_i(), nop_i()),
+            # Both loads precede the call in one MMB issue group.  r40 is a
+            # caller local and r47 is caller output zero; the branch commits
+            # both prefix results before it remaps the register stack.
+            Bundle(0x130, 0x19, ld8(40, 15), ld8(47, 11),
+                   br_call(0x130, 0x180, 0)),
+            Bundle(0x140, 0x01, nop_m(), adds(20, 0, 40), nop_i()),
+            spin_bundle(0x150),
+
+            Bundle(0x180, 0x01, alloc(41, 11, 11, 1),
+                   mov_brgr(42, 0), nop_i()),
+            Bundle(0x190, 0x01, nop_m(), mov_gr_to_pfs(41),
+                   mov_grbr(6, 42)),
+            Bundle(0x1a0, 0x11, nop_m(), nop_i(), br_ret(6)),
+        ),
+        terminal_ip=0x150,
+        data=(
+            DataWord(0x1000, 0x666, 8),
+            DataWord(0x1008, 0x777, 8),
+        ),
+    )
+
+
+def return_prefix_stack_restore_program() -> Program:
+    """Publish a static stack-pointer restore before a frame return."""
+    return Program(
+        name="return commits same-group stack-pointer restore",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(12, 0x1000, 0), nop_i()),
+            Bundle(0x20, 0x11, nop_m(), nop_i(),
+                   br_call(0x20, 0x80, 0)),
+            Bundle(0x30, 0x01, nop_m(), nop_i(), nop_i()),
+            Bundle(0x40, 0x01, nop_m(), nop_i(), nop_i()),
+            Bundle(0x50, 0x01, nop_m(), adds(20, 0, 12), nop_i()),
+            spin_bundle(0x60),
+
+            Bundle(0x80, 0x01, alloc(41, 11, 11, 1),
+                   mov_brgr(42, 0), nop_i()),
+            Bundle(0x90, 0x01, nop_m(), adds(12, -0x40, 12), nop_i()),
+            Bundle(0xa0, 0x02, nop_m(), mov_gr_to_pfs(41),
+                   mov_grbr(6, 42)),
+            Bundle(0xb0, 0x19, nop_m(), adds(12, 0x40, 12), br_ret(6)),
+        ),
+        terminal_ip=0x60,
     )
 
 
@@ -8993,6 +9083,11 @@ def test_typed_call_branches(qemu: Path) -> str:
         typed_call_traces=((0xc0, 0x120, False, 1),),
         one_bundle_per_tb=True,
     )
+    frame_combined = run_program(
+        qemu,
+        frame_program,
+        typed_call_traces=((0xc0, 0x120, False, 1),),
+    )
     _require(not frame.exception_pending,
              "architectural B3 call-frame program has a pending exception")
     _require(frame.ip == frame_program.terminal_ip,
@@ -9009,10 +9104,11 @@ def test_typed_call_branches(qemu: Path) -> str:
         "B3 call link is not bundle+16: b2=0x{:x}".format(frame.br[2]),
     )
     _require(
-        frame.cfm == 2 and frame.rse_base == 4 and
+        frame.cfm == (8 | (8 << 7)) and frame.rse_base == 4 and
         frame.rse_bsp == 0x1020 and
         frame.rse_bspstore == 0x1000 and frame.rse_bspload == 0x1000,
-        "call-frame remap expected CFM=2/base=4/BSP=0x1020 and "
+        "call-frame remap plus callee alloc expected CFM=SOF8/SOL8/"
+        "base=4/BSP=0x1020 and "
         "BSPSTORE=BSPLOAD=0x1000; got CFM=0x{:x}/base={}/"
         "BSP=0x{:x}/0x{:x}/0x{:x}".format(
             frame.cfm, frame.rse_base, frame.rse_bsp,
@@ -9036,6 +9132,90 @@ def test_typed_call_branches(qemu: Path) -> str:
     _require(
         frame.gr[24] == 1,
         "call-frame entry left a caller-stacked ALAT entry observable",
+    )
+    _require(
+        frame_combined == frame,
+        "combined call-frame execution differs from one-bundle-per-TB "
+        "execution",
+    )
+    program_count += 1
+    call_encodings += 1
+
+    stack_program = return_prefix_stack_restore_program()
+    stack_split = run_program(qemu, stack_program, one_bundle_per_tb=True)
+    stack_combined = run_program(qemu, stack_program)
+    _require(
+        stack_split.gr[20] == 0x1000,
+        "split return lost stack-pointer prefix: r20=0x{:x}".format(
+            stack_split.gr[20]
+        ),
+    )
+    _require(
+        stack_combined == stack_split,
+        "combined return-prefix publication differs from split: "
+        "combined r20=0x{:x}, split r20=0x{:x}".format(
+            stack_combined.gr[20], stack_split.gr[20]
+        ),
+    )
+    program_count += 1
+    call_encodings += 1
+
+    local_program = call_return_caller_local_program()
+    local_split = run_program(
+        qemu,
+        local_program,
+        typed_call_traces=((0x20, 0x100, False, 1),
+                           (0x130, 0x180, False, 1)),
+        typed_return_traces=((0x1a0, 3),),
+        one_bundle_per_tb=True,
+    )
+    local_combined = run_program(
+        qemu,
+        local_program,
+        typed_call_traces=((0x20, 0x100, False, 1),
+                           (0x130, 0x180, False, 1)),
+        typed_return_traces=((0x1a0, 3),),
+    )
+    _require(
+        local_split.gr[20] == 0x666,
+        "split call/return lost stopped caller local r40: r20=0x{:x}".format(
+            local_split.gr[20]
+        ),
+    )
+    _require(
+        local_combined == local_split,
+        "combined call/return caller-local handoff differs from split: "
+        "combined r20=0x{:x}, split r20=0x{:x}".format(
+            local_combined.gr[20], local_split.gr[20]
+        ),
+    )
+    program_count += 1
+    call_encodings += 1
+
+    handoff_program = call_alloc_output_handoff_program()
+    handoff_split = run_program(
+        qemu,
+        handoff_program,
+        typed_call_traces=((0x40, 0x80, False, 1),),
+        one_bundle_per_tb=True,
+    )
+    handoff_combined = run_program(
+        qemu,
+        handoff_program,
+        typed_call_traces=((0x40, 0x80, False, 1),),
+    )
+    _require(
+        handoff_split.gr[20] == 0x666,
+        "split call/alloc handoff lost caller output r47: r20=0x{:x}".format(
+            handoff_split.gr[20]
+        ),
+    )
+    _require(
+        handoff_combined == handoff_split,
+        "combined SOL15 call/alloc handoff differs from split execution: "
+        "combined r20=0x{:x}, split r20=0x{:x}".format(
+            handoff_combined.gr[20], handoff_split.gr[20]
+        ),
     )
     program_count += 1
     call_encodings += 1
@@ -9196,10 +9376,10 @@ def test_typed_call_branches(qemu: Path) -> str:
     program_count += 1
     call_encodings += 1
 
-    _require(program_count == 9 and call_encodings == 9,
-             "typed call corpus drifted from its exact nine programs/calls")
+    _require(program_count == 12 and call_encodings == 12,
+             "typed call corpus drifted from its exact twelve programs/calls")
     return (
-        "nine forced-one-bundle-TB call programs cover B3/X4 forward and "
+        "twelve split-and-combined call programs cover B3/X4 forward and "
         "backward targets, B5 forwarding/alignment/b1==b2 latching, p0 and "
         "same-group true/false/nullified predicates, stopped/no-stop and "
         "equal-fallthrough visibility, link/PFS/RSE/output+NaT/ALAT frame "

@@ -47,7 +47,7 @@ Override those variables only if the toolchain is installed elsewhere.
 | Event/timer services | CreateEvent, SignalEvent, CheckEvent, WaitForEvent, SetTimer time warp, and CloseEvent |
 | Protocol database | HandleProtocol, LocateHandle, InstallProtocolInterface, OpenProtocol, CloseProtocol, LocateProtocol, and UninstallProtocolInterface |
 | Boot utility services | CalculateCrc32, CopyMem, and SetMem |
-| Runtime services | Get/SetTime, wakeup time, Set/Get/GetNextVariableName, high monotonic count, ConvertPointer, SetVirtualAddressMap, and ResetSystem |
+| Runtime services | Get/SetTime, wakeup time, Set/Get/GetNextVariableName, high monotonic count, ConvertPointer, and SetVirtualAddressMap (the non-returning ResetSystem path is covered by machine lifecycle tests) |
 | Graphics Output Protocol | QueryMode, SetMode, and all implemented Blt operations |
 | Block/File media services | BlockIO reset/read/write-protected/flush plus SimpleFS and EFI_FILE open/read/get-info/position/write-protected paths |
 
