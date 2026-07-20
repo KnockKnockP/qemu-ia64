@@ -1,0 +1,106 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.conformance-runner-protocol",
+  "schema_version": 1,
+  "profile": {"id": 1, "name": "vibtanium-strict-up"},
+  "publication": {
+    "completion_marker": "magic",
+    "writer_order": "payload-then-release-magic",
+    "reader_rule": "ignore-zero-magic-reject-nonzero-invalid"
+  },
+  "record_types": {
+    "command": {
+      "magic": "0x49413634434d4421",
+      "size": 32,
+      "fields": [
+        {"name": "magic", "offset": 0, "type": "u64-le"},
+        {"name": "format_version", "offset": 8, "type": "u64-le"},
+        {"name": "generation", "offset": 16, "type": "u64-le"},
+        {"name": "opcode", "offset": 24, "type": "u64-le"}
+      ]
+    },
+    "heartbeat": {
+      "magic": "0x4941363448454154",
+      "size": 48,
+      "fields": [
+        {"name": "magic", "offset": 0, "type": "u64-le"},
+        {"name": "format_version", "offset": 8, "type": "u64-le"},
+        {"name": "generation", "offset": 16, "type": "u64-le"},
+        {"name": "phase", "offset": 24, "type": "u64-le"},
+        {"name": "sequence", "offset": 32, "type": "u64-le"},
+        {"name": "elapsed_ticks", "offset": 40, "type": "u64-le"}
+      ]
+    },
+    "result": {
+      "magic": "0x4941363452455355",
+      "size": 192,
+      "fields": [
+        {"name": "magic", "offset": 0, "type": "u64-le"},
+        {"name": "format_version", "offset": 8, "type": "u64-le"},
+        {"name": "record_size", "offset": 16, "type": "u64-le"},
+        {"name": "profile", "offset": 24, "type": "u64-le"},
+        {"name": "generation", "offset": 32, "type": "u64-le"},
+        {"name": "test_id", "offset": 40, "type": "u64-le"},
+        {"name": "case_id", "offset": 48, "type": "u64-le"},
+        {"name": "normative_id", "offset": 56, "type": "u64-le"},
+        {"name": "seed", "offset": 64, "type": "u64-le"},
+        {"name": "phase", "offset": 72, "type": "u64-le"},
+        {"name": "initial_state", "offset": 80, "type": "u64-le"},
+        {"name": "expected_state", "offset": 88, "type": "u64-le"},
+        {"name": "actual_state", "offset": 96, "type": "u64-le"},
+        {"name": "expected_interruption", "offset": 104, "type": "u64-le"},
+        {"name": "actual_interruption", "offset": 112, "type": "u64-le"},
+        {"name": "vector", "offset": 120, "type": "u64-le"},
+        {"name": "saved_iip", "offset": 128, "type": "u64-le"},
+        {"name": "saved_ipsr", "offset": 136, "type": "u64-le"},
+        {"name": "saved_isr", "offset": 144, "type": "u64-le"},
+        {"name": "committed_prefix", "offset": 152, "type": "u64-le"},
+        {"name": "retry_result", "offset": 160, "type": "u64-le"},
+        {"name": "external_transactions", "offset": 168, "type": "u64-le"},
+        {"name": "elapsed_ticks", "offset": 176, "type": "u64-le"},
+        {"name": "classification", "offset": 184, "type": "u64-le"}
+      ]
+    }
+  },
+  "enums": {
+    "command": {"run": 1, "continue": 2, "stop": 3},
+    "phase": {"idle": 0, "running": 1, "complete": 2, "repair": 3, "retry": 4},
+    "retry_result": {"not-requested": 0, "repaired-pass": 1, "repair-failed": 2, "retry-failed": 3},
+    "classification": {
+      "pass": 0,
+      "normative-assertion-failure": 1,
+      "guest-test-harness-failure": 2,
+      "malformed-result": 3,
+      "heartbeat-loss": 4,
+      "qemu-hang": 5,
+      "qemu-assertion": 6,
+      "qemu-abort": 7,
+      "host-crash": 8,
+      "missing-output": 9,
+      "unexpected-exit": 10,
+      "unavailable-prerequisite": 11,
+      "test-infrastructure-failure": 12
+    }
+  },
+  "memory_map": {
+    "command_queue": "0x8000",
+    "heartbeat": "0x8100",
+    "result_queue": "0x9000",
+    "result_stride": 256,
+    "scratch": "0xc000",
+    "ivt": "0x10000",
+    "short_vhpt": "0x20000"
+  },
+  "case_isolation": [
+    "restore-declared-registers",
+    "clear-test-memory",
+    "clear-pending-test-events",
+    "advance-generation",
+    "verify-no-state-leak"
+  ],
+  "architecture_builders": {
+    "ivt": {"alignment": 32768, "size": 32768},
+    "short_vhpt": {"entry_size": 8, "minimum_size_bits": 15},
+    "repair_retry": {"records_vector_state": true, "requires_same_retry_ip": true}
+  }
+}

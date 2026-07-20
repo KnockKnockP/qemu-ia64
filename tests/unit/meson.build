@@ -310,6 +310,13 @@ test('test-ia64-normative-catalogue', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-runner-protocol', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-conformance-runner.py',
+            '--check',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-rse-spine-static', python,
      args: [meson.current_source_dir() / 'test-ia64-rse-spine-static.py',
             '--source-root', meson.project_source_root()],
@@ -355,6 +362,15 @@ if 'ia64-softmmu' in target_dirs
               '--check',
               '--root', meson.project_source_root(),
               '--build-dir', meson.project_build_root(),
+              '--binary', ia64_full_tcg_emulator.full_path()],
+       timeout: 30,
+       suite: ['unit'])
+
+  test('test-ia64-conformance-runner', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-conformance-runner.py',
+              '--source-root', meson.project_source_root(),
               '--binary', ia64_full_tcg_emulator.full_path()],
        timeout: 30,
        suite: ['unit'])

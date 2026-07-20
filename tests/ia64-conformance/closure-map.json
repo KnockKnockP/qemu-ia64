@@ -11,7 +11,8 @@
     "test-ia64-conformance-closure",
     "test-ia64-evidence-map",
     "test-ia64-implementation-surface",
-    "test-ia64-normative-catalogue"
+    "test-ia64-normative-catalogue",
+    "test-ia64-runner-protocol"
   ],
   "mappings": [
     {

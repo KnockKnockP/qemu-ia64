@@ -100,6 +100,26 @@
       "limitations": ["Construction-time closure reporting does not execute conformance cases."]
     },
     {
+      "id": "meson:test-ia64-conformance-runner",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-conformance-runner",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-conformance-runner.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/runner-protocol.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-conformance-runner.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-conformance-runner",
+      "scope": "Persistent command batching, binary result and heartbeat queues, generation isolation, and host failure classification.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["The minimal runner self-test validates infrastructure and does not make a normative architectural claim."]
+    },
+    {
       "id": "meson:test-ia64-data-plane-tcg",
       "kind": "bare-metal",
       "lane": "bare-metal-batch",
@@ -494,6 +514,26 @@
       "conformance_role": "supporting",
       "closes_normative_rows": [],
       "limitations": ["Source structure alone does not prove RSE architectural behavior."]
+    },
+    {
+      "id": "meson:test-ia64-runner-protocol",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-runner-protocol",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-conformance-runner.py"},
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-conformance-runner.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/runner-protocol.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-runner-protocol",
+      "scope": "Binary runner protocol schema plus IVT, short-VHPT, translation, and repair/retry builder invariants.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Builder self-tests validate construction contracts but do not execute a normative guest case."]
     },
     {
       "id": "meson:test-ia64-system-tcg",
