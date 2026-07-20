@@ -304,6 +304,12 @@ test('test-ia64-opcode-ledger', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-normative-catalogue', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-normative-catalogue.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-rse-spine-static', python,
      args: [meson.current_source_dir() / 'test-ia64-rse-spine-static.py',
             '--source-root', meson.project_source_root()],

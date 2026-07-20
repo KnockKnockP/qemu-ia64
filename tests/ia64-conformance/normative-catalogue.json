@@ -1,0 +1,693 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.normative-catalogue",
+  "schema_version": 1,
+  "catalogue_revision": 1,
+  "catalogue_policy": {
+    "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
+    "derivation": "manually-authored-from-cited-specification",
+    "implementation_imports": false,
+    "external_emulator_oracle": false
+  },
+  "profiles": [
+    "vibtanium-strict-up",
+    "vibtanium-default-up"
+  ],
+  "rows": [
+    {
+      "id": "BND-001-BUNDLE-FORMAT",
+      "requirement_ids": [
+        "BND-001"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.bundle",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.3",
+        "printed_pages": [
+          "1:38"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "Bundle Format"
+      },
+      "operation": {
+        "kind": "bundle-format",
+        "selector": "one aligned IA-64 instruction bundle",
+        "encoding": "128 bits: template 4:0, slot 0 45:5, slot 1 86:46, slot 2 127:87"
+      },
+      "legal_inputs": [
+        "A 16-byte-aligned 128-bit bundle containing a defined template and legal slot encodings"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "Bundle layout is independent of privilege level"
+      },
+      "state_read": [
+        "128 instruction bits at the aligned bundle address"
+      ],
+      "state_written": [],
+      "predication": {
+        "applies": false,
+        "rule": "Predication affects decoded instructions, not bundle field extraction"
+      },
+      "nat_behavior": "Bundle field extraction does not read or write NaT state",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "No architectural instruction result is committed by bundle field extraction alone",
+      "restart_rule": "A fetch interruption is retried at the interrupted bundle and slot under the applicable interruption rules",
+      "permitted_results": [
+        "Exactly one 5-bit template and three ordered 41-bit instruction slots are extracted from the specified bit ranges"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "BND-001-TEMPLATE-MAP",
+      "requirement_ids": [
+        "BND-001",
+        "BND-002"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.bundle",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.3",
+        "printed_pages": [
+          "1:38",
+          "1:39"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "Template Field Encoding and Instruction Slot Mapping"
+      },
+      "operation": {
+        "kind": "bundle-template",
+        "selector": "defined template encodings from Table 3-10",
+        "encoding": "template values 0x00-0x1d with reserved values excluded"
+      },
+      "legal_inputs": [
+        "0x00 MII",
+        "0x01 MII stop2",
+        "0x02 MI stop1 I",
+        "0x03 MI stop1 I stop2",
+        "0x04 MLX",
+        "0x05 MLX stop2",
+        "0x08 MMI",
+        "0x09 MMI stop2",
+        "0x0a M stop0 MI",
+        "0x0b M stop0 MI stop2",
+        "0x0c MFI",
+        "0x0d MFI stop2",
+        "0x0e MMF",
+        "0x0f MMF stop2",
+        "0x10 MIB",
+        "0x11 MIB stop2",
+        "0x12 MBB",
+        "0x13 MBB stop2",
+        "0x16 BBB",
+        "0x17 BBB stop2",
+        "0x18 MMB",
+        "0x19 MMB stop2",
+        "0x1c MFB",
+        "0x1d MFB stop2"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "Template unit and stop mappings are independent of privilege level"
+      },
+      "state_read": [
+        "5-bit bundle template"
+      ],
+      "state_written": [],
+      "predication": {
+        "applies": false,
+        "rule": "Predication does not change template unit or stop mappings"
+      },
+      "nat_behavior": "Template decoding does not read or write NaT state",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Template decoding alone commits no instruction result",
+      "restart_rule": "A fetch interruption is retried at the interrupted bundle and slot under the applicable interruption rules",
+      "permitted_results": [
+        "Each legal input maps to exactly the listed slot-unit sequence and stop positions"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "BND-003-SEQUENTIAL-ORDER",
+      "requirement_ids": [
+        "BND-003"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.sequencing",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.4",
+        "printed_pages": [
+          "1:39"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "Instruction Sequencing Considerations"
+      },
+      "operation": {
+        "kind": "execution-order",
+        "selector": "sequential bundles and slots",
+        "encoding": "bundle addresses increase first; within a bundle slots increase from 0 through 2"
+      },
+      "legal_inputs": [
+        "A legal instruction stream spanning one or more adjacent bundles"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "Instruction ordering is independent of privilege level"
+      },
+      "state_read": [
+        "instruction stream in increasing bundle-address and slot order"
+      ],
+      "state_written": [
+        "architectural state written by the ordered instructions"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "Predication may dynamically disable an instruction's resource accesses without changing its position in instruction order"
+      },
+      "nat_behavior": "NaT behavior is determined by each ordered instruction",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "For an interruption, commitment follows the separately catalogued instruction-group rule",
+      "restart_rule": "Resume uses the architecturally saved bundle address and slot",
+      "permitted_results": [
+        "Bundles are ordered by increasing memory address and instructions within each bundle are ordered slot 0, slot 1, slot 2"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "GRP-002-STOP-VISIBILITY",
+      "requirement_ids": [
+        "GRP-002"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.issue-group",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.4",
+        "printed_pages": [
+          "1:40"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "Between instruction groups"
+      },
+      "operation": {
+        "kind": "issue-group-boundary",
+        "selector": "producer and consumer separated by an architectural stop",
+        "encoding": "any legal templates that place the producer and consumer in adjacent instruction groups"
+      },
+      "legal_inputs": [
+        "A legal producer followed by a stop and a legal consumer of its result"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The rule applies at every privilege level where both instructions are legal"
+      },
+      "state_read": [
+        "architectural state at the start of the consumer's instruction group"
+      ],
+      "state_written": [
+        "producer state before the stop",
+        "consumer result after the stop"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "Only dynamically enabled resource accesses participate"
+      },
+      "nat_behavior": "A NaT value committed by the producer is visible to the later group according to the consumer's NaT semantics",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "All updates from the previous instruction group precede reads in the next group",
+      "restart_rule": "Any instruction fault uses its separately catalogued restart rule",
+      "permitted_results": [
+        "The consumer reads architectural state after all updates from the producer's instruction group"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "GRP-004-GROUP-ENTRY-REGISTER",
+      "requirement_ids": [
+        "GRP-004"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.issue-group",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.4",
+        "printed_pages": [
+          "1:40"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "Within an instruction group"
+      },
+      "operation": {
+        "kind": "issue-group-register-read",
+        "selector": "multiple legal register accesses in one instruction group",
+        "encoding": "legal dependency cases only; prohibited RAW and WAW cases are outside this row"
+      },
+      "legal_inputs": [
+        "A well-formed instruction group satisfying the architectural dependency restrictions"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The rule applies at every privilege level where the instructions are legal"
+      },
+      "state_read": [
+        "register state at instruction-group entry except for architecturally specified dependency special cases"
+      ],
+      "state_written": [
+        "register updates produced by the instruction group"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "Dependency restrictions apply only to resource reads and writes not dynamically disabled by predication"
+      },
+      "nat_behavior": "GR NaT bits are part of register state and follow the same group-entry rule unless a specified dependency exception applies",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Instruction-group completion exposes the final architecturally permitted register updates",
+      "restart_rule": "Any instruction fault uses the separately catalogued instruction-group commitment and restart rules",
+      "permitted_results": [
+        "Each register read observes group-entry register state rather than another instruction's update in the same group, except for specified dependency special cases"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "GRP-007-FAULT-COMMITMENT",
+      "requirement_ids": [
+        "GRP-007"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.issue-group",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.4",
+        "printed_pages": [
+          "1:41"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "Exceptions are reported in instruction order"
+      },
+      "operation": {
+        "kind": "issue-group-fault",
+        "selector": "a correctly formed instruction group with one or more instruction exceptions",
+        "encoding": "faulting instruction at any legal slot in a dependency-correct group"
+      },
+      "legal_inputs": [
+        "A correctly formed instruction group satisfying resource dependency requirements and containing an architecturally defined exception"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The rule applies at every privilege level where the instructions and exception are applicable"
+      },
+      "state_read": [
+        "ordered instructions and their exception conditions"
+      ],
+      "state_written": [
+        "architectural updates from instructions before the reported exception"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "Dynamically disabled resource accesses do not create the corresponding exception or dependency"
+      },
+      "nat_behavior": "NaT state written by earlier completed instructions is part of the committed prefix; later NaT updates are not committed",
+      "possible_faults": [
+        "Any architecturally defined instruction exception applicable to the selected instruction"
+      ],
+      "fault_priority": [
+        "Report the exception on the earliest instruction when multiple instructions in the group raise exceptions"
+      ],
+      "committed_prefix": "All prior instructions have updated architectural state and all subsequent instructions have not updated architectural state at exception delivery",
+      "restart_rule": "Repair and retry begins at the saved faulting instruction without replaying the committed prefix",
+      "permitted_results": [
+        "The earliest instruction exception is reported with exactly the preceding instruction prefix committed"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-004-FR0-READ",
+      "requirement_ids": [
+        "REG-004"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.register",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.1.3",
+        "printed_pages": [
+          "1:26"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "FR0 and FR1 are special"
+      },
+      "operation": {
+        "kind": "register-read",
+        "selector": "FR0 as a source operand",
+        "encoding": "any legal instruction source field selecting FR0"
+      },
+      "legal_inputs": [
+        "Any legal instruction that sources FR0"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "FR0 is available to programs at all privilege levels"
+      },
+      "state_read": [
+        "FR0 architectural constant"
+      ],
+      "state_written": [],
+      "predication": {
+        "applies": true,
+        "rule": "Instruction-specific predication controls execution but does not change the FR0 constant"
+      },
+      "nat_behavior": "FR0 supplies +0.0 rather than NaTVal",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Reading FR0 alone commits no state",
+      "restart_rule": "A fault from another aspect of the instruction follows that instruction's restart rule",
+      "permitted_results": [
+        "The source operand is the architectural floating-point value +0.0"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-004-FR1-READ",
+      "requirement_ids": [
+        "REG-004"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.register",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.1.3",
+        "printed_pages": [
+          "1:26"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "FR0 and FR1 are special"
+      },
+      "operation": {
+        "kind": "register-read",
+        "selector": "FR1 as a source operand",
+        "encoding": "any legal instruction source field selecting FR1"
+      },
+      "legal_inputs": [
+        "Any legal instruction that sources FR1"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "FR1 is available to programs at all privilege levels"
+      },
+      "state_read": [
+        "FR1 architectural constant"
+      ],
+      "state_written": [],
+      "predication": {
+        "applies": true,
+        "rule": "Instruction-specific predication controls execution but does not change the FR1 constant"
+      },
+      "nat_behavior": "FR1 supplies +1.0 rather than NaTVal",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Reading FR1 alone commits no state",
+      "restart_rule": "A fault from another aspect of the instruction follows that instruction's restart rule",
+      "permitted_results": [
+        "The source operand is the architectural floating-point value +1.0"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-004-GR0-READ",
+      "requirement_ids": [
+        "REG-004"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.register",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.1.2",
+        "printed_pages": [
+          "1:25"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "GR0 is special"
+      },
+      "operation": {
+        "kind": "register-read",
+        "selector": "GR0 as a source operand",
+        "encoding": "any legal instruction source field selecting GR0"
+      },
+      "legal_inputs": [
+        "Any legal instruction that sources GR0"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "GR0 is available to programs at all privilege levels"
+      },
+      "state_read": [
+        "GR0 architectural constant"
+      ],
+      "state_written": [],
+      "predication": {
+        "applies": true,
+        "rule": "Instruction-specific predication controls execution but does not change the GR0 constant"
+      },
+      "nat_behavior": "GR0 supplies integer zero with its architectural NaT indication clear",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Reading GR0 alone commits no state",
+      "restart_rule": "A fault from another aspect of the instruction follows that instruction's restart rule",
+      "permitted_results": [
+        "The source operand is 64-bit integer zero with NaT clear"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-004-PR0-READ",
+      "requirement_ids": [
+        "REG-004"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.register",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.1.4",
+        "printed_pages": [
+          "1:26"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "PR0 always reads as"
+      },
+      "operation": {
+        "kind": "register-read",
+        "selector": "PR0 as a source or qualifying predicate",
+        "encoding": "any legal predicate field selecting PR0"
+      },
+      "legal_inputs": [
+        "Any legal instruction that sources PR0"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "PR0 is available to programs at all privilege levels"
+      },
+      "state_read": [
+        "PR0 architectural constant"
+      ],
+      "state_written": [],
+      "predication": {
+        "applies": true,
+        "rule": "PR0 as a qualifying predicate always enables the otherwise legal instruction"
+      },
+      "nat_behavior": "Predicate registers do not carry NaT state",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Reading PR0 alone commits no state",
+      "restart_rule": "A fault from another aspect of the instruction follows that instruction's restart rule",
+      "permitted_results": [
+        "The predicate source value is 1"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-004-PR0-WRITE",
+      "requirement_ids": [
+        "REG-004",
+        "PRD-003"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.register",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.1.4",
+        "printed_pages": [
+          "1:26"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "when used as a destination, the result is discarded"
+      },
+      "operation": {
+        "kind": "register-write",
+        "selector": "PR0 as a legal predicate destination",
+        "encoding": "any legal destination field selecting PR0"
+      },
+      "legal_inputs": [
+        "Any instruction form for which PR0 is a legal predicate destination"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "PR0 is available to programs at all privilege levels"
+      },
+      "state_read": [],
+      "state_written": [],
+      "predication": {
+        "applies": true,
+        "rule": "The containing instruction's qualifying predicate still controls whether its operation executes"
+      },
+      "nat_behavior": "Predicate registers do not carry NaT state",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "No predicate state change is committed for the discarded PR0 destination",
+      "restart_rule": "A fault from another aspect of the instruction follows that instruction's restart rule",
+      "permitted_results": [
+        "The destination result is discarded and subsequent PR0 reads still return 1"
+      ],
+      "required_evidence": "E2"
+    }
+  ]
+}
