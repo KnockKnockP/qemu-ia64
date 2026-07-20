@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 36
+    "row_closing_claims_expected": 44
   },
   "entries": [
     {
@@ -733,6 +733,70 @@
       "conformance_role": "supporting",
       "closes_normative_rows": [],
       "limitations": ["Builder self-tests validate construction contracts but do not execute a normative guest case."]
+    },
+    {
+      "id": "meson:test-ia64-scalar-integer-tranche",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-scalar-integer-tranche",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/scalar-integer-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-fp-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-packed-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-scalar-integer-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-scalar-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-scalar-integer-tranche",
+      "scope": "Independent E2 arithmetic/bit models, exact 40-opcode inventory, XMA and character forms, and complete scalar predication/NaT/alias/slot/reserved-field state checks for eight rows owning all seven INT requirements.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["INT-001-ARITHMETIC-FORMS", "INT-002-LOGICAL-CONSTANT-FORMS", "INT-003-GR-MULTIPLY", "INT-003-XMA-MULTIPLY-ADD", "INT-004-SHIFT-BITFIELD-EXTEND", "INT-005-CHARACTER-BIT-FORMS", "INT-006-STATE-LEGALITY", "INT-007-INDEPENDENT-MODEL"],
+      "limitations": ["The exact scalar inventory is closed at 40 opcodes; adding an admitted scalar case label requires extending the declarative model and metadata before this gate can pass."]
+    },
+    {
+      "id": "meson:test-ia64-scalar-integer-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-scalar-integer-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-scalar-integer-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/scalar-integer-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-scalar-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-scalar-integer-tranche-static",
+      "scope": "Exact translator/test opcode inventory, section 10.1 metadata, citations, stable identities, executable probes, and independent-oracle validation for eight scalar rows.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Static inventory and metadata validation does not close rows without the E2 runtime gate."]
+    },
+    {
+      "id": "meson:test-ia64-scalar-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-scalar-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-fp-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-packed-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-scalar-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-scalar-tcg",
+      "scope": "Guest-executed scalar integer model, XMA, character/bit, and state-legality probes.",
+      "oracle_independence": "independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["The direct probe batch is diagnostic; row closure is owned by the normative tranche wrapper."]
     },
     {
       "id": "meson:test-ia64-system-tcg",

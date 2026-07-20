@@ -1,0 +1,102 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.scalar-integer-tranche",
+  "schema_version": 1,
+  "profile": "vibtanium-strict-up",
+  "test_id": 704,
+  "cases": [
+    {
+      "id": "INT-001-ARITHMETIC-FORMS-EXACT", "case_id": 1, "normative_token": 37,
+      "normative_row": "INT-001-ARITHMETIC-FORMS", "implementation_rows": ["cpu.integer.arithmetic"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.2.1", "printed_pages": ["1:51"], "anchor": "Addition and subtraction (add, sub) are supported"},
+      "preconditions": ["Every selected A-unit arithmetic encoding and source register is legal"],
+      "inputs": ["Base and boundary vectors for add/subtract, +1/-1, signed immediates, shifted-add, and addp4 forms"],
+      "expected_results": ["All arithmetic results equal independent modulo or pointer-address goldens"], "allowed_results": ["Exact 64-bit modeled destination values"],
+      "permitted_state_changes": ["Selected destination GR and NaT bit"], "required_unchanged_state": ["Sources, unrelated registers, predicates, and memory"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Each enabled arithmetic form commits one destination update", "restart_action": "Not exercised for legal forms",
+      "applicable_variants": ["register", "immediate", "carry/borrow wrap", "shifted add", "32-bit pointer"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_model_matrix"], "result_observations": ["base and boundary destination values"]},
+      "oracle": {"independence": "independent", "derivation": "Python unbounded arithmetic, explicit 64-bit reduction, and literal pointer-region construction define results without production helpers"}
+    },
+    {
+      "id": "INT-002-LOGICAL-CONSTANT-FORMS-EXACT", "case_id": 2, "normative_token": 38,
+      "normative_row": "INT-002-LOGICAL-CONSTANT-FORMS", "implementation_rows": ["cpu.integer.logical"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.2.2", "printed_pages": ["1:51", "1:53"], "anchor": "Instructions to perform logical AND"},
+      "preconditions": ["Logical register/immediate and movl forms occupy legal slots"], "inputs": ["Overlapping/complementary patterns, signed immediate extremes, and two full-width movl constants"],
+      "expected_results": ["Register, complement, immediate, and constant-construction results match literal bit models"], "allowed_results": ["Exact modeled 64-bit values"],
+      "permitted_state_changes": ["Destination GR and NaT"], "required_unchanged_state": ["Sources and unrelated state"], "expected_faults": [], "fault_priority": [],
+      "committed_prefix": "One complete logical or constant result commits", "restart_action": "Not exercised", "applicable_variants": ["and", "andcm", "or", "xor", "immediate", "addl", "movl"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_model_matrix"], "result_observations": ["bitwise result", "large constant"]},
+      "oracle": {"independence": "independent", "derivation": "Test-owned Python bit operations and literal immediate reconstruction provide the oracle"}
+    },
+    {
+      "id": "INT-003-GR-MULTIPLY-EXACT", "case_id": 3, "normative_token": 39,
+      "normative_row": "INT-003-GR-MULTIPLY", "implementation_rows": ["cpu.integer.multiply-gr"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.2.1", "printed_pages": ["1:51"], "anchor": "32-bit multiplication is supported"},
+      "preconditions": ["mpy4 and mpyshl4 source halves are explicit"], "inputs": ["Ordinary and maximum 32-bit partial products"],
+      "expected_results": ["Full 32x32 and shifted partial products match exact Python products"], "allowed_results": ["Exact 64-bit modeled products"],
+      "permitted_state_changes": ["Destination GR and NaT"], "required_unchanged_state": ["Both source GRs"], "expected_faults": [], "fault_priority": [],
+      "committed_prefix": "The selected product commits once", "restart_action": "Not exercised", "applicable_variants": ["mpy4", "mpyshl4"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_model_matrix"], "result_observations": ["low-half product", "shifted high/low partial product"]},
+      "oracle": {"independence": "independent", "derivation": "Explicit 32-bit slicing and Python multiplication define both products"}
+    },
+    {
+      "id": "INT-003-XMA-MULTIPLY-ADD-EXACT", "case_id": 4, "normative_token": 40,
+      "normative_row": "INT-003-XMA-MULTIPLY-ADD", "implementation_rows": ["cpu.integer.multiply-xma"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "5.3.6", "printed_pages": ["1:101"], "anchor": "Integer (fixed-point) multiply is executed"},
+      "preconditions": ["Source FR significands contain canonical integer operands"], "inputs": ["Signed/unsigned multiplicands and a zero-extended addend"],
+      "expected_results": ["Low and signed/unsigned high halves match the exact 128-bit multiply-add"], "allowed_results": ["Literal canonical-integer FR results"],
+      "permitted_state_changes": ["Selected destination FR"], "required_unchanged_state": ["Source FRs and unrelated FPSR state"],
+      "expected_faults": ["Disabled Floating-point Register fault"], "fault_priority": ["False qp suppresses disabled checks; enabled XMA reports the first disabled FR operand"],
+      "committed_prefix": "The selected 64-bit half commits once", "restart_action": "Faulting inputs restart without an FR write", "applicable_variants": ["xma.l", "xma.h", "xma.hu", "xmpy.hu"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_integer_multiply_add_forms"], "result_observations": ["canonical integer significand", "low/high selection"]},
+      "oracle": {"independence": "independent", "derivation": "Literal operands and exact 128-bit integer products/addends define each selected half independently"}
+    },
+    {
+      "id": "INT-004-SHIFT-BITFIELD-EXTEND-EXACT", "case_id": 5, "normative_token": 41,
+      "normative_row": "INT-004-SHIFT-BITFIELD-EXTEND", "implementation_rows": ["cpu.integer.bitfield-shift"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.2.4", "printed_pages": ["1:52", "1:53"], "anchor": "Four classes of instructions are defined"},
+      "preconditions": ["Field positions/lengths and variable counts are legal"], "inputs": ["Interior and boundary logical/arithmetic shifts, funnel shifts, extracts, deposits, and every implemented extension width"],
+      "expected_results": ["All shifted, masked, merged, and extended values equal independent bit models"], "allowed_results": ["Exact modeled 64-bit values"],
+      "permitted_state_changes": ["Destination GR and NaT"], "required_unchanged_state": ["Value/count sources and unrelated state"], "expected_faults": [], "fault_priority": [],
+      "committed_prefix": "One complete bitfield result commits", "restart_action": "Not exercised", "applicable_variants": ["shl", "shr", "shr.u", "shrp", "dep", "dep.z", "extr", "extr.u", "sxt", "zxt"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_model_matrix"], "result_observations": ["count boundary", "field mask", "sign/zero fill"]},
+      "oracle": {"independence": "independent", "derivation": "Test-owned masks, concatenation, sign extension, and count-boundary rules define every result"}
+    },
+    {
+      "id": "INT-005-CHARACTER-BIT-FORMS-EXACT", "case_id": 6, "normative_token": 42,
+      "normative_row": "INT-005-CHARACTER-BIT-FORMS", "implementation_rows": ["cpu.integer.character-bit"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.8", "printed_pages": ["1:81", "1:83", "1:84"], "anchor": "Character and Bit Strings"},
+      "preconditions": ["Bit patterns and byte/halfword lanes are distinguishable"], "inputs": ["Zero/all-one/alternating popcnt/clz inputs plus mux and left/right czx patterns"],
+      "expected_results": ["Counts, indices, and selected lanes match independent literal goldens"], "allowed_results": ["Exact count, index, or arranged 64-bit value"],
+      "permitted_state_changes": ["Destination GR and NaT"], "required_unchanged_state": ["Sources and unrelated state"], "expected_faults": [], "fault_priority": [],
+      "committed_prefix": "The selected count/index/arrangement commits once", "restart_action": "Not exercised", "applicable_variants": ["popcnt", "clz", "mux1", "mux2", "czx1.l/r", "czx2.l/r"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_model_matrix", "test_character_byte_forms"], "result_observations": ["bit count", "leading zeros", "lane order", "zero index"]},
+      "oracle": {"independence": "independent", "derivation": "Python bit counts and test-owned lane permutations/scans define exact results"}
+    },
+    {
+      "id": "INT-006-STATE-LEGALITY-EXACT", "case_id": 7, "normative_token": 43,
+      "normative_row": "INT-006-STATE-LEGALITY", "implementation_rows": ["cpu.integer.legality"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "4", "printed_pages": ["3:299"], "anchor": "Reserved if PR[qp] is 1 instructions"},
+      "preconditions": ["Every scalar form has explicit predicate, NaT, alias, and legal-slot fixtures"],
+      "inputs": ["All 40 false qualifiers, all 40 NaT rows, 18 destination/source aliases, every A form in M and I slots, and enabled/nullified reserved POPCNT"],
+      "expected_results": ["Exact non-effects, NaT propagation/clearing, alias results, slot equivalence, and precise Illegal Operation state"], "allowed_results": ["Exact legal result/NaT, unchanged poisoned target, or declared fault vector/state"],
+      "permitted_state_changes": ["Enabled destination or interruption state"], "required_unchanged_state": ["False-qualified target/NaT", "Faulting target and suffix", "Sources"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["False qp suppresses the reserved field; enabled reserved POPCNT faults before target/suffix effects"],
+      "committed_prefix": "Legal writes commit once and the reserved fault preserves its prefix", "restart_action": "The reserved encoding reports exact IIP and slot RI", "applicable_variants": ["predicate", "NaT", "alias", "M/I legal slots", "reserved r2 field"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_state_legality_matrix"], "result_observations": ["GR/NaT", "exception kind/vector", "IIP/RI", "suffix suppression"]},
+      "oracle": {"independence": "independent", "derivation": "Literal encodings, values, NaT placement, vector addresses, and slot expectations are owned by the test"}
+    },
+    {
+      "id": "INT-007-INDEPENDENT-MODEL-EXACT", "case_id": 8, "normative_token": 44,
+      "normative_row": "INT-007-INDEPENDENT-MODEL", "implementation_rows": ["cpu.integer.generated-domain"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.2", "printed_pages": ["1:50", "1:51", "1:52", "1:53"], "anchor": "Integer Computation Instructions"},
+      "preconditions": ["The declarative test inventory exactly equals the translator's 40 scalar case labels"], "inputs": ["Two deterministic generated base/boundary vectors for every admitted opcode"],
+      "expected_results": ["All 80 guest results and all 40 source-count-based NaT outcomes equal independent models"], "allowed_results": ["Only exact modeled results"],
+      "permitted_state_changes": ["Selected destination GR and NaT"], "required_unchanged_state": ["Sources and unrelated architectural state"], "expected_faults": [], "fault_priority": [],
+      "committed_prefix": "Each generated row commits one result", "restart_action": "Not exercised", "applicable_variants": ["exact 40-opcode inventory", "base vector", "boundary vector", "source-count NaT model"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_model_matrix", "test_state_legality_matrix"], "result_observations": ["80 result values", "40 NaT results", "inventory equality"]},
+      "oracle": {"independence": "independent", "derivation": "Declarative encoders and Python arithmetic/bit models are separate from production decoder and TCG tables"}
+    }
+  ]
+}

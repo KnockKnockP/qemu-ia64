@@ -109,6 +109,46 @@ ARCHITECTURAL_SURFACES = (
         "ia64_tr_group_publish_prefix_for_noreturn_fault",
     ),
     (
+        "cpu.integer.arithmetic", "cpu.integer",
+        "scalar add, subtract, immediate, carry/borrow, and shifted-add forms",
+        "target/ia64/translate.c", "case IA64_OP_ADD_ONE:",
+    ),
+    (
+        "cpu.integer.logical", "cpu.integer",
+        "scalar logical, complement, immediate, and constant construction",
+        "target/ia64/translate.c", "case IA64_OP_ANDCM_IMM:",
+    ),
+    (
+        "cpu.integer.multiply-gr", "cpu.integer",
+        "GR-based 32-bit multiply and shifted-high multiply",
+        "target/ia64/translate.c", "case IA64_OP_MPYSHL4:",
+    ),
+    (
+        "cpu.integer.multiply-xma", "cpu.integer",
+        "FR-based integer multiply-add low and high forms",
+        "target/ia64/translate.c", "case IA64_OP_XMA_HU:",
+    ),
+    (
+        "cpu.integer.bitfield-shift", "cpu.integer",
+        "scalar variable shifts, funnel shift, extract, deposit, and extension",
+        "target/ia64/translate.c", "case IA64_OP_SHRP_IMM:",
+    ),
+    (
+        "cpu.integer.character-bit", "cpu.integer",
+        "population, leading-zero, mux, and zero-index character operations",
+        "target/ia64/translate.c", "tcg_gen_ctpop_i64",
+    ),
+    (
+        "cpu.integer.legality", "cpu.integer",
+        "scalar predication, NaT, alias, slot, reserved-field, and fault behavior",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_illegal_operation",
+    ),
+    (
+        "cpu.integer.generated-domain", "cpu.integer",
+        "complete current scalar domain and ordinary source/NaT selection",
+        "target/ia64/translate.c", "source_count = ia64_tr_decoded_sources",
+    ),
+    (
         "cpu.memory.code-invalidation",
         "cpu.memory",
         "translated-code invalidation after an architectural store",
@@ -764,6 +804,10 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 {
                     "domain": "cpu.issue-group",
                     "completeness": "first-architectural-tranche",
+                },
+                {
+                    "domain": "cpu.integer",
+                    "completeness": "catalogued-semantic-tranche",
                 },
                 {
                     "domain": "cpu.sequencing",

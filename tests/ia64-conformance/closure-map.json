@@ -17,7 +17,8 @@
     "test-ia64-normative-catalogue",
     "test-ia64-packed-integer-tranche-static",
     "test-ia64-predicate-branch-tranche-static",
-    "test-ia64-runner-protocol"
+    "test-ia64-runner-protocol",
+    "test-ia64-scalar-integer-tranche-static"
   ],
   "mappings": [
     {
@@ -152,6 +153,62 @@
         "test-ia64-memory-exceptions",
         "test-ia64-memory-tcg"
       ]
+    },
+    {
+      "normative_row": "INT-001-ARITHMETIC-FORMS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.arithmetic"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-002-LOGICAL-CONSTANT-FORMS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.logical"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-003-GR-MULTIPLY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.multiply-gr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-003-XMA-MULTIPLY-ADD",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.multiply-xma"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-fp-tcg", "test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-004-SHIFT-BITFIELD-EXTEND",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.bitfield-shift"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-005-CHARACTER-BIT-FORMS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.character-bit"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-tcg", "test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-006-STATE-LEGALITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.legality"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "INT-007-INDEPENDENT-MODEL",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.integer.generated-domain"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-scalar-integer-tranche", "test-ia64-scalar-tcg"]
     },
     {
       "normative_row": "MEM-009-CODE-INVALIDATION",

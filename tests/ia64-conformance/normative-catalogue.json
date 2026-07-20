@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 4,
+  "catalogue_revision": 5,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -533,6 +533,104 @@
         "The earliest instruction exception is reported with exactly the preceding instruction prefix committed"
       ],
       "required_evidence": "E2"
+    },
+    {
+      "id": "INT-001-ARITHMETIC-FORMS",
+      "requirement_ids": ["INT-001"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.2.1", "printed_pages": ["1:51"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Addition and subtraction (add, sub) are supported"},
+      "operation": {"kind": "scalar-arithmetic", "selector": "add, subtract, add-one, subtract-one, immediate, shifted-add, and 32-bit-pointer forms", "encoding": "all currently admitted A1, A3, A4, and A5 scalar arithmetic opcodes"},
+      "legal_inputs": ["Zero, one, signed limits, unsigned limits, carry/borrow wrap, immediate extremes, and shift counts 1 through 4"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Application integer arithmetic is independent of privilege"},
+      "state_read": ["One or two source GR values and encoded immediate where applicable"], "state_written": ["Destination GR and destination NaT bit"],
+      "predication": {"applies": true, "rule": "A false qualifying predicate suppresses destination value and NaT writes"}, "nat_behavior": "Any enabled source NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "The complete arithmetic result and NaT state commit as one GR update", "restart_rule": "No restart occurs for legal register operands",
+      "permitted_results": ["The exact modulo-64 or architected 32-bit-pointer result for the selected form"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-002-LOGICAL-CONSTANT-FORMS",
+      "requirement_ids": ["INT-002"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.2.2", "printed_pages": ["1:51", "1:53"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Instructions to perform logical AND"},
+      "operation": {"kind": "scalar-logical-and-constant", "selector": "and, andcm, or, xor, signed immediates, addl construction, and movl", "encoding": "all currently admitted register/immediate logical and large-constant forms"},
+      "legal_inputs": ["Complementary and overlapping bit patterns, signed immediate boundaries, and full-width movl constants"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Logical and constant construction instructions are independent of privilege"},
+      "state_read": ["Source GRs and encoded immediate fields"], "state_written": ["Destination GR and NaT bit"],
+      "predication": {"applies": true, "rule": "False qualification suppresses the destination write"}, "nat_behavior": "Source-based forms propagate NaT; source-free constant construction clears destination NaT",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "The selected logical or constant value commits once", "restart_rule": "No restart occurs for legal forms",
+      "permitted_results": ["Exact bitwise or sign-extended constant results"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-003-GR-MULTIPLY",
+      "requirement_ids": ["INT-003"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.2.1", "printed_pages": ["1:51"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "32-bit multiplication is supported"},
+      "operation": {"kind": "gr-integer-multiply", "selector": "mpy4 and mpyshl4", "encoding": "currently admitted I-unit GR multiply encodings"},
+      "legal_inputs": ["Zero, one, maximum low halves, and maximum high-half/low-half products"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "GR integer multiplication is independent of privilege"},
+      "state_read": ["Selected 32-bit halves of two source GRs"], "state_written": ["64-bit destination GR and NaT bit"],
+      "predication": {"applies": true, "rule": "False qualification suppresses multiplication and destination writes"}, "nat_behavior": "Either source NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "The multiply result commits as one GR update", "restart_rule": "No restart occurs for legal forms",
+      "permitted_results": ["Exact unsigned 32x32 product or exact shifted high/low partial product"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-003-XMA-MULTIPLY-ADD",
+      "requirement_ids": ["INT-003"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Floating-point Programming Model", "section": "5.3.6", "printed_pages": ["1:101"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Integer (fixed-point) multiply is executed"},
+      "operation": {"kind": "fr-integer-multiply-add", "selector": "xma.l, xma.h, xma.hu, and xmpy.hu", "encoding": "currently admitted F-unit fixed-point multiply-add forms"},
+      "legal_inputs": ["Signed and unsigned 64-bit significands with zero-extended addends"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "XMA computation is independent of privilege subject to FR enable state"},
+      "state_read": ["Two multiplicand significands, one addend significand, and source NaTVal state"], "state_written": ["Canonical integer destination FR"],
+      "predication": {"applies": true, "rule": "False qualification suppresses FR checks and writes"}, "nat_behavior": "NaTVal inputs follow floating-register consumption rules",
+      "possible_faults": ["Disabled Floating-point Register fault"], "fault_priority": ["A false qualifier suppresses disabled-register checks; an enabled XMA reports the first disabled FR operand"],
+      "committed_prefix": "The selected low or high half commits once as a canonical integer", "restart_rule": "A fault restarts at the XMA instruction without a destination write",
+      "permitted_results": ["The selected low or signed/unsigned high 64 bits of the exact 128-bit multiply-add"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-004-SHIFT-BITFIELD-EXTEND",
+      "requirement_ids": ["INT-004"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.2.4", "printed_pages": ["1:52", "1:53"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Four classes of instructions are defined"},
+      "operation": {"kind": "scalar-shift-bitfield", "selector": "logical/arithmetic shifts, shrp, dep, dep.z, extr, extr.u, sxt, and zxt", "encoding": "all currently admitted I-unit shift, bitfield, and extension forms"},
+      "legal_inputs": ["Counts zero through and beyond 64, field boundaries, signed fields, and 8/16/32-bit extension boundaries"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Shift and bitfield instructions are independent of privilege"},
+      "state_read": ["Source GRs, count GR, and position/length immediates"], "state_written": ["Destination GR and NaT bit"],
+      "predication": {"applies": true, "rule": "False qualification suppresses all result effects"}, "nat_behavior": "Any enabled source or count NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "The full shifted, extracted, deposited, or extended result commits once", "restart_rule": "No restart occurs for legal fields",
+      "permitted_results": ["Exact logical, sign-filled, funnel, masked, merged, sign-extended, or zero-extended result"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-005-CHARACTER-BIT-FORMS",
+      "requirement_ids": ["INT-005"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.8", "printed_pages": ["1:81", "1:83", "1:84"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Character and Bit Strings"},
+      "operation": {"kind": "character-and-bit", "selector": "popcnt, clz, mux1, mux2, and all implemented czx scans", "encoding": "currently admitted bit-count and byte/halfword arrangement/search forms"},
+      "legal_inputs": ["Zero, all-one, alternating-bit, lane-unique, and every zero-index placement"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Character and bit-string operations are independent of privilege"},
+      "state_read": ["Source GR bit or lane image and mux selector"], "state_written": ["Count, index, or arranged destination GR"],
+      "predication": {"applies": true, "rule": "False qualification suppresses the destination write"}, "nat_behavior": "Source NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "The count, index, or arrangement result commits once", "restart_rule": "No restart occurs for legal forms",
+      "permitted_results": ["Exact population/leading-zero count, zero index, or selector-defined byte/halfword arrangement"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-006-STATE-LEGALITY",
+      "requirement_ids": ["INT-006"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Instruction Formats", "section": "4", "printed_pages": ["3:299"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "Reserved if PR[qp] is 1 instructions"},
+      "operation": {"kind": "scalar-state-legality", "selector": "predicate, NaT, alias, legal slot, reserved field, and precise fault behavior", "encoding": "every admitted scalar form plus an invalid POPCNT reserved source field"},
+      "legal_inputs": ["True and false qualifiers, source/destination aliases, source NaT, every legal unit placement, and enabled/nullified reserved fields"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Application scalar legality is independent of privilege"},
+      "state_read": ["Entry predicate and GR/NaT images, encoding fields, and slot type"], "state_written": ["Legal destination or architectural interruption state"],
+      "predication": {"applies": true, "rule": "A false qualifier suppresses legal writes and reserved-if-qp-one faults"}, "nat_behavior": "Source forms propagate NaT, source-free forms clear it, and nullified forms preserve destination NaT",
+      "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Predicate qualification precedes reserved-if-qp-one checks; enabled reserved fields fault before destination or suffix effects"],
+      "committed_prefix": "Legal writes commit once; an enabled reserved encoding preserves its prefix and suppresses its target and suffix", "restart_rule": "Illegal Operation saves the exact faulting bundle and slot",
+      "permitted_results": ["Exact legal result/NaT, no effect when nullified, or precise Illegal Operation for the enabled reserved field"], "required_evidence": "E2"
+    },
+    {
+      "id": "INT-007-INDEPENDENT-MODEL",
+      "requirement_ids": ["INT-007"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.integer",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.2", "printed_pages": ["1:50", "1:51", "1:52", "1:53"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Integer Computation Instructions"},
+      "operation": {"kind": "scalar-independent-model", "selector": "the exact current 40-opcode scalar admission set", "encoding": "two deterministic generated base/boundary rows per admitted opcode"},
+      "legal_inputs": ["Declaratively generated ordinary, zero, limit, overflow, excessive-count, and field-boundary inputs"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Generated application-integer cases are independent of privilege"},
+      "state_read": ["Literal test-owned operand and encoding fields"], "state_written": ["Destination GR and NaT bit"],
+      "predication": {"applies": true, "rule": "The model separately validates false-qualifier non-effects"}, "nat_behavior": "The state matrix independently validates source-count-based NaT propagation for all 40 rows",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "Every generated legal operation commits its one modeled result once", "restart_rule": "Not exercised by legal generated rows",
+      "permitted_results": ["Every generated guest result equals the independently calculated Python integer model"], "required_evidence": "E2"
     },
     {
       "id": "MEM-009-CODE-INVALIDATION",
