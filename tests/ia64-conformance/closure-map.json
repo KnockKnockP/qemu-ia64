@@ -1,0 +1,138 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.conformance-closure-map",
+  "schema_version": 1,
+  "policy": {
+    "candidate_tests_close_rows": false,
+    "required_evidence_classified": false,
+    "description": "Candidate registrations are join hints only until evidence classification is completed."
+  },
+  "infrastructure_tests": [
+    "test-ia64-conformance-closure",
+    "test-ia64-implementation-surface",
+    "test-ia64-normative-catalogue"
+  ],
+  "mappings": [
+    {
+      "normative_row": "BND-001-BUNDLE-FORMAT",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "inventory_gap": "Bundle formats are listed as pending in implementation-surface version 1.",
+      "candidate_tests": [
+        "test-ia64-bundle",
+        "test-ia64-decode",
+        "test-ia64-full-tcg"
+      ]
+    },
+    {
+      "normative_row": "BND-001-TEMPLATE-MAP",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "inventory_gap": "Template unit and stop mappings are listed as pending in implementation-surface version 1.",
+      "candidate_tests": [
+        "test-ia64-bundle",
+        "test-ia64-decode",
+        "test-ia64-full-tcg",
+        "test-ia64-production-cutover"
+      ]
+    },
+    {
+      "normative_row": "BND-003-SEQUENTIAL-ORDER",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "inventory_gap": "Cross-bundle instruction sequencing is listed as pending in implementation-surface version 1.",
+      "candidate_tests": [
+        "test-ia64-full-tcg",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "GRP-002-STOP-VISIBILITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "inventory_gap": "Issue-group state is listed as pending in implementation-surface version 1.",
+      "candidate_tests": [
+        "test-ia64-full-tcg",
+        "test-ia64-memory-tcg",
+        "test-ia64-packed-tcg"
+      ]
+    },
+    {
+      "normative_row": "GRP-004-GROUP-ENTRY-REGISTER",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "inventory_gap": "Issue-group state is listed as pending in implementation-surface version 1.",
+      "candidate_tests": [
+        "test-ia64-full-tcg",
+        "test-ia64-insn",
+        "test-ia64-packed-tcg"
+      ]
+    },
+    {
+      "normative_row": "GRP-007-FAULT-COMMITMENT",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "inventory_gap": "Precise instruction-group commitment is listed as pending in implementation-surface version 1.",
+      "candidate_tests": [
+        "test-ia64-full-tcg",
+        "test-ia64-memory-exceptions",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "REG-004-FR0-READ",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.register.fr.0"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-fp-tcg"
+      ]
+    },
+    {
+      "normative_row": "REG-004-FR1-READ",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.register.fr.1"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-fp-tcg"
+      ]
+    },
+    {
+      "normative_row": "REG-004-GR0-READ",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.register.gr.0"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-full-tcg"
+      ]
+    },
+    {
+      "normative_row": "REG-004-PR0-READ",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.register.pr.0"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-full-tcg"
+      ]
+    },
+    {
+      "normative_row": "REG-004-PR0-WRITE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.register.pr.0"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-full-tcg"
+      ]
+    }
+  ]
+}

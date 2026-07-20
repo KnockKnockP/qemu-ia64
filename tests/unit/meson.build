@@ -340,6 +340,17 @@ if 'ia64-softmmu' in target_dirs
        timeout: 30,
        suite: ['unit'])
 
+  test('test-ia64-conformance-closure', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.project_source_root() / 'scripts/ia64-gen-conformance-closure.py',
+              '--check',
+              '--root', meson.project_source_root(),
+              '--build-dir', meson.project_build_root(),
+              '--binary', ia64_full_tcg_emulator.full_path()],
+       timeout: 30,
+       suite: ['unit'])
+
   test('test-ia64-production-cutover', python,
        depends: [ia64_full_tcg_emulator],
        env: test_env,
