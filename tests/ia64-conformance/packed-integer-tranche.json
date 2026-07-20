@@ -1,0 +1,92 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.packed-integer-tranche",
+  "schema_version": 1,
+  "profile": "vibtanium-strict-up",
+  "test_id": 703,
+  "cases": [
+    {
+      "id": "PKD-001-LANE-WIDTHS-EXACT", "case_id": 1, "normative_token": 31,
+      "normative_row": "PKD-001-LANE-WIDTHS", "implementation_rows": ["cpu.packed.lane-widths"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.6", "printed_pages": ["1:79", "1:80", "1:81"], "anchor": "eight 8-bit, four 16-bit, or two 32-bit elements"},
+      "preconditions": ["All source and destination GRs are legal and initialized"],
+      "inputs": ["Lane-unique 8-bit, 16-bit, and 32-bit source patterns"],
+      "expected_results": ["Every implemented opcode produces the independent per-lane golden"],
+      "allowed_results": ["The exact 64-bit result declared for each of 54 opcodes"],
+      "permitted_state_changes": ["Selected destination GR and its NaT bit"],
+      "required_unchanged_state": ["Source GRs, unrelated registers, predicates, and memory"],
+      "expected_faults": [], "fault_priority": [],
+      "committed_prefix": "Each enabled packed operation commits one complete destination value",
+      "restart_action": "Not exercised for legal mapped operations",
+      "applicable_variants": ["8-bit lanes", "16-bit lanes", "32-bit lanes"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_matrix"], "result_observations": ["54 literal destination values", "source preservation"]},
+      "oracle": {"independence": "independent", "derivation": "Test-owned lane extraction, insertion, sign extension, and result composition do not import production decode or translation tables"}
+    },
+    {
+      "id": "PKD-002-SATURATION-EXACT", "case_id": 2, "normative_token": 32,
+      "normative_row": "PKD-002-SATURATION", "implementation_rows": ["cpu.packed.saturation"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.6.1", "printed_pages": ["1:79", "1:80"], "anchor": "signed saturation"},
+      "preconditions": ["Lane inputs straddle positive and negative saturation limits"],
+      "inputs": ["Modulo, signed-saturating, unsigned-saturating, shift-add, and pack operands"],
+      "expected_results": ["Each lane clamps or wraps at the exact selected boundary"],
+      "allowed_results": ["Independent signed, unsigned, and modulo lane goldens"],
+      "permitted_state_changes": ["Selected destination GR"], "required_unchanged_state": ["All sources and unrelated state"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "All lane results commit atomically as one GR write",
+      "restart_action": "Not exercised", "applicable_variants": ["signed saturation", "unsigned saturation", "modulo"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_matrix"], "result_observations": ["positive limit", "negative limit", "unsigned zero and maximum"]},
+      "oracle": {"independence": "independent", "derivation": "Python integer bounds and explicit lane masks define saturation without using translator helpers"}
+    },
+    {
+      "id": "PKD-003-COMPARISONS-EXACT", "case_id": 3, "normative_token": 33,
+      "normative_row": "PKD-003-COMPARISONS", "implementation_rows": ["cpu.packed.comparisons"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.6.1", "printed_pages": ["1:80"], "anchor": "parallel compare instruction (pcmp)"},
+      "preconditions": ["Lane pairs contain equal, greater, and lesser values"], "inputs": ["pcmp equality and signed greater-than at every implemented width"],
+      "expected_results": ["True lanes contain all ones and false lanes contain zero"], "allowed_results": ["Exact mixed true/false lane masks"],
+      "permitted_state_changes": ["Selected destination GR"], "required_unchanged_state": ["Source values and unrelated state"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "The composed comparison mask commits as one destination write",
+      "restart_action": "Not exercised", "applicable_variants": ["pcmp.eq", "pcmp.gt", "8-bit", "16-bit", "32-bit"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_matrix"], "result_observations": ["per-lane all-ones/zero mask"]},
+      "oracle": {"independence": "independent", "derivation": "Test-owned signed lane conversion and Python comparisons define each mask independently"}
+    },
+    {
+      "id": "PKD-004-DATA-ARRANGEMENT-EXACT", "case_id": 4, "normative_token": 34,
+      "normative_row": "PKD-004-DATA-ARRANGEMENT", "implementation_rows": ["cpu.packed.arrangement"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.6.3", "printed_pages": ["1:81"], "anchor": "Data Arrangement"},
+      "preconditions": ["Every input lane has a distinguishable value"], "inputs": ["Average, min/max, multiply, SAD, mix, mux, pack, unpack, and zero-scan forms"],
+      "expected_results": ["Lane selection, ordering, rounding, widening, narrowing, and reduction match literal goldens"], "allowed_results": ["Exact per-form 64-bit results"],
+      "permitted_state_changes": ["Selected destination GR"], "required_unchanged_state": ["Sources and unrelated architectural state"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Each arrangement or reduction commits one destination value",
+      "restart_action": "Not exercised", "applicable_variants": ["mix", "mux", "pack", "unpack", "average", "multiply", "sum", "SAD", "czx"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_matrix"], "result_observations": ["lane ordering", "rounding", "saturation", "reduction"]},
+      "oracle": {"independence": "independent", "derivation": "Explicit Python lane permutations and arithmetic reductions define results without production lookup tables"}
+    },
+    {
+      "id": "PKD-005-SHIFT-BOUNDARIES-EXACT", "case_id": 5, "normative_token": 35,
+      "normative_row": "PKD-005-SHIFT-BOUNDARIES", "implementation_rows": ["cpu.packed.shifts"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.6.2", "printed_pages": ["1:80", "1:81"], "anchor": "Parallel Shifts"},
+      "preconditions": ["Signed and unsigned lanes expose shifted-in bits"], "inputs": ["Fixed and variable counts below, at, and beyond lane width"],
+      "expected_results": ["Logical and arithmetic shifts use the exact architected boundary result per lane"], "allowed_results": ["Independent fixed and variable shift goldens"],
+      "permitted_state_changes": ["Selected destination GR"], "required_unchanged_state": ["Shift count source, value source, and unrelated state"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "All shifted lanes commit in one GR write",
+      "restart_action": "Not exercised", "applicable_variants": ["pshl", "pshr", "pshr.u", "fixed count", "variable count"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_matrix"], "result_observations": ["zero count", "interior count", "lane-width and excessive count"]},
+      "oracle": {"independence": "independent", "derivation": "Test-owned count clamping, lane masks, and signed shifts define boundary results"}
+    },
+    {
+      "id": "PKD-006-LEGALITY-EXACT", "case_id": 6, "normative_token": 36,
+      "normative_row": "PKD-006-LEGALITY", "implementation_rows": ["cpu.packed.legality"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "4", "printed_pages": ["3:299"], "anchor": "Reserved if PR[qp] is 1 instructions"},
+      "preconditions": ["Predicate, alias, NaT, reserved MUX1, and legal A-unit slot fixtures are explicit"],
+      "inputs": ["True and false qp, same-group GR alias, real ld8.fill NaT, reserved immediate, and A9 in M/I slots"],
+      "expected_results": ["Predication suppresses effects, aliases read group-entry state, NaT propagates, legal slots execute, and enabled reserved fields fault precisely"],
+      "allowed_results": ["Exact destination/NaT images or exact Illegal Operation state"],
+      "permitted_state_changes": ["Enabled legal destination or architectural interruption state"], "required_unchanged_state": ["False-qualified target", "Faulting target and suffix", "Aliased sources"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["A false qualifying predicate suppresses the reserved-field fault; an enabled reserved encoding faults before target or suffix effects"],
+      "committed_prefix": "Legal packed writes commit once; enabled reserved fields preserve the prefix and suppress faulting/suffix effects",
+      "restart_action": "The enabled reserved encoding reports its exact bundle and slot for restart",
+      "applicable_variants": ["false qp", "same-group alias", "NaT propagation", "reserved immediate", "A9 M slot", "A9 I slot"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_semantic_matrix", "test_nat_propagation", "test_legality_matrix"], "result_observations": ["target and source values", "NaT bit", "exception vector and kind", "IIP and slot RI", "suffix suppression"]},
+      "oracle": {"independence": "independent", "derivation": "Literal encodings, group-entry values, NaT setup, vector addresses, and fault-slot expectations are owned by the test"}
+    }
+  ]
+}

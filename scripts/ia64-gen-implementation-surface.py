@@ -144,6 +144,36 @@ ARCHITECTURAL_SURFACES = (
         "memory_restart_complex",
     ),
     (
+        "cpu.packed.lane-widths", "cpu.packed",
+        "packed 8-bit, 16-bit, and 32-bit lane execution",
+        "target/ia64/translate.c", "ia64_tr_packed_extract_lane",
+    ),
+    (
+        "cpu.packed.saturation", "cpu.packed",
+        "packed signed and unsigned saturation",
+        "target/ia64/translate.c", "ia64_tr_packed_saturate_signed",
+    ),
+    (
+        "cpu.packed.comparisons", "cpu.packed",
+        "packed equality and signed greater-than comparisons",
+        "target/ia64/translate.c", "IA64_TR_PACKED_CMP_EQ",
+    ),
+    (
+        "cpu.packed.arrangement", "cpu.packed",
+        "packed mix, mux, pack, unpack, average, sum, and SAD forms",
+        "target/ia64/translate.c", "ia64_tr_packed_mux1_lane",
+    ),
+    (
+        "cpu.packed.shifts", "cpu.packed",
+        "packed fixed and variable shift boundaries",
+        "target/ia64/translate.c", "IA64_TR_PACKED_SHR_U",
+    ),
+    (
+        "cpu.packed.legality", "cpu.packed",
+        "packed predication, alias, NaT, reserved-field, and slot admission",
+        "target/ia64/translate.c", "ia64_tr_decoded_is_supported_packed",
+    ),
+    (
         "cpu.predicate.compare-relations", "cpu.predicate",
         "signed, unsigned, and equality predicate comparisons",
         "target/ia64/translate.c", "ia64_tr_compare_cond",
@@ -742,6 +772,10 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 {
                     "domain": "cpu.memory",
                     "completeness": "catalogued-boundary-tranche",
+                },
+                {
+                    "domain": "cpu.packed",
+                    "completeness": "catalogued-semantic-tranche",
                 },
                 {
                     "domain": "cpu.predicate",

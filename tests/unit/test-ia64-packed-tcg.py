@@ -742,6 +742,99 @@ def test_nat_propagation(harness: ModuleType, qemu: Path) -> str:
     return "PSAD propagates a real ld8.fill NaT through the staged GR/NaT pair"
 
 
+def _packed_illegal_program(harness: ModuleType, name: str,
+                            raw: int) -> object:
+    fault_ip = 0x40
+    fault_bundle = harness.Bundle(
+        fault_ip, 0x03, harness.nop_m(), raw,
+        harness.adds(30, 0x456, 0)
+    )
+    return harness.Program(
+        name=name,
+        bundles=(
+            harness.Bundle(0x10, 0x01, harness.ssm(harness.IA64_PSR_IC),
+                           harness.nop_i(), harness.nop_i()),
+            harness.Bundle(0x20, 0x01, harness.srlz_i(),
+                           harness.nop_i(), harness.nop_i()),
+            movl_bundle(harness, 0x30, 31, 0x123),
+            fault_bundle,
+            harness.Bundle(
+                harness.IA64_GENERAL_EXCEPTION_VECTOR, 0x11,
+                harness.nop_m(), harness.nop_i(),
+                harness.br_cond(harness.IA64_GENERAL_EXCEPTION_VECTOR,
+                                harness.IA64_GENERAL_EXCEPTION_VECTOR),
+            ),
+        ),
+        terminal_ip=harness.IA64_GENERAL_EXCEPTION_VECTOR,
+    )
+
+
+def test_legality_matrix(harness: ModuleType, qemu: Path) -> str:
+    """Cover reserved fields, legal units, predication, and precise faults."""
+    reserved_mux1 = raw_mux(31, 8, 1)
+    program = _packed_illegal_program(
+        harness, "reserved MUX1 function", reserved_mux1
+    )
+    snapshot = harness.run_program(
+        qemu, program, preserve_fault_slot=True,
+        typed_direct_trace_ips=(0x40,),
+    )
+    if (snapshot.ip != harness.IA64_GENERAL_EXCEPTION_VECTOR or
+            snapshot.exception_kind != "illegal-operation" or
+            snapshot.exception_vector !=
+            harness.IA64_GENERAL_EXCEPTION_VECTOR):
+        raise AssertionError("reserved MUX1 did not raise Illegal Operation")
+    if (snapshot.cr_iip != 0x40 or not snapshot.slot_valid or
+            snapshot.slot_ip != 0x40 or snapshot.slot_ri != 1):
+        raise AssertionError("reserved MUX1 lost exact fault-slot state")
+    if snapshot.gr[31] != 0x123 or snapshot.gr[30] != 0:
+        raise AssertionError("reserved MUX1 modified its target or suffix")
+
+    false_program = harness.Program(
+        name="false-predicated packed reserved encoding",
+        bundles=(
+            harness.Bundle(0x10, 0x03, harness.nop_m(),
+                           raw_mux(31, 8, 1, qp=1),
+                           harness.adds(30, 0x123, 0)),
+            harness.spin_bundle(0x20),
+        ),
+        terminal_ip=0x20,
+    )
+    false_snapshot = harness.run_program(qemu, false_program)
+    if (false_snapshot.exception_pending or false_snapshot.gr[31] != 0 or
+            false_snapshot.gr[30] != 0x123):
+        raise AssertionError(
+            "false qp did not suppress packed reserved-field effects"
+        )
+
+    source2 = 0x0706050403020100
+    source3 = 0x0101010101010101
+    slot_program = harness.Program(
+        name="A9 packed operation in M and I slots",
+        bundles=(
+            movl_bundle(harness, 0x10, 2, source2),
+            movl_bundle(harness, 0x20, 3, source3),
+            harness.Bundle(0x30, 0x03, raw_a9(4, 8, 0, 0),
+                           harness.nop_i(), harness.nop_i()),
+            harness.Bundle(0x40, 0x03, harness.nop_m(),
+                           raw_a9(5, 8, 0, 0), harness.nop_i()),
+            harness.spin_bundle(0x50),
+        ),
+        terminal_ip=0x50,
+    )
+    slot_snapshot = harness.run_program(
+        qemu, slot_program, typed_direct_trace_ips=(0x30, 0x40)
+    )
+    expected = golden_addsub(source2, source3, 8, 0, False)
+    if (slot_snapshot.exception_pending or slot_snapshot.gr[4] != expected or
+            slot_snapshot.gr[5] != expected):
+        raise AssertionError("A9 packed operation did not execute in M/I slots")
+    return (
+        "reserved MUX1 raises a precise Illegal Operation without target or "
+        "suffix effects; false qp suppresses it; A9 executes in M and I slots"
+    )
+
+
 def test_generated_density(harness: ModuleType, qemu: Path) -> str:
     cases = make_cases()
     matrices = (
@@ -783,6 +876,7 @@ def main() -> int:
     tests = [
         ("54-row packed semantic matrix", test_semantic_matrix),
         ("packed NaT propagation", test_nat_propagation),
+        ("packed legality and predication matrix", test_legality_matrix),
         ("packed family generated-code density", test_generated_density),
     ]
     print("TAP version 13")

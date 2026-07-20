@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 3,
+  "catalogue_revision": 4,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -856,6 +856,84 @@
       "permitted_results": [
         "Exactly one 32-bit platform write and one 32-bit platform read occur, the load returns the declared I/O SAPIC version, and both prefixes/successors retire once"
       ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "PKD-001-LANE-WIDTHS",
+      "requirement_ids": ["PKD-001"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.packed",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "4.6", "printed_pages": ["1:79", "1:80", "1:81"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "eight 8-bit, four 16-bit, or two 32-bit elements"},
+      "operation": {"kind": "packed-lane-widths", "selector": "every implemented 8-bit, 16-bit, and 32-bit packed form", "encoding": "legal A9, I1, I2, I3, and I4 multimedia encodings"},
+      "legal_inputs": ["Lane-unique source patterns at every implemented element width"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Application multimedia instructions are independent of privilege"},
+      "state_read": ["Source GR lanes and source NaT bits"], "state_written": ["Destination GR lanes and destination NaT bit"],
+      "predication": {"applies": true, "rule": "A false qualifying predicate suppresses destination and NaT updates"},
+      "nat_behavior": "Source NaT state propagates to the destination without per-lane reinterpretation",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "Every lane result commits atomically as one destination GR update",
+      "restart_rule": "No restart occurs for legal register operands", "permitted_results": ["Every lane equals the result of the selected operation at its declared width"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "PKD-002-SATURATION",
+      "requirement_ids": ["PKD-002"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.packed",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "4.6.1", "printed_pages": ["1:79", "1:80"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "signed saturation"},
+      "operation": {"kind": "packed-saturation", "selector": "modulo, signed-saturating, and unsigned-saturating arithmetic and pack forms", "encoding": "legal saturation completers and narrowing encodings"},
+      "legal_inputs": ["Positive and negative underflow, in-range, and overflow lane values"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Packed saturation is independent of privilege"},
+      "state_read": ["Source GR lanes"], "state_written": ["Saturated or modulo destination lanes"],
+      "predication": {"applies": true, "rule": "False qualification suppresses all lane writes"}, "nat_behavior": "Source NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "All saturated lanes commit as one GR update", "restart_rule": "No restart occurs for legal register operands",
+      "permitted_results": ["Signed lanes clamp to signed bounds, unsigned lanes clamp to zero or their maximum, and modulo forms wrap"], "required_evidence": "E2"
+    },
+    {
+      "id": "PKD-003-COMPARISONS",
+      "requirement_ids": ["PKD-003"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.packed",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "4.6.1", "printed_pages": ["1:80"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "parallel compare instruction (pcmp)"},
+      "operation": {"kind": "packed-comparison", "selector": "parallel equality and signed greater-than", "encoding": "legal pcmp1, pcmp2, and pcmp4 encodings"},
+      "legal_inputs": ["Equal, greater, and lesser lane pairs including signed boundaries"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Packed comparison is independent of privilege"},
+      "state_read": ["Two source GR lane vectors"], "state_written": ["Destination comparison-mask lanes"],
+      "predication": {"applies": true, "rule": "False qualification suppresses the comparison-mask write"}, "nat_behavior": "Source NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "All comparison-mask lanes commit together", "restart_rule": "No restart occurs for legal register operands",
+      "permitted_results": ["Each true relation produces an all-one lane and each false relation produces a zero lane"], "required_evidence": "E2"
+    },
+    {
+      "id": "PKD-004-DATA-ARRANGEMENT",
+      "requirement_ids": ["PKD-004"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.packed",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "4.6.3", "printed_pages": ["1:81"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Data Arrangement"},
+      "operation": {"kind": "packed-data-arrangement", "selector": "average, min/max, multiply, sum, SAD, mix, mux, pack, unpack, and zero-scan forms", "encoding": "legal implemented multimedia arithmetic and data-arrangement encodings"},
+      "legal_inputs": ["Lane-unique vectors, rounding pairs, multiplication limits, and zero-scan placements"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Packed data arrangement is independent of privilege"},
+      "state_read": ["One or two source GR lane vectors and immediate selector where applicable"], "state_written": ["Arranged or reduced destination GR"],
+      "predication": {"applies": true, "rule": "False qualification suppresses the destination write"}, "nat_behavior": "Any source NaT propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "The complete arranged or reduced result commits once", "restart_rule": "No restart occurs for legal operands",
+      "permitted_results": ["Lane selection, interleaving, narrowing, widening, rounding, multiplication, sum, and SAD match the selected form"], "required_evidence": "E2"
+    },
+    {
+      "id": "PKD-005-SHIFT-BOUNDARIES",
+      "requirement_ids": ["PKD-005"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.packed",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "4.6.2", "printed_pages": ["1:80", "1:81"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Parallel Shifts"},
+      "operation": {"kind": "packed-shift-boundaries", "selector": "fixed and variable logical-left, logical-right, and arithmetic-right shifts", "encoding": "legal I3 and I4 packed shift encodings"},
+      "legal_inputs": ["Counts below, at, and above the selected lane width"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Packed shifts are independent of privilege"},
+      "state_read": ["Source lane vector and immediate or GR count"], "state_written": ["Shifted destination lanes"],
+      "predication": {"applies": true, "rule": "False qualification suppresses shift-count consumption and destination write"}, "nat_behavior": "NaT in an enabled source or variable count propagates to the destination",
+      "possible_faults": [], "fault_priority": [], "committed_prefix": "All shifted lanes commit as one destination update", "restart_rule": "No restart occurs for legal operands",
+      "permitted_results": ["Each lane uses its logical or sign-filled result with the architected boundary count behavior"], "required_evidence": "E2"
+    },
+    {
+      "id": "PKD-006-LEGALITY",
+      "requirement_ids": ["PKD-006"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.packed",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Instruction Formats", "section": "4", "printed_pages": ["3:299"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "Reserved if PR[qp] is 1 instructions"},
+      "operation": {"kind": "packed-legality", "selector": "predicate, alias, NaT, reserved-field, and legal-slot behavior", "encoding": "legal A9/I multimedia forms plus an enabled or nullified reserved MUX1 function"},
+      "legal_inputs": ["True and false predicates, same-group aliases, source NaT, A9 in M and I slots, and a reserved MUX1 selector"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "Packed legality and predication rules are independent of privilege"},
+      "state_read": ["Entry predicate image, entry source GR/NaT image, encoding fields, and slot type"], "state_written": ["Legal destination GR/NaT or architectural interruption state"],
+      "predication": {"applies": true, "rule": "A false qualifying predicate makes a reserved-if-qp-one encoding a nop"}, "nat_behavior": "Enabled packed operations propagate source NaT; nullified operations do not alter destination NaT",
+      "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Predicate qualification precedes reserved-if-qp-one checks; an enabled reserved field faults before destination or suffix effects"],
+      "committed_prefix": "A legal result commits once; an enabled reserved encoding preserves its prefix and suppresses its own and suffix effects",
+      "restart_rule": "Illegal Operation saves the faulting bundle and slot for restart", "permitted_results": ["Exact legal result or precise Illegal Operation; no effect for a false predicate"],
       "required_evidence": "E2"
     },
     {

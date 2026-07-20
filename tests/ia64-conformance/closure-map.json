@@ -15,6 +15,7 @@
     "test-ia64-implementation-surface",
     "test-ia64-memory-boundary-tranche-static",
     "test-ia64-normative-catalogue",
+    "test-ia64-packed-integer-tranche-static",
     "test-ia64-predicate-branch-tranche-static",
     "test-ia64-runner-protocol"
   ],
@@ -212,6 +213,48 @@
         "test-ia64-memory-boundary-tranche",
         "test-ia64-memory-tcg"
       ]
+    },
+    {
+      "normative_row": "PKD-001-LANE-WIDTHS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.packed.lane-widths"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-integer-tranche", "test-ia64-packed-tcg"]
+    },
+    {
+      "normative_row": "PKD-002-SATURATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.packed.saturation"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-integer-tranche", "test-ia64-packed-tcg"]
+    },
+    {
+      "normative_row": "PKD-003-COMPARISONS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.packed.comparisons"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-integer-tranche", "test-ia64-packed-tcg"]
+    },
+    {
+      "normative_row": "PKD-004-DATA-ARRANGEMENT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.packed.arrangement"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-integer-tranche", "test-ia64-packed-tcg"]
+    },
+    {
+      "normative_row": "PKD-005-SHIFT-BOUNDARIES",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.packed.shifts"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-integer-tranche", "test-ia64-packed-tcg"]
+    },
+    {
+      "normative_row": "PKD-006-LEGALITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.packed.legality"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-packed-integer-tranche", "test-ia64-packed-tcg"]
     },
     {
       "normative_row": "PRD-001-COMPARE-RELATIONS",
