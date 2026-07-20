@@ -3484,7 +3484,8 @@ def main() -> int:
     )
     fresh_overlay_clear = section(
         source_overlay_clear,
-        "if (!ssa->inherited && !ssa->durable_materialized)",
+        "if (!ssa->inherited && !ssa->durable_materialized &&\n"
+        "            ctx->source_overlay_known_clear)",
         "if (!ssa->inherited)",
     )
     taken_visibility = section(

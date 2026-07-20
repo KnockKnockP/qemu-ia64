@@ -264,8 +264,9 @@ def check_encodings() -> None:
 
 
 def check_references(reference_root: Path) -> None:
-    qemu = reference_root / "external-src/qemu-system-ia64-main/target/ia64"
-    ski = reference_root / "external-src/ski/src"
+    emulator = reference_root / "external-src/emulator"
+    qemu = emulator / "qemu-system-ia64-main/target/ia64"
+    ski = emulator / "ski/src"
     manual = reference_root / "docs/pdf/itanium-architecture-vol-3-manual.txt"
     for path in (qemu / "cpu.c", qemu / "op_helper.c",
                  ski / "exec.incl.c", ski / "mem_exec.tmpl.c", manual):

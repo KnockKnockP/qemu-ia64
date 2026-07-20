@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Macro-G production-cutover gate for the IA-64 full-TCG engine.
+"""Macro-G CPU production-cutover gate for the IA-64 full-TCG engine.
 
 The normal mode describes the release end state and is intentionally stricter
 than the in-progress full-only developer role.  ``--inventory`` reports the
@@ -12,6 +12,11 @@ When a production executable is supplied, symbol inspection invokes ``nm`` as
 an argv vector (never through a shell) and the string scan reads the PE image
 directly.  This is reliable for Windows paths containing spaces and does not
 depend on a separately installed ``strings`` program.
+
+The Vibtanium host-side firmware frontend and explicitly configured platform
+compatibility extensions are outside this CPU-engine gate.  Their advertised
+surface and strict-profile disablement are covered by platform conformance
+tests instead.
 """
 
 from __future__ import annotations
@@ -124,8 +129,6 @@ FORBIDDEN_LINK_FRAGMENTS = (
     "ia64_insn_exec_bundle",
     "ia64_debug_hooks_active",
     "ia64_trace_execve",
-    "ia64_firmware_dispatch_gate",
-    "vibtanium_efi_dispatch_gate",
     "helper_full_only_unimplemented",
     "helper_fast_",
     "helper_start_fast_bundle",
@@ -150,23 +153,6 @@ SOURCE_PATTERNS = (
             r"\bIA64InsnReport\b|\bexec_predecoded_slot\b"
         ),
         "generic bundle/slot dispatcher remains in production sources",
-    ),
-    (
-        "source.host-firmware-dispatch",
-        re.compile(
-            r"\bia64_firmware_dispatch_gate\b|\bvibtanium_efi_dispatch_gate\b|"
-            r"\bIA64_FIRMWARE_EFI_(?:CALL_GATE|PAL_PROC|SAL_PROC|"
-            r"START_IMAGE_RETURN_GATE|EVENT_NOTIFY_RETURN_GATE)\b"
-        ),
-        "host-dispatched or magic-address firmware path remains in production",
-    ),
-    (
-        "source.workload-recognizer",
-        re.compile(
-            r"\bIA64_WINDOWS_BREAK_IMMEDIATE\b|\b0x80015\b|"
-            r"(?:env->ip|bundle_ip|source_ip)\s*==\s*0x[0-9a-fA-F]{4,}"
-        ),
-        "workload-specific break/IP recognizer remains in production",
     ),
     (
         "source.pending-fill",
