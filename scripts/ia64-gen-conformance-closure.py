@@ -533,8 +533,8 @@ def build_report(
             "declared_profile_consistent": "not-evaluated",
             "profile_complete": "not-evaluated",
             "reason": (
-                "blocking closure rows remain and no row-closing evidence "
-                "is claimed"
+                "blocking implementation rows remain outside the seed "
+                "catalogue; explicit seed-row evidence is reported below"
             ),
         },
         "classification_policy": {

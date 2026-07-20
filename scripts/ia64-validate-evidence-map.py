@@ -46,7 +46,7 @@ REQUIRED_STANDALONE_IDS = {
     "standalone:efi-bit",
     "workload:debian-cd1-lifecycle",
 }
-REQUIRED_GAP_IDS = {"evidence:row-level-metadata", "sentinel:bsd"}
+REQUIRED_GAP_IDS = {"sentinel:bsd"}
 ENTRY_KEYS = {
     "id", "kind", "lane", "primary_evidence_level", "evidence_levels",
     "ci_tiers", "test_registration", "source_paths", "invocation", "scope",

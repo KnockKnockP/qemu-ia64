@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 0
+    "row_closing_claims_expected": 11
   },
   "entries": [
     {
@@ -208,6 +208,46 @@
       "conformance_role": "supporting",
       "closes_normative_rows": [],
       "limitations": ["Evidence metadata validation does not execute the classified tests."]
+    },
+    {
+      "id": "meson:test-ia64-first-architectural-tranche",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-first-architectural-tranche",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-conformance-runner.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/first-architectural-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/runner-protocol.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-first-architectural-tranche.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-first-architectural-tranche",
+      "scope": "Independent literal E2 oracles for all eleven seed bundle, sequencing, issue-group, constant-register, commitment, and repair/retry rows.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["BND-001-BUNDLE-FORMAT", "BND-001-TEMPLATE-MAP", "BND-003-SEQUENTIAL-ORDER", "GRP-002-STOP-VISIBILITY", "GRP-004-GROUP-ENTRY-REGISTER", "GRP-007-FAULT-COMMITMENT", "REG-004-FR0-READ", "REG-004-FR1-READ", "REG-004-GR0-READ", "REG-004-PR0-READ", "REG-004-PR0-WRITE"],
+      "limitations": ["The claim is limited to the eleven currently catalogued seed rows and does not imply profile-wide conformance."]
+    },
+    {
+      "id": "meson:test-ia64-first-architectural-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-first-architectural-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-first-architectural-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/first-architectural-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-first-architectural-tranche-static",
+      "scope": "Complete section 10.1 case metadata, citation, stable identity, lane, and independent-oracle validation.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Static metadata validation is supporting E0 evidence and does not close architectural rows by itself."]
     },
     {
       "id": "meson:test-ia64-fp-tcg",
@@ -683,13 +723,6 @@
     }
   ],
   "gaps": [
-    {
-      "id": "evidence:row-level-metadata",
-      "expected_level": "E2",
-      "ci_tiers": ["required"],
-      "status": "not-present",
-      "reason": "Existing architectural tests do not yet emit the complete normative row and result metadata required by section 10.1."
-    },
     {
       "id": "sentinel:bsd",
       "expected_level": "E4",

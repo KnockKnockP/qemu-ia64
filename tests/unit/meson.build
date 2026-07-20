@@ -317,6 +317,12 @@ test('test-ia64-runner-protocol', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-first-architectural-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-first-architectural-tranche.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-rse-spine-static', python,
      args: [meson.current_source_dir() / 'test-ia64-rse-spine-static.py',
             '--source-root', meson.project_source_root()],
@@ -373,6 +379,15 @@ if 'ia64-softmmu' in target_dirs
               '--source-root', meson.project_source_root(),
               '--binary', ia64_full_tcg_emulator.full_path()],
        timeout: 30,
+       suite: ['unit'])
+
+  test('test-ia64-first-architectural-tranche', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-first-architectural-tranche.py',
+              '--source-root', meson.project_source_root(),
+              '--binary', ia64_full_tcg_emulator.full_path()],
+       timeout: 120,
        suite: ['unit'])
 
   test('test-ia64-production-cutover', python,

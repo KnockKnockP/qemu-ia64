@@ -65,6 +65,52 @@ class SurfaceError(RuntimeError):
     pass
 
 
+ARCHITECTURAL_SURFACES = (
+    (
+        "cpu.bundle.format",
+        "cpu.bundle",
+        "128-bit bundle field extraction",
+        "target/ia64/bundle.c",
+        "decoded->slot[0] = (lo >> 5) & IA64_SLOT_MASK",
+    ),
+    (
+        "cpu.bundle.template-map",
+        "cpu.bundle",
+        "defined template unit and stop map",
+        "target/ia64/bundle.c",
+        "ia64_template_table[32]",
+    ),
+    (
+        "cpu.sequencing.sequential-order",
+        "cpu.sequencing",
+        "bundle and slot execution order",
+        "target/ia64/translate.c",
+        "ia64_tr_try_decoded_bundle",
+    ),
+    (
+        "cpu.issue-group.stop-visibility",
+        "cpu.issue-group",
+        "architectural stop visibility",
+        "target/ia64/translate.c",
+        "decoded.ends_at_group_boundary",
+    ),
+    (
+        "cpu.issue-group.entry-register",
+        "cpu.issue-group",
+        "instruction-group entry register image",
+        "target/ia64/translate.c",
+        "ia64_tr_store_source_visibility_state",
+    ),
+    (
+        "cpu.issue-group.fault-commitment",
+        "cpu.issue-group",
+        "precise committed prefix publication",
+        "target/ia64/translate.c",
+        "ia64_tr_group_publish_prefix_for_noreturn_fault",
+    ),
+)
+
+
 def relative(path: Path, root: Path) -> str:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
@@ -190,6 +236,36 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
                 "path": relative(cpu_h, root),
                 "anchor": f"uint64_t {name}",
             }],
+        })
+    return rows
+
+
+def architectural_surface_rows(root: Path) -> list[dict[str, Any]]:
+    """Inventory the explicitly tested first architectural tranche.
+
+    These rows remain implementation-derived: every row is admitted only when
+    its named source anchor exists.  Normative meaning stays in the separate
+    catalogue and is never inferred from these source names.
+    """
+    rows = []
+    for identifier, kind, name, path_text, anchor in ARCHITECTURAL_SURFACES:
+        path = root / path_text
+        source = path.read_text(encoding="utf-8")
+        if anchor not in source:
+            raise SurfaceError(
+                f"architectural surface anchor disappeared: {path_text}: "
+                f"{anchor}"
+            )
+        rows.append({
+            "id": identifier,
+            "kind": kind,
+            "name": name,
+            "status": "live",
+            "attributes": {
+                "classification": "first-architectural-tranche",
+                "guest_reachability": "reachable",
+            },
+            "provenance": [{"path": path_text, "anchor": anchor}],
         })
     return rows
 
@@ -520,6 +596,7 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
     features, feature_sources = config_features(build_dir, root)
     rows = opcode_surface_rows(root)
     rows.extend(register_rows(root))
+    rows.extend(architectural_surface_rows(root))
     platform, version = platform_rows(root, binary)
     rows.extend(platform)
     rows.sort(key=lambda row: row["id"])
@@ -542,6 +619,18 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 {
                     "domain": "cpu.register",
                     "completeness": "storage-index-complete",
+                },
+                {
+                    "domain": "cpu.bundle",
+                    "completeness": "first-architectural-tranche",
+                },
+                {
+                    "domain": "cpu.issue-group",
+                    "completeness": "first-architectural-tranche",
+                },
+                {
+                    "domain": "cpu.sequencing",
+                    "completeness": "first-architectural-tranche",
                 },
                 {"domain": "platform.machine", "completeness": "foundation"},
                 {
