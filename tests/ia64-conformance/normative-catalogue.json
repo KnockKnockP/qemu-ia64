@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 1,
+  "catalogue_revision": 2,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -397,6 +397,330 @@
       "restart_rule": "Repair and retry begins at the saved faulting instruction without replaying the committed prefix",
       "permitted_results": [
         "The earliest instruction exception is reported with exactly the preceding instruction prefix committed"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "MEM-009-CODE-INVALIDATION",
+      "requirement_ids": [
+        "MEM-009"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.memory",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v2-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture",
+        "revision": "2.3",
+        "volume": 2,
+        "part": "Part 2: System Programmer's Guide",
+        "section": "2.5.1",
+        "printed_pages": [
+          "2:532"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf",
+        "anchor": "Self-modifying Code"
+      },
+      "operation": {
+        "kind": "instruction-cache-coherence",
+        "selector": "store to an instruction image followed by fc.i, sync.i, srlz.i, and re-entry",
+        "encoding": "legal store and cache/serialization instructions operating on an aligned bundle image"
+      },
+      "legal_inputs": [
+        "A valid replacement instruction image written through an architecturally legal data store",
+        "The affected cache line is flushed and instruction visibility is synchronized and serialized before re-entry"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The sequence applies at every privilege level where the mapping permits the store and cache-control operations"
+      },
+      "state_read": [
+        "original instruction image",
+        "replacement bytes",
+        "instruction-cache coherence state"
+      ],
+      "state_written": [
+        "instruction image",
+        "instruction-side visibility state",
+        "architectural results of the replacement instruction"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "A false-predicated store or maintenance instruction performs no corresponding state update"
+      },
+      "nat_behavior": "A NaT-consuming address or store operand follows the selected instruction's fault semantics and cannot make the replacement executable",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "The data store, cache-line flush, instruction synchronization, and serialization complete in program order before re-entry",
+      "restart_rule": "If a separately defined interruption occurs, retry follows that instruction's architectural restart rule; successful re-entry fetches the coherent replacement",
+      "permitted_results": [
+        "After the complete synchronization sequence, re-entry executes the replacement instruction image and not stale translated code"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "MEM-010-RAM-CONTINUATION",
+      "requirement_ids": [
+        "MEM-010"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.memory",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.4",
+        "printed_pages": [
+          "1:40"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "read of the memory and ALAT state occurred after the update"
+      },
+      "operation": {
+        "kind": "ram-load-continuation",
+        "selector": "ordinary RAM load followed by a dependent instruction",
+        "encoding": "legal load and dependency-correct consumer spanning either one translator TB or an internal TB boundary"
+      },
+      "legal_inputs": [
+        "A naturally aligned mapped RAM operand",
+        "A legal consumer of the successful load result"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The rule applies at every privilege level for which the mapping grants read access"
+      },
+      "state_read": [
+        "RAM value",
+        "load base register",
+        "instruction-group entry state"
+      ],
+      "state_written": [
+        "load destination",
+        "dependent consumer destination"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "A false-predicated load performs no memory read and produces no destination for a later consumer"
+      },
+      "nat_behavior": "A successful ordinary load clears the destination NaT indication; a NaT address follows the separately catalogued fault rule",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "The successful load result is available to the dependency-correct consumer independent of an implementation-created TB boundary",
+      "restart_rule": "Not exercised for the valid mapped RAM input",
+      "permitted_results": [
+        "The load and consumer produce identical architectural values with and without a translator-created continuation boundary"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "MEM-011-UPDATE-SAFEPOINT",
+      "requirement_ids": [
+        "MEM-011"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.memory",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Application Programming Model",
+        "section": "4.4",
+        "printed_pages": [
+          "1:57"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "The update is done after the load or store operation"
+      },
+      "operation": {
+        "kind": "memory-base-update",
+        "selector": "successful post-increment store followed by same-group and later memory consumers",
+        "encoding": "legal immediate base-update store at a final-bundle memory safepoint"
+      },
+      "legal_inputs": [
+        "A mapped naturally aligned destination",
+        "A legal immediate update and dependency-correct same-group consumers"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The rule applies at every privilege level for which the mapping grants write access"
+      },
+      "state_read": [
+        "store value",
+        "group-entry base register",
+        "target memory"
+      ],
+      "state_written": [
+        "target memory",
+        "post-incremented base register",
+        "successor results"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "A false-predicated update-form store performs neither the memory write nor the base update"
+      },
+      "nat_behavior": "A successful store preserves unrelated NaT state; a NaT-consuming operand follows the separately catalogued fault rule",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "The memory write completes and the base is updated exactly once before the final architectural state is observed",
+      "restart_rule": "Not exercised for the valid mapped destination; a faulting variant belongs to MEM-012",
+      "permitted_results": [
+        "The stored value, one post-increment, immutable same-group entry-base read, and successor results match across resident and split execution"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "MEM-012-FAULT-SUPPRESSION",
+      "requirement_ids": [
+        "MEM-012"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.memory",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v1-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture",
+        "revision": "2.3",
+        "volume": 1,
+        "part": "Part 1: Execution Environment",
+        "section": "3.4",
+        "printed_pages": [
+          "1:41"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf",
+        "anchor": "At the point of exception delivery for a correctly formed instruction group"
+      },
+      "operation": {
+        "kind": "memory-fault-commitment",
+        "selector": "faulting update-form load after a multi-bundle successful prefix",
+        "encoding": "legal slot-1 load whose NaT address raises Register NaT Consumption"
+      },
+      "legal_inputs": [
+        "A dependency-correct issue group with successful GR, BR, PR, store, and base-update prefixes",
+        "A NaT-tagged load address in slot 1"
+      ],
+      "privilege": {
+        "levels": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "rule": "The commitment rule applies at every privilege level where the instructions are legal"
+      },
+      "state_read": [
+        "ordered issue-group prefix",
+        "NaT-tagged address register",
+        "faulting load operands"
+      ],
+      "state_written": [
+        "architectural effects of instructions before the fault",
+        "saved interruption state"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "The tested load is enabled; a false-predicated load would not consume the address NaT or fault"
+      },
+      "nat_behavior": "The enabled load consumes a NaT address and faults without changing its destination, base, or NaT state",
+      "possible_faults": [
+        "Register NaT Consumption fault"
+      ],
+      "fault_priority": [
+        "The enabled slot-1 NaT-consuming load is the earliest faulting instruction and is reported after every prior instruction update"
+      ],
+      "committed_prefix": "Every successful store/base, BR, PR, and GR prefix effect is visible exactly once; the faulting load and suffix are suppressed",
+      "restart_rule": "Repair would retry at the saved slot-1 load without replaying the already committed prefix",
+      "permitted_results": [
+        "Exact Register NaT Consumption vector and saved IIP/RI/ISR with the literal prefix committed and load destination/base unchanged"
+      ],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "MEM-013-MMIO-EXACTLY-ONCE",
+      "requirement_ids": [
+        "MEM-013"
+      ],
+      "profiles": [
+        "vibtanium-strict-up",
+        "vibtanium-default-up"
+      ],
+      "interface_kind": "cpu.memory",
+      "specification": {
+        "document_id": "intel-ia64-sdm-v2-r2.3",
+        "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture",
+        "revision": "2.3",
+        "volume": 2,
+        "part": "Part 2: System Programmer's Guide",
+        "section": "11",
+        "printed_pages": [
+          "2:615"
+        ],
+        "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf",
+        "anchor": "uncacheable I/O references are always presented to the platform in program order"
+      },
+      "operation": {
+        "kind": "mmio-transaction",
+        "selector": "one 32-bit store and one 32-bit load to mapped I/O SAPIC registers",
+        "encoding": "ordinary IA-64 store/load instructions to uncacheable platform MMIO"
+      },
+      "legal_inputs": [
+        "Aligned 32-bit accesses to implemented I/O SAPIC selector/data registers",
+        "One successful issue-group prefix before each MMIO instruction"
+      ],
+      "privilege": {
+        "levels": [
+          0
+        ],
+        "rule": "The platform MMIO mapping is exercised by privileged bare-metal code"
+      },
+      "state_read": [
+        "I/O SAPIC register state",
+        "MMIO load address",
+        "issue-group prefix state"
+      ],
+      "state_written": [
+        "I/O SAPIC selector register",
+        "MMIO load destination",
+        "successor and prefix registers"
+      ],
+      "predication": {
+        "applies": true,
+        "rule": "A false-predicated MMIO instruction presents no transaction to the platform"
+      },
+      "nat_behavior": "A NaT-consuming address or store value faults before presenting the MMIO transaction",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Each successful prefix retires once and each enabled MMIO instruction presents exactly one platform transaction in program order",
+      "restart_rule": "An implementation-internal I/O recompile resumes at the MMIO instruction without architecturally replaying its successful prefix or device access",
+      "permitted_results": [
+        "Exactly one 32-bit platform write and one 32-bit platform read occur, the load returns the declared I/O SAPIC version, and both prefixes/successors retire once"
       ],
       "required_evidence": "E2"
     },

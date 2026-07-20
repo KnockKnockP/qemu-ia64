@@ -108,6 +108,41 @@ ARCHITECTURAL_SURFACES = (
         "target/ia64/translate.c",
         "ia64_tr_group_publish_prefix_for_noreturn_fault",
     ),
+    (
+        "cpu.memory.code-invalidation",
+        "cpu.memory",
+        "translated-code invalidation after an architectural store",
+        "target/ia64/translate.c",
+        "tcg_gen_qemu_st_i64",
+    ),
+    (
+        "cpu.memory.ram-continuation",
+        "cpu.memory",
+        "ordinary RAM access continuation",
+        "target/ia64/translate.c",
+        "tcg_gen_qemu_ld_i64",
+    ),
+    (
+        "cpu.memory.update-safepoint",
+        "cpu.memory",
+        "memory base-update safepoint",
+        "target/ia64/translate.c",
+        "memory_safepoint_valid",
+    ),
+    (
+        "cpu.memory.fault-commitment",
+        "cpu.memory",
+        "faulting memory operation commitment",
+        "target/ia64/translate.c",
+        "ia64_tr_group_publish_prefix_for_noreturn_fault",
+    ),
+    (
+        "cpu.memory.mmio-exactly-once",
+        "cpu.memory",
+        "MMIO retry without architectural replay",
+        "target/ia64/translate.c",
+        "memory_restart_complex",
+    ),
 )
 
 
@@ -241,7 +276,7 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
 
 
 def architectural_surface_rows(root: Path) -> list[dict[str, Any]]:
-    """Inventory the explicitly tested first architectural tranche.
+    """Inventory explicitly catalogued architectural surfaces.
 
     These rows remain implementation-derived: every row is admitted only when
     its named source anchor exists.  Normative meaning stays in the separate
@@ -262,7 +297,7 @@ def architectural_surface_rows(root: Path) -> list[dict[str, Any]]:
             "name": name,
             "status": "live",
             "attributes": {
-                "classification": "first-architectural-tranche",
+                "classification": "catalogued-architectural-surface",
                 "guest_reachability": "reachable",
             },
             "provenance": [{"path": path_text, "anchor": anchor}],
@@ -631,6 +666,10 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 {
                     "domain": "cpu.sequencing",
                     "completeness": "first-architectural-tranche",
+                },
+                {
+                    "domain": "cpu.memory",
+                    "completeness": "catalogued-boundary-tranche",
                 },
                 {"domain": "platform.machine", "completeness": "foundation"},
                 {

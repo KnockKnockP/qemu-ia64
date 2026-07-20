@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 11
+    "row_closing_claims_expected": 16
   },
   "entries": [
     {
@@ -397,6 +397,45 @@
       "conformance_role": "supporting",
       "closes_normative_rows": [],
       "limitations": ["Host helper behavior alone does not prove normal guest execution."]
+    },
+    {
+      "id": "meson:test-ia64-memory-boundary-tranche",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-memory-boundary-tranche",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/memory-boundary-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-memory-boundary-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-memory-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-memory-boundary-tranche",
+      "scope": "Independent literal E2 oracles for code invalidation, RAM continuation, update safepoints, fault suppression, and exactly-once MMIO rows.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["MEM-009-CODE-INVALIDATION", "MEM-010-RAM-CONTINUATION", "MEM-011-UPDATE-SAFEPOINT", "MEM-012-FAULT-SUPPRESSION", "MEM-013-MMIO-EXACTLY-ONCE"],
+      "limitations": ["The claims close only the five explicitly catalogued memory-boundary rows; the remaining width, alignment, speculation, alias, DMA, watchpoint, and address-boundary requirements remain open."]
+    },
+    {
+      "id": "meson:test-ia64-memory-boundary-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-memory-boundary-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-memory-boundary-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/memory-boundary-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-memory-boundary-tranche-static",
+      "scope": "Complete section 10.1 metadata, citation equality, stable identity, executable probe, and independent-oracle validation for five memory-boundary rows.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Static metadata validation is supporting E0 evidence and does not close rows without the E2 runtime gate."]
     },
     {
       "id": "meson:test-ia64-memory-exceptions",

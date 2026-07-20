@@ -13,6 +13,7 @@
     "test-ia64-evidence-map",
     "test-ia64-first-architectural-tranche-static",
     "test-ia64-implementation-surface",
+    "test-ia64-memory-boundary-tranche-static",
     "test-ia64-normative-catalogue",
     "test-ia64-runner-protocol"
   ],
@@ -98,6 +99,67 @@
         "test-ia64-first-architectural-tranche",
         "test-ia64-full-tcg",
         "test-ia64-memory-exceptions",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "MEM-009-CODE-INVALIDATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.memory.code-invalidation"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-memory-boundary-tranche",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "MEM-010-RAM-CONTINUATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.memory.ram-continuation"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-memory-boundary-tranche",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "MEM-011-UPDATE-SAFEPOINT",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.memory.update-safepoint"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-memory-boundary-tranche",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "MEM-012-FAULT-SUPPRESSION",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.memory.fault-commitment"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-memory-boundary-tranche",
+        "test-ia64-memory-exceptions",
+        "test-ia64-memory-tcg"
+      ]
+    },
+    {
+      "normative_row": "MEM-013-MMIO-EXACTLY-ONCE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [
+        "cpu.memory.mmio-exactly-once"
+      ],
+      "inventory_gap": null,
+      "candidate_tests": [
+        "test-ia64-memory-boundary-tranche",
         "test-ia64-memory-tcg"
       ]
     },

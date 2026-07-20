@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Validate complete row metadata for the first IA-64 E2 tranche."""
+"""Validate complete row metadata for the IA-64 memory-boundary tranche."""
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
 import sys
 from typing import Any, Sequence
 
 
-SCHEMA = "vibtanium.ia64.first-architectural-tranche"
+SCHEMA = "vibtanium.ia64.memory-boundary-tranche"
 SPDX_DECLARATION = "SPDX-" + "License-Identifier: GPL-2.0-or-later"
 PROFILE = "vibtanium-strict-up"
 ROOT_KEYS = {
@@ -25,21 +26,28 @@ CASE_KEYS = {
     "committed_prefix", "restart_action", "applicable_variants",
     "execution", "oracle",
 }
-CITATION_KEYS = {
-    "document_id", "section", "printed_pages", "anchor",
-}
-EXPECTED_IMPLEMENTATION = {
-    "BND-001-BUNDLE-FORMAT": ["cpu.bundle.format"],
-    "BND-001-TEMPLATE-MAP": ["cpu.bundle.template-map"],
-    "BND-003-SEQUENTIAL-ORDER": ["cpu.sequencing.sequential-order"],
-    "GRP-002-STOP-VISIBILITY": ["cpu.issue-group.stop-visibility"],
-    "GRP-004-GROUP-ENTRY-REGISTER": ["cpu.issue-group.entry-register"],
-    "GRP-007-FAULT-COMMITMENT": ["cpu.issue-group.fault-commitment"],
-    "REG-004-FR0-READ": ["cpu.register.fr.0"],
-    "REG-004-FR1-READ": ["cpu.register.fr.1"],
-    "REG-004-GR0-READ": ["cpu.register.gr.0"],
-    "REG-004-PR0-READ": ["cpu.register.pr.0"],
-    "REG-004-PR0-WRITE": ["cpu.register.pr.0"],
+CITATION_KEYS = {"document_id", "section", "printed_pages", "anchor"}
+EXPECTED = {
+    "MEM-009-CODE-INVALIDATION": (
+        ["cpu.memory.code-invalidation"],
+        "test_store_update_code_page_restart",
+    ),
+    "MEM-010-RAM-CONTINUATION": (
+        ["cpu.memory.ram-continuation"],
+        "test_normal_ram_continuation",
+    ),
+    "MEM-011-UPDATE-SAFEPOINT": (
+        ["cpu.memory.update-safepoint"],
+        "test_store_update_continuation",
+    ),
+    "MEM-012-FAULT-SUPPRESSION": (
+        ["cpu.memory.fault-commitment"],
+        "test_multi_prefix_slot1_fault",
+    ),
+    "MEM-013-MMIO-EXACTLY-ONCE": (
+        ["cpu.memory.mmio-exactly-once"],
+        "test_mmio_io_recompile_exactly_once",
+    ),
 }
 
 
@@ -69,7 +77,7 @@ def string_list(value: Any, label: str, *, allow_empty: bool = False) -> list[st
     if not isinstance(value, list) or any(
         not isinstance(item, str) or not item for item in value
     ):
-        raise TrancheError(f"{label}: expected non-empty strings")
+        raise TrancheError(f"{label}: expected strings")
     if not allow_empty and not value:
         raise TrancheError(f"{label}: must not be empty")
     if len(value) != len(set(value)):
@@ -77,78 +85,61 @@ def string_list(value: Any, label: str, *, allow_empty: bool = False) -> list[st
     return value
 
 
-def validate_literal_bundle_fields() -> None:
-    """Exercise a test-owned pack/extract oracle for BND-001."""
-    template = 0x01
-    slots = (
-        (1 << 27) | (0x15555 << 6),
-        (1 << 27) | (0x2aaaa << 6),
-        (1 << 27) | (0x12345 << 6),
-    )
-    value = (
-        template | (slots[0] << 5) | (slots[1] << 46) | (slots[2] << 87)
-    )
-    recovered = (
-        value & 0x1f,
-        (value >> 5) & ((1 << 41) - 1),
-        (value >> 46) & ((1 << 41) - 1),
-        (value >> 87) & ((1 << 41) - 1),
-    )
-    if recovered != (template, *slots):
-        raise TrancheError("literal 128-bit bundle field oracle failed")
-    if value.to_bytes(16, "little").hex() != (
-        "01a8aa0a0100a0aa2a0200a068240400"
-    ):
-        raise TrancheError("literal packed bundle bytes drifted")
+def harness_functions(path: Path) -> set[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise TrancheError(f"cannot inspect {path}: {exc}") from exc
+    return {
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
 
 
-def validate(document: Any, catalogue: Any) -> dict[str, int]:
+def validate(document: Any, catalogue: Any, root: Path) -> dict[str, int]:
     exact_keys(document, ROOT_KEYS, "tranche root")
     if document["$comment"] != SPDX_DECLARATION:
         raise TrancheError("SPDX declaration changed")
     if document["schema"] != SCHEMA or document["schema_version"] != 1:
         raise TrancheError("unsupported tranche schema/version")
-    if document["profile"] != PROFILE or document["test_id"] != 700:
+    if document["profile"] != PROFILE or document["test_id"] != 701:
         raise TrancheError("profile or stable test id changed")
 
     catalogue_rows = {row["id"]: row for row in catalogue.get("rows", [])}
-    missing_seed_rows = sorted(
-        set(EXPECTED_IMPLEMENTATION) - set(catalogue_rows)
-    )
-    if missing_seed_rows:
+    missing_rows = sorted(set(EXPECTED) - set(catalogue_rows))
+    if missing_rows:
         raise TrancheError(
-            "tranche seed rows disappeared from the catalogue: "
-            + ", ".join(missing_seed_rows)
+            "memory rows disappeared from catalogue: " + ", ".join(missing_rows)
         )
+    functions = harness_functions(root / "tests/unit/test-ia64-memory-tcg.py")
     cases = document["cases"]
-    if not isinstance(cases, list) or len(cases) != 11:
-        raise TrancheError("first tranche must contain exactly eleven cases")
+    if not isinstance(cases, list) or len(cases) != len(EXPECTED):
+        raise TrancheError("memory tranche must contain exactly five cases")
     identifiers = [case.get("id") for case in cases]
-    if identifiers != sorted(identifiers) or len(set(identifiers)) != 11:
+    if identifiers != sorted(identifiers) or len(set(identifiers)) != len(cases):
         raise TrancheError("case ids must be unique and sorted")
 
-    seen_rows = set()
-    persistent_generations = []
+    seen_rows: set[str] = set()
     for index, case in enumerate(cases, 1):
         label = f"case {case.get('id', index)}"
         exact_keys(case, CASE_KEYS, label)
-        if case["case_id"] != index or case["normative_token"] != index:
+        if case["case_id"] != index or case["normative_token"] != index + 11:
             raise TrancheError(f"{label}: stable numeric ids drifted")
         row_id = case["normative_row"]
-        if row_id not in catalogue_rows or row_id in seen_rows:
+        if row_id not in EXPECTED or row_id in seen_rows:
             raise TrancheError(f"{label}: unknown or duplicate normative row")
         seen_rows.add(row_id)
-        if case["implementation_rows"] != EXPECTED_IMPLEMENTATION[row_id]:
+        implementation, probe = EXPECTED[row_id]
+        if case["implementation_rows"] != implementation:
             raise TrancheError(f"{label}: implementation mapping changed")
 
         citation = case["citation"]
         exact_keys(citation, CITATION_KEYS, f"{label} citation")
         specification = catalogue_rows[row_id]["specification"]
-        expected_citation = {
-            key: specification[key] for key in CITATION_KEYS
-        }
-        if citation != expected_citation:
+        if citation != {key: specification[key] for key in CITATION_KEYS}:
             raise TrancheError(f"{label}: citation differs from catalogue")
+        if catalogue_rows[row_id]["required_evidence"] != "E2":
+            raise TrancheError(f"{label}: normative row no longer requires E2")
 
         for field in (
             "preconditions", "inputs", "expected_results", "allowed_results",
@@ -160,43 +151,37 @@ def validate(document: Any, catalogue: Any) -> dict[str, int]:
                     allow_empty=True)
         string_list(case["fault_priority"], f"{label} fault_priority",
                     allow_empty=True)
+        if bool(case["expected_faults"]) != bool(case["fault_priority"]):
+            raise TrancheError(f"{label}: fault and priority metadata disagree")
         for field in ("committed_prefix", "restart_action"):
             if not isinstance(case[field], str) or not case[field]:
                 raise TrancheError(f"{label}: {field} must not be empty")
 
         exact_keys(
-            case["execution"], {"lane", "generation", "result_observations"},
+            case["execution"], {"lane", "probe", "result_observations"},
             f"{label} execution",
         )
-        string_list(
-            case["execution"]["result_observations"],
-            f"{label} result observations",
-        )
-        lane = case["execution"]["lane"]
-        generation = case["execution"]["generation"]
-        if lane == "persistent-guest":
-            if type(generation) is not int or generation <= 0:
-                raise TrancheError(f"{label}: invalid persistent generation")
-            persistent_generations.append(generation)
-        elif lane == "isolated-repair-retry":
-            if row_id != "GRP-007-FAULT-COMMITMENT" or generation != 0:
-                raise TrancheError(f"{label}: invalid isolated lane")
-        else:
-            raise TrancheError(f"{label}: unknown execution lane")
+        if case["execution"]["lane"] != "isolated-guest":
+            raise TrancheError(f"{label}: unexpected execution lane")
+        if case["execution"]["probe"] != probe or probe not in functions:
+            raise TrancheError(f"{label}: missing or changed executable probe")
+        string_list(case["execution"]["result_observations"],
+                    f"{label} result observations")
 
         exact_keys(case["oracle"], {"independence", "derivation"},
                    f"{label} oracle")
         if case["oracle"]["independence"] != "independent":
             raise TrancheError(f"{label}: row oracle must be independent")
-        if not isinstance(case["oracle"]["derivation"], str):
+        derivation = case["oracle"]["derivation"]
+        if not isinstance(derivation, str) or not derivation:
             raise TrancheError(f"{label}: oracle derivation is missing")
-        if catalogue_rows[row_id]["required_evidence"] != "E2":
-            raise TrancheError(f"{label}: seed row no longer requires E2")
 
-    if persistent_generations != list(range(1, 11)):
-        raise TrancheError("persistent generations must be exactly 1 through 10")
-    validate_literal_bundle_fields()
-    return {"cases": len(cases), "persistent": 10, "isolated": 1}
+    if seen_rows != set(EXPECTED):
+        raise TrancheError("memory tranche row coverage is incomplete")
+    return {
+        "cases": len(cases),
+        "faulting": sum(bool(case["expected_faults"]) for case in cases),
+    }
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -210,17 +195,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = args.root.resolve()
     try:
         summary = validate(
-            load_json(root / "tests/ia64-conformance/first-architectural-tranche.json"),
+            load_json(root / "tests/ia64-conformance/memory-boundary-tranche.json"),
             load_json(root / "tests/ia64-conformance/normative-catalogue.json"),
+            root,
         )
     except TrancheError as exc:
-        print(f"first architectural tranche validation failed: {exc}",
-              file=sys.stderr)
+        print(f"memory-boundary tranche validation failed: {exc}", file=sys.stderr)
         return 1
     print(
-        "first architectural tranche metadata is valid: "
-        f"{summary['cases']} cases ({summary['persistent']} persistent, "
-        f"{summary['isolated']} repair/retry)"
+        "memory-boundary tranche metadata is valid: "
+        f"{summary['cases']} cases ({summary['faulting']} faulting)"
     )
     return 0
 
