@@ -4,11 +4,12 @@
   "schema_version": 1,
   "policy": {
     "candidate_tests_close_rows": false,
-    "required_evidence_classified": false,
-    "description": "Candidate registrations are join hints only until evidence classification is completed."
+    "required_evidence_classified": true,
+    "description": "Candidate registrations have E-level and CI-tier classifications, but close rows only through explicit evidence claims."
   },
   "infrastructure_tests": [
     "test-ia64-conformance-closure",
+    "test-ia64-evidence-map",
     "test-ia64-implementation-surface",
     "test-ia64-normative-catalogue"
   ],

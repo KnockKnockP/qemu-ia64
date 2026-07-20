@@ -3,9 +3,8 @@
 """Join IA-64 implementation, normative, and test-registration rows.
 
 This report is intentionally conservative.  A registered test is only a
-candidate until its evidence level and exact assertions are classified, so the
-foundation cannot accidentally turn existing broad tests into a conformance
-claim.
+candidate unless the evidence registry explicitly claims an exact normative
+row, so broad regression tests cannot accidentally become conformance claims.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ NORMATIVE_SCHEMA = Path(
     "tests/ia64-conformance/normative-catalogue.schema.json"
 )
 CLOSURE_MAP = Path("tests/ia64-conformance/closure-map.json")
+EVIDENCE_MAP = Path("tests/ia64-conformance/evidence-map.json")
 BLOCKING_STATES = (
     "advertised-untested",
     "contradiction",
@@ -190,8 +190,8 @@ def validate_closure_map(
         raise ClosureError(
             "candidate tests must not close rows at this checkpoint"
         )
-    if policy["required_evidence_classified"] is not False:
-        raise ClosureError("evidence classification belongs to commit point 5")
+    if policy["required_evidence_classified"] is not True:
+        raise ClosureError("required evidence must be classified")
     if not isinstance(policy["description"], str) or not policy["description"]:
         raise ClosureError("closure-map policy description must not be empty")
 
@@ -325,7 +325,7 @@ def blockers_for_state(state: str, *, has_catalogue: bool) -> list[str]:
         blockers = []
         if not has_catalogue:
             blockers.append("missing normative catalogue row")
-        blockers.append("required evidence is not classified")
+        blockers.append("no explicit row-closing evidence claim")
         return blockers
     return []
 
@@ -334,6 +334,8 @@ def build_report(
     implementation: dict[str, Any],
     catalogue: dict[str, Any],
     closure_map: dict[str, Any],
+    evidence_map: dict[str, Any],
+    evidence_summary: dict[str, Any],
     registrations: list[dict[str, Any]],
     profile: str,
 ) -> dict[str, Any]:
@@ -362,6 +364,18 @@ def build_report(
     mappings = validate_closure_map(
         closure_map, normative_rows, implementation_rows, registration_rows
     )
+    evidence_by_registration = {
+        entry["test_registration"]: entry
+        for entry in evidence_map["entries"]
+        if entry["test_registration"] is not None
+    }
+    evidence_by_normative: dict[str, list[dict[str, Any]]] = {
+        row_id: [] for row_id in normative_rows
+    }
+    for entry in evidence_map["entries"]:
+        for row_id in entry["closes_normative_rows"]:
+            if row_id in evidence_by_normative:
+                evidence_by_normative[row_id].append(entry)
 
     candidate_for: dict[str, list[str]] = {
         test_id: [] for test_id in registration_rows
@@ -375,21 +389,30 @@ def build_report(
         mapped_implementation.update(implementation_ids)
         for test_id in mapping["candidate_tests"]:
             candidate_for[test_id].append(normative_id)
-        blockers = blockers_for_state(
-            "implemented-untested", has_catalogue=True
+        closing_evidence = evidence_by_normative[normative_id]
+        state = (
+            "implemented-tested" if closing_evidence
+            else "implemented-untested"
         )
+        blockers = blockers_for_state(state, has_catalogue=True)
         if mapping["inventory_gap"] is not None:
             blockers.insert(0, mapping["inventory_gap"])
         joined_rows.append({
             "id": f"normative:{normative_id}",
             "origin": "normative-catalogue",
-            "state": "implemented-untested",
+            "state": state,
             "interface_kind": normative["interface_kind"],
             "implementation_rows": implementation_ids,
             "normative_rows": [normative_id],
             "test_registrations": mapping["candidate_tests"],
             "required_evidence": normative["required_evidence"],
-            "evidence_status": "candidate-tests-unclassified",
+            "evidence_status": (
+                "row-closing-evidence" if closing_evidence
+                else "classified-no-row-closing-claim"
+            ),
+            "row_closing_evidence": [
+                entry["id"] for entry in closing_evidence
+            ],
             "inventory_gap": mapping["inventory_gap"],
             "blockers": blockers,
         })
@@ -441,7 +464,20 @@ def build_report(
             **registration,
             "candidate_for": sorted(candidate_for[test_id]),
             "infrastructure": test_id in infrastructure,
-            "evidence_status": "unclassified",
+            "evidence": {
+                "id": evidence_by_registration[test_id]["id"],
+                "primary_level": evidence_by_registration[test_id][
+                    "primary_evidence_level"
+                ],
+                "levels": evidence_by_registration[test_id]["evidence_levels"],
+                "ci_tiers": evidence_by_registration[test_id]["ci_tiers"],
+                "role": evidence_by_registration[test_id]["conformance_role"],
+            },
+            "evidence_status": (
+                "row-closing" if evidence_by_registration[test_id][
+                    "closes_normative_rows"
+                ] else "classified-not-row-closing"
+            ),
         })
 
     state_counts = Counter(row["state"] for row in joined_rows)
@@ -480,7 +516,12 @@ def build_report(
             "closure_map": {
                 "schema_version": closure_map["schema_version"],
                 "candidate_tests_close_rows": False,
-                "required_evidence_classified": False,
+                "required_evidence_classified": True,
+            },
+            "evidence_map": {
+                "schema_version": evidence_map["schema_version"],
+                "entries": evidence_summary["entries"],
+                "row_closing_claims": evidence_summary["row_closing_claims"],
             },
             "test_registrations": {
                 "source": "meson-info/intro-tests.json",
@@ -492,7 +533,8 @@ def build_report(
             "declared_profile_consistent": "not-evaluated",
             "profile_complete": "not-evaluated",
             "reason": (
-                "blocking closure rows remain and test evidence is unclassified"
+                "blocking closure rows remain and no row-closing evidence "
+                "is claimed"
             ),
         },
         "classification_policy": {
@@ -500,12 +542,17 @@ def build_report(
             "runtime_exposed": "advertised-untested",
             "decoder_dead_alias_or_illegal": "known-unimplemented",
             "candidate_test_registration": "does-not-close-row",
+            "classified_evidence": (
+                "closes-only-explicitly-claimed-normative-rows"
+            ),
         },
         "summary": {
             "join_rows": len(joined_rows),
             "implementation_rows": len(implementation_rows),
             "normative_rows": len(normative_rows),
             "test_registrations": len(registrations),
+            "evidence_entries": evidence_summary["entries"],
+            "row_closing_claims": evidence_summary["row_closing_claims"],
             "candidate_links": candidate_links,
             "inventory_gaps": inventory_gaps,
             "blocking_rows": blocking_rows,
@@ -523,9 +570,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         f"Profile: `{report['profile']}`",
         "",
-        "This is a construction-time closure report. Registered tests are only",
-        "candidate evidence until commit point 5 classifies their exact evidence",
-        "level and assertions.",
+        "This is a construction-time closure report. Registered tests are",
+        "only classified evidence. A registration closes a normative row",
+        "only when the evidence registry makes an explicit, independently",
+        "validated claim.",
         "",
         "## Claims",
         "",
@@ -538,6 +586,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Implementation rows: {summary['implementation_rows']}",
         f"- Normative rows: {summary['normative_rows']}",
         f"- Focused test registrations: {summary['test_registrations']}",
+        f"- Classified evidence entries: {summary['evidence_entries']}",
+        f"- Row-closing evidence claims: {summary['row_closing_claims']}",
         f"- Candidate test links: {summary['candidate_links']}",
         f"- Joined rows: {summary['join_rows']}",
         "",
@@ -612,6 +662,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--closure-map", type=Path, default=CLOSURE_MAP,
         help="closure mapping, relative to --root by default",
     )
+    parser.add_argument(
+        "--evidence-map", type=Path, default=EVIDENCE_MAP,
+        help="evidence classification, relative to --root by default",
+    )
     parser.add_argument("--output", type=Path, help="write JSON report")
     parser.add_argument(
         "--summary-output", type=Path,
@@ -645,6 +699,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         root / "scripts/ia64-validate-normative-catalogue.py",
         "_ia64_normative_catalogue",
     )
+    evidence_module = load_module(
+        root / "scripts/ia64-validate-evidence-map.py",
+        "_ia64_evidence_map",
+    )
     try:
         implementation = implementation_module.build_surface(
             root, build_dir, binary
@@ -666,8 +724,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     closure_map = load_json(resolve_path(root, args.closure_map).resolve())
     registrations = focused_test_registrations(build_dir)
+    evidence_map = load_json(resolve_path(root, args.evidence_map).resolve())
+    try:
+        evidence_summary = evidence_module.validate_evidence_map(
+            evidence_map,
+            [row["id"] for row in registrations],
+            {row["id"]: row for row in catalogue["rows"]},
+            {"qemu-ia64": root, "vibtanium": None},
+        )
+    except Exception as exc:
+        raise ClosureError(f"evidence classification failed: {exc}") from exc
     report = build_report(
-        implementation, catalogue, closure_map, registrations, args.profile
+        implementation, catalogue, closure_map, evidence_map,
+        evidence_summary, registrations, args.profile
     )
     if args.check:
         counts = report["summary"]["by_state"]

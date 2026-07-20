@@ -340,6 +340,14 @@ if 'ia64-softmmu' in target_dirs
        timeout: 30,
        suite: ['unit'])
 
+  test('test-ia64-evidence-map', python,
+       args: [meson.project_source_root() / 'scripts/ia64-validate-evidence-map.py',
+              '--check',
+              '--root', meson.project_source_root(),
+              '--build-dir', meson.project_build_root()],
+       timeout: 30,
+       suite: ['unit'])
+
   test('test-ia64-conformance-closure', python,
        depends: [ia64_full_tcg_emulator],
        env: test_env,

@@ -1,0 +1,661 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.evidence-map",
+  "schema_version": 1,
+  "policy": {
+    "classification_does_not_imply_pass": true,
+    "row_closure_requires_normative_claim": true,
+    "row_closing_claims_expected": 0
+  },
+  "entries": [
+    {
+      "id": "diagnostic:installed-debian",
+      "kind": "performance-diagnostic",
+      "lane": "performance-diagnostic",
+      "primary_evidence_level": "E4",
+      "evidence_levels": ["E4"],
+      "ci_tiers": ["nightly", "soak"],
+      "test_registration": null,
+      "source_paths": [
+        {"repository": "vibtanium", "path": "scripts/qemu/installed-debian-benchmark.sh"},
+        {"repository": "vibtanium", "path": "scripts/qemu/installed_debian_benchmark.py"}
+      ],
+      "invocation": "./vibtanium/scripts/qemu/installed-debian-benchmark.sh cmd --command-text true",
+      "scope": "Installed Debian shell and benchmark integration with diagnostic collection.",
+      "oracle_independence": "integration-milestone",
+      "conformance_role": "diagnostic-only",
+      "closes_normative_rows": [],
+      "limitations": ["Performance and installed-OS progress are diagnostics, not direct architectural assertions."]
+    },
+    {
+      "id": "meson:qtest-ia64/ia64-acpi-test",
+      "kind": "qtest",
+      "lane": "qtest-platform",
+      "primary_evidence_level": "E3",
+      "evidence_levels": ["E3"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "qtest-ia64/ia64-acpi-test",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/qtest/ia64-acpi-test.c"}
+      ],
+      "invocation": "meson test qemu:qtest-ia64/ia64-acpi-test",
+      "scope": "IA-64 ACPI table and platform transaction checks through qtest.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Transactions are not yet mapped to platform catalogue rows and citations."]
+    },
+    {
+      "id": "meson:qtest-ia64/ia64-input-test",
+      "kind": "qtest",
+      "lane": "qtest-platform",
+      "primary_evidence_level": "E3",
+      "evidence_levels": ["E3"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "qtest-ia64/ia64-input-test",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/qtest/ia64-input-test.c"}
+      ],
+      "invocation": "meson test qemu:qtest-ia64/ia64-input-test",
+      "scope": "IA-64 machine keyboard and input-routing transactions through qtest.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Transactions are not yet mapped to platform catalogue rows and citations."]
+    },
+    {
+      "id": "meson:test-ia64-bundle",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-bundle",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-bundle.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-bundle",
+      "scope": "Host-side bundle extraction and template invariants.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Host helper checks do not prove guest-visible bundle execution."]
+    },
+    {
+      "id": "meson:test-ia64-conformance-closure",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-conformance-closure",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-gen-conformance-closure.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-conformance-closure",
+      "scope": "Implementation, catalogue, evidence, and registration closure joins.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Construction-time closure reporting does not execute conformance cases."]
+    },
+    {
+      "id": "meson:test-ia64-data-plane-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-data-plane-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-data-plane-tcg",
+      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Legacy cases lack normative IDs, citations, and the complete required variant matrix."]
+    },
+    {
+      "id": "meson:test-ia64-data-plane-tcg-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-data-plane-tcg-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-data-plane-tcg-static",
+      "scope": "Data-plane translator source structure and open-audit checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Source structure alone does not prove guest-visible semantics."]
+    },
+    {
+      "id": "meson:test-ia64-decode",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-decode",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-decode.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-decode",
+      "scope": "Host-side decoder tables, masks, aliases, and malformed encodings.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Decoder unit coverage does not execute guest-visible instruction semantics."]
+    },
+    {
+      "id": "meson:test-ia64-engine-role",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-engine-role",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-engine-role.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-engine-role",
+      "scope": "Production binary and source checks for retired execution-engine seams.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Engine-role structure is not an architectural expected-value oracle."]
+    },
+    {
+      "id": "meson:test-ia64-evidence-map",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-evidence-map",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-evidence-map.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-evidence-map",
+      "scope": "Evidence-level, lane, CI-tier, registration, and path classification checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Evidence metadata validation does not execute the classified tests."]
+    },
+    {
+      "id": "meson:test-ia64-fp-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-fp-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-fp-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-fp-tcg",
+      "scope": "Guest-executed IA-64 floating-point programs and result checks.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Expected values are not yet audited as an independent normative floating-point oracle."]
+    },
+    {
+      "id": "meson:test-ia64-fp-tcg-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-fp-tcg-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-fp-tcg-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-fp-tcg-static",
+      "scope": "Floating-point translator source and harness structure checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Source structure alone does not prove floating-point results."]
+    },
+    {
+      "id": "meson:test-ia64-full-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-full-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-full-tcg",
+      "scope": "Broad guest-executed IA-64 core instruction and state programs.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Broad legacy cases lack row IDs, printed citations, and full fault/retry metadata."]
+    },
+    {
+      "id": "meson:test-ia64-full-tcg-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-full-tcg-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-full-tcg-static",
+      "scope": "Core translator source-structure and admission checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Source scans are regression guards rather than architectural execution evidence."]
+    },
+    {
+      "id": "meson:test-ia64-implementation-surface",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-implementation-surface",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-gen-implementation-surface.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-implementation-surface",
+      "scope": "Implementation-derived opcode, register, machine, and QOM inventory.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Implementation inventory is explicitly not a normative oracle."]
+    },
+    {
+      "id": "meson:test-ia64-insn",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-insn",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-insn.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-insn",
+      "scope": "Host instruction-helper and internal state invariants.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Host helper behavior alone does not prove normal guest execution."]
+    },
+    {
+      "id": "meson:test-ia64-memory-exceptions",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-memory-exceptions",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-memory-exceptions.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-memory-exceptions",
+      "scope": "Host MMU, interruption, priority, and saved-state invariants.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Direct host state injection is not guest repair-and-retry evidence."]
+    },
+    {
+      "id": "meson:test-ia64-memory-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-memory-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-memory-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-memory-tcg",
+      "scope": "Guest-executed memory, continuation, and fault-boundary programs.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Cases lack structured normative assertion and repair/retry records."]
+    },
+    {
+      "id": "meson:test-ia64-normative-catalogue",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-normative-catalogue",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-normative-catalogue.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-normative-catalogue",
+      "scope": "Normative catalogue schema and semantic validation.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Catalogue validation checks assertions as data but does not execute them."]
+    },
+    {
+      "id": "meson:test-ia64-opcode-ledger",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-opcode-ledger",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-gen-opcode-ledger.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-opcode-ledger",
+      "scope": "Typed opcode authority and implementation ledger drift detection.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["The implementation ledger is not a specification-derived expected-value source."]
+    },
+    {
+      "id": "meson:test-ia64-opcode-traits",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-opcode-traits",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-opcode-traits.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-opcode-traits",
+      "scope": "Host opcode family, side-effect, and fault-trait invariants.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Implementation trait consistency is not guest-visible semantics."]
+    },
+    {
+      "id": "meson:test-ia64-packed-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-packed-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-packed-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-packed-tcg",
+      "scope": "Guest-executed packed integer and same-group state programs.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Legacy cases do not declare catalogue IDs or the complete operand matrix."]
+    },
+    {
+      "id": "meson:test-ia64-packed-tcg-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-packed-tcg-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-packed-tcg-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-packed-tcg-static",
+      "scope": "Packed-integer translator structure and group-state checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Source structure alone does not prove packed instruction results."]
+    },
+    {
+      "id": "meson:test-ia64-platform-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-platform-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-platform-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-platform-static",
+      "scope": "Vibtanium platform source wiring and declaration checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Static wiring checks do not transact with guest-visible devices."]
+    },
+    {
+      "id": "meson:test-ia64-production-cutover",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E0", "E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-production-cutover",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-production-cutover.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-production-cutover",
+      "scope": "Production-cutover source guards plus focused guest runtime smoke cases.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Mixed structural and smoke coverage lacks row-level normative metadata."]
+    },
+    {
+      "id": "meson:test-ia64-rse-spine",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-rse-spine",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-rse-spine.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-rse-spine",
+      "scope": "Host RSE frame, backing-store, RNAT, and malformed-state invariants.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Host RSE state manipulation does not prove guest interruption recovery."]
+    },
+    {
+      "id": "meson:test-ia64-rse-spine-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-rse-spine-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-rse-spine-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-rse-spine-static",
+      "scope": "RSE source ownership and helper-boundary structure checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Source structure alone does not prove RSE architectural behavior."]
+    },
+    {
+      "id": "meson:test-ia64-system-tcg",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-system-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-system-tcg",
+      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Legacy programs lack per-case catalogue, citation, and restart metadata."]
+    },
+    {
+      "id": "meson:test-ia64-system-tcg-static",
+      "kind": "source-check",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-system-tcg-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg-static.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-system-tcg-static",
+      "scope": "System translator source and helper-boundary structure checks.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Source scans do not prove interruption or MMU semantics."]
+    },
+    {
+      "id": "meson:test-ia64-tcp-migration",
+      "kind": "migration",
+      "lane": "multi-process",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["required", "nightly"],
+      "test_registration": "test-ia64-tcp-migration",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-tcp-migration.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-tcp-migration",
+      "scope": "Fresh-process TCP migration with guest-visible state comparison.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Round-trip state checks are not yet attributed to individual normative state rows."]
+    },
+    {
+      "id": "meson:test-ia64-vmstate",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-vmstate",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-vmstate.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-vmstate",
+      "scope": "Host VMState round trips, validation, and malformed input rejection.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["In-process VMState checks do not replace fresh-process migration evidence."]
+    },
+    {
+      "id": "sentinel:linux-debian-installer",
+      "kind": "os-sentinel",
+      "lane": "os-sentinel",
+      "primary_evidence_level": "E4",
+      "evidence_levels": ["E4"],
+      "ci_tiers": ["release"],
+      "test_registration": null,
+      "source_paths": [
+        {"repository": "vibtanium", "path": "scripts/qemu/agent-debian-run.sh"},
+        {"repository": "vibtanium", "path": "scripts/qemu/agent_debian_run.py"}
+      ],
+      "invocation": "./vibtanium/scripts/qemu/agent-debian-run.sh --scenario boot-language",
+      "scope": "Debian IA-64 cold-media boot to a deterministic installer milestone.",
+      "oracle_independence": "integration-milestone",
+      "conformance_role": "integration-only",
+      "closes_normative_rows": [],
+      "limitations": ["An OS milestone composes contracts but does not prove individual architecture rows."]
+    },
+    {
+      "id": "sentinel:windows-server-2003",
+      "kind": "os-sentinel",
+      "lane": "os-sentinel",
+      "primary_evidence_level": "E4",
+      "evidence_levels": ["E4"],
+      "ci_tiers": ["release"],
+      "test_registration": null,
+      "source_paths": [
+        {"repository": "vibtanium", "path": "scripts/vib/vib.py"}
+      ],
+      "invocation": "./vibtanium/vib run --preset windows-cd",
+      "scope": "Windows IA-64 checked-media boot to the configured setup milestone.",
+      "oracle_independence": "integration-milestone",
+      "conformance_role": "integration-only",
+      "closes_normative_rows": [],
+      "limitations": ["Restricted-media integration is local-only and does not prove individual architecture rows."]
+    },
+    {
+      "id": "standalone:efi-bit",
+      "kind": "efi-bit",
+      "lane": "efi-bit",
+      "primary_evidence_level": "E3",
+      "evidence_levels": ["E3"],
+      "ci_tiers": ["required", "release"],
+      "test_registration": null,
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-efi-bit/bit.c"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-efi-bit/run.sh"}
+      ],
+      "invocation": "cd qemu-ia64/tests/ia64-efi-bit && bash run.sh",
+      "scope": "Guest EFI application checks for firmware tables, services, protocols, graphics, and storage effects.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Broad BIT checks are not yet split into catalogue-cited service rows with exact effect metadata."]
+    },
+    {
+      "id": "workload:debian-cd1-lifecycle",
+      "kind": "os-workload",
+      "lane": "os-sentinel",
+      "primary_evidence_level": "E4",
+      "evidence_levels": ["E4"],
+      "ci_tiers": ["release", "soak"],
+      "test_registration": null,
+      "source_paths": [
+        {"repository": "vibtanium", "path": "scripts/qemu/cd1_lifecycle.py"}
+      ],
+      "invocation": "python vibtanium/scripts/qemu/cd1_lifecycle.py --help",
+      "scope": "Cold Debian CD lifecycle, reset, shutdown, and boot-menu integration workload.",
+      "oracle_independence": "integration-milestone",
+      "conformance_role": "integration-only",
+      "closes_normative_rows": [],
+      "limitations": ["This OS lifecycle workload is release/soak evidence rather than a synthetic direct gauntlet."]
+    }
+  ],
+  "gaps": [
+    {
+      "id": "evidence:row-level-metadata",
+      "expected_level": "E2",
+      "ci_tiers": ["required"],
+      "status": "not-present",
+      "reason": "Existing architectural tests do not yet emit the complete normative row and result metadata required by section 10.1."
+    },
+    {
+      "id": "sentinel:bsd",
+      "expected_level": "E4",
+      "ci_tiers": ["release"],
+      "status": "not-present",
+      "reason": "No maintained IA-64 BSD sentinel is present in the current workspace."
+    }
+  ]
+}
