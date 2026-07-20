@@ -120,6 +120,47 @@
       "limitations": ["The minimal runner self-test validates infrastructure and does not make a normative architectural claim."]
     },
     {
+      "id": "meson:test-ia64-correctness-lessons",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-correctness-lessons",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/correctness-lessons.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-correctness-lessons.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-memory-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-tcp-migration.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-correctness-lessons",
+      "scope": "One exact executable matrix for every correctness lesson named by construction-order step 7, including special modes and fresh-process migration.",
+      "oracle_independence": "partially-independent",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["This representative regression lock does not replace section 10.3 exhaustive variants or make new normative row-closing claims."]
+    },
+    {
+      "id": "meson:test-ia64-correctness-lessons-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-correctness-lessons-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-correctness-lessons.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/correctness-lessons.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-correctness-lessons-static",
+      "scope": "Exact plan-lesson membership, executable-probe mapping, callable existence, and limitation validation for construction-order step 7.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Static matrix validation does not execute the guest probes or close architectural rows."]
+    },
+    {
       "id": "meson:test-ia64-data-plane-tcg",
       "kind": "bare-metal",
       "lane": "bare-metal-batch",

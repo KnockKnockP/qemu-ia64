@@ -1,0 +1,146 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.correctness-lessons",
+  "schema_version": 1,
+  "plan_section": "29",
+  "plan_step": 7,
+  "scope": "Representative executable lock for every correctness lesson carried forward from paused WP1 and WP2.",
+  "limitations": [
+    "This supporting E2 gate does not close normative catalogue rows.",
+    "It is not the exhaustive state-class by boundary Cartesian matrix required by section 10.3.",
+    "Broader lifecycle, debugger, watchpoint, device replay, and repeated-migration coverage remains in construction step 15."
+  ],
+  "probes": [
+    {
+      "id": "application-register-helper-boundary",
+      "module": "full-tcg",
+      "callable": "test_effectful_application_read_ssa",
+      "assertion": "AR.ITC is sampled per instruction across helper, stop, memory, and branch boundaries without stale SSA reuse."
+    },
+    {
+      "id": "ar-pfs-boundary-matrix",
+      "module": "full-tcg",
+      "callable": "test_pfs_register_moves",
+      "assertion": "AR.PFS moves retain exact architectural, predication, fault, typed-IR, and migration behavior."
+    },
+    {
+      "id": "branch-and-predicate-forwarding",
+      "module": "full-tcg",
+      "callable": "test_predicate_tests_and_direct_branches",
+      "assertion": "Same-group compare results forward to direct branches while false-predicated and stopped variants preserve exact state."
+    },
+    {
+      "id": "code-page-invalidation-restart",
+      "module": "memory-tcg",
+      "callable": "test_store_update_code_page_restart",
+      "assertion": "A synchronized code-page store invalidates translated code and resumes at the correct architectural boundary."
+    },
+    {
+      "id": "group-entry-tb-continuation",
+      "module": "full-tcg",
+      "callable": "test_typed_group_tb_continuation",
+      "assertion": "Open issue groups retain immutable entry state and typed forwarding across translator-created TB boundaries."
+    },
+    {
+      "id": "live-tcp-migration",
+      "module": "tcp-migration",
+      "callable": "run_tcp_migration",
+      "assertion": "A fresh destination process restores and resumes a live open IA-64 issue group over TCP migration."
+    },
+    {
+      "id": "mmio-exactly-once",
+      "module": "memory-tcg",
+      "callable": "test_mmio_io_recompile_exactly_once",
+      "assertion": "The I/O recompile path commits the prefix and performs each architecturally executed MMIO transaction exactly once."
+    },
+    {
+      "id": "nat-value-state-matrix",
+      "module": "full-tcg",
+      "callable": "test_nat_golden",
+      "assertion": "GR values and NaT state obey exact propagation, predication, speculation, spill/fill, and fault behavior."
+    },
+    {
+      "id": "plugin-icount-replay-equivalence",
+      "module": "full-tcg",
+      "callable": "test_plugin_icount_replay_runtime",
+      "assertion": "Plugin, fixed-icount, record, and replay executions produce the same exact architectural result and valid observations."
+    },
+    {
+      "id": "precise-multi-bundle-prefix",
+      "module": "memory-tcg",
+      "callable": "test_multi_prefix_slot1_fault",
+      "assertion": "A slot-1 fault publishes every successful prior bundle and slot while suppressing the faulting instruction and suffix."
+    },
+    {
+      "id": "ri-application-register-restart",
+      "module": "full-tcg",
+      "callable": "test_typed_application_move_ri_restart",
+      "assertion": "RI=2 restart skips earlier non-idempotent slots and executes the application-register operation once."
+    },
+    {
+      "id": "rse-return-boundaries",
+      "module": "full-tcg",
+      "callable": "test_typed_return_branches",
+      "assertion": "Return branches preserve exact CFM, PFS, RSE, NaT, predication, fault, and typed-lowering behavior."
+    },
+    {
+      "id": "savevm-open-epoch",
+      "module": "full-tcg",
+      "callable": "test_typed_epoch_savevm_migration",
+      "assertion": "Save/load into a fresh QEMU preserves exact open-epoch entry images, forwarding provenance, GR values, and NaT state."
+    },
+    {
+      "id": "timer-external-interrupt-rfi",
+      "module": "full-tcg",
+      "callable": "test_timer_external_interrupt_rfi",
+      "assertion": "Timer and external interrupt delivery preserve exact saved state, priority, pending state, and RFI continuation."
+    }
+  ],
+  "lessons": [
+    {
+      "id": "group-entry-state",
+      "plan_text": "group-entry state",
+      "probe_ids": ["group-entry-tb-continuation", "savevm-open-epoch"]
+    },
+    {
+      "id": "forwarding",
+      "plan_text": "forwarding",
+      "probe_ids": ["branch-and-predicate-forwarding", "group-entry-tb-continuation", "savevm-open-epoch"]
+    },
+    {
+      "id": "nat",
+      "plan_text": "NaT",
+      "probe_ids": ["nat-value-state-matrix", "savevm-open-epoch"]
+    },
+    {
+      "id": "application-register-boundaries",
+      "plan_text": "AR.PFS and application-register boundaries",
+      "probe_ids": ["application-register-helper-boundary", "ar-pfs-boundary-matrix", "ri-application-register-restart"]
+    },
+    {
+      "id": "rse-state",
+      "plan_text": "RSE state",
+      "probe_ids": ["rse-return-boundaries"]
+    },
+    {
+      "id": "prior-slot-commitment",
+      "plan_text": "prior-slot commitment",
+      "probe_ids": ["precise-multi-bundle-prefix", "ri-application-register-restart"]
+    },
+    {
+      "id": "memory-safepoints",
+      "plan_text": "current memory safepoints",
+      "probe_ids": ["code-page-invalidation-restart", "mmio-exactly-once", "precise-multi-bundle-prefix"]
+    },
+    {
+      "id": "timer-interrupt-observation",
+      "plan_text": "timer and interrupt observation",
+      "probe_ids": ["timer-external-interrupt-rfi"]
+    },
+    {
+      "id": "special-modes-and-migration",
+      "plan_text": "replay, plugin, and migration",
+      "probe_ids": ["live-tcp-migration", "plugin-icount-replay-equivalence", "savevm-open-epoch"]
+    }
+  ]
+}

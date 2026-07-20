@@ -9,6 +9,7 @@
   },
   "infrastructure_tests": [
     "test-ia64-conformance-closure",
+    "test-ia64-correctness-lessons-static",
     "test-ia64-evidence-map",
     "test-ia64-first-architectural-tranche-static",
     "test-ia64-implementation-surface",
