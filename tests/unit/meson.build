@@ -335,6 +335,12 @@ test('test-ia64-memory-boundary-tranche-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-predicate-branch-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-predicate-branch-tranche.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-rse-spine-static', python,
      args: [meson.current_source_dir() / 'test-ia64-rse-spine-static.py',
             '--source-root', meson.project_source_root()],
@@ -420,6 +426,16 @@ if 'ia64-softmmu' in target_dirs
               '--binary', ia64_full_tcg_emulator.full_path()],
        protocol: 'tap',
        timeout: 120,
+       suite: ['unit'])
+
+  test('test-ia64-predicate-branch-tranche', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-predicate-branch-tranche.py',
+              '--source-root', meson.project_source_root(),
+              '--binary', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
+       timeout: 180,
        suite: ['unit'])
 
   test('test-ia64-production-cutover', python,

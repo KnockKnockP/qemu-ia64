@@ -108,7 +108,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "pattern": "^[A-Z]{3}-[0-9]{3}(?:-[A-Z0-9]+)+$"
+          "pattern": "^[A-Z]{2,3}-[0-9]{3}(?:-[A-Z0-9]+)+$"
         },
         "requirement_ids": {
           "type": "array",
@@ -116,7 +116,7 @@
           "uniqueItems": true,
           "items": {
             "type": "string",
-            "pattern": "^[A-Z]{3}-[0-9]{3}$"
+            "pattern": "^[A-Z]{2,3}-[0-9]{3}$"
           }
         },
         "profiles": {

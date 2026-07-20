@@ -15,6 +15,7 @@
     "test-ia64-implementation-surface",
     "test-ia64-memory-boundary-tranche-static",
     "test-ia64-normative-catalogue",
+    "test-ia64-predicate-branch-tranche-static",
     "test-ia64-runner-protocol"
   ],
   "mappings": [
@@ -59,6 +60,55 @@
         "test-ia64-full-tcg",
         "test-ia64-memory-tcg"
       ]
+    },
+    {
+      "normative_row": "BR-001-BRANCH-FORMS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.forms"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "BR-002-TAKEN-NOT-TAKEN",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.outcomes"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "BR-003-DISPLACEMENT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.displacement"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "BR-004-REGISTER-TARGET",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.register-target"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "BR-006-LOOP-STATE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.loop-state"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "BR-008-BRANCH-TRAPS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.traps"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "BR-009-EXECUTION-BOUNDARIES",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.boundaries"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
     },
     {
       "normative_row": "GRP-002-STOP-VISIBILITY",
@@ -162,6 +212,55 @@
         "test-ia64-memory-boundary-tranche",
         "test-ia64-memory-tcg"
       ]
+    },
+    {
+      "normative_row": "PRD-001-COMPARE-RELATIONS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.compare-relations"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "PRD-002-UPDATE-COMPLETERS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.update-completers"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "PRD-004-PAIRED-ALIAS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.alias"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "PRD-005-NAT-COMPARE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.nat"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "PRD-006-GROUP-PRODUCERS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.group-producers"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "PRD-007-PREDICATE-ROTATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.rotation"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
+    },
+    {
+      "normative_row": "PRD-008-PREDICATE-TESTS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.predicate.tests"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
     },
     {
       "normative_row": "REG-004-FR0-READ",

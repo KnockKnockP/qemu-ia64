@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 16
+    "row_closing_claims_expected": 30
   },
   "entries": [
     {
@@ -580,6 +580,45 @@
       "conformance_role": "supporting",
       "closes_normative_rows": [],
       "limitations": ["Static wiring checks do not transact with guest-visible devices."]
+    },
+    {
+      "id": "meson:test-ia64-predicate-branch-tranche",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-predicate-branch-tranche",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/predicate-branch-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-predicate-branch-tranche.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-predicate-branch-tranche",
+      "scope": "Independent literal E2 oracles for seven predicate rows and seven direct, indirect, loop, trap, and execution-boundary branch rows.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["BR-001-BRANCH-FORMS", "BR-002-TAKEN-NOT-TAKEN", "BR-003-DISPLACEMENT", "BR-004-REGISTER-TARGET", "BR-006-LOOP-STATE", "BR-008-BRANCH-TRAPS", "BR-009-EXECUTION-BOUNDARIES", "PRD-001-COMPARE-RELATIONS", "PRD-002-UPDATE-COMPLETERS", "PRD-004-PAIRED-ALIAS", "PRD-005-NAT-COMPARE", "PRD-006-GROUP-PRODUCERS", "PRD-007-PREDICATE-ROTATION", "PRD-008-PREDICATE-TESTS"],
+      "limitations": ["BR-005 call nesting/recursion, BR-007 hint semantics, BR-010 IA-32 transition, and PRD-003's already-catalogued p0 row are outside this tranche."]
+    },
+    {
+      "id": "meson:test-ia64-predicate-branch-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-predicate-branch-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-predicate-branch-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/predicate-branch-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-predicate-branch-tranche-static",
+      "scope": "Complete section 10.1 metadata, citation equality, stable identity, executable probe-set, and independent-oracle validation for fourteen predicate and branch rows.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Static metadata validation is supporting E0 evidence and does not close rows without the E2 runtime gate."]
     },
     {
       "id": "meson:test-ia64-production-cutover",

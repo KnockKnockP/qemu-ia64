@@ -143,6 +143,78 @@ ARCHITECTURAL_SURFACES = (
         "target/ia64/translate.c",
         "memory_restart_complex",
     ),
+    (
+        "cpu.predicate.compare-relations", "cpu.predicate",
+        "signed, unsigned, and equality predicate comparisons",
+        "target/ia64/translate.c", "ia64_tr_compare_cond",
+    ),
+    (
+        "cpu.predicate.update-completers", "cpu.predicate",
+        "normal, unconditional, and parallel predicate updates",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_integer_compare",
+    ),
+    (
+        "cpu.predicate.alias", "cpu.predicate",
+        "paired predicate target alias semantics",
+        "target/ia64/translate.c", "ia64_tr_write_pr_bool",
+    ),
+    (
+        "cpu.predicate.nat", "cpu.predicate",
+        "NaT integer comparison semantics",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_integer_compare",
+    ),
+    (
+        "cpu.predicate.group-producers", "cpu.predicate",
+        "same-group predicate producer and consumer visibility",
+        "target/ia64/translate.c",
+        "ia64_tr_group_update_branch_forward_predicate",
+    ),
+    (
+        "cpu.predicate.rotation", "cpu.predicate",
+        "rotating predicate register transfer and rename semantics",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_pr_move",
+    ),
+    (
+        "cpu.predicate.tests", "cpu.predicate",
+        "test-bit, test-NaT, and test-feature predicate production",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_predicate_test",
+    ),
+    (
+        "cpu.branch.forms", "cpu.branch",
+        "direct, indirect, long, conditional, and loop branch forms",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_branch_split",
+    ),
+    (
+        "cpu.branch.outcomes", "cpu.branch",
+        "taken, not-taken, and first-taken branch outcomes",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_branch_cfg_exits",
+    ),
+    (
+        "cpu.branch.displacement", "cpu.branch",
+        "signed IP-relative and long branch target construction",
+        "target/ia64/translate.c", "ia64_tr_emit_typed_direct_branch_exit",
+    ),
+    (
+        "cpu.branch.register-target", "cpu.branch",
+        "branch-register target selection and alignment",
+        "target/ia64/translate.c", "ia64_tr_emit_typed_indirect_branch_exit",
+    ),
+    (
+        "cpu.branch.loop-state", "cpu.branch",
+        "loop count, epilog count, and rotating-register transitions",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_loop_branch_split",
+    ),
+    (
+        "cpu.branch.traps", "cpu.branch",
+        "taken-branch and lower-privilege trap delivery",
+        "target/ia64/translate.c", "gen_helper_raise_taken_branch_trap",
+    ),
+    (
+        "cpu.branch.boundaries", "cpu.branch",
+        "branch execution across slot, page, helper, and TB boundaries",
+        "target/ia64/translate.c",
+        "ia64_tr_split_state_cache_at_typed_branch",
+    ),
 )
 
 
@@ -670,6 +742,14 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 {
                     "domain": "cpu.memory",
                     "completeness": "catalogued-boundary-tranche",
+                },
+                {
+                    "domain": "cpu.predicate",
+                    "completeness": "catalogued-semantic-tranche",
+                },
+                {
+                    "domain": "cpu.branch",
+                    "completeness": "catalogued-semantic-tranche",
                 },
                 {"domain": "platform.machine", "completeness": "foundation"},
                 {
