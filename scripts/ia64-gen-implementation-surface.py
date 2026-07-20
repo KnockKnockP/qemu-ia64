@@ -1,0 +1,631 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Generate the implementation-derived IA-64 conformance surface foundation.
+
+The output is deliberately not a normative catalogue.  It records what the
+current source and selected build expose, together with provenance and honest
+coverage limits for the foundation checkpoint.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+import csv
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import time
+from types import ModuleType
+from typing import Any, Sequence
+
+
+SCHEMA = "vibtanium.ia64.implementation-surface"
+SCHEMA_VERSION = 1
+MACHINE = "vibtanium"
+MACHINE_TYPE = "vibtanium-machine"
+QMP_TIMEOUT = 10.0
+
+REGISTER_BANKS = (
+    ("gr", "IA64_GR_COUNT", "gr"),
+    ("fr", "IA64_FR_COUNT", "fr"),
+    ("pr", "IA64_PR_COUNT", "pr"),
+    ("br", "IA64_BR_COUNT", "br"),
+    ("ar", "IA64_AR_COUNT", "ar"),
+    ("cr", "IA64_CR_COUNT", "cr"),
+    ("rr", "IA64_RR_COUNT", "rr"),
+    ("pkr", "IA64_PKR_COUNT", "pkr"),
+    ("dbr", "IA64_DBR_COUNT", "dbr"),
+    ("ibr", "IA64_IBR_COUNT", "ibr"),
+    ("cpuid", "IA64_CPUID_COUNT", "cpuid"),
+    ("dahr", "IA64_DAHR_COUNT", "dahr"),
+    ("msr", "IA64_MSR_COUNT", "msr"),
+    ("itr", "IA64_ITR_COUNT", "itr"),
+    ("dtr", "IA64_DTR_COUNT", "dtr"),
+    ("pmc", "IA64_PMC_COUNT", "pmc"),
+    ("pmd", "IA64_PMD_COUNT", "pmd"),
+)
+SCALAR_REGISTERS = ("ip", "psr", "cfm")
+BUILD_FEATURES = (
+    "CONFIG_TCG",
+    "CONFIG_PLUGIN",
+    "CONFIG_VIBTANIUM",
+    "CONFIG_VIBTANIUM_BIT",
+    "CONFIG_IA64_OBSERVABILITY",
+)
+
+
+class SurfaceError(RuntimeError):
+    pass
+
+
+def relative(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return "@build/" + path.name
+
+
+def load_module(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise SurfaceError(f"cannot load generator module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def generated_opcode_rows(root: Path) -> list[dict[str, str]]:
+    script = root / "scripts/ia64-gen-opcode-ledger.py"
+    generator = load_module(script, "_ia64_opcode_ledger_generator")
+    enum_path = root / "target/ia64/decode.h"
+    traits_path = root / "target/ia64/opcode-traits.def"
+    families_path = root / "target/ia64/opcode-families.def"
+    names = generator.opcode_enum(enum_path)
+    traits = generator.opcode_rows(traits_path)
+    families = generator.family_rows(families_path)
+    generator.verify_sources(
+        names,
+        traits,
+        families,
+        root / "target/ia64/decode.c",
+        root / "target/ia64/translate.c",
+    )
+    text = generator.make_ledger(names, traits, families)
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if len(rows) != len(names):
+        raise SurfaceError("generated opcode ledger row count drifted")
+    return rows
+
+
+def parse_integer_defines(text: str) -> dict[str, int]:
+    return {
+        name: int(value, 0)
+        for name, value in re.findall(
+            r"^#define\s+(IA64_[A-Z0-9_]+)\s+(0x[0-9a-fA-F]+|[0-9]+)\s*$",
+            text,
+            re.MULTILINE,
+        )
+    }
+
+
+def parse_named_registers(text: str) -> dict[tuple[str, int], str]:
+    result: dict[tuple[str, int], str] = {}
+    for bank, enum_name, prefix in (
+        ("ar", "IA64ApplicationRegister", "IA64_AR_"),
+        ("cr", "IA64ControlRegister", "IA64_CR_"),
+    ):
+        match = re.search(
+            rf"enum\s+{enum_name}\s*\{{(.*?)\}};", text, re.DOTALL
+        )
+        if match is None:
+            raise SurfaceError(f"missing {enum_name} declaration")
+        for name, value in re.findall(
+            rf"\b({prefix}[A-Z0-9_]+)\s*=\s*(0x[0-9a-fA-F]+|[0-9]+)",
+            match.group(1),
+        ):
+            result[(bank, int(value, 0))] = name
+    return result
+
+
+def register_rows(root: Path) -> list[dict[str, Any]]:
+    cpu_h = root / "target/ia64/cpu.h"
+    text = cpu_h.read_text(encoding="utf-8")
+    defines = parse_integer_defines(text)
+    aliases = parse_named_registers(text)
+    rows: list[dict[str, Any]] = []
+    for bank, count_name, storage in REGISTER_BANKS:
+        if count_name not in defines:
+            raise SurfaceError(f"missing register count {count_name}")
+        count = defines[count_name]
+        if not re.search(
+            rf"\b(?:uint64_t|IA64FloatReg)\s+{storage}\s*"
+            rf"(?:\[{re.escape(count_name)}\]|;)",
+            text,
+        ):
+            raise SurfaceError(f"register storage {storage!r} is not declared")
+        for index in range(count):
+            attributes: dict[str, Any] = {
+                "bank": bank,
+                "index": index,
+                "count_constant": count_name,
+                "storage": storage,
+                "guest_reachability": "not-yet-classified",
+                "field_behavior": "not-yet-classified",
+            }
+            if (bank, index) in aliases:
+                attributes["named_alias"] = aliases[(bank, index)]
+            rows.append({
+                "id": f"cpu.register.{bank}.{index}",
+                "kind": "cpu.register",
+                "name": f"{bank}{index}",
+                "status": "storage-present",
+                "attributes": attributes,
+                "provenance": [{
+                    "path": relative(cpu_h, root),
+                    "anchor": count_name,
+                }],
+            })
+    for name in SCALAR_REGISTERS:
+        if re.search(rf"\buint64_t\s+{name}\s*;", text) is None:
+            raise SurfaceError(f"missing scalar architectural storage {name}")
+        rows.append({
+            "id": f"cpu.register.scalar.{name}",
+            "kind": "cpu.register",
+            "name": name,
+            "status": "storage-present",
+            "attributes": {
+                "bank": "scalar",
+                "guest_reachability": "reachable",
+                "field_behavior": "not-yet-classified",
+            },
+            "provenance": [{
+                "path": relative(cpu_h, root),
+                "anchor": f"uint64_t {name}",
+            }],
+        })
+    return rows
+
+
+def opcode_surface_rows(root: Path) -> list[dict[str, Any]]:
+    provenance = [
+        {"path": "target/ia64/decode.h", "anchor": "IA64Opcode"},
+        {"path": "target/ia64/opcode-traits.def", "anchor": "IA64_OPCODE"},
+        {
+            "path": "target/ia64/opcode-families.def",
+            "anchor": "IA64_OPCODE_FAMILY",
+        },
+    ]
+    result = []
+    for ledger in generated_opcode_rows(root):
+        attributes: dict[str, Any] = dict(ledger)
+        attributes["ordinal"] = int(attributes["ordinal"])
+        result.append({
+            "id": f"cpu.opcode.{ledger['opcode'].lower()}",
+            "kind": "cpu.opcode",
+            "name": ledger["opcode"],
+            "status": ledger["decoder_status"],
+            "attributes": attributes,
+            "provenance": provenance,
+        })
+    return result
+
+
+def config_features(
+    build_dir: Path, root: Path
+) -> tuple[dict[str, bool], list[str]]:
+    candidates = (
+        build_dir / "config-host.h",
+        build_dir / "ia64-softmmu-config-target.h",
+        build_dir / "ia64-softmmu-config-devices.h",
+    )
+    texts: list[tuple[Path, str]] = []
+    for path in candidates:
+        if not path.is_file():
+            raise SurfaceError(f"missing configured build input: {path}")
+        texts.append((path, path.read_text(encoding="utf-8")))
+    features: dict[str, bool] = {}
+    sources: list[str] = []
+    for name in BUILD_FEATURES:
+        states: list[bool] = []
+        for path, text in texts:
+            if re.search(rf"^#define\s+{re.escape(name)}(?:\s+1)?\s*$", text,
+                         re.MULTILINE):
+                states.append(True)
+                sources.append(relative(path, root))
+            elif re.search(rf"^#undef\s+{re.escape(name)}\s*$", text,
+                           re.MULTILINE):
+                states.append(False)
+                sources.append(relative(path, root))
+        if not states:
+            features[name] = False
+        elif any(state != states[0] for state in states):
+            raise SurfaceError(f"conflicting configured values for {name}")
+        else:
+            features[name] = states[0]
+    return features, sorted(set(sources))
+
+
+def free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def child_environment(binary: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    runtime = str(binary.parent)
+    environment["PATH"] = runtime + os.pathsep + environment.get("PATH", "")
+    return environment
+
+
+class QMPClient:
+    def __init__(self, stream: socket.socket):
+        self.stream = stream
+        self.reader = stream.makefile("rb")
+        self.next_id = 1
+
+    def read(self) -> dict[str, Any]:
+        line = self.reader.readline()
+        if not line:
+            raise SurfaceError("QMP connection closed unexpectedly")
+        return json.loads(line.decode("utf-8"))
+
+    def execute(self, command: str,
+                arguments: dict[str, Any] | None = None) -> Any:
+        identifier = self.next_id
+        self.next_id += 1
+        request: dict[str, Any] = {"execute": command, "id": identifier}
+        if arguments is not None:
+            request["arguments"] = arguments
+        self.stream.sendall(json.dumps(request).encode("utf-8") + b"\n")
+        while True:
+            response = self.read()
+            if response.get("id") != identifier:
+                continue
+            if "error" in response:
+                raise SurfaceError(
+                    f"QMP {command} failed: "
+                    f"{response['error'].get('desc', response['error'])}"
+                )
+            return response.get("return")
+
+    def close(self) -> None:
+        self.reader.close()
+        self.stream.close()
+
+
+def connect_qmp(process: subprocess.Popen[str], port: int) -> socket.socket:
+    deadline = time.monotonic() + QMP_TIMEOUT
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output = process.stdout.read() if process.stdout else ""
+            raise SurfaceError(
+                f"QEMU exited before QMP became available: {output.strip()}"
+            )
+        try:
+            stream = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+            stream.settimeout(QMP_TIMEOUT)
+            return stream
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.025)
+    raise SurfaceError(f"timed out connecting to QMP: {last_error}")
+
+
+def runtime_machine_surface(binary: Path,
+                            property_names: Sequence[str]) -> tuple[
+                                dict[str, Any], dict[str, dict[str, Any]],
+                                dict[str, Any]]:
+    port = free_tcp_port()
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    command = [
+        str(binary), "-S", "-display", "none", "-serial", "none",
+        "-monitor", "none", "-machine",
+        f"{MACHINE},efi-boot-manager=off", "-qmp",
+        f"tcp:127.0.0.1:{port},server=on,wait=off",
+    ]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=child_environment(binary),
+        creationflags=creationflags,
+    )
+    stream: socket.socket | None = None
+    client: QMPClient | None = None
+    try:
+        stream = connect_qmp(process, port)
+        client = QMPClient(stream)
+        greeting = client.read()
+        if "QMP" not in greeting:
+            raise SurfaceError("QMP greeting is malformed")
+        client.execute("qmp_capabilities")
+        machines = client.execute("query-machines")
+        machine = next(
+            (entry for entry in machines if entry.get("name") == MACHINE), None
+        )
+        if machine is None:
+            raise SurfaceError("built emulator does not expose vibtanium")
+        properties = client.execute(
+            "qom-list-properties", {"typename": MACHINE_TYPE}
+        )
+        metadata = {entry["name"]: entry for entry in properties}
+        missing = sorted(set(property_names) - set(metadata))
+        if missing:
+            raise SurfaceError(
+                "built machine lacks source-declared properties: "
+                + ", ".join(missing)
+            )
+        defaults = {}
+        for name in property_names:
+            if name == "efi-boot-manager":
+                continue
+            defaults[name] = client.execute(
+                "qom-get", {"path": "/machine", "property": name}
+            )
+        client.execute("quit")
+        version = greeting["QMP"]["version"]
+        return machine, metadata, {"defaults": defaults, "version": version}
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except OSError:
+                pass
+        elif stream is not None:
+            stream.close()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+
+
+def source_qom_properties(source: str) -> dict[str, str]:
+    result = {
+        name: kind
+        for kind, name in re.findall(
+            r"object_class_property_add_(bool|str)\s*\(oc,\s*\"([^\"]+)\"",
+            source,
+        )
+    }
+    all_names = set(re.findall(
+        r"object_class_property_add(?:_[a-z0-9_]+)?\s*"
+        r"\(oc,\s*\"([^\"]+)\"",
+        source,
+    ))
+    unsupported = sorted(all_names - set(result))
+    if unsupported:
+        raise SurfaceError(
+            "unclassified Vibtanium QOM property constructors: "
+            + ", ".join(unsupported)
+        )
+    if not result:
+        raise SurfaceError("no Vibtanium-owned QOM properties were found")
+    return result
+
+
+def source_machine_defaults(source: str, internal: str) -> dict[str, Any]:
+    def string_assignment(field: str) -> str:
+        match = re.search(rf"mc->{field}\s*=\s*\"([^\"]+)\"", source)
+        if match is None:
+            raise SurfaceError(f"missing MachineClass assignment {field}")
+        return match.group(1)
+
+    def integer_assignment(field: str) -> int:
+        match = re.search(rf"mc->{field}\s*=\s*([0-9]+)\s*;", source)
+        if match is None:
+            raise SurfaceError(f"missing MachineClass assignment {field}")
+        return int(match.group(1))
+
+    ram = re.search(r"mc->default_ram_size\s*=\s*([0-9]+)\s*\*\s*GiB", source)
+    policy = re.search(
+        r'#define\s+VIBTANIUM_EFI_BOOT_MANAGER_DEFAULT\s+"([^"]+)"',
+        internal,
+    )
+    if ram is None or policy is None:
+        raise SurfaceError("missing Vibtanium RAM or boot-manager default")
+    return {
+        "max_cpus": integer_assignment("max_cpus"),
+        "default_ram_size": int(ram.group(1)) * 1024 ** 3,
+        "default_ram_id": string_assignment("default_ram_id"),
+        "default_nic": string_assignment("default_nic"),
+        "default_display": string_assignment("default_display"),
+        "efi_boot_manager": policy.group(1),
+    }
+
+
+def platform_rows(
+    root: Path, binary: Path
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    source_path = root / "hw/ia64/vibtanium.c"
+    internal_path = root / "hw/ia64/vibtanium-internal.h"
+    source = source_path.read_text(encoding="utf-8")
+    internal = internal_path.read_text(encoding="utf-8")
+    property_kinds = source_qom_properties(source)
+    source_defaults = source_machine_defaults(source, internal)
+    machine, metadata, runtime = runtime_machine_surface(
+        binary, sorted(property_kinds)
+    )
+    defaults = runtime["defaults"]
+    defaults["efi-boot-manager"] = source_defaults["efi_boot_manager"]
+    rows: list[dict[str, Any]] = [{
+        "id": "platform.machine.vibtanium",
+        "kind": "platform.machine",
+        "name": MACHINE,
+        "status": "runtime-exposed",
+        "attributes": {
+            "runtime": machine,
+            "source_defaults": {
+                key: value for key, value in source_defaults.items()
+                if key != "efi_boot_manager"
+            },
+        },
+        "provenance": [{
+            "path": relative(source_path, root),
+            "anchor": "vibtanium_machine_class_init",
+        }],
+    }]
+    for name in sorted(property_kinds):
+        item = metadata[name]
+        attributes = {
+            "type": item.get("type"),
+            "description": item.get("description"),
+            "default": defaults[name],
+            "default_origin": (
+                "source-constant" if name == "efi-boot-manager"
+                else "runtime-qom-get"
+            ),
+            "source_property_kind": property_kinds[name],
+        }
+        rows.append({
+            "id": f"platform.qom.machine.vibtanium.{name}",
+            "kind": "platform.qom-property",
+            "name": name,
+            "status": "runtime-exposed",
+            "attributes": attributes,
+            "provenance": [{
+                "path": relative(source_path, root),
+                "anchor": (
+                    f"object_class_property_add_{property_kinds[name]}"
+                    f'(oc, "{name}"'
+                ),
+            }],
+        })
+    return rows, runtime["version"]
+
+
+def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
+    if not binary.is_file():
+        raise SurfaceError(f"IA-64 emulator not found: {binary}")
+    features, feature_sources = config_features(build_dir, root)
+    rows = opcode_surface_rows(root)
+    rows.extend(register_rows(root))
+    platform, version = platform_rows(root, binary)
+    rows.extend(platform)
+    rows.sort(key=lambda row: row["id"])
+    identifiers = [row["id"] for row in rows]
+    if len(set(identifiers)) != len(identifiers):
+        raise SurfaceError("implementation-surface row IDs are not unique")
+    counts = Counter(row["kind"] for row in rows)
+    return {
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "implementation_derived": True,
+        "normative_oracle": False,
+        "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+        "coverage": {
+            "included": [
+                {
+                    "domain": "cpu.opcode",
+                    "completeness": "current-ledger-complete",
+                },
+                {
+                    "domain": "cpu.register",
+                    "completeness": "storage-index-complete",
+                },
+                {"domain": "platform.machine", "completeness": "foundation"},
+                {
+                    "domain": "platform.qom-property",
+                    "completeness": "vibtanium-owned-complete",
+                },
+            ],
+            "pending": [
+                "opcode encoding masks, completers, units, and legal slots",
+                "register reachability, access, masks, and reserved behavior",
+                "CPUID values and feature declarations",
+                "interruptions, MMU facilities, PAL, SAL, and EFI services",
+                "ACPI tables, PCI functions, MMIO, sparse I/O, and inherited devices",
+                "reset, power, VMState, observability modes, and compatibility hooks",
+            ],
+        },
+        "build": {
+            "target": "ia64-softmmu",
+            "machine": MACHINE,
+            "qemu_version": version,
+            "features": features,
+            "feature_provenance": feature_sources,
+        },
+        "summary": {
+            "rows": len(rows),
+            "by_kind": dict(sorted(counts.items())),
+        },
+        "rows": rows,
+    }
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root", type=Path,
+        default=Path(__file__).resolve().parents[1],
+        help="QEMU source root",
+    )
+    parser.add_argument(
+        "--build-dir", type=Path, required=True,
+        help="configured IA-64 QEMU build directory",
+    )
+    parser.add_argument(
+        "--binary", type=Path,
+        help="qemu-system-ia64 binary (defaults inside --build-dir)",
+    )
+    parser.add_argument("--output", type=Path, help="write JSON to this path")
+    parser.add_argument(
+        "--check", action="store_true",
+        help="validate the inventory without emitting JSON",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    root = args.root.resolve()
+    build_dir = args.build_dir.resolve()
+    binary = (args.binary.resolve() if args.binary else
+              build_dir / ("qemu-system-ia64.exe" if os.name == "nt"
+                           else "qemu-system-ia64"))
+    if args.check and args.output:
+        raise SurfaceError("--check and --output are mutually exclusive")
+    surface = build_surface(root, build_dir, binary)
+    if args.check:
+        counts = surface["summary"]["by_kind"]
+        print(
+            "IA-64 implementation surface verified: "
+            f"{surface['summary']['rows']} rows; "
+            + ", ".join(f"{kind}={count}" for kind, count in counts.items())
+        )
+        return 0
+    encoded = json.dumps(surface, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(encoded, encoding="utf-8")
+    else:
+        sys.stdout.write(encoded)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, SurfaceError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
