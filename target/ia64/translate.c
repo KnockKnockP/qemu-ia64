@@ -1854,6 +1854,32 @@ static void ia64_tr_emit_invalid_template(DisasContext *ctx,
     gen_helper_raise_illegal_operation(tcg_env);
 }
 
+/*
+ * An L+X instruction is one logical instruction beginning in slot 1.  RFI may
+ * restore any architectural RI, but RI=2 cannot name the continuation half of
+ * an MLX instruction.  The architecture requires an Illegal Operation fault
+ * on the target bundle in that case.  Handle the invalid restart before typed
+ * region preflight: there is deliberately no standalone slot-2 instruction
+ * descriptor for the continuation half.
+ */
+static void ia64_tr_emit_invalid_mlx_restart(DisasContext *ctx,
+                                             const IA64DecodedBundle *bundle,
+                                             uint64_t pc, uint8_t start_slot)
+{
+    g_assert(bundle != NULL && bundle->valid && bundle->info != NULL);
+    g_assert(bundle->info->long_immediate);
+    g_assert(start_slot == 2);
+    g_assert(ia64_tr_group_is_empty(ctx));
+
+    ia64_tr_sync_state_cache(ctx);
+    tcg_gen_movi_i64(cpu_ip, pc);
+    ia64_tr_publish_fault_state(ctx, pc, start_slot,
+                                bundle->info->slot_type[start_slot],
+                                bundle->slot[start_slot],
+                                ctx->instruction_group_start);
+    gen_helper_raise_illegal_operation(tcg_env);
+}
+
 static bool ia64_tr_gr_is_stacked(uint8_t reg)
 {
     return reg >= IA64_STATIC_GR_COUNT;
@@ -15546,6 +15572,12 @@ static void ia64_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
 
     if (!bundle.valid) {
         ia64_tr_emit_invalid_template(ctx, &bundle, pc, start_slot);
+        ctx->base.is_jmp = DISAS_NORETURN;
+        return;
+    }
+
+    if (start_slot == 2 && bundle.info->long_immediate) {
+        ia64_tr_emit_invalid_mlx_restart(ctx, &bundle, pc, start_slot);
         ctx->base.is_jmp = DISAS_NORETURN;
         return;
     }

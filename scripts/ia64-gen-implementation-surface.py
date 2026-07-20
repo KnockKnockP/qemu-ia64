@@ -81,6 +81,41 @@ ARCHITECTURAL_SURFACES = (
         "ia64_template_table[32]",
     ),
     (
+        "cpu.bundle.template-equivalence", "cpu.bundle",
+        "complete defined-template execution equivalence",
+        "target/ia64/bundle.c", "ia64_template_table[32]",
+    ),
+    (
+        "cpu.bundle.long-immediate", "cpu.bundle",
+        "logical L+X immediate construction",
+        "target/ia64/translate.c", "IA64_OP_MOVL",
+    ),
+    (
+        "cpu.bundle.legality", "cpu.bundle",
+        "reserved-template and invalid MLX restart handling",
+        "target/ia64/translate.c", "ia64_tr_emit_invalid_mlx_restart",
+    ),
+    (
+        "cpu.bundle.field-semantics", "cpu.bundle",
+        "ignored and reserved instruction-field behavior",
+        "target/ia64/translate.c", "ia64_tr_emit_decoded_illegal_operation",
+    ),
+    (
+        "cpu.bundle.ip-ri", "cpu.bundle",
+        "IP and RI transition publication",
+        "target/ia64/translate.c", "ia64_tr_publish_fault_state",
+    ),
+    (
+        "cpu.bundle.ri-resume", "cpu.bundle",
+        "architectural RI entry and suffix resume",
+        "target/ia64/translate.c", "ia64_tcg_tb_flags_ri",
+    ),
+    (
+        "cpu.bundle.boundaries", "cpu.bundle",
+        "translation-block and page-boundary equivalence",
+        "target/ia64/translate.c", "ia64_tr_preflight_rewrite_region",
+    ),
+    (
         "cpu.sequencing.sequential-order",
         "cpu.sequencing",
         "bundle and slot execution order",
@@ -799,7 +834,7 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 },
                 {
                     "domain": "cpu.bundle",
-                    "completeness": "first-architectural-tranche",
+                    "completeness": "catalogued-domain-closure",
                 },
                 {
                     "domain": "cpu.issue-group",

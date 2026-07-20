@@ -329,6 +329,12 @@ test('test-ia64-correctness-lessons-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-decoder-bundle-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-decoder-bundle-tranche.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-memory-boundary-tranche-static', python,
      args: [meson.project_source_root() / 'scripts/ia64-validate-memory-boundary-tranche.py',
             '--root', meson.project_source_root()],
@@ -424,6 +430,26 @@ if 'ia64-softmmu' in target_dirs
        depends: [ia64_full_tcg_emulator],
        env: test_env,
        args: [meson.current_source_dir() / 'test-ia64-correctness-lessons.py',
+              '--source-root', meson.project_source_root(),
+              '--binary', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
+
+  test('test-ia64-decoder-bundle-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-decoder-bundle-tcg.py',
+              '--source-root', meson.project_source_root(),
+              '--binary', ia64_full_tcg_emulator.full_path()],
+       protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
+
+  test('test-ia64-decoder-bundle-tranche', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-decoder-bundle-tranche.py',
               '--source-root', meson.project_source_root(),
               '--binary', ia64_full_tcg_emulator.full_path()],
        protocol: 'tap',

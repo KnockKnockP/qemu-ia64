@@ -1,0 +1,58 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.decoder-bundle-tranche",
+  "schema_version": 1,
+  "profile": "vibtanium-strict-up",
+  "test_id": 705,
+  "cases": [
+    {
+      "id": "BND-004-TEMPLATE-EQUIVALENCE-EXACT", "case_id": 1, "normative_token": 45, "normative_row": "BND-004-TEMPLATE-EQUIVALENCE", "implementation_rows": ["cpu.bundle.template-equivalence"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.3", "printed_pages": ["1:38", "1:39"], "anchor": "Template Field Encoding and Instruction Slot Mapping"},
+      "preconditions": ["Every legal unit receives a test-owned no-effect encoding"], "inputs": ["Exact literal matrix of all 32 template values"], "expected_results": ["All 24 defined templates retire with their exact units/stops"], "allowed_results": ["Exact legal execution for every defined template"],
+      "permitted_state_changes": ["Final marker GR"], "required_unchanged_state": ["Unrelated registers and interruption state"], "expected_faults": [], "fault_priority": [], "committed_prefix": "Stops partition the stream according to the literal matrix", "restart_action": "Not exercised for legal templates", "applicable_variants": ["24 defined templates", "all slot-unit maps", "all stop maps"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_legal_template_equivalence"], "result_observations": ["terminal IP", "exception state", "retirement marker"]}, "oracle": {"independence": "independent", "derivation": "A test-owned 32-entry literal is compared statically with production and executed with independently selected unit encodings"}
+    },
+    {
+      "id": "BND-005-LONG-IMMEDIATE-EXACT", "case_id": 2, "normative_token": 46, "normative_row": "BND-005-LONG-IMMEDIATE", "implementation_rows": ["cpu.bundle.long-immediate"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "4.7", "printed_pages": ["3:365", "3:366", "3:367"], "anchor": "The X-unit instructions occupy two instruction slots"},
+      "preconditions": ["MLX contains a legal logical L+X instruction"], "inputs": ["Two MOVL constants and forward/backward BRL displacements beyond imm21 range"], "expected_results": ["Exact 64-bit constants and signed imm60 targets"], "allowed_results": ["Only the independently reconstructed values and targets"],
+      "permitted_state_changes": ["Selected GRs and branch IP"], "required_unchanged_state": ["Unrelated state"], "expected_faults": [], "fault_priority": [], "committed_prefix": "L and X commit as one instruction", "restart_action": "Legal L+X starts at logical slot one", "applicable_variants": ["MOVL", "forward BRL", "backward BRL"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_long_immediate_construction"], "result_observations": ["GR constants", "forward target", "backward target"]}, "oracle": {"independence": "independent", "derivation": "Test-local bitfield reconstruction and literal signed displacement arithmetic do not import decoder tables"}
+    },
+    {
+      "id": "BND-006-TEMPLATE-PLACEMENT-LEGALITY-EXACT", "case_id": 3, "normative_token": 47, "normative_row": "BND-006-TEMPLATE-PLACEMENT-LEGALITY", "implementation_rows": ["cpu.bundle.legality"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "8.3", "printed_pages": ["2:191", "2:192"], "anchor": "Attempts to execute a bundle of template MLX when PSR.ri == 2"},
+      "preconditions": ["PSR.ic is enabled for precise interruption collection"], "inputs": ["All eight reserved templates and RFI to an MLX bundle with saved RI two"], "expected_results": ["Precise Illegal Operation for every illegal template or placement"], "allowed_results": ["General Exception vector with exact IIP/IPSR.ri/ISR.ei"],
+      "permitted_state_changes": ["Interruption resources"], "required_unchanged_state": ["MLX destination and illegal bundle effects"], "expected_faults": ["Illegal Operation fault"], "fault_priority": ["Placement is rejected before any instruction effect"], "committed_prefix": "No illegal-bundle effect commits", "restart_action": "IIP names the bundle and saved RI/EI remain two", "applicable_variants": ["8 reserved templates", "MLX continuation RI two"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_template_and_placement_legality"], "result_observations": ["exception kind/vector", "IIP/IPSR/ISR", "slot record", "unchanged destination"]}, "oracle": {"independence": "independent", "derivation": "The manual-derived reserved set and explicit RFI image determine exact fault state"}
+    },
+    {
+      "id": "BND-007-IGNORED-RESERVED-FIELDS-EXACT", "case_id": 4, "normative_token": 48, "normative_row": "BND-007-IGNORED-RESERVED-FIELDS", "implementation_rows": ["cpu.bundle.field-semantics"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "4.1", "printed_pages": ["3:298", "3:299"], "anchor": "Ignored instructions"},
+      "preconditions": ["Ignored and reserved fields are made observably nonzero"], "inputs": ["X3 ignored L bits and POPCNT reserved r2 under true and false qp"], "expected_results": ["Ignored bits execute normally; enabled reserved field faults; false qp suppresses it"], "allowed_results": ["Exact legal target or precise Illegal Operation"],
+      "permitted_state_changes": ["Legal branch IP or interruption resources"], "required_unchanged_state": ["Faulting target and suffix", "False-qualified target"], "expected_faults": ["Illegal Operation fault"], "fault_priority": ["False qp suppresses the reserved field; enabled reserved field faults before effects"], "committed_prefix": "The fault preserves its successful prefix", "restart_action": "Saved RI identifies the reserved instruction", "applicable_variants": ["ignored", "reserved enabled", "reserved nullified"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_ignored_and_reserved_fields"], "result_observations": ["branch target", "exception state", "destination and suffix markers"]}, "oracle": {"independence": "independent", "derivation": "Literal ignored-bit and reserved-field encodings are constructed outside the production decoder"}
+    },
+    {
+      "id": "BND-008-IP-RI-TRANSITIONS-EXACT", "case_id": 5, "normative_token": 49, "normative_row": "BND-008-IP-RI-TRANSITIONS", "implementation_rows": ["cpu.bundle.ip-ri"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "3.3.2", "printed_pages": ["2:540", "2:541"], "anchor": "instruction bundle address contained in IIP, along with the IPSR.ri field"},
+      "preconditions": ["Precise collection and selected branch/interrupt controls are enabled"], "inputs": ["Sequential completion, taken-branch trap, external interrupt, and RFI"], "expected_results": ["Exact target or interrupted IP/RI is exposed and restored"], "allowed_results": ["Only the architectural transition state"],
+      "permitted_state_changes": ["IP/RI and interruption resources"], "required_unchanged_state": ["Unrelated registers"], "expected_faults": ["Taken Branch trap", "External Interrupt"], "fault_priority": ["Completed transfer trap attribution and interrupted instruction attribution follow the manual"], "committed_prefix": "Completed instructions remain committed", "restart_action": "RFI restores exact saved IP/RI", "applicable_variants": ["completion", "branch trap", "external interruption", "RFI"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_ip_ri_transition_matrix"], "result_observations": ["IP", "IIP/IPSR/ISR/IIPA", "handler and resume markers"]}, "oracle": {"independence": "independent", "derivation": "Literal bundle addresses, slot numbers, vector addresses, and markers define the expected transition graph"}
+    },
+    {
+      "id": "BND-009-RI-ENTRY-RESUME-EXACT", "case_id": 6, "normative_token": 50, "normative_row": "BND-009-RI-ENTRY-RESUME", "implementation_rows": ["cpu.bundle.ri-resume"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "3.3.2", "printed_pages": ["2:540", "2:541"], "anchor": "instruction bundle address contained in IIP, along with the IPSR.ri field"},
+      "preconditions": ["A legal three-slot MII bundle has unique destination markers"], "inputs": ["Architectural RI zero, one, and two"], "expected_results": ["Only the selected slot and its suffix execute"], "allowed_results": ["RI0 all markers; RI1 slots one/two; RI2 slot two"],
+      "permitted_state_changes": ["Selected suffix destinations and completed IP/RI"], "required_unchanged_state": ["Destinations of skipped prefix slots"], "expected_faults": [], "fault_priority": [], "committed_prefix": "Slots below entry RI are never replayed", "restart_action": "Begin at exactly RI and finish with canonical RI zero", "applicable_variants": ["RI zero", "RI one", "RI two"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_ri_entry_resume_matrix"], "result_observations": ["three GR markers", "final PSR.ri"]}, "oracle": {"independence": "independent", "derivation": "A literal suffix matrix defines the three expected register tuples"}
+    },
+    {
+      "id": "BND-010-PAGE-TB-EQUIVALENCE-EXACT", "case_id": 7, "normative_token": 51, "normative_row": "BND-010-PAGE-TB-EQUIVALENCE", "implementation_rows": ["cpu.bundle.boundaries"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.4", "printed_pages": ["1:39", "1:40"], "anchor": "Bundles are ordered from lowest to highest memory address"},
+      "preconditions": ["No-stop groups cross translator and page boundaries"], "inputs": ["5/6/16-bundle groups, automatic TCG-op segmentation, and a 0xff0/0x1000 group-entry overlay"], "expected_results": ["Split execution equals uninterrupted architectural execution"], "allowed_results": ["Exact destination, predicate, NaT, and terminal state"],
+      "permitted_state_changes": ["Destinations selected by the ordered group"], "required_unchanged_state": ["Group-entry source values and their NaT pairing"], "expected_faults": [], "fault_priority": [], "committed_prefix": "Nonarchitectural boundaries add no commitment point", "restart_action": "Translation segmentation does not alter restart state", "applicable_variants": ["explicit TB split", "automatic op-budget split", "4 KiB page crossing"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_page_tb_boundary_equivalence"], "result_observations": ["direct TCG trace", "visibility state", "GR/NaT/PR results"]}, "oracle": {"independence": "independent", "derivation": "Literal group-entry values and result markers define equivalence independently of translation segmentation"}
+    }
+  ]
+}

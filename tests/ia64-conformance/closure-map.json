@@ -10,6 +10,7 @@
   "infrastructure_tests": [
     "test-ia64-conformance-closure",
     "test-ia64-correctness-lessons-static",
+    "test-ia64-decoder-bundle-tranche-static",
     "test-ia64-evidence-map",
     "test-ia64-first-architectural-tranche-static",
     "test-ia64-implementation-surface",
@@ -62,6 +63,55 @@
         "test-ia64-full-tcg",
         "test-ia64-memory-tcg"
       ]
+    },
+    {
+      "normative_row": "BND-004-TEMPLATE-EQUIVALENCE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.template-equivalence"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche"]
+    },
+    {
+      "normative_row": "BND-005-LONG-IMMEDIATE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.long-immediate"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche", "test-ia64-full-tcg"]
+    },
+    {
+      "normative_row": "BND-006-TEMPLATE-PLACEMENT-LEGALITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.legality"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche"]
+    },
+    {
+      "normative_row": "BND-007-IGNORED-RESERVED-FIELDS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.field-semantics"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche", "test-ia64-scalar-tcg"]
+    },
+    {
+      "normative_row": "BND-008-IP-RI-TRANSITIONS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.ip-ri"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche", "test-ia64-full-tcg"]
+    },
+    {
+      "normative_row": "BND-009-RI-ENTRY-RESUME",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.ri-resume"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche", "test-ia64-full-tcg"]
+    },
+    {
+      "normative_row": "BND-010-PAGE-TB-EQUIVALENCE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.bundle.boundaries"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-decoder-bundle-tcg", "test-ia64-decoder-bundle-tranche", "test-ia64-full-tcg"]
     },
     {
       "normative_row": "BR-001-BRANCH-FORMS",

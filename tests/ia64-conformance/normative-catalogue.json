@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 5,
+  "catalogue_revision": 6,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -214,6 +214,62 @@
         "Bundles are ordered by increasing memory address and instructions within each bundle are ordered slot 0, slot 1, slot 2"
       ],
       "required_evidence": "E2"
+    },
+    {
+      "id": "BND-004-TEMPLATE-EQUIVALENCE", "requirement_ids": ["BND-004"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.bundle",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "3.3", "printed_pages": ["1:38", "1:39"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Template Field Encoding and Instruction Slot Mapping"},
+      "operation": {"kind": "template-equivalence", "selector": "all 24 defined template encodings", "encoding": "exact M/I/F/B/L/X slot types, internal stops, terminal stops, and MLX designation"},
+      "legal_inputs": ["Each defined template with a legal no-effect instruction in every named unit"], "privilege": {"levels": [0, 1, 2, 3], "rule": "Template interpretation is independent of privilege"},
+      "state_read": ["five-bit template field and three instruction slots"], "state_written": ["state written by the decoded instructions"], "predication": {"applies": false, "rule": "Template interpretation precedes instruction predication"},
+      "nat_behavior": "Template interpretation does not itself consume or produce NaT", "possible_faults": [], "fault_priority": [], "committed_prefix": "Stops partition issue groups exactly as encoded", "restart_rule": "Resume retains the template interpretation at the saved bundle and RI", "permitted_results": ["All defined templates produce exactly the manual's unit and stop mapping"], "required_evidence": "E2"
+    },
+    {
+      "id": "BND-005-LONG-IMMEDIATE", "requirement_ids": ["BND-005"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.bundle",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Part 1: Application Instruction Set", "section": "4.7", "printed_pages": ["3:365", "3:366", "3:367"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "The X-unit instructions occupy two instruction slots"},
+      "operation": {"kind": "long-immediate", "selector": "MOVL and BRL L+X formats", "encoding": "one logical instruction combines the L-slot immediate extension with the X-slot opcode and immediate fields"},
+      "legal_inputs": ["Legal positive and negative long immediates and bundle-aligned branch targets"], "privilege": {"levels": [0, 1, 2, 3], "rule": "Application L+X instructions execute at every privilege level"},
+      "state_read": ["both L and X slots and current bundle IP for BRL"], "state_written": ["MOVL destination GR or BRL target IP"], "predication": {"applies": true, "rule": "The X-slot qualifying predicate governs the logical L+X instruction"},
+      "nat_behavior": "MOVL clears the destination NaT; BRL does not consume NaT", "possible_faults": [], "fault_priority": [], "committed_prefix": "The L and X slots commit as one logical instruction", "restart_rule": "A legal L+X instruction restarts at its logical slot 1", "permitted_results": ["Exact 64-bit MOVL constant or signed 60-bit BRL target reconstruction"], "required_evidence": "E2"
+    },
+    {
+      "id": "BND-006-TEMPLATE-PLACEMENT-LEGALITY", "requirement_ids": ["BND-006"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.bundle",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "8.3", "printed_pages": ["2:191", "2:192"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Attempts to execute a bundle of template MLX when PSR.ri == 2"},
+      "operation": {"kind": "template-placement-legality", "selector": "reserved templates and MLX entry with RI equal to two", "encoding": "eight reserved template values and an invalid L+X continuation entry"},
+      "legal_inputs": ["Interruption collection enabled before the illegal bundle is entered"], "privilege": {"levels": [0, 1, 2, 3], "rule": "Illegal bundle and slot placement is detected at every privilege level"},
+      "state_read": ["template, saved RI, and instruction bits"], "state_written": ["interruption resources"], "predication": {"applies": false, "rule": "Template and MLX continuation legality is checked independently of qp"},
+      "nat_behavior": "An illegal placement does not change NaT state", "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Bundle/template placement is rejected before instruction effects"], "committed_prefix": "No instruction in the illegal bundle commits", "restart_rule": "IIP names the target bundle and IPSR.ri/ISR.ei preserve RI 2 for invalid MLX continuation entry", "permitted_results": ["Precise Illegal Operation with unchanged instruction destinations"], "required_evidence": "E2"
+    },
+    {
+      "id": "BND-007-IGNORED-RESERVED-FIELDS", "requirement_ids": ["BND-007"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.bundle",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Part 1: Application Instruction Set", "section": "4.1", "printed_pages": ["3:298", "3:299"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "Ignored instructions"},
+      "operation": {"kind": "field-legality", "selector": "ignored and reserved instruction fields", "encoding": "nonzero ignored X3 L bits and nonzero reserved POPCNT r2"},
+      "legal_inputs": ["Both enabled and false-qualified encodings with distinguishable destination and suffix markers"], "privilege": {"levels": [0, 1, 2, 3], "rule": "Reserved and ignored field rules are independent of privilege"},
+      "state_read": ["instruction fields and qualifying predicate"], "state_written": ["legal result or interruption resources"], "predication": {"applies": true, "rule": "A false qualifying predicate suppresses reserved-field behavior where specified"},
+      "nat_behavior": "Ignored fields do not change NaT; a reserved-field fault commits no target NaT", "possible_faults": ["Illegal Operation fault"], "fault_priority": ["False qp nullifies the instruction; otherwise a reserved field faults before target or suffix effects"], "committed_prefix": "Only instructions before the reserved encoding may commit", "restart_rule": "The saved bundle and RI identify the reserved instruction", "permitted_results": ["Ignored fields do not affect the legal result; enabled reserved fields fault precisely"], "required_evidence": "E2"
+    },
+    {
+      "id": "BND-008-IP-RI-TRANSITIONS", "requirement_ids": ["BND-008"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.sequencing",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "3.3.2", "printed_pages": ["2:540", "2:541"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "instruction bundle address contained in IIP, along with the IPSR.ri field"},
+      "operation": {"kind": "ip-ri-transition", "selector": "completion, control transfer, trap, external interruption, and RFI", "encoding": "architectural IP plus PSR.ri or IIP plus IPSR.ri"},
+      "legal_inputs": ["Sequential groups, a taken transfer, an enabled branch trap, and an enabled external interrupt"], "privilege": {"levels": [0], "rule": "The system-state probe executes at privilege level zero"},
+      "state_read": ["IP, PSR.ri, branch target, interruption resources"], "state_written": ["IP/RI and interruption resources"], "predication": {"applies": true, "rule": "Only an enabled taken transfer changes the sequential IP path"},
+      "nat_behavior": "IP/RI transitions do not themselves read or write NaT", "possible_faults": ["Taken Branch trap", "External Interrupt"], "fault_priority": ["Completed branch trap state names the target; an external interruption saves the interrupted instruction before handler entry"], "committed_prefix": "Completed instructions precede the saved IP/RI state", "restart_rule": "RFI restores the saved bundle and RI", "permitted_results": ["Every transition exposes the exact architectural bundle and slot state"], "required_evidence": "E2"
+    },
+    {
+      "id": "BND-009-RI-ENTRY-RESUME", "requirement_ids": ["BND-009"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.sequencing",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "3.3.2", "printed_pages": ["2:540", "2:541"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "instruction bundle address contained in IIP, along with the IPSR.ri field"},
+      "operation": {"kind": "ri-entry-resume", "selector": "architectural RI values zero, one, and two", "encoding": "one MII bundle with distinct slot destination markers"},
+      "legal_inputs": ["A legal bundle entered at each valid architectural slot number"], "privilege": {"levels": [0, 1, 2, 3], "rule": "RI selects an instruction slot independently of current privilege"},
+      "state_read": ["IP, PSR.ri, and the selected bundle suffix"], "state_written": ["destinations of the selected slot and following slots plus completed IP/RI"], "predication": {"applies": false, "rule": "The matrix uses p0 so RI selection is observed directly"},
+      "nat_behavior": "The selected ADD destinations clear NaT; skipped slots leave destinations unchanged", "possible_faults": [], "fault_priority": [], "committed_prefix": "Slots before the entry RI are not replayed", "restart_rule": "Execution starts at exactly the saved RI and continues through the legal suffix", "permitted_results": ["RI 0 executes slots 0-2, RI 1 executes slots 1-2, and RI 2 executes slot 2"], "required_evidence": "E2"
+    },
+    {
+      "id": "BND-010-PAGE-TB-EQUIVALENCE", "requirement_ids": ["BND-010"], "profiles": ["vibtanium-strict-up", "vibtanium-default-up"], "interface_kind": "cpu.sequencing",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "3.4", "printed_pages": ["1:39", "1:40"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Bundles are ordered from lowest to highest memory address"},
+      "operation": {"kind": "translation-boundary-equivalence", "selector": "instruction groups split by translator limits or a 4 KiB page boundary", "encoding": "no-stop multi-bundle groups with group-entry dependencies"},
+      "legal_inputs": ["Groups longer than one translation block and groups crossing from 0xff0 to 0x1000"], "privilege": {"levels": [0], "rule": "The direct-TCG probes execute at privilege level zero"},
+      "state_read": ["ordered bundles and group-entry GR, NaT, and predicate state"], "state_written": ["the same architectural destinations as an unsplit group"], "predication": {"applies": true, "rule": "A boundary may not alter predicate visibility"},
+      "nat_behavior": "Saved group-entry GR values remain paired with their NaT bits across boundaries", "possible_faults": [], "fault_priority": [], "committed_prefix": "A nonarchitectural translation boundary commits no extra prefix", "restart_rule": "Translation segmentation does not change architectural restart state", "permitted_results": ["Split and unsplit execution have identical ordered results and visibility"], "required_evidence": "E2"
     },
     {
       "id": "BR-001-BRANCH-FORMS",
