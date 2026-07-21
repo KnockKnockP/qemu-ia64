@@ -1,7 +1,7 @@
 {
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.conformance-closure-map",
-  "schema_version": 1,
+  "schema_version": 2,
   "policy": {
     "candidate_tests_close_rows": false,
     "required_evidence_classified": true,
@@ -18,6 +18,7 @@
     "test-ia64-normative-catalogue",
     "test-ia64-packed-integer-tranche-static",
     "test-ia64-predicate-branch-tranche-static",
+    "test-ia64-register-tcg-static",
     "test-ia64-runner-protocol",
     "test-ia64-scalar-integer-tranche-static"
   ],
@@ -471,6 +472,50 @@
         "test-ia64-first-architectural-tranche",
         "test-ia64-full-tcg"
       ]
+    },
+    {
+      "normative_row": "REG-005-GR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.gr.all-indices",
+        "exclude_rows": ["cpu.register.gr.0"]
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-006-BR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.br.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-006-FR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.fr.all-indices",
+        "exclude_rows": ["cpu.register.fr.0", "cpu.register.fr.1"]
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-006-PR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.pr.all-indices",
+        "exclude_rows": ["cpu.register.pr.0"]
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
     }
   ]
 }

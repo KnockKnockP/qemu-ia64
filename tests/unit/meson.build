@@ -297,6 +297,13 @@ test('test-ia64-fp-tcg-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-register-tcg-static', python,
+     args: [meson.current_source_dir() / 'test-ia64-register-tcg.py',
+            '--source-root', meson.project_source_root(),
+            '--self-check'],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-opcode-ledger', python,
      args: [meson.project_source_root() / 'scripts/ia64-gen-opcode-ledger.py',
             '--check',
@@ -578,6 +585,17 @@ if 'ia64-softmmu' in target_dirs
        depends: [ia64_full_tcg_emulator],
        env: test_env,
        args: [meson.current_source_dir() / 'test-ia64-fp-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path(),
+              '--harness',
+              meson.current_source_dir() / 'test-ia64-full-tcg.py'],
+       protocol: 'tap',
+       timeout: 180,
+       suite: ['unit'])
+  test('test-ia64-register-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-register-tcg.py',
+              '--source-root', meson.project_source_root(),
               '--qemu', ia64_full_tcg_emulator.full_path(),
               '--harness',
               meson.current_source_dir() / 'test-ia64-full-tcg.py'],

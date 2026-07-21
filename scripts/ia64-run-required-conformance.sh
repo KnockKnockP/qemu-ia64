@@ -40,6 +40,7 @@ set +e
     qemu:test-ia64-data-plane-tcg-static \
     qemu:test-ia64-system-tcg-static \
     qemu:test-ia64-fp-tcg-static \
+    qemu:test-ia64-register-tcg-static \
     qemu:test-ia64-opcode-ledger \
     qemu:test-ia64-normative-catalogue \
     qemu:test-ia64-runner-protocol \
@@ -73,6 +74,7 @@ set +e
     qemu:test-ia64-tcp-migration \
     qemu:test-ia64-packed-tcg \
     qemu:test-ia64-fp-tcg \
+    qemu:test-ia64-register-tcg \
     qemu:qtest-ia64/ia64-acpi-test \
     qemu:qtest-ia64/ia64-input-test
 test_status=$?

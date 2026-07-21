@@ -4236,6 +4236,35 @@ def _loader_arguments(program: Program) -> List[str]:
     return arguments
 
 
+def _compact_loader_arguments(program: Program) \
+        -> Tuple[List[str], tempfile.TemporaryDirectory]:
+    """Materialize a program when per-word loader arguments are too long."""
+    image_end = max(
+        [bundle.address + 16 for bundle in program.bundles]
+        + [word.address + word.size for word in program.data]
+    )
+    image = bytearray(image_end)
+    for bundle in program.bundles:
+        low, high = bundle_words(bundle)
+        image[bundle.address:bundle.address + 8] = low.to_bytes(8, "little")
+        image[bundle.address + 8:bundle.address + 16] = high.to_bytes(
+            8, "little"
+        )
+    for word in program.data:
+        if word.size < 1 or word.size > 8:
+            raise ValueError("generic loader data length must be from 1 to 8")
+        image[word.address:word.address + word.size] = word.value.to_bytes(
+            word.size, "little"
+        )
+    temporary = tempfile.TemporaryDirectory(prefix="ia64-program-image-")
+    image_path = Path(temporary.name) / "guest.img"
+    image_path.write_bytes(image)
+    return ([
+        "-device", "loader,file={},addr=0x0".format(image_path.as_posix()),
+        "-device", "loader,addr=0x{:x},cpu-num=0".format(program.entry),
+    ], temporary)
+
+
 def _child_environment(state_cache: bool = False,
                        extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     environment = os.environ.copy()
@@ -5610,6 +5639,7 @@ def run_program(qemu: Path, program: Program,
                  state_cache: bool = False,
                  extra_args: Sequence[str] = (),
                  extra_env: Optional[Dict[str, str]] = None,
+                 compact_loader: bool = False,
                  graceful_quit: bool = False,
                  profile_second_pass: bool = False,
                  required_output_patterns: Sequence[str] = (),
@@ -5652,7 +5682,12 @@ def run_program(qemu: Path, program: Program,
             "tcp:127.0.0.1:{},server=on,wait=off".format(gdb_port),
         ))
     arguments.extend(extra_args)
-    arguments.extend(_loader_arguments(program))
+    loader_image: Optional[tempfile.TemporaryDirectory] = None
+    if compact_loader:
+        loader_arguments, loader_image = _compact_loader_arguments(program)
+        arguments.extend(loader_arguments)
+    else:
+        arguments.extend(_loader_arguments(program))
 
     trace_directory: Optional[tempfile.TemporaryDirectory] = None
     trace_path: Optional[Path] = None
@@ -5876,6 +5911,8 @@ def run_program(qemu: Path, program: Program,
             failure = trace_exc
     if trace_directory is not None:
         trace_directory.cleanup()
+    if loader_image is not None:
+        loader_image.cleanup()
 
     if failure is not None:
         detail = "{}".format(failure)

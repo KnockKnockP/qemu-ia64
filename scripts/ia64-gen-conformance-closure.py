@@ -23,7 +23,7 @@ from typing import Any, Sequence
 SCHEMA = "vibtanium.ia64.conformance-closure"
 SCHEMA_VERSION = 3
 MAP_SCHEMA = "vibtanium.ia64.conformance-closure-map"
-MAP_SCHEMA_VERSION = 1
+MAP_SCHEMA_VERSION = 2
 NORMATIVE_CATALOGUE = Path(
     "tests/ia64-conformance/normative-catalogue.json"
 )
@@ -370,11 +370,18 @@ def validate_closure_map(
         "candidate_tests",
     }
     seen_normative: set[str] = set()
+    expanded_mappings: list[dict[str, Any]] = []
     for index, mapping in enumerate(mappings):
         label = f"closure-map mappings[{index}]"
         if not isinstance(mapping, dict):
             raise ClosureError(f"{label}: expected an object")
-        exact_keys(mapping, expected_mapping_keys, label)
+        actual_keys = set(mapping)
+        selector_keys = expected_mapping_keys | {"implementation_selector"}
+        if actual_keys not in (expected_mapping_keys, selector_keys):
+            raise ClosureError(
+                f"{label}: keys differ (expected legacy keys or one "
+                "implementation_selector)"
+            )
         normative_id = mapping["normative_row"]
         if (
             not isinstance(normative_id, str)
@@ -393,11 +400,52 @@ def validate_closure_map(
             raise ClosureError(
                 f"{normative_id}: seed catalogue rows must be implemented"
             )
-        implementation_ids = string_list(
-            mapping["implementation_rows"],
-            f"{normative_id} implementation_rows",
-            allow_empty=True,
+        implementation_ids = list(
+            string_list(
+                mapping["implementation_rows"],
+                f"{normative_id} implementation_rows",
+                allow_empty=True,
+            )
         )
+        if "implementation_selector" in mapping:
+            selector = mapping["implementation_selector"]
+            exact_keys(
+                selector,
+                {"coverage_group", "exclude_rows"},
+                f"{normative_id} implementation_selector",
+            )
+            group = selector["coverage_group"]
+            if not isinstance(group, str) or not group:
+                raise ClosureError(
+                    f"{normative_id}: coverage_group must be a non-empty string"
+                )
+            group_ids = sorted(
+                row_id for row_id, row in implementation_rows.items()
+                if row.get("attributes", {}).get("coverage_group") == group
+            )
+            if not group_ids:
+                raise ClosureError(
+                    f"{normative_id}: coverage group {group!r} is empty"
+                )
+            exclusions = string_list(
+                selector["exclude_rows"],
+                f"{normative_id} implementation_selector exclude_rows",
+                allow_empty=True,
+            )
+            invalid_exclusions = sorted(set(exclusions) - set(group_ids))
+            if invalid_exclusions:
+                raise ClosureError(
+                    f"{normative_id}: selector exclusion(s) are outside "
+                    f"{group}: " + ", ".join(invalid_exclusions)
+                )
+            implementation_ids.extend(
+                row_id for row_id in group_ids if row_id not in exclusions
+            )
+        if len(implementation_ids) != len(set(implementation_ids)):
+            raise ClosureError(
+                f"{normative_id}: implementation rows overlap after "
+                "selector expansion"
+            )
         unknown_implementation = sorted(
             set(implementation_ids) - set(implementation_rows)
         )
@@ -440,7 +488,11 @@ def validate_closure_map(
                 + ", ".join(missing_tests)
             )
 
-    mapping_order = [mapping["normative_row"] for mapping in mappings]
+        expanded = dict(mapping)
+        expanded["implementation_rows"] = implementation_ids
+        expanded_mappings.append(expanded)
+
+    mapping_order = [mapping["normative_row"] for mapping in expanded_mappings]
     if mapping_order != sorted(mapping_order):
         raise ClosureError(
             "closure-map mappings must be sorted by normative row"
@@ -456,7 +508,7 @@ def validate_closure_map(
         raise ClosureError(
             "normative mapping is not complete: " + "; ".join(details)
         )
-    return mappings
+    return expanded_mappings
 
 
 def state_for_implementation(row: dict[str, Any]) -> str:
