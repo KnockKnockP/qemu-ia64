@@ -1,0 +1,64 @@
+name: IA-64 required conformance
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  required-conformance:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out QEMU fork
+        uses: actions/checkout@v4
+        with:
+          path: qemu-ia64
+
+      - name: Check out Vibtanium tooling
+        uses: actions/checkout@v4
+        with:
+          repository: KnockKnockP/vibtanium
+          path: vibtanium
+
+      - name: Prepare MSYS2 MINGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            git
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-pixman
+            mingw-w64-x86_64-libslirp
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-python-pip
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-poppler
+            mingw-w64-x86_64-curl
+
+      - name: Fetch public IA-64 manuals
+        shell: msys2 {0}
+        run: ./vibtanium/scripts/qemu/fetch-ia64-manuals.sh
+
+      - name: Build IA-64 debug emulator
+        shell: msys2 {0}
+        run: ./vibtanium/scripts/qemu/build-ia64-debug.sh
+
+      - name: Run required IA-64 conformance baseline
+        shell: msys2 {0}
+        run: ./vibtanium/scripts/qemu/run-ia64-conformance-baseline.sh
+
+      - name: Upload concise conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia64-conformance-closure
+          path: |
+            vibtanium/traces/raw/ia64-conformance-closure.json
+            vibtanium/traces/raw/ia64-conformance-closure.md
+          if-no-files-found: warn

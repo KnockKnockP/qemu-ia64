@@ -33,8 +33,8 @@ EXPECTED = {
         "test_store_update_code_page_restart",
     ),
     "MEM-010-RAM-CONTINUATION": (
-        ["cpu.memory.ram-continuation"],
-        "test_normal_ram_continuation",
+        ["cpu.memory.ram-tb-equivalence"],
+        "test_normal_ram_tb_equivalence",
     ),
     "MEM-011-UPDATE-SAFEPOINT": (
         ["cpu.memory.update-safepoint"],

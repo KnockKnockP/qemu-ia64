@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 
 SCHEMA = "vibtanium.ia64.conformance-closure"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAP_SCHEMA = "vibtanium.ia64.conformance-closure-map"
 MAP_SCHEMA_VERSION = 1
 NORMATIVE_CATALOGUE = Path(
@@ -50,6 +50,15 @@ ROW_STATES = (
     "inherited-dependency-tested",
     "compatibility-extension-tested",
     "contradiction",
+    "test-infrastructure-failure",
+)
+TEST_EXECUTION_STATES = (
+    "test-not-defined",
+    "test-defined",
+    "test-registered",
+    "test-not-run",
+    "test-passed",
+    "test-failed",
     "test-infrastructure-failure",
 )
 IMPLEMENTED_STATUSES = ("live", "storage-present")
@@ -141,6 +150,149 @@ def focused_test_registrations(build_dir: Path) -> list[dict[str, Any]]:
     if len(identifiers) != len(set(identifiers)):
         raise ClosureError("focused Meson test registration IDs are not unique")
     return focused
+
+
+def meson_registration_id(name: str) -> str | None:
+    marker = "qemu:"
+    if marker not in name:
+        return None
+    return name.rsplit(marker, 1)[1]
+
+
+def load_test_results(
+    path: Path, registration_ids: set[str]
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Load a Meson JSON-lines log without retaining commands or environment."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError as exc:
+        raise ClosureError(f"missing Meson test result log: {path}") from exc
+
+    results: dict[str, dict[str, Any]] = {}
+    starts: list[float] = []
+    ends: list[float] = []
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ClosureError(
+                f"invalid Meson result JSON at {path}:{line_number}: "
+                f"{exc.msg}"
+            ) from exc
+        if not isinstance(record, dict):
+            raise ClosureError(
+                f"Meson result at {path}:{line_number} is not an object"
+            )
+        name = record.get("name")
+        if not isinstance(name, str):
+            raise ClosureError(
+                f"Meson result at {path}:{line_number} has no test name"
+            )
+        test_id = meson_registration_id(name)
+        if test_id not in registration_ids:
+            continue
+        if test_id in results:
+            raise ClosureError(f"duplicate Meson result for {test_id}")
+
+        meson_result = record.get("result")
+        duration = record.get("duration")
+        returncode = record.get("returncode")
+        start = record.get("starttime")
+        if not isinstance(meson_result, str):
+            raise ClosureError(f"{test_id}: Meson result status is malformed")
+        if not isinstance(duration, (int, float)) or duration < 0:
+            raise ClosureError(f"{test_id}: Meson result duration is malformed")
+        if returncode is not None and not isinstance(returncode, int):
+            raise ClosureError(f"{test_id}: Meson return code is malformed")
+        if isinstance(start, (int, float)):
+            starts.append(float(start))
+            ends.append(float(start) + float(duration))
+
+        if meson_result == "OK" and returncode == 0:
+            state = "test-passed"
+        elif meson_result == "SKIP":
+            state = "test-not-run"
+        elif meson_result in {"FAIL", "UNEXPECTEDPASS", "EXPECTEDFAIL"}:
+            state = "test-failed"
+        else:
+            state = "test-infrastructure-failure"
+
+        result: dict[str, Any] = {
+            "state": state,
+            "meson_result": meson_result,
+            "duration_seconds": round(float(duration), 6),
+            "returncode": returncode,
+        }
+        if state in {"test-failed", "test-infrastructure-failure"}:
+            output_parts = []
+            for field in ("stdout", "stderr"):
+                value = record.get(field)
+                if isinstance(value, str) and value.strip():
+                    output_parts.append(value.strip())
+            output = "\n".join(output_parts)
+            result["failure_output"] = output[-4000:]
+        results[test_id] = result
+
+    counts = Counter(result["state"] for result in results.values())
+    summary = {
+        "source": str(path),
+        "focused_results": len(results),
+        "wall_elapsed_seconds": (
+            round(max(ends) - min(starts), 6) if starts else 0.0
+        ),
+        "by_state": {
+            state: counts.get(state, 0) for state in TEST_EXECUTION_STATES
+        },
+    }
+    return results, summary
+
+
+def row_execution_state(
+    closing_evidence: list[dict[str, Any]],
+    registrations: dict[str, dict[str, Any]],
+    test_results: dict[str, dict[str, Any]] | None,
+) -> str:
+    if not closing_evidence:
+        return "test-not-defined"
+    test_ids = [
+        entry["test_registration"] for entry in closing_evidence
+        if entry["test_registration"] is not None
+    ]
+    if len(test_ids) != len(closing_evidence) or any(
+        test_id not in registrations for test_id in test_ids
+    ):
+        return "test-defined"
+    if test_results is None:
+        return "test-registered"
+    states = [
+        test_results.get(test_id, {"state": "test-not-run"})["state"]
+        for test_id in test_ids
+    ]
+    if "test-infrastructure-failure" in states:
+        return "test-infrastructure-failure"
+    if "test-failed" in states:
+        return "test-failed"
+    if "test-not-run" in states:
+        return "test-not-run"
+    if states and all(state == "test-passed" for state in states):
+        return "test-passed"
+    return "test-infrastructure-failure"
+
+
+def blockers_for_execution(state: str) -> list[str]:
+    return {
+        "test-not-defined": ["no explicit row-closing evidence claim"],
+        "test-defined": ["row-closing test is not registered in this build"],
+        "test-registered": ["no execution result log was supplied"],
+        "test-not-run": ["row-closing test was not run in the selected result set"],
+        "test-passed": [],
+        "test-failed": ["row-closing test failed in the selected result set"],
+        "test-infrastructure-failure": [
+            "row-closing test had an infrastructure failure"
+        ],
+    }[state]
 
 
 def validate_closure_map(
@@ -338,6 +490,8 @@ def build_report(
     evidence_summary: dict[str, Any],
     registrations: list[dict[str, Any]],
     profile: str,
+    test_results: dict[str, dict[str, Any]] | None = None,
+    test_result_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if implementation.get("schema") != "vibtanium.ia64.implementation-surface":
         raise ClosureError("implementation input has an unexpected schema")
@@ -390,11 +544,16 @@ def build_report(
         for test_id in mapping["candidate_tests"]:
             candidate_for[test_id].append(normative_id)
         closing_evidence = evidence_by_normative[normative_id]
-        state = (
-            "implemented-tested" if closing_evidence
-            else "implemented-untested"
+        execution_state = row_execution_state(
+            closing_evidence, registration_rows, test_results
         )
-        blockers = blockers_for_state(state, has_catalogue=True)
+        if execution_state == "test-passed":
+            state = "implemented-tested"
+        elif execution_state == "test-infrastructure-failure":
+            state = "test-infrastructure-failure"
+        else:
+            state = "implemented-untested"
+        blockers = blockers_for_execution(execution_state)
         if mapping["inventory_gap"] is not None:
             blockers.insert(0, mapping["inventory_gap"])
         joined_rows.append({
@@ -406,11 +565,12 @@ def build_report(
             "normative_rows": [normative_id],
             "test_registrations": mapping["candidate_tests"],
             "required_evidence": normative["required_evidence"],
+            "test_execution_state": execution_state,
             "evidence_status": (
-                "row-closing-evidence" if closing_evidence
+                "row-closing-claim-defined" if closing_evidence
                 else "classified-no-row-closing-claim"
             ),
-            "row_closing_evidence": [
+            "row_closing_claims": [
                 entry["id"] for entry in closing_evidence
             ],
             "inventory_gap": mapping["inventory_gap"],
@@ -431,6 +591,7 @@ def build_report(
             "normative_rows": [],
             "test_registrations": [],
             "required_evidence": None,
+            "test_execution_state": "test-not-defined",
             "evidence_status": "missing-normative-row",
             "inventory_gap": None,
             "blockers": blockers_for_state(state, has_catalogue=False),
@@ -460,6 +621,12 @@ def build_report(
     report_registrations = []
     for registration in registrations:
         test_id = registration["id"]
+        if test_results is None:
+            execution_result = {"state": "test-registered"}
+        else:
+            execution_result = test_results.get(
+                test_id, {"state": "test-not-run"}
+            )
         report_registrations.append({
             **registration,
             "candidate_for": sorted(candidate_for[test_id]),
@@ -474,10 +641,11 @@ def build_report(
                 "role": evidence_by_registration[test_id]["conformance_role"],
             },
             "evidence_status": (
-                "row-closing" if evidence_by_registration[test_id][
+                "row-closing-claim" if evidence_by_registration[test_id][
                     "closes_normative_rows"
                 ] else "classified-not-row-closing"
             ),
+            "execution_result": execution_result,
         })
 
     state_counts = Counter(row["state"] for row in joined_rows)
@@ -488,6 +656,11 @@ def build_report(
     )
     candidate_links = sum(
         len(row["test_registrations"]) for row in joined_rows
+    )
+    normative_execution_counts = Counter(
+        row["test_execution_state"]
+        for row in joined_rows
+        if row["origin"] == "normative-catalogue"
     )
     implemented_conformant = blocking_rows == 0
     if implemented_conformant:
@@ -500,6 +673,8 @@ def build_report(
         "schema_version": SCHEMA_VERSION,
         "profile": profile,
         "report_scope": (
+            "selected-build runtime closure"
+            if test_results is not None else
             "construction-time closure; registrations are not execution results"
         ),
         "inputs": {
@@ -527,6 +702,7 @@ def build_report(
                 "source": "meson-info/intro-tests.json",
                 "focused_rows": len(registrations),
             },
+            "test_results": test_result_summary,
         },
         "claims": {
             "implemented_surface_conformant": False,
@@ -545,6 +721,9 @@ def build_report(
             "classified_evidence": (
                 "closes-only-explicitly-claimed-normative-rows"
             ),
+            "implemented_tested": (
+                "requires-test-passed-for-selected-build-and-profile"
+            ),
         },
         "summary": {
             "join_rows": len(joined_rows),
@@ -557,6 +736,10 @@ def build_report(
             "inventory_gaps": inventory_gaps,
             "blocking_rows": blocking_rows,
             "by_state": by_state,
+            "normative_by_test_execution_state": {
+                state: normative_execution_counts.get(state, 0)
+                for state in TEST_EXECUTION_STATES
+            },
         },
         "test_registrations": report_registrations,
         "rows": joined_rows,
@@ -565,15 +748,17 @@ def build_report(
 
 def render_markdown(report: dict[str, Any]) -> str:
     summary = report["summary"]
+    runtime = report["inputs"]["test_results"]
     lines = [
         "# IA-64 Conformance Closure Report",
         "",
         f"Profile: `{report['profile']}`",
         "",
-        "This is a construction-time closure report. Registered tests are",
-        "only classified evidence. A registration closes a normative row",
-        "only when the evidence registry makes an explicit, independently",
-        "validated claim.",
+        f"Scope: `{report['report_scope']}`",
+        "",
+        "A row is `implemented-tested` only when the evidence registry makes",
+        "an explicit, independently validated claim and its row-closing test",
+        "passed in the selected build result set.",
         "",
         "## Claims",
         "",
@@ -591,11 +776,26 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Candidate test links: {summary['candidate_links']}",
         f"- Joined rows: {summary['join_rows']}",
         "",
+    ]
+    if runtime is not None:
+        runtime_counts = runtime["by_state"]
+        lines.extend([
+            "## Runtime result set",
+            "",
+            f"- Focused results: {runtime['focused_results']}",
+            f"- Passed: {runtime_counts['test-passed']}",
+            f"- Failed: {runtime_counts['test-failed']}",
+            "- Infrastructure failures: "
+            f"{runtime_counts['test-infrastructure-failure']}",
+            f"- Wall elapsed: {runtime['wall_elapsed_seconds']:.3f} seconds",
+            "",
+        ])
+    lines.extend([
         "## Row states",
         "",
         "| State | Count |",
         "| --- | ---: |",
-    ]
+    ])
     for state in ROW_STATES:
         lines.append(f"| `{state}` | {summary['by_state'][state]} |")
     lines.extend([
@@ -604,8 +804,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Seed catalogue joins",
         "",
-        "| Normative row | State | Implementation rows | Candidate tests |",
-        "| --- | --- | ---: | ---: |",
+        "| Normative row | State | Test execution | Implementation rows | Candidate tests |",
+        "| --- | --- | --- | ---: | ---: |",
     ])
     normative_rows = [
         row for row in report["rows"]
@@ -615,6 +815,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         normative_id = row["normative_rows"][0]
         lines.append(
             f"| `{normative_id}` | `{row['state']}` | "
+            f"`{row['test_execution_state']}` | "
             f"{len(row['implementation_rows'])} | "
             f"{len(row['test_registrations'])} |"
         )
@@ -665,6 +866,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--evidence-map", type=Path, default=EVIDENCE_MAP,
         help="evidence classification, relative to --root by default",
+    )
+    parser.add_argument(
+        "--test-log", type=Path,
+        help="Meson JSON-lines test log for the selected build and run",
     )
     parser.add_argument("--output", type=Path, help="write JSON report")
     parser.add_argument(
@@ -724,6 +929,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     closure_map = load_json(resolve_path(root, args.closure_map).resolve())
     registrations = focused_test_registrations(build_dir)
+    test_results = None
+    test_result_summary = None
+    if args.test_log is not None:
+        test_results, test_result_summary = load_test_results(
+            args.test_log.resolve(), {row["id"] for row in registrations}
+        )
+        test_result_summary["selected_build"] = str(build_dir)
+        test_result_summary["command"] = (
+            "vibtanium/scripts/qemu/run-ia64-conformance-baseline.sh"
+        )
     evidence_map = load_json(resolve_path(root, args.evidence_map).resolve())
     try:
         evidence_summary = evidence_module.validate_evidence_map(
@@ -736,7 +951,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ClosureError(f"evidence classification failed: {exc}") from exc
     report = build_report(
         implementation, catalogue, closure_map, evidence_map,
-        evidence_summary, registrations, args.profile
+        evidence_summary, registrations, args.profile,
+        test_results, test_result_summary,
     )
     if args.check:
         counts = report["summary"]["by_state"]
@@ -746,6 +962,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"implemented-untested={counts['implemented-untested']}; "
             f"advertised-untested={counts['advertised-untested']}; "
             f"known-unimplemented={counts['known-unimplemented']}; "
+            "execution-results=not-supplied; "
             f"blocking={report['summary']['blocking_rows']}"
         )
         return 0

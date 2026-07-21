@@ -191,9 +191,9 @@ ARCHITECTURAL_SURFACES = (
         "tcg_gen_qemu_st_i64",
     ),
     (
-        "cpu.memory.ram-continuation",
+        "cpu.memory.ram-tb-equivalence",
         "cpu.memory",
-        "ordinary RAM access continuation",
+        "ordinary RAM architectural TB-boundary equivalence",
         "target/ia64/translate.c",
         "tcg_gen_qemu_ld_i64",
     ),

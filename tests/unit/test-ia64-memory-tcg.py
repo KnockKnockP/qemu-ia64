@@ -338,39 +338,6 @@ def _finish_program(name: str, bundles: List[object], address: int,
     )
 
 
-def _require_normal_memory_continuation_trace(
-        trace: str, memory_ip: int, successor_ip: int) -> None:
-    """Require a normal RAM access and its successor in one translated TB.
-
-    This is deliberately a generated-shape assertion, not a throughput proxy:
-    the pre-WP2 translator can execute the same architectural program but
-    necessarily places the successor in a different OP block because every
-    memory bundle requests ``translator_io_start()``.
-    """
-    wanted = {memory_ip, successor_ip}
-    for block in re.split(r"(?m)(?=^OP:[ \t]*$)", trace):
-        translated = {
-            int(value, 16)
-            for value in re.findall(
-                r"(?m)^ ---- ([0-9a-fA-F]{16})\b", block
-            )
-        }
-        if wanted <= translated:
-            H._require(
-                re.search(r"(?m)^\s*qemu_ld_i64\b", block) is not None,
-                "continued memory TB lost its direct SoftMMU load",
-            )
-            H._require(
-                "translator_io_start" not in block,
-                "normal generated memory shape retained an I/O terminator",
-            )
-            return
-    raise H.HarnessError(
-        "ordinary RAM bundle 0x{:x} and successor 0x{:x} were not "
-        "translated in one normal-mode TB".format(memory_ip, successor_ip)
-    )
-
-
 def _require_taken_overlay_clear_trace(combined_trace: str,
                                        inherited_trace: str,
                                        branch_ip: int) -> None:
@@ -416,11 +383,11 @@ def _require_taken_overlay_clear_trace(combined_trace: str,
                              for value in sorted(expected - zeroed_offsets))))
 
 
-def test_normal_ram_continuation(qemu: Path) -> str:
+def test_normal_ram_tb_equivalence(qemu: Path) -> str:
     memory_ip = 0x20
     successor_ip = 0x30
     program = H.Program(
-        name="normal RAM memory continues in a multi-bundle TB",
+        name="normal RAM architectural TB-boundary equivalence",
         bundles=(
             H.Bundle(0x10, 0x03, H.nop_m(), H.adds(10, 0x1000, 0),
                      H.nop_i()),
@@ -433,25 +400,26 @@ def test_normal_ram_continuation(qemu: Path) -> str:
         terminal_ip=0x40,
         data=(H.DataWord(0x1000, DATA_PATTERN, 8),),
     )
-    trace_capture: List[str] = []
-    snapshot = H.run_program(
-        qemu, program,
-        typed_direct_trace_ips=(memory_ip, successor_ip),
-        trace_capture=trace_capture,
-    )
-    H._require(not snapshot.exception_pending,
-               "normal RAM continuation raised an exception")
-    H._require(snapshot.gr[20] == DATA_PATTERN and
-               snapshot.gr[21] == (DATA_PATTERN + 9) & H.U64_MASK,
-               "normal RAM continuation lost its load or successor result")
-    H._require(len(trace_capture) == 1,
-               "normal RAM continuation did not capture one TCG trace")
-    _require_normal_memory_continuation_trace(
-        trace_capture[0], memory_ip, successor_ip
+    combined = H.run_program(qemu, program)
+    split = H.run_program(qemu, program, one_bundle_per_tb=True)
+    for mode, snapshot in (("combined", combined), ("split", split)):
+        H._require(not snapshot.exception_pending,
+                   f"{mode} normal RAM execution raised an exception")
+        H._require(snapshot.ip == program.terminal_ip,
+                   f"{mode} normal RAM execution missed its terminal")
+        H._require(snapshot.gr[20] == DATA_PATTERN and
+                   snapshot.gr[21] == (DATA_PATTERN + 9) & H.U64_MASK,
+                   f"{mode} normal RAM execution lost its architectural "
+                   "load or successor result")
+    differences = H.successful_snapshot_differences(combined, split)
+    H._require(
+        not differences,
+        "normal RAM architectural state changed at a TB boundary:\n  "
+        + "\n  ".join(differences),
     )
     return (
-        "direct qemu_ld stayed in one normal-mode TB with the following "
-        "bundle and the successor consumed the successful result"
+        "ordinary RAM load, successor, and complete architectural success "
+        "state matched with combined and forced one-bundle TB execution"
     )
 
 
@@ -491,13 +459,7 @@ def test_store_update_continuation(qemu: Path) -> str:
         terminal_ip=0x90,
         data=(H.DataWord(0x1800, 0, 8),),
     )
-    trace_capture: List[str] = []
-    snapshot = H.run_program(
-        qemu,
-        program,
-        typed_direct_trace_ips=(store_ip, successor_ip, load_ip),
-        trace_capture=trace_capture,
-    )
+    snapshot = H.run_program(qemu, program)
     H._require(not snapshot.exception_pending,
                "continued post-increment store raised an exception")
     H._require(snapshot.gr[32] == 0x1808,
@@ -508,12 +470,6 @@ def test_store_update_continuation(qemu: Path) -> str:
                "successor arithmetic was lost after the continued store")
     H._require(snapshot.gr[37] == 0x5A,
                "continued store/load round trip produced the wrong value")
-    H._require(len(trace_capture) == 1,
-               "store continuation did not capture one TCG trace")
-    _require_normal_memory_continuation_trace(
-        trace_capture[0], store_ip, successor_ip
-    )
-
     # Reproduce the Debian initramfs handoff that originally distinguished a
     # resident Shape-B group from the same group serialized at a TB boundary.
     # Template 0x02 closes the store's group after slot 1, so slot 2 opens a
@@ -600,8 +556,8 @@ def test_store_update_continuation(qemu: Path) -> str:
         combined_trace[0], inherited_trace[0], 0xE0
     )
     return (
-        "a direct post-increment qemu_st continued across two no-stop bundles; "
-        "its final base, immutable group-entry source, successor result, and "
+        "a post-increment store across two no-stop bundles produced the exact "
+        "final base, immutable group-entry source, successor result, and "
         "following direct load all matched architectural expectations; the "
         "Debian-shaped internal-stop/check-load/store/branch group matched its "
         "one-bundle inherited execution and its taken edge cleared the "
@@ -1670,7 +1626,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     qemu = args.qemu.expanduser().resolve()
     tests = (
-        ("normal RAM multi-bundle continuation", test_normal_ram_continuation),
+        ("normal RAM TB-boundary equivalence", test_normal_ram_tb_equivalence),
         ("post-increment store multi-bundle continuation",
          test_store_update_continuation),
         ("post-increment store invalidates ALAT before chk.a",

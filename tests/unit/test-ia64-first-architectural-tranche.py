@@ -145,15 +145,25 @@ class TrancheGuest:
         )
 
     def bundle_format(self) -> tuple[int, int]:
-        slots = (
-            self.h.nop_m() | (0x15555 << 6),
-            self.h.nop_i() | (0x2AAAA << 6),
-            self.h.nop_i() | (0x12345 << 6),
+        data = 0x1020304050607080
+        self.g.movl(20, 0x7000)
+        self.g.emit(
+            0x01,
+            self.m.load(8, 30, 20),
+            self.h.adds(31, 0x155, 0),
+            self.h.adds(32, 0x2AA, 0),
         )
-        self.g.emit(0x01, *slots)
-        marker = 0x42554E444C45
-        self.g.movl(30, marker)
-        return 30, marker
+        self.g.emit(
+            0x03, self.h.nop_m(), self.h.shl_imm(31, 31, 8),
+            self.h.shl_imm(32, 32, 20),
+        )
+        self.g.emit(
+            0x03, self.h.nop_m(), self.h.add(33, 30, 31), self.h.nop_i()
+        )
+        self.g.emit(
+            0x03, self.h.nop_m(), self.h.add(30, 33, 32), self.h.nop_i()
+        )
+        return 30, (data + (0x155 << 8) + (0x2AA << 20)) & U64_MASK
 
     def template_map(self) -> tuple[int, int]:
         slots = {
@@ -302,6 +312,7 @@ class TrancheGuest:
                 self.h.DataWord(
                     self.r.memory_address(self.protocol, "scratch"), 0, 8
                 ),
+                self.h.DataWord(0x7000, 0x1020304050607080, 8),
             ),
         )
 
@@ -631,7 +642,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         root / "tests/unit/test-ia64-conformance-runner.py",
         "ia64_tranche_infrastructure",
     )
+    static_validator = load_module(
+        root / "scripts/ia64-validate-first-architectural-tranche.py",
+        "ia64_tranche_static_validator",
+    )
     try:
+        try:
+            static_validator.validate_literal_bundle_fields()
+        except Exception as exc:
+            raise TrancheFailure(
+                "test-infrastructure-failure",
+                f"independent bundle pack/extract oracle failed: {exc}",
+            ) from exc
         protocol = runner.load_protocol(
             root / "tests/ia64-conformance/runner-protocol.json"
         )
@@ -665,7 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"[{classification}]: {exc}")
         return 1
     print(
-        "ok 1 - first architectural tranche closed 11 E2 rows "
+        "ok 1 - first architectural tranche passed 11 cases "
         "(10 persistent, 1 precise repair/retry)"
     )
     print("# normative-tokens=" + ",".join(

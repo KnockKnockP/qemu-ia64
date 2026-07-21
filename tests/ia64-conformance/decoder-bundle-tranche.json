@@ -6,11 +6,11 @@
   "test_id": 705,
   "cases": [
     {
-      "id": "BND-004-TEMPLATE-EQUIVALENCE-EXACT", "case_id": 1, "normative_token": 45, "normative_row": "BND-004-TEMPLATE-EQUIVALENCE", "implementation_rows": ["cpu.bundle.template-equivalence"],
+      "id": "BND-004-TEMPLATE-ACCEPTANCE-PARTIAL", "case_id": 1, "normative_token": 45, "normative_row": "BND-004-TEMPLATE-EQUIVALENCE", "implementation_rows": ["cpu.bundle.template-equivalence"],
       "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.3", "printed_pages": ["1:38", "1:39"], "anchor": "Template Field Encoding and Instruction Slot Mapping"},
-      "preconditions": ["Every legal unit receives a test-owned no-effect encoding"], "inputs": ["Exact literal matrix of all 32 template values"], "expected_results": ["All 24 defined templates retire with their exact units/stops"], "allowed_results": ["Exact legal execution for every defined template"],
-      "permitted_state_changes": ["Final marker GR"], "required_unchanged_state": ["Unrelated registers and interruption state"], "expected_faults": [], "fault_priority": [], "committed_prefix": "Stops partition the stream according to the literal matrix", "restart_action": "Not exercised for legal templates", "applicable_variants": ["24 defined templates", "all slot-unit maps", "all stop maps"],
-      "execution": {"lane": "isolated-guest", "probes": ["test_legal_template_equivalence"], "result_observations": ["terminal IP", "exception state", "retirement marker"]}, "oracle": {"independence": "independent", "derivation": "A test-owned 32-entry literal is compared statically with production and executed with independently selected unit encodings"}
+      "preconditions": ["Every defined template receives test-owned no-effect placeholder encodings"], "inputs": ["Exact literal matrix of all 32 template values"], "expected_results": ["All 24 defined templates are accepted and reach the suffix marker"], "allowed_results": ["Legal completion for every defined template"],
+      "permitted_state_changes": ["Final marker GR"], "required_unchanged_state": ["Unrelated registers and interruption state"], "expected_faults": [], "fault_priority": [], "committed_prefix": "Accepted placeholders complete before the final marker", "restart_action": "Not exercised for legal templates", "applicable_variants": ["24 defined template values", "acceptance smoke only"],
+      "execution": {"lane": "isolated-guest", "probes": ["test_legal_template_equivalence"], "result_observations": ["terminal IP", "exception state", "retirement marker"]}, "oracle": {"independence": "independent", "derivation": "A test-owned 32-entry literal is compared statically with production and executed for acceptance; this does not independently prove every unit and stop mapping"}
     },
     {
       "id": "BND-005-LONG-IMMEDIATE-EXACT", "case_id": 2, "normative_token": 46, "normative_row": "BND-005-LONG-IMMEDIATE", "implementation_rows": ["cpu.bundle.long-immediate"],

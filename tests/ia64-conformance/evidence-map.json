@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 51
+    "row_closing_claims_expected": 21
   },
   "entries": [
     {
@@ -248,11 +248,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-decoder-bundle-tranche",
-      "scope": "Independent E2 closure of all seven remaining decoder/bundle requirements with exact 32-template, long-immediate, illegal-placement, field, IP/RI, resume, and boundary oracles.",
+      "scope": "Independent E2 evidence for long-immediate, illegal-placement, field, IP/RI, resume, and translation-boundary rows, plus partial template-equivalence coverage.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["BND-004-TEMPLATE-EQUIVALENCE", "BND-005-LONG-IMMEDIATE", "BND-006-TEMPLATE-PLACEMENT-LEGALITY", "BND-007-IGNORED-RESERVED-FIELDS", "BND-008-IP-RI-TRANSITIONS", "BND-009-RI-ENTRY-RESUME", "BND-010-PAGE-TB-EQUIVALENCE"],
-      "limitations": ["The bundle front-end domain is closed; register, RSE, MMU, interruption, and floating-point domains remain separate checkpoints."]
+      "closes_normative_rows": ["BND-005-LONG-IMMEDIATE", "BND-006-TEMPLATE-PLACEMENT-LEGALITY", "BND-007-IGNORED-RESERVED-FIELDS", "BND-008-IP-RI-TRANSITIONS", "BND-009-RI-ENTRY-RESUME", "BND-010-PAGE-TB-EQUIVALENCE"],
+      "limitations": ["BND-004 remains partial: defined-template acceptance does not independently prove every M/I/F/B/L/X unit mapping with unit-specific observable effects."]
     },
     {
       "id": "meson:test-ia64-decoder-bundle-tranche-static",
@@ -315,21 +315,22 @@
       "kind": "bare-metal",
       "lane": "bare-metal-batch",
       "primary_evidence_level": "E2",
-      "evidence_levels": ["E2"],
+      "evidence_levels": ["E0", "E2"],
       "ci_tiers": ["affected-edit", "required"],
       "test_registration": "test-ia64-first-architectural-tranche",
       "source_paths": [
         {"repository": "qemu-ia64", "path": "scripts/ia64-conformance-runner.py"},
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-first-architectural-tranche.py"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/first-architectural-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/runner-protocol.json"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-first-architectural-tranche.py"}
       ],
       "invocation": "meson test qemu:test-ia64-first-architectural-tranche",
-      "scope": "Independent literal E2 oracles for all eleven seed bundle, sequencing, issue-group, constant-register, commitment, and repair/retry rows.",
+      "scope": "Combined independent E0 pack/extract and observable E2 execution for bundle format, plus exact E2 sequencing, issue-group, constant-register, commitment, and repair/retry rows.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["BND-001-BUNDLE-FORMAT", "BND-001-TEMPLATE-MAP", "BND-003-SEQUENTIAL-ORDER", "GRP-002-STOP-VISIBILITY", "GRP-004-GROUP-ENTRY-REGISTER", "GRP-007-FAULT-COMMITMENT", "REG-004-FR0-READ", "REG-004-FR1-READ", "REG-004-GR0-READ", "REG-004-PR0-READ", "REG-004-PR0-WRITE"],
-      "limitations": ["The claim is limited to the eleven currently catalogued seed rows and does not imply profile-wide conformance."]
+      "closes_normative_rows": ["BND-001-BUNDLE-FORMAT", "BND-003-SEQUENTIAL-ORDER", "GRP-002-STOP-VISIBILITY", "GRP-004-GROUP-ENTRY-REGISTER", "GRP-007-FAULT-COMMITMENT", "REG-004-FR0-READ", "REG-004-FR1-READ", "REG-004-GR0-READ", "REG-004-PR0-READ", "REG-004-PR0-WRITE"],
+      "limitations": ["BND-001-TEMPLATE-MAP remains partial until every unit mapping and stop form has a unit-specific observable oracle; the other ten claims do not imply profile-wide conformance."]
     },
     {
       "id": "meson:test-ia64-first-architectural-tranche-static",
@@ -472,7 +473,7 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-memory-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-memory-boundary-tranche",
-      "scope": "Independent literal E2 oracles for code invalidation, RAM continuation, update safepoints, fault suppression, and exactly-once MMIO rows.",
+      "scope": "Independent literal E2 oracles for code invalidation, architectural RAM TB-boundary equivalence, update safepoints, fault suppression, and exactly-once MMIO rows.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
       "closes_normative_rows": ["MEM-009-CODE-INVALIDATION", "MEM-010-RAM-CONTINUATION", "MEM-011-UPDATE-SAFEPOINT", "MEM-012-FAULT-SUPPRESSION", "MEM-013-MMIO-EXACTLY-ONCE"],
@@ -542,14 +543,15 @@
       "ci_tiers": ["affected-edit", "required"],
       "test_registration": "test-ia64-normative-catalogue",
       "source_paths": [
-        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-normative-catalogue.py"}
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-normative-catalogue.py"},
+        {"repository": "vibtanium", "path": "docs/pdf/README.md"}
       ],
       "invocation": "meson test qemu:test-ia64-normative-catalogue",
-      "scope": "Normative catalogue schema and semantic validation.",
+      "scope": "Normative catalogue schema and semantic validation plus cited Intel manual, printed-page, and normalized-anchor verification.",
       "oracle_independence": "implementation-coupled",
       "conformance_role": "supporting",
       "closes_normative_rows": [],
-      "limitations": ["Catalogue validation checks assertions as data but does not execute them."]
+      "limitations": ["Catalogue validation checks citations and assertions as data but does not execute architectural behavior."]
     },
     {
       "id": "meson:test-ia64-opcode-ledger",
@@ -602,11 +604,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-packed-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-packed-integer-tranche",
-      "scope": "Independent E2 lane goldens and exact legality, predication, alias, NaT, reserved-field, and slot checks for all six packed-integer requirements.",
+      "scope": "Partial E2 lane goldens and selected legality, predication, alias, NaT, reserved-field, and slot checks for six broad packed-integer rows.",
       "oracle_independence": "independent",
-      "conformance_role": "row-closing",
-      "closes_normative_rows": ["PKD-001-LANE-WIDTHS", "PKD-002-SATURATION", "PKD-003-COMPARISONS", "PKD-004-DATA-ARRANGEMENT", "PKD-005-SHIFT-BOUNDARIES", "PKD-006-LEGALITY"],
-      "limitations": ["This tranche closes the implemented packed-integer domain; future packed opcodes require new normative rows and independent runtime goldens."]
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["The broad rows remain partial until their declared boundary, predicate, NaT, slot, reserved-field, fault-priority, commitment, and repair/retry matrices are complete or split into atomic rows."]
     },
     {
       "id": "meson:test-ia64-packed-integer-tranche-static",
@@ -695,11 +697,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-predicate-branch-tranche.py"}
       ],
       "invocation": "meson test qemu:test-ia64-predicate-branch-tranche",
-      "scope": "Independent literal E2 oracles for seven predicate rows and seven direct, indirect, loop, trap, and execution-boundary branch rows.",
+      "scope": "Partial independent E2 oracles across seven predicate rows and seven direct, indirect, loop, trap, and execution-boundary branch rows.",
       "oracle_independence": "independent",
-      "conformance_role": "row-closing",
-      "closes_normative_rows": ["BR-001-BRANCH-FORMS", "BR-002-TAKEN-NOT-TAKEN", "BR-003-DISPLACEMENT", "BR-004-REGISTER-TARGET", "BR-006-LOOP-STATE", "BR-008-BRANCH-TRAPS", "BR-009-EXECUTION-BOUNDARIES", "PRD-001-COMPARE-RELATIONS", "PRD-002-UPDATE-COMPLETERS", "PRD-004-PAIRED-ALIAS", "PRD-005-NAT-COMPARE", "PRD-006-GROUP-PRODUCERS", "PRD-007-PREDICATE-ROTATION", "PRD-008-PREDICATE-TESTS"],
-      "limitations": ["BR-005 call nesting/recursion, BR-007 hint semantics, BR-010 IA-32 transition, and PRD-003's already-catalogued p0 row are outside this tranche."]
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["These broad rows remain partial pending complete boundary, predicate, NaT, slot, privilege, fault-priority, commitment, and repair/retry matrices; BR-005, BR-007, BR-010, and PRD-003 are also outside this tranche."]
     },
     {
       "id": "meson:test-ia64-predicate-branch-tranche-static",
@@ -811,11 +813,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-scalar-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-scalar-integer-tranche",
-      "scope": "Independent E2 arithmetic/bit models, exact 40-opcode inventory, XMA and character forms, and complete scalar predication/NaT/alias/slot/reserved-field state checks for eight rows owning all seven INT requirements.",
+      "scope": "Partial independent E2 arithmetic/bit models, a 40-opcode implementation inventory, XMA and character forms, and selected scalar state checks across eight broad rows.",
       "oracle_independence": "independent",
-      "conformance_role": "row-closing",
-      "closes_normative_rows": ["INT-001-ARITHMETIC-FORMS", "INT-002-LOGICAL-CONSTANT-FORMS", "INT-003-GR-MULTIPLY", "INT-003-XMA-MULTIPLY-ADD", "INT-004-SHIFT-BITFIELD-EXTEND", "INT-005-CHARACTER-BIT-FORMS", "INT-006-STATE-LEGALITY", "INT-007-INDEPENDENT-MODEL"],
-      "limitations": ["The exact scalar inventory is closed at 40 opcodes; adding an admitted scalar case label requires extending the declarative model and metadata before this gate can pass."]
+      "conformance_role": "candidate",
+      "closes_normative_rows": [],
+      "limitations": ["Implementation inventory is not a normative oracle; these broad rows remain partial until all declared boundary, immediate, alias, predicate, NaT, slot, reserved-field, fault-priority, commitment, and repair/retry cases exist or are split into atomic rows."]
     },
     {
       "id": "meson:test-ia64-scalar-integer-tranche-static",

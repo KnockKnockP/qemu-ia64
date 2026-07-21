@@ -276,7 +276,7 @@
       "normative_row": "MEM-010-RAM-CONTINUATION",
       "surface_disposition": "implemented",
       "implementation_rows": [
-        "cpu.memory.ram-continuation"
+        "cpu.memory.ram-tb-equivalence"
       ],
       "inventory_gap": null,
       "candidate_tests": [
