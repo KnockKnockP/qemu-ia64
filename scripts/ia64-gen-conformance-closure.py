@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 
 SCHEMA = "vibtanium.ia64.conformance-closure"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAP_SCHEMA = "vibtanium.ia64.conformance-closure-map"
 MAP_SCHEMA_VERSION = 1
 NORMATIVE_CATALOGUE = Path(
@@ -61,7 +61,7 @@ TEST_EXECUTION_STATES = (
     "test-failed",
     "test-infrastructure-failure",
 )
-IMPLEMENTED_STATUSES = ("live", "storage-present")
+IMPLEMENTED_STATUSES = ("live",)
 UNIMPLEMENTED_STATUSES = ("decoder-dead-alias", "illegal")
 ADVERTISED_STATUSES = ("runtime-exposed",)
 SPDX_DECLARATION = "SPDX-" + "License-Identifier: GPL-2.0-or-later"
@@ -495,7 +495,7 @@ def build_report(
 ) -> dict[str, Any]:
     if implementation.get("schema") != "vibtanium.ia64.implementation-surface":
         raise ClosureError("implementation input has an unexpected schema")
-    if implementation.get("schema_version") != 1:
+    if implementation.get("schema_version") != 2:
         raise ClosureError("implementation input has an unsupported version")
     if profile not in implementation.get("profiles", []):
         raise ClosureError(
@@ -714,7 +714,7 @@ def build_report(
             ),
         },
         "classification_policy": {
-            "live_or_storage_present": "implemented-untested",
+            "guest_reachable_live": "implemented-untested",
             "runtime_exposed": "advertised-untested",
             "decoder_dead_alias_or_illegal": "known-unimplemented",
             "candidate_test_registration": "does-not-close-row",

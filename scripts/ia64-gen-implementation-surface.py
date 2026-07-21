@@ -27,31 +27,60 @@ from typing import Any, Sequence
 
 
 SCHEMA = "vibtanium.ia64.implementation-surface"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MACHINE = "vibtanium"
 MACHINE_TYPE = "vibtanium-machine"
 QMP_TIMEOUT = 10.0
 
 REGISTER_BANKS = (
-    ("gr", "IA64_GR_COUNT", "gr"),
-    ("fr", "IA64_FR_COUNT", "fr"),
-    ("pr", "IA64_PR_COUNT", "pr"),
-    ("br", "IA64_BR_COUNT", "br"),
-    ("ar", "IA64_AR_COUNT", "ar"),
-    ("cr", "IA64_CR_COUNT", "cr"),
-    ("rr", "IA64_RR_COUNT", "rr"),
-    ("pkr", "IA64_PKR_COUNT", "pkr"),
-    ("dbr", "IA64_DBR_COUNT", "dbr"),
-    ("ibr", "IA64_IBR_COUNT", "ibr"),
-    ("cpuid", "IA64_CPUID_COUNT", "cpuid"),
-    ("dahr", "IA64_DAHR_COUNT", "dahr"),
-    ("msr", "IA64_MSR_COUNT", "msr"),
-    ("itr", "IA64_ITR_COUNT", "itr"),
-    ("dtr", "IA64_DTR_COUNT", "dtr"),
-    ("pmc", "IA64_PMC_COUNT", "pmc"),
-    ("pmd", "IA64_PMD_COUNT", "pmd"),
+    ("gr", "IA64_GR_COUNT", "gr", "instruction-register-field",
+     "target/ia64/translate.c",
+     "static IA64TrGrWrite *ia64_tr_group_prepare_gr("),
+    ("fr", "IA64_FR_COUNT", "fr", "instruction-register-field",
+     "target/ia64/translate.c",
+     "static void ia64_tr_group_prepare_fr("),
+    ("pr", "IA64_PR_COUNT", "pr", "predicate-register-field",
+     "target/ia64/translate.c",
+     "static IA64TrPrWrite *ia64_tr_group_prepare_pr("),
+    ("br", "IA64_BR_COUNT", "br", "branch-register-field",
+     "target/ia64/translate.c",
+     "static IA64TrBrWrite *ia64_tr_group_prepare_br("),
+    ("ar", "IA64_AR_COUNT", "ar", "application-register-selector",
+     "target/ia64/system-plane.c",
+     "uint64_t HELPER(application_register_read)("),
+    ("cr", "IA64_CR_COUNT", "cr", "control-register-selector",
+     "target/ia64/insn.c", "uint64_t ia64_read_control_register("),
+    ("rr", "IA64_RR_COUNT", "rr", "virtual-region-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_RRGR:"),
+    ("pkr", "IA64_PKR_COUNT", "pkr", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_PKRGR_INDEXED:"),
+    ("dbr", "IA64_DBR_COUNT", "dbr", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_DBRGR_INDEXED:"),
+    ("ibr", "IA64_IBR_COUNT", "ibr", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_IBRGR_INDEXED:"),
+    ("cpuid", "IA64_CPUID_COUNT", "cpuid", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_CPUID_INDEXED:"),
+    ("dahr", "IA64_DAHR_COUNT", "dahr", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_DAHRGR_INDEXED:"),
+    ("msr", "IA64_MSR_COUNT", "msr", "model-specific-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_MSRGR:"),
+    ("itr", "IA64_ITR_COUNT", "itr", "translation-register-slot",
+     "target/ia64/system-plane.c", "env->itr[slot] = translation;"),
+    ("dtr", "IA64_DTR_COUNT", "dtr", "translation-register-slot",
+     "target/ia64/system-plane.c", "env->dtr[slot] = translation;"),
+    ("pmc", "IA64_PMC_COUNT", "pmc", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_PMCGR_INDEXED:"),
+    ("pmd", "IA64_PMD_COUNT", "pmd", "indexed-register-selector",
+     "target/ia64/system-plane.c", "case IA64_OP_MOV_PMDGR_INDEXED:"),
 )
-SCALAR_REGISTERS = ("ip", "psr", "cfm")
+SCALAR_REGISTERS = (
+    ("ip", "instruction-pointer-state", "target/ia64/system-plane.c",
+     "case IA64_OP_MOV_CURRENT_IP:"),
+    ("psr", "processor-status-state", "target/ia64/system-plane.c",
+     "case IA64_OP_MOV_PSRGR:"),
+    ("cfm", "current-frame-state", "target/ia64/insn.c",
+     "void ia64_assign_cfm("),
+)
 BUILD_FEATURES = (
     "CONFIG_TCG",
     "CONFIG_PLUGIN",
@@ -393,13 +422,23 @@ def parse_named_registers(text: str) -> dict[tuple[str, int], str]:
     return result
 
 
+def require_source_anchor(root: Path, path_text: str, anchor: str) -> None:
+    path = root / path_text
+    if anchor not in path.read_text(encoding="utf-8"):
+        raise SurfaceError(
+            f"register reachability anchor disappeared: {path_text}: "
+            f"{anchor}"
+        )
+
+
 def register_rows(root: Path) -> list[dict[str, Any]]:
     cpu_h = root / "target/ia64/cpu.h"
     text = cpu_h.read_text(encoding="utf-8")
     defines = parse_integer_defines(text)
     aliases = parse_named_registers(text)
     rows: list[dict[str, Any]] = []
-    for bank, count_name, storage in REGISTER_BANKS:
+    for (bank, count_name, storage, access_class,
+         access_path, access_anchor) in REGISTER_BANKS:
         if count_name not in defines:
             raise SurfaceError(f"missing register count {count_name}")
         count = defines[count_name]
@@ -409,13 +448,21 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
             text,
         ):
             raise SurfaceError(f"register storage {storage!r} is not declared")
+        require_source_anchor(root, access_path, access_anchor)
         for index in range(count):
             attributes: dict[str, Any] = {
                 "bank": bank,
                 "index": index,
                 "count_constant": count_name,
                 "storage": storage,
-                "guest_reachability": "not-yet-classified",
+                "guest_reachability": "guest-selectable",
+                "access_class": access_class,
+                "coverage_group": f"cpu.register.{bank}.all-indices",
+                "selector_domain": {
+                    "first": 0,
+                    "last": count - 1,
+                    "cardinality": count,
+                },
                 "field_behavior": "not-yet-classified",
             }
             if (bank, index) in aliases:
@@ -424,30 +471,39 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
                 "id": f"cpu.register.{bank}.{index}",
                 "kind": "cpu.register",
                 "name": f"{bank}{index}",
-                "status": "storage-present",
+                "status": "live",
                 "attributes": attributes,
-                "provenance": [{
-                    "path": relative(cpu_h, root),
-                    "anchor": count_name,
-                }],
+                "provenance": [
+                    {
+                        "path": relative(cpu_h, root),
+                        "anchor": count_name,
+                    },
+                    {"path": access_path, "anchor": access_anchor},
+                ],
             })
-    for name in SCALAR_REGISTERS:
+    for name, access_class, access_path, access_anchor in SCALAR_REGISTERS:
         if re.search(rf"\buint64_t\s+{name}\s*;", text) is None:
             raise SurfaceError(f"missing scalar architectural storage {name}")
+        require_source_anchor(root, access_path, access_anchor)
         rows.append({
             "id": f"cpu.register.scalar.{name}",
             "kind": "cpu.register",
             "name": name,
-            "status": "storage-present",
+            "status": "live",
             "attributes": {
                 "bank": "scalar",
-                "guest_reachability": "reachable",
+                "guest_reachability": "architectural-state",
+                "access_class": access_class,
+                "coverage_group": f"cpu.register.scalar.{name}",
                 "field_behavior": "not-yet-classified",
             },
-            "provenance": [{
-                "path": relative(cpu_h, root),
-                "anchor": f"uint64_t {name}",
-            }],
+            "provenance": [
+                {
+                    "path": relative(cpu_h, root),
+                    "anchor": f"uint64_t {name}",
+                },
+                {"path": access_path, "anchor": access_anchor},
+            ],
         })
     return rows
 
@@ -830,7 +886,7 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
                 },
                 {
                     "domain": "cpu.register",
-                    "completeness": "storage-index-complete",
+                    "completeness": "guest-selectable-index-complete",
                 },
                 {
                     "domain": "cpu.bundle",
@@ -872,7 +928,7 @@ def build_surface(root: Path, build_dir: Path, binary: Path) -> dict[str, Any]:
             ],
             "pending": [
                 "opcode encoding masks, completers, units, and legal slots",
-                "register reachability, access, masks, and reserved behavior",
+                "register access, masks, and reserved behavior",
                 "CPUID values and feature declarations",
                 "interruptions, MMU facilities, PAL, SAL, and EFI services",
                 "ACPI tables, PCI functions, MMIO, sparse I/O, and inherited devices",
