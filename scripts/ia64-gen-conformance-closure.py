@@ -937,7 +937,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         test_result_summary["selected_build"] = str(build_dir)
         test_result_summary["command"] = (
-            "vibtanium/scripts/qemu/run-ia64-conformance-baseline.sh"
+            "scripts/ia64-run-required-conformance.sh"
         )
     evidence_map = load_json(resolve_path(root, args.evidence_map).resolve())
     try:

@@ -16,12 +16,6 @@ jobs:
         with:
           path: qemu-ia64
 
-      - name: Check out Vibtanium tooling
-        uses: actions/checkout@v4
-        with:
-          repository: KnockKnockP/vibtanium
-          path: vibtanium
-
       - name: Prepare MSYS2 MINGW64
         uses: msys2/setup-msys2@v2
         with:
@@ -43,15 +37,29 @@ jobs:
 
       - name: Fetch public IA-64 manuals
         shell: msys2 {0}
-        run: ./vibtanium/scripts/qemu/fetch-ia64-manuals.sh
+        run: ./qemu-ia64/scripts/ia64-fetch-conformance-manuals.sh
 
       - name: Build IA-64 debug emulator
         shell: msys2 {0}
-        run: ./vibtanium/scripts/qemu/build-ia64-debug.sh
+        working-directory: qemu-ia64
+        run: |
+          mkdir -p build-ia64-debug
+          cd build-ia64-debug
+          CFLAGS='-O0 -g -DVIBTANIUM_DIAGNOSTICS=1' \
+          CXXFLAGS='-O0 -g -DVIBTANIUM_DIAGNOSTICS=1' \
+          ../configure \
+              --target-list=ia64-softmmu \
+              --disable-docs \
+              --disable-werror \
+              --enable-slirp \
+              --enable-debug \
+              -Dbuildtype=debug \
+              -Doptimization=0
+          ninja qemu-system-ia64.exe
 
       - name: Run required IA-64 conformance baseline
         shell: msys2 {0}
-        run: ./vibtanium/scripts/qemu/run-ia64-conformance-baseline.sh
+        run: ./qemu-ia64/scripts/ia64-run-required-conformance.sh
 
       - name: Upload concise conformance report
         if: always()
@@ -59,6 +67,6 @@ jobs:
         with:
           name: ia64-conformance-closure
           path: |
-            vibtanium/traces/raw/ia64-conformance-closure.json
-            vibtanium/traces/raw/ia64-conformance-closure.md
+            qemu-ia64/conformance-results/ia64-conformance-closure.json
+            qemu-ia64/conformance-results/ia64-conformance-closure.md
           if-no-files-found: warn
