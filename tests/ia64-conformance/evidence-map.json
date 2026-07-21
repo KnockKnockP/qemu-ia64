@@ -9,25 +9,6 @@
   },
   "entries": [
     {
-      "id": "diagnostic:installed-debian",
-      "kind": "performance-diagnostic",
-      "lane": "performance-diagnostic",
-      "primary_evidence_level": "E4",
-      "evidence_levels": ["E4"],
-      "ci_tiers": ["nightly", "soak"],
-      "test_registration": null,
-      "source_paths": [
-        {"repository": "vibtanium", "path": "scripts/qemu/installed-debian-benchmark.sh"},
-        {"repository": "vibtanium", "path": "scripts/qemu/installed_debian_benchmark.py"}
-      ],
-      "invocation": "./vibtanium/scripts/qemu/installed-debian-benchmark.sh cmd --command-text true",
-      "scope": "Installed Debian shell and benchmark integration with diagnostic collection.",
-      "oracle_independence": "integration-milestone",
-      "conformance_role": "diagnostic-only",
-      "closes_normative_rows": [],
-      "limitations": ["Performance and installed-OS progress are diagnostics, not direct architectural assertions."]
-    },
-    {
       "id": "meson:qtest-ia64/ia64-acpi-test",
       "kind": "qtest",
       "lane": "qtest-platform",
@@ -544,7 +525,7 @@
       "test_registration": "test-ia64-normative-catalogue",
       "source_paths": [
         {"repository": "qemu-ia64", "path": "scripts/ia64-validate-normative-catalogue.py"},
-        {"repository": "vibtanium", "path": "docs/pdf/README.md"}
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/manuals/README.md"}
       ],
       "invocation": "meson test qemu:test-ia64-normative-catalogue",
       "scope": "Normative catalogue schema and semantic validation plus cited Intel manual, printed-page, and normalized-anchor verification.",
@@ -933,43 +914,6 @@
       "limitations": ["In-process VMState checks do not replace fresh-process migration evidence."]
     },
     {
-      "id": "sentinel:linux-debian-installer",
-      "kind": "os-sentinel",
-      "lane": "os-sentinel",
-      "primary_evidence_level": "E4",
-      "evidence_levels": ["E4"],
-      "ci_tiers": ["release"],
-      "test_registration": null,
-      "source_paths": [
-        {"repository": "vibtanium", "path": "scripts/qemu/agent-debian-run.sh"},
-        {"repository": "vibtanium", "path": "scripts/qemu/agent_debian_run.py"}
-      ],
-      "invocation": "./vibtanium/scripts/qemu/agent-debian-run.sh --scenario boot-language",
-      "scope": "Debian IA-64 cold-media boot to a deterministic installer milestone.",
-      "oracle_independence": "integration-milestone",
-      "conformance_role": "integration-only",
-      "closes_normative_rows": [],
-      "limitations": ["An OS milestone composes contracts but does not prove individual architecture rows."]
-    },
-    {
-      "id": "sentinel:windows-server-2003",
-      "kind": "os-sentinel",
-      "lane": "os-sentinel",
-      "primary_evidence_level": "E4",
-      "evidence_levels": ["E4"],
-      "ci_tiers": ["release"],
-      "test_registration": null,
-      "source_paths": [
-        {"repository": "vibtanium", "path": "scripts/vib/vib.py"}
-      ],
-      "invocation": "./vibtanium/vib run --preset windows-cd",
-      "scope": "Windows IA-64 checked-media boot to the configured setup milestone.",
-      "oracle_independence": "integration-milestone",
-      "conformance_role": "integration-only",
-      "closes_normative_rows": [],
-      "limitations": ["Restricted-media integration is local-only and does not prove individual architecture rows."]
-    },
-    {
       "id": "standalone:efi-bit",
       "kind": "efi-bit",
       "lane": "efi-bit",
@@ -987,24 +931,6 @@
       "conformance_role": "candidate",
       "closes_normative_rows": [],
       "limitations": ["Broad BIT checks are not yet split into catalogue-cited service rows with exact effect metadata."]
-    },
-    {
-      "id": "workload:debian-cd1-lifecycle",
-      "kind": "os-workload",
-      "lane": "os-sentinel",
-      "primary_evidence_level": "E4",
-      "evidence_levels": ["E4"],
-      "ci_tiers": ["release", "soak"],
-      "test_registration": null,
-      "source_paths": [
-        {"repository": "vibtanium", "path": "scripts/qemu/cd1_lifecycle.py"}
-      ],
-      "invocation": "python vibtanium/scripts/qemu/cd1_lifecycle.py --help",
-      "scope": "Cold Debian CD lifecycle, reset, shutdown, and boot-menu integration workload.",
-      "oracle_independence": "integration-milestone",
-      "conformance_role": "integration-only",
-      "closes_normative_rows": [],
-      "limitations": ["This OS lifecycle workload is release/soak evidence rather than a synthetic direct gauntlet."]
     }
   ],
   "gaps": [

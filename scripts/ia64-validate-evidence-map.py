@@ -40,11 +40,7 @@ KIND_LANE_LEVEL = {
     "performance-diagnostic": ("performance-diagnostic", "E4"),
 }
 REQUIRED_STANDALONE_IDS = {
-    "diagnostic:installed-debian",
-    "sentinel:linux-debian-installer",
-    "sentinel:windows-server-2003",
     "standalone:efi-bit",
-    "workload:debian-cd1-lifecycle",
 }
 REQUIRED_GAP_IDS = {"sentinel:bsd"}
 ENTRY_KEYS = {
@@ -375,7 +371,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--root", type=Path,
                         default=Path(__file__).resolve().parents[1])
     parser.add_argument("--build-dir", type=Path, required=True)
-    parser.add_argument("--workspace-root", type=Path)
     parser.add_argument(
         "--evidence-map", type=Path,
         default=Path("tests/ia64-conformance/evidence-map.json"),
@@ -391,17 +386,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     root = args.root.resolve()
-    workspace = args.workspace_root.resolve() if args.workspace_root else None
     catalogue = load_json(resolve(root, args.catalogue).resolve())
     normative_rows = {row["id"]: row for row in catalogue["rows"]}
     summary = validate_evidence_map(
         load_json(resolve(root, args.evidence_map).resolve()),
         focused_registrations(args.build_dir.resolve()),
         normative_rows,
-        {
-            "qemu-ia64": root,
-            "vibtanium": workspace / "vibtanium" if workspace else None,
-        },
+        {"qemu-ia64": root},
     )
     levels = ", ".join(
         f"{level}={count}"

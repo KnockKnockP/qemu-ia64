@@ -4,9 +4,7 @@
 
 This preparation gate does not require the shared translator to have landed.
 ``--audit-open`` additionally proves that the map's live rows are closed by
-the data-plane owner and its reserved encodings are decoder-dead.  If the
-sibling vibtanium reference tree is
-available, its QEMU, Ski, and Intel-manual anchors are audited as well.
+the data-plane owner and its reserved encodings are decoder-dead.
 """
 
 from __future__ import annotations
@@ -261,49 +259,6 @@ def check_encodings() -> None:
             require(normalized == alias.opcode,
                     "{} normalized as {} rather than {}".format(
                         alias.name, normalized, alias.opcode))
-
-
-def check_references(reference_root: Path) -> None:
-    emulator = reference_root / "external-src/emulator"
-    qemu = emulator / "qemu-system-ia64-main/target/ia64"
-    ski = emulator / "ski/src"
-    manual = reference_root / "docs/pdf/itanium-architecture-vol-3-manual.txt"
-    for path in (qemu / "cpu.c", qemu / "op_helper.c",
-                 ski / "exec.incl.c", ski / "mem_exec.tmpl.c", manual):
-        require(path.is_file(), "missing audited reference: " + str(path))
-
-    cpu = (qemu / "cpu.c").read_text(encoding="utf-8")
-    helper = (qemu / "op_helper.c").read_text(encoding="utf-8")
-    ski_exec = (ski / "exec.incl.c").read_text(encoding="utf-8")
-    ski_mem = (ski / "mem_exec.tmpl.c").read_text(encoding="utf-8")
-    intel = manual.read_text(encoding="utf-8")
-    for token in (
-        "ia64_gen_speculative_load", "ia64_gen_fp_load_pair",
-        "IA64_OP_CMP8XCHG16", "ia64_gen_lfetch", "IA64_OP_INVALAT",
-    ):
-        require(token in cpu, "reference QEMU lost " + token)
-    cmp_decode = cpu.find("ia64_cmpxchg_acqrel_opcode_from_size(size)")
-    split_s_decode = cpu.find("ia64_speculative_load_opcode_from_x6a(x6a)")
-    split_check_decode = cpu.find("ia64_check_load_opcode_from_x6a(x6a, !is_nc)")
-    require(0 <= cmp_decode < split_s_decode < split_check_decode,
-            "split speculative/check branches are no longer shadowed by "
-            "the primary cmpxchg decoder; re-audit aliases")
-    for token in ("helper_cmpxchg", "helper_cmp8xchg16", "helper_ldfe",
-                  "helper_stf_spill", "helper_lfetch_fault"):
-        require(token in helper, "reference helper lost " + token)
-    for token in ("LD_S_EX", "LD_SA_EX", "LD_C_NC_EX", "LD_C_CLR_EX"):
-        require(token in ski_exec, "Ski semantic macro missing " + token)
-    require("LD_EX(DWORD,8,nat1)" in ski_mem,
-            "Ski no longer documents fixed-width ld.fill behavior")
-    require("Status ldFillEx" in ski_mem and "Status stSpillEx" in ski_mem,
-            "Ski spill/fill anchors missing")
-    for token in (
-        "ld8.fill.ldhint", "st8.spill.sthint", "cmp8xchg16.sem.ldhint",
-        "chk.a.aclr", "lfetch.lftype.lfhint", "fwb — Flush Write Buffers",
-    ):
-        require(token in intel, "Intel transcript anchor missing " + token)
-    require("ld1.fill" not in intel and "st1.spill" not in intel,
-            "reserved-width finding must be revisited against the manual")
 
 
 def check_sources(root: Path) -> None:
@@ -620,35 +575,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="qemu-ia64 source root",
     )
     parser.add_argument(
-        "--references", type=Path,
-        help="vibtanium reference root (auto-detected as a sibling)",
-    )
-    parser.add_argument(
         "--audit-open", action="store_true",
         help="require live rows closed and reserved rows decoder-dead",
     )
-    parser.add_argument(
-        "--require-references", action="store_true",
-        help="fail rather than skip if the vibtanium tree is unavailable",
-    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    references = (args.references.resolve() if args.references else
-                  root.parent / "vibtanium")
 
     check_inventory(root, args.audit_open)
     check_semantics()
     check_encodings()
     check_sources(root)
-    checked_references = references.is_dir()
-    if checked_references:
-        check_references(references)
-    elif args.require_references:
-        raise SystemExit("vibtanium reference root not found: " + str(references))
 
-    print("data-plane TCG spec: 63 rows, 8 families, {} aliases; references {}"
-          .format(len(ALIAS_ENCODINGS),
-                  "checked" if checked_references else "skipped"))
+    print("data-plane TCG spec: 63 rows, 8 families, {} aliases"
+          .format(len(ALIAS_ENCODINGS)))
     return 0
 
 

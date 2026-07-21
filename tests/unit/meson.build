@@ -307,7 +307,7 @@ test('test-ia64-opcode-ledger', python,
 test('test-ia64-normative-catalogue', python,
      args: [meson.project_source_root() / 'scripts/ia64-validate-normative-catalogue.py',
             '--root', meson.project_source_root(),
-            '--manual-dir', meson.project_source_root() / '..' / 'vibtanium' / 'docs' / 'pdf'],
+            '--manual-dir', meson.project_source_root() / 'tests' / 'ia64-conformance' / 'manuals'],
      timeout: 30,
      suite: ['unit'])
 

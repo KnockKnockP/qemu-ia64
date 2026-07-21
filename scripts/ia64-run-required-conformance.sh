@@ -3,9 +3,9 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 qemu_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-build_dir=${VIBTANIUM_QEMU_BUILD:-$qemu_root/build-ia64-debug}
-output_dir=${VIBTANIUM_CONFORMANCE_OUTPUT_DIR:-$qemu_root/conformance-results}
-profile=${VIBTANIUM_CONFORMANCE_PROFILE:-vibtanium-strict-up}
+build_dir=${QEMU_IA64_BUILD_DIR:-$qemu_root/build-ia64-debug}
+output_dir=${QEMU_IA64_CONFORMANCE_OUTPUT_DIR:-$qemu_root/conformance-results}
+profile=${QEMU_IA64_CONFORMANCE_PROFILE:-vibtanium-strict-up}
 meson="$build_dir/pyvenv/bin/meson"
 python="$build_dir/pyvenv/bin/python.exe"
 binary=${QEMU_IA64_BIN:-$build_dir/qemu-system-ia64.exe}
@@ -16,6 +16,7 @@ if [ "${MINGW_PACKAGE_PREFIX:-}" != "mingw-w64-x86_64" ] &&
     echo "ERROR: run this script from the MSYS2 MINGW64 environment." >&2
     exit 1
 fi
+"$qemu_root/scripts/ia64-fetch-conformance-manuals.sh"
 if [ ! -x "$meson" ] || [ ! -x "$python" ] || [ ! -x "$binary" ]; then
     echo "ERROR: configured IA-64 debug build is unavailable: $build_dir" >&2
     exit 1
@@ -25,7 +26,7 @@ cd "$qemu_root"
 set +e
 "$meson" test -C "$build_dir" \
     --print-errorlogs \
-    --num-processes "${VIBTANIUM_TEST_JOBS:-4}" \
+    --num-processes "${QEMU_IA64_TEST_JOBS:-4}" \
     qemu:test-ia64-bundle \
     qemu:test-ia64-decode \
     qemu:test-ia64-opcode-traits \

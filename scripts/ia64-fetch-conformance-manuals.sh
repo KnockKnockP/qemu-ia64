@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 qemu_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-manual_dir=${VIBTANIUM_IA64_MANUAL_DIR:-$qemu_root/../vibtanium/docs/pdf}
+manual_dir=${IA64_CONFORMANCE_MANUAL_DIR:-$qemu_root/tests/ia64-conformance/manuals}
 
 mkdir -p "$manual_dir"
 

@@ -23,3 +23,6 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+/conformance-results/
+/tests/ia64-conformance/manuals/*.pdf
+/tests/ia64-conformance/manuals/*.txt

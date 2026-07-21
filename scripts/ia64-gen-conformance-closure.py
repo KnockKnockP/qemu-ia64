@@ -945,7 +945,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             evidence_map,
             [row["id"] for row in registrations],
             {row["id"]: row for row in catalogue["rows"]},
-            {"qemu-ia64": root, "vibtanium": None},
+            {"qemu-ia64": root},
         )
     except Exception as exc:
         raise ClosureError(f"evidence classification failed: {exc}") from exc
