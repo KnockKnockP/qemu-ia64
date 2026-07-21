@@ -146,7 +146,7 @@ static uint64_t ia64_system_validate_cr_access(CPUIA64State *env,
                                                 uint64_t value)
 {
     if ((env->psr & IA64_PSR_IC_BIT) &&
-        reg >= IA64_CR_IPSR && reg <= IA64_CR_IHA) {
+        reg >= IA64_CR_IPSR && reg <= IA64_CR_IIB1) {
         ia64_system_raise_illegal(env);
     }
     if (write && (reg == IA64_CR_IVR ||
@@ -163,7 +163,7 @@ static void ia64_system_validate_cr_legality(CPUIA64State *env,
                                               uint32_t reg, bool write)
 {
     if ((env->psr & IA64_PSR_IC_BIT) &&
-        reg >= IA64_CR_IPSR && reg <= IA64_CR_IHA) {
+        reg >= IA64_CR_IPSR && reg <= IA64_CR_IIB1) {
         ia64_system_raise_illegal(env);
     }
     if (write && (reg == IA64_CR_IVR ||

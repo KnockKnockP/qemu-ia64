@@ -296,6 +296,8 @@ enum IA64ControlRegister {
     IA64_CR_IFS = 23,
     IA64_CR_IIM = 24,
     IA64_CR_IHA = 25,
+    IA64_CR_IIB0 = 26,
+    IA64_CR_IIB1 = 27,
     IA64_CR_LID = 64,
     IA64_CR_IVR = 65,
     IA64_CR_TPR = 66,

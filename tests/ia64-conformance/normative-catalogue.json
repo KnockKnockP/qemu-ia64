@@ -1579,6 +1579,24 @@
       "required_evidence": "E2"
     },
     {
+      "id": "REG-006-CR-INDEX-SPACE",
+      "requirement_ids": ["REG-006"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "3.3.3", "printed_pages": ["2:29", "2:30"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "CR82-127"},
+      "operation": {"kind": "register-index-space", "selector": "cr0-cr127 in the selected no-ITO profile", "encoding": "M-unit MOV-to-CR and MOV-from-CR for every seven-bit selector"},
+      "legal_inputs": ["Every selector and direction with enabled and false qualification; independently selected safe writes for every writable defined CR; a complete-file distinct-value initialization before delayed readback"],
+      "privilege": {"levels": [0], "rule": "CPL0 isolates selector, read-only, and PSR.ic access rules from the operation-wide privilege check"},
+      "state_read": ["Every defined, reserved, read-only, and optional-absent CR selector class"], "state_written": ["Defined writable CRs and declared GR/predicate/interruption observation state"],
+      "predication": {"applies": true, "rule": "False qualification precedes and suppresses selector, read-only, and PSR.ic legality checks"},
+      "nat_behavior": "All write sources are NaT clear; operand-NaT priority is outside this selector-space row",
+      "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Qualification, then PSR.ic and selector/read-only legality"],
+      "committed_prefix": "Each stopped setup prefix commits; SRLZ.D follows each completed write",
+      "restart_rule": "The common handler validates exact IIP and ISR, clears p1, and RFI retries the same access nullified",
+      "permitted_results": ["All 128 selectors match Table 3-3, including reserved CR9 and defined interruption registers CR26 IIB0 and CR27 IIB1; every storage-backed safe value survives the complete-file anti-alias pass"],
+      "required_evidence": "E2"
+    },
+    {
       "id": "REG-006-FR-INDEX-SPACE",
       "requirement_ids": ["REG-006"],
       "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
@@ -1627,6 +1645,24 @@
       "committed_prefix": "The stopped setup prefix commits; the enabled faulting operation and poisoned destination do not",
       "restart_rule": "The handler proves exact IIP/EI/code, clears p1, and RFI completes the nullified retry once",
       "permitted_results": ["Defined selectors accept their specified unit, reserved/wrong-unit/BSP-write forms fault, and ignored selectors accept either unit with zero/discard behavior"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-007-CR-ACCESS-CLASSES",
+      "requirement_ids": ["REG-007"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "3.3.3", "printed_pages": ["2:29", "2:30"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Writes to read-only registers (IVR, IRR0-3) result in an Illegal Operation fault"},
+      "operation": {"kind": "control-register-access-class", "selector": "defined, reserved, read-only, optional-absent, and CR16-CR27 PSR.ic-restricted selectors", "encoding": "M-unit register-form CR reads and writes"},
+      "legal_inputs": ["All 512 selector/direction/qualification forms plus enabled PSR.ic=1 reads and writes for each of eleven defined interruption-state CRs"],
+      "privilege": {"levels": [0], "rule": "The matrix tests the complete selector access partition at CPL0; operation-wide lower-CPL privilege has separate system-batch evidence"},
+      "state_read": ["Complete CR selector disposition and exact interruption restart state"], "state_written": ["Defined writable CRs and declared GR/predicate/interruption observation state"],
+      "predication": {"applies": true, "rule": "False qualification suppresses reserved-selector, read-only-write, and PSR.ic faults and preserves read destinations"},
+      "nat_behavior": "NaT-clear inputs isolate access-class behavior from Register NaT Consumption priority",
+      "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Qualification precedes PSR.ic, selector, and read-only checks"],
+      "committed_prefix": "Only the stopped setup prefix commits before each enabled illegal access",
+      "restart_rule": "The handler proves exact IIP/EI/code, clears p1, and RFI completes the nullified retry once",
+      "permitted_results": ["The exact 534-form matrix; IVR/IRR writes fault, reserved selectors fault, and CR16-CR27 require PSR.ic clear when enabled"],
       "required_evidence": "E2"
     },
     {

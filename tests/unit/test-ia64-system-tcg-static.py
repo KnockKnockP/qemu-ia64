@@ -658,6 +658,37 @@ def check_variant_matrix() -> None:
             "system normalized-form variant count drift")
 
 
+def check_control_register_partition(root: Path) -> None:
+    cpu = (root / "target/ia64/cpu.h").read_text(encoding="utf-8")
+    decode = (root / "target/ia64/decode.c").read_text(encoding="utf-8")
+    system = (root / "target/ia64/system-plane.c").read_text(
+        encoding="utf-8"
+    )
+    for token in ("IA64_CR_IIB0 = 26", "IA64_CR_IIB1 = 27"):
+        require(token in cpu, "control-register endpoint lost " + token)
+    reserved = section(
+        decode,
+        "static bool ia64_reserved_cr(uint8_t cr)",
+        "bool ia64_instruction_has_illegal_register(",
+    )
+    compact = re.sub(r"\s+", " ", reserved)
+    for token in (
+        "cr >= 3 && cr <= 7",
+        "cr >= 9 && cr <= 15",
+        "cr == 18",
+        "cr >= 28 && cr <= 63",
+        "cr >= 75 && cr <= 79",
+        "cr >= 82",
+    ):
+        require(token in compact, "CR reserved partition lost " + token)
+    require("cr >= 26 && cr <= 63" not in compact and
+            "cr >= 10 && cr <= 15" not in compact,
+            "CR9 or IIB0/IIB1 reverted to the former wrong partition")
+    require(system.count(
+        "reg >= IA64_CR_IPSR && reg <= IA64_CR_IIB1"
+    ) == 2, "CR interruption-access range no longer reaches IIB1")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -665,6 +696,7 @@ def main() -> int:
     root = args.source_root.resolve()
 
     check_variant_matrix()
+    check_control_register_partition(root)
     check_inventory(root)
     check_traits(root)
     check_translate(root)

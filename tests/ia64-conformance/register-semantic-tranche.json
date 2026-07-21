@@ -191,6 +191,40 @@
       "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_selectors"], "result_observations": ["guest CPUID[4] image", "per-form fault marker", "exact CR.IIP and CR.ISR", "poison read destination"]},
       "oracle": {"independence": "independent", "derivation": "Intel Volume 2 defines CPUID[4].ru as the RUC availability contract and requires AR45 to be reserved when it is clear"},
       "limitations": ["RUC counter monotonicity, write serialization, and PSR.si privilege apply only to profiles advertising the optional feature"]
+    },
+    {
+      "id": "REG-006-CR-INDEX-SPACE-EXACT", "case_id": 12, "normative_token": 63,
+      "normative_row": "REG-006-CR-INDEX-SPACE",
+      "implementation_selector": {"coverage_group": "cpu.register.cr.all-indices", "exclude_rows": []},
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "3.3.3", "printed_pages": ["2:29", "2:30"], "anchor": "CR82-127"},
+      "preconditions": ["Execution is at CPL0", "PSR.ic is clear for enabled accesses to CR16-CR27 and set for all other enabled accesses", "The selected emulator profile does not implement optional CR4 ITO"],
+      "inputs": ["Every selector cr0-cr127", "M-unit MOV-to-CR and MOV-from-CR forms", "Independent safe values for every writable defined register", "A separate full-file initialization with distinct safe values before any readback", "Poison destinations for faulting and nullified reads"],
+      "expected_results": ["All 128 selectors match the Volume 2 defined, reserved, or optional-absent partition", "CR26 IIB0 and CR27 IIB1 are defined interruption registers", "Every defined writable selector round-trips its safe value after SRLZ.D", "The full-file delayed readback detects aliased selector sources or destinations", "Reserved selectors take precise Illegal Operation"],
+      "allowed_results": ["Exactly the selected-profile Table 3-3 selector partition and declared normalized read values"],
+      "permitted_state_changes": ["Defined writable CR state", "Declared GR/predicate/handler observation state", "Timer, TLB, and interrupt-controller side effects architecturally associated with legal safe writes"],
+      "required_unchanged_state": ["Reserved CR selectors", "False-qualified write state", "Faulting and false-qualified read destinations"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["False qualification precedes selector legality", "PSR.ic access restriction applies only to enabled interruption-register accesses"], "committed_prefix": "Each CR access is isolated by stops; SRLZ.D follows every completed write", "restart_action": "The common handler validates exact IIP/ISR, clears p1, and RFI re-executes the access nullified",
+      "applicable_variants": ["all 128 selectors", "defined writable", "read-only", "reserved", "optional CR4 absent", "interruption-state IIB0/IIB1 endpoints"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_control_register_selectors"], "result_observations": ["guest mismatch branch", "per-selector safe-value readback", "complete-file delayed anti-alias readback", "poison destination", "exact saved IIP and ISR"]},
+      "oracle": {"independence": "independent", "derivation": "The selector sets and CR26/CR27 endpoints are transcribed from Intel Volume 2 Table 3-3; safe values are constrained by the published register formats rather than QEMU state"},
+      "limitations": ["Optional ITO feature advertisement through PAL is a separate REG-003/PAL closure unit", "Named field-mask and reset-value semantics remain separate REG-001/REG-007/REG-008 closure units"]
+    },
+    {
+      "id": "REG-007-CR-ACCESS-CLASSES-EXACT", "case_id": 13, "normative_token": 64,
+      "normative_row": "REG-007-CR-ACCESS-CLASSES",
+      "implementation_selector": {"coverage_group": "cpu.register.cr.all-indices", "exclude_rows": []},
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "3.3.3", "printed_pages": ["2:29", "2:30"], "anchor": "Writes to read-only registers (IVR, IRR0-3) result in an Illegal Operation fault"},
+      "preconditions": ["Execution is at CPL0", "PSR.ic starts enabled and is serialized after every transition", "No external interrupt is pending in each fresh shard"],
+      "inputs": ["Enabled and false-qualified reads and writes for all 128 selectors", "Additional enabled PSR.ic=1 reads and writes for every CR16-CR27 defined selector", "Nonzero false-write values and poisoned read destinations"],
+      "expected_results": ["All 512 base selector/direction/qualification forms have the exact legal or Illegal Operation disposition", "All 22 enabled interruption-register forms fault with PSR.ic=1 and their matching PSR.ic=0 forms complete", "IVR and IRR0-IRR3 writes fault while reads return the spurious vector or empty request image", "False qualification suppresses reserved, read-only, and PSR.ic checks"],
+      "allowed_results": ["The exact 534-form access-class matrix"],
+      "permitted_state_changes": ["Defined writable CR state", "IVR spurious-vector state", "Declared handler and comparison state"],
+      "required_unchanged_state": ["Reserved and read-only CR state on faulting writes", "Destination of every faulting or false-qualified read", "Architectural CR state on every false-qualified write"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["Predicate qualification precedes selector, read-only, and PSR.ic legality", "The PSR.ic restriction precedes completed access to CR16-CR27"], "committed_prefix": "Only the stopped setup prefix commits before each enabled illegal access", "restart_action": "The handler proves exact IIP/EI/code, clears p1, and RFI completes a nullified retry once",
+      "applicable_variants": ["reserved selector", "read-only IVR/IRR", "PSR.ic enabled/disabled", "enabled/false predicate", "read/write", "CR16-CR27 including IIB0/IIB1"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_control_register_selectors"], "result_observations": ["534 per-form outcomes", "handler marker", "exact CR.IIP and CR.ISR", "poison destination", "defined readback"]},
+      "oracle": {"independence": "independent", "derivation": "Volume 2 defines the read-only and interruption-state access restrictions; the generator combines those literal sets with predicate and direction without consulting emulator decode or helpers"},
+      "limitations": ["The operation-wide CPL0 privilege rule is already exercised by the system-instruction batch and is not redundantly expanded to every selector here", "Individual named-register reserved-field patterns remain separate REG-007/REG-008 closure units"]
     }
   ]
 }

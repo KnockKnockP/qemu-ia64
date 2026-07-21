@@ -2123,6 +2123,10 @@ static const char *ia64_cr_trace_name(uint32_t reg)
         return "iim";
     case IA64_CR_IHA:
         return "iha";
+    case IA64_CR_IIB0:
+        return "iib0";
+    case IA64_CR_IIB1:
+        return "iib1";
     case IA64_CR_TPR:
         return "tpr";
     case IA64_CR_EOI:

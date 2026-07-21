@@ -3350,8 +3350,8 @@ static bool ia64_insn_has_reserved_ar(const IA64Instruction *insn)
 
 static bool ia64_reserved_cr(uint8_t cr)
 {
-    return (cr >= 3 && cr <= 7) || (cr >= 10 && cr <= 15) ||
-           cr == 18 || (cr >= 26 && cr <= 63) ||
+    return (cr >= 3 && cr <= 7) || (cr >= 9 && cr <= 15) ||
+           cr == 18 || (cr >= 28 && cr <= 63) ||
            (cr >= 75 && cr <= 79) || (cr >= 82);
 }
 

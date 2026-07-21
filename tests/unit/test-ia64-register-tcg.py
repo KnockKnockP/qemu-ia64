@@ -34,6 +34,59 @@ AR_I_INDICES = frozenset((64, 65, 66))
 AR_RESERVED_INDICES = frozenset(range(128)) - (
     AR_IGNORED_INDICES | AR_M_INDICES | AR_I_INDICES
 )
+CR_DEFINED_INDICES = frozenset((
+    0, 1, 2, 8, 16, 17, *range(19, 28),
+    *range(64, 75), 80, 81,
+))
+CR_READ_ONLY_INDICES = frozenset((65, *range(68, 72)))
+CR_INTERRUPTION_INDICES = frozenset((16, 17, *range(19, 28)))
+CR_RESERVED_INDICES = frozenset(range(128)) - CR_DEFINED_INDICES
+CR_WRITE_VALUES = {
+    0: 0x2,
+    1: 0x101,
+    # Keep IVA at zero so every later precise-fault probe reaches the common
+    # vector installed at the architectural 0x5400 offset.
+    2: 0,
+    8: 0x3c,
+    16: 1 << 13,
+    17: 0x11,
+    19: 0x130,
+    20: 0x140,
+    21: 0x150,
+    22: 0x160,
+    23: 0x17,
+    24: 0x18,
+    25: 0x190,
+    26: 0x1a0,
+    27: 0x1b0,
+    64: 0x400000,
+    66: 0x10040,
+    67: 0x67,
+    72: 0x10048,
+    73: 0x10049,
+    74: 0x1004a,
+    80: 0x10050,
+    81: 0x10051,
+}
+CR_EXPECTED_READS = {
+    **CR_WRITE_VALUES,
+    65: 0x0f,
+    68: 0,
+    69: 0,
+    70: 0,
+    71: 0,
+    67: 0,
+}
+CR_ALIAS_WRITE_VALUES = {**CR_WRITE_VALUES, 2: 0x10000}
+CR_ALIAS_EXPECTED_READS = {
+    **CR_ALIAS_WRITE_VALUES,
+    65: 0x0f,
+    68: 0,
+    69: 0,
+    70: 0,
+    71: 0,
+    67: 0,
+}
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -56,6 +109,8 @@ def validate_contract(root: Path) -> str:
         "REG-006-BR-INDEX-SPACE": ("cpu.register.br.all-indices", []),
         "REG-006-AR-INDEX-SPACE": ("cpu.register.ar.all-indices", []),
         "REG-007-AR-ACCESS-CLASSES": ("cpu.register.ar.all-indices", []),
+        "REG-006-CR-INDEX-SPACE": ("cpu.register.cr.all-indices", []),
+        "REG-007-CR-ACCESS-CLASSES": ("cpu.register.cr.all-indices", []),
     }
     expected_rows = {
         "REG-003-CPUID-RUC-AR45": ["cpu.register.ar.45", "cpu.register.cpuid.4"],
@@ -67,8 +122,8 @@ def validate_contract(root: Path) -> str:
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 11:
-        raise AssertionError("register tranche must contain eleven cases")
+    if not isinstance(cases, list) or len(cases) != 13:
+        raise AssertionError("register tranche must contain thirteen cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -103,6 +158,22 @@ def validate_contract(root: Path) -> str:
         AR_RESERVED_INDICES,
     ))) != 128:
         raise AssertionError("AR selector classes overlap")
+    if (CR_DEFINED_INDICES | CR_RESERVED_INDICES) != frozenset(range(128)):
+        raise AssertionError("CR selector classes do not cover cr0-cr127")
+    if CR_DEFINED_INDICES & CR_RESERVED_INDICES:
+        raise AssertionError("CR defined/reserved selector classes overlap")
+    if not CR_READ_ONLY_INDICES < CR_DEFINED_INDICES:
+        raise AssertionError("CR read-only selectors are not a defined subset")
+    if not CR_INTERRUPTION_INDICES < CR_DEFINED_INDICES:
+        raise AssertionError("CR interruption selectors are not a defined subset")
+    if set(CR_WRITE_VALUES) != CR_DEFINED_INDICES - CR_READ_ONLY_INDICES:
+        raise AssertionError("CR safe-write oracle does not cover every writable CR")
+    if set(CR_EXPECTED_READS) != CR_DEFINED_INDICES:
+        raise AssertionError("CR read oracle does not cover every defined CR")
+    if (set(CR_ALIAS_WRITE_VALUES) !=
+            CR_DEFINED_INDICES - CR_READ_ONLY_INDICES or
+            set(CR_ALIAS_EXPECTED_READS) != CR_DEFINED_INDICES):
+        raise AssertionError("CR anti-alias oracle does not cover its full file")
     if GR_ROTATING_SIZES != tuple(range(8, 97, 8)):
         raise AssertionError("GR rotating-size matrix drift")
     rotating_signatures = {
@@ -113,7 +184,8 @@ def validate_contract(root: Path) -> str:
         raise AssertionError("rotating predicate codewords are not unique")
     return (
         "complete GR/FR/PR/BR indices, 12 GR rotating sizes, 96 FR bases, "
-        "48 PR bases, all 128 AR selectors in both units, and "
+        "48 PR bases, all 128 AR selectors in both units, all 128 CR "
+        "selectors and interruption-access states, and "
         "interruption/RFI bank transitions"
     )
 
@@ -541,6 +613,269 @@ def test_application_register_selectors(h: ModuleType, system: ModuleType,
     )
 
 
+def control_register_selector_program(h: ModuleType, system: ModuleType,
+                                      selectors: Sequence[int]):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    bundles: list[object] = []
+    address = entry
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> int:
+        nonlocal address
+        result = address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+        return result
+
+    def emit_movl(register: int, value: int) -> int:
+        nonlocal address
+        result = address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+        return result
+
+    def set_ic(enabled: bool) -> None:
+        emit(
+            0x01,
+            h.ssm(h.IA64_PSR_IC) if enabled else h.rsm(h.IA64_PSR_IC),
+            h.nop_i(), h.nop_i(),
+        )
+        emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+
+    def append_access(selector: int, *, write: bool, qualified: bool,
+                      ic_enabled: bool, expect_fault: bool,
+                      form_code: int, source: int = 0,
+                      expected_read: int | None = None) -> None:
+        nonlocal address
+        set_ic(ic_enabled)
+        # Six setup bundles precede the M-slot access.  The vector verifies
+        # the independently calculated saved IIP and full Illegal Operation
+        # ISR image before nullifying the retry through p1.
+        access_ip = address + 0x60
+        emit_movl(21, access_ip)
+        emit_movl(24, 0)
+        diagnostic = (selector << 4) | form_code
+        emit(0x01, h.nop_m(), h.adds(8, selector, 0),
+             h.adds(9, diagnostic, 0))
+        emit(0x01, h.nop_m(), h.adds(20, 0, 0), h.nop_i())
+        emit_movl(29, source)
+        predicate_setup = h.cmp_rr(
+            1, 2, 0, 0, "eq" if qualified else "lt"
+        )
+        emit(0x01, h.nop_m(), h.adds(30, 0x55, 0), predicate_setup)
+        actual_ip = address
+        raw = (
+            system.m_system(0x2C, r2=29, r3=selector, qp=1)
+            if write else
+            system.m_system(0x24, r1=30, r3=selector, qp=1)
+        )
+        bundles.append(system.raw_bundle(h, address, "M", raw))
+        address += 0x10
+        if actual_ip != access_ip:
+            raise AssertionError("CR access address accounting drift")
+        if write and qualified and not expect_fault:
+            emit(0x01, h.srlz_d(), h.nop_i(), h.nop_i())
+        address = append_gr_check(
+            h, bundles, address, 20, int(expect_fault), failure
+        )
+        if not write:
+            if expect_fault or not qualified:
+                address = append_gr_check(
+                    h, bundles, address, 30, 0x55, failure
+                )
+            elif expected_read is not None:
+                emit_movl(28, expected_read)
+                address = append_gr_pair_check(
+                    h, bundles, address, 30, 28, failure
+                )
+
+    selector_tuple = tuple(selectors)
+    if not selector_tuple:
+        raise AssertionError("invalid CR selector shard")
+    for selector in selector_tuple:
+        defined = selector in CR_DEFINED_INDICES
+        read_only = selector in CR_READ_ONLY_INDICES
+        interruption = selector in CR_INTERRUPTION_INDICES
+
+        if interruption:
+            append_access(
+                selector, write=True, qualified=True, ic_enabled=True,
+                expect_fault=True, form_code=0x1, source=0,
+            )
+            append_access(
+                selector, write=False, qualified=True, ic_enabled=True,
+                expect_fault=True, form_code=0x2,
+            )
+
+        write_fault = not defined or read_only
+        append_access(
+            selector, write=True, qualified=True,
+            ic_enabled=not interruption, expect_fault=write_fault,
+            form_code=0x3, source=CR_WRITE_VALUES.get(selector, 0),
+        )
+        append_access(
+            selector, write=True, qualified=False, ic_enabled=True,
+            expect_fault=False, form_code=0x4, source=0x5a,
+        )
+        append_access(
+            selector, write=False, qualified=False, ic_enabled=True,
+            expect_fault=False, form_code=0x5,
+        )
+        append_access(
+            selector, write=False, qualified=True,
+            ic_enabled=not interruption, expect_fault=not defined,
+            form_code=0x6,
+            expected_read=CR_EXPECTED_READS.get(selector),
+        )
+
+    handler = h.IA64_GENERAL_EXCEPTION_VECTOR
+    bundles.append(system.raw_bundle(
+        h, handler, "M", system.m_system(0x24, r1=22, r3=19)
+    ))
+    handler = append_gr_pair_check(
+        h, bundles, handler + 0x10, 22, 21, failure
+    )
+    bundles.append(system.raw_bundle(
+        h, handler, "M", system.m_system(0x24, r1=23, r3=17)
+    ))
+    handler = append_gr_pair_check(
+        h, bundles, handler + 0x10, 23, 24, failure
+    )
+    bundles.append(h.Bundle(
+        handler, 0x01, h.nop_m(), h.adds(20, 1, 0),
+        h.cmp_rr(1, 2, 0, 0, "lt"),
+    ))
+    handler += 0x10
+    bundles.append(h.Bundle(
+        handler, 0x11, h.nop_m(), h.nop_i(), h.rfi()
+    ))
+
+    return finish_checked_program(
+        h,
+        "CR selector shard {}-{}".format(
+            selector_tuple[0], selector_tuple[-1]
+        ),
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        entry=entry,
+    )
+
+
+def control_register_alias_program(h: ModuleType, system: ModuleType):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    bundles: list[object] = []
+    address = entry
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    def set_ic(enabled: bool) -> None:
+        emit(
+            0x01,
+            h.ssm(h.IA64_PSR_IC) if enabled else h.rsm(h.IA64_PSR_IC),
+            h.nop_i(), h.nop_i(),
+        )
+        emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+
+    # No illegal access follows the IVA write in this program, so the
+    # complete-file pass can use a nonzero aligned IVA label as well as
+    # distinct safe values for every ordinary storage-backed writable CR.
+    for selector in sorted(CR_ALIAS_WRITE_VALUES):
+        set_ic(selector not in CR_INTERRUPTION_INDICES)
+        emit(0x01, h.nop_m(), h.adds(8, selector, 0), h.adds(9, 1, 0))
+        emit_movl(29, CR_ALIAS_WRITE_VALUES[selector])
+        bundles.append(system.raw_bundle(
+            h, address, "M",
+            system.m_system(0x2C, r2=29, r3=selector),
+        ))
+        address += 0x10
+        emit(0x01, h.srlz_d(), h.nop_i(), h.nop_i())
+
+    for selector in sorted(CR_DEFINED_INDICES):
+        set_ic(selector not in CR_INTERRUPTION_INDICES)
+        emit(0x01, h.nop_m(), h.adds(8, selector, 0), h.adds(9, 2, 0))
+        bundles.append(system.raw_bundle(
+            h, address, "M",
+            system.m_system(0x24, r1=30, r3=selector),
+        ))
+        address += 0x10
+        emit_movl(28, CR_ALIAS_EXPECTED_READS[selector])
+        address = append_gr_pair_check(
+            h, bundles, address, 30, 28, failure
+        )
+
+    return finish_checked_program(
+        h, "CR complete-file distinct-value anti-alias pass", bundles,
+        address, failure=failure, terminal=terminal, entry=entry,
+    )
+
+
+def test_control_register_selectors(h: ModuleType, system: ModuleType,
+                                    qemu: Path) -> str:
+    combinations = 0
+    for first in range(0, 128, 32):
+        selectors = range(first, first + 32)
+        label = f"CR selectors {first}-{first + 31}"
+        try:
+            snapshot = h.run_program(
+                qemu,
+                control_register_selector_program(h, system, selectors),
+                compact_loader=True,
+                preserve_fault_slot=True,
+            )
+        except Exception as exc:
+            raise AssertionError(f"{label}: {exc}") from exc
+        if snapshot.gr[14] != 1:
+            raise AssertionError(
+                f"{label} failed: marker={snapshot.gr[14]} "
+                f"selector={snapshot.gr[8]} form=0x{snapshot.gr[9]:x} "
+                f"ip=0x{snapshot.ip:x} expected-iip=0x{snapshot.gr[21]:x} "
+                f"actual-iip=0x{snapshot.cr_iip:x} "
+                f"expected-isr=0x{snapshot.gr[24]:x} "
+                f"actual-isr=0x{snapshot.cr_isr:x} "
+                f"exception={snapshot.exception_kind}"
+            )
+        combinations += 32 * 4
+        combinations += 2 * len(
+            CR_INTERRUPTION_INDICES & frozenset(selectors)
+        )
+    if combinations != 534:
+        raise AssertionError(
+            f"CR selector matrix covered {combinations}, expected 534 forms"
+        )
+    alias_snapshot = h.run_program(
+        qemu,
+        control_register_alias_program(h, system),
+        compact_loader=True,
+        preserve_fault_slot=True,
+    )
+    if alias_snapshot.gr[14] != 1:
+        raise AssertionError(
+            "CR full-file anti-alias pass failed: "
+            f"selector={alias_snapshot.gr[8]} "
+            f"phase={alias_snapshot.gr[9]} ip=0x{alias_snapshot.ip:x} "
+            f"exception={alias_snapshot.exception_kind}"
+        )
+    return (
+        "all 128 CR selectors pass 512 enabled/false-qualified read/write "
+        "forms plus 22 PSR.ic restriction forms, including exact Illegal "
+        "Operation restart, read-only IVR/IRR behavior, IIB0/IIB1, and a "
+        "separate complete-file distinct-value anti-alias pass"
+    )
+
+
 def general_register_rotation_program(h: ModuleType, size: int):
     failure = 0x10000
     bundles: list[object] = []
@@ -948,6 +1283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("complete PR rotation", lambda: test_predicate_register_rotation(harness, system, args.qemu.resolve())),
         ("interruption and RFI GR banks", lambda: test_interruption_bank_switch(harness, system, args.qemu.resolve())),
         ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
+        ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),
     )
     print("TAP version 13")
     print(f"1..{len(tests)}")

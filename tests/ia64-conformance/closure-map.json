@@ -514,6 +514,17 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-006-CR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.cr.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
       "normative_row": "REG-006-FR-INDEX-SPACE",
       "surface_disposition": "implemented",
       "implementation_rows": [],
@@ -541,6 +552,17 @@
       "implementation_rows": [],
       "implementation_selector": {
         "coverage_group": "cpu.register.ar.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-007-CR-ACCESS-CLASSES",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.cr.all-indices",
         "exclude_rows": []
       },
       "inventory_gap": null,
