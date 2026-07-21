@@ -26,6 +26,14 @@ PR_CODEWORDS = tuple(
     for bit in range(6)
 )
 BR_VALUES = tuple(0x100 + register for register in range(8))
+AR_IGNORED_INDICES = frozenset((*range(48, 64), *range(112, 128)))
+AR_M_INDICES = frozenset((
+    *range(0, 8), *range(16, 20), 21, *range(24, 31), 32, 36, 40, 44,
+))
+AR_I_INDICES = frozenset((64, 65, 66))
+AR_RESERVED_INDICES = frozenset(range(128)) - (
+    AR_IGNORED_INDICES | AR_M_INDICES | AR_I_INDICES
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -46,8 +54,11 @@ def validate_contract(root: Path) -> str:
         "REG-006-FR-INDEX-SPACE": ("cpu.register.fr.all-indices", ["cpu.register.fr.0", "cpu.register.fr.1"]),
         "REG-006-PR-INDEX-SPACE": ("cpu.register.pr.all-indices", ["cpu.register.pr.0"]),
         "REG-006-BR-INDEX-SPACE": ("cpu.register.br.all-indices", []),
+        "REG-006-AR-INDEX-SPACE": ("cpu.register.ar.all-indices", []),
+        "REG-007-AR-ACCESS-CLASSES": ("cpu.register.ar.all-indices", []),
     }
     expected_rows = {
+        "REG-003-CPUID-RUC-AR45": ["cpu.register.ar.45", "cpu.register.cpuid.4"],
         "REG-009-GR-BANK-SWITCH": ["cpu.register.gr.bank-switch"],
         "REG-010-FR-ROTATION": ["cpu.register.rotation.fr"],
         "REG-010-GR-ROTATION": ["cpu.register.rotation.gr"],
@@ -56,8 +67,8 @@ def validate_contract(root: Path) -> str:
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 8:
-        raise AssertionError("register tranche must contain eight cases")
+    if not isinstance(cases, list) or len(cases) != 11:
+        raise AssertionError("register tranche must contain eleven cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -84,6 +95,14 @@ def validate_contract(root: Path) -> str:
         raise AssertionError("predicate codewords do not distinguish p1-p63")
     if len(set(BR_VALUES)) != 8:
         raise AssertionError("branch-register values are not unique")
+    if (AR_IGNORED_INDICES | AR_M_INDICES | AR_I_INDICES |
+            AR_RESERVED_INDICES) != frozenset(range(128)):
+        raise AssertionError("AR selector classes do not cover ar0-ar127")
+    if sum(map(len, (
+        AR_IGNORED_INDICES, AR_M_INDICES, AR_I_INDICES,
+        AR_RESERVED_INDICES,
+    ))) != 128:
+        raise AssertionError("AR selector classes overlap")
     if GR_ROTATING_SIZES != tuple(range(8, 97, 8)):
         raise AssertionError("GR rotating-size matrix drift")
     rotating_signatures = {
@@ -94,7 +113,8 @@ def validate_contract(root: Path) -> str:
         raise AssertionError("rotating predicate codewords are not unique")
     return (
         "complete GR/FR/PR/BR indices, 12 GR rotating sizes, 96 FR bases, "
-        "48 PR bases, and interruption/RFI bank transitions"
+        "48 PR bases, all 128 AR selectors in both units, and "
+        "interruption/RFI bank transitions"
     )
 
 
@@ -264,10 +284,19 @@ def append_tnat_check(h: ModuleType, bundles: list[object], address: int,
     )
 
 
+def append_gr_pair_check(h: ModuleType, bundles: list[object], address: int,
+                         left: int, right: int, failure: int) -> int:
+    bundles.append(h.Bundle(
+        address, 0x01, h.nop_m(),
+        h.cmp_rr(6, 7, left, right, "eq"), h.nop_i(),
+    ))
+    return append_failure_branch(h, bundles, address + 0x10, failure)
+
+
 def finish_checked_program(h: ModuleType, name: str, bundles: list[object],
                            address: int, *, failure: int = 0x10000,
                            terminal: int = 0x10030,
-                           data: tuple[object, ...] = ()):
+                           data: tuple[object, ...] = (), entry: int = 0x10):
     if address >= failure or failure + 0x20 >= terminal:
         raise AssertionError("checked-program control addresses overlap")
     bundles.append(h.Bundle(
@@ -297,7 +326,219 @@ def finish_checked_program(h: ModuleType, name: str, bundles: list[object],
             raise AssertionError(
                 f"{name}: data at 0x{data_start:x} overlaps generated code"
             )
-    return h.Program(name, tuple(bundles), terminal, data)
+    return h.Program(name, tuple(bundles), terminal, data, entry)
+
+
+def ar_selector_is_legal(unit: str, selector: int) -> bool:
+    if selector in AR_IGNORED_INDICES:
+        return True
+    if unit == "M":
+        return selector in AR_M_INDICES
+    if unit == "I":
+        return selector in AR_I_INDICES
+    raise AssertionError(f"unknown AR execution unit {unit!r}")
+
+
+def application_register_selector_program(h: ModuleType,
+                                          system: ModuleType, unit: str,
+                                          selectors: Sequence[int],
+                                          forms: Sequence[str] = (
+                                              "write", "false-write",
+                                              "false-read", "read",
+                                          )):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    bundles: list[object] = []
+    address = entry
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> int:
+        nonlocal address
+        result = address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+        return result
+
+    def emit_movl(register: int, value: int) -> int:
+        nonlocal address
+        result = address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+        return result
+
+    def raw_access(unit: str, selector: int, write: bool,
+                   predicate: int) -> int:
+        if unit == "M":
+            return (h.mov_m_grar(selector, 29, qp=predicate) if write else
+                    h.mov_m_argr(30, selector, qp=predicate))
+        return (h.mov_i_grar(selector, 29, qp=predicate) if write else
+                h.mov_argr(30, selector, qp=predicate))
+
+    def append_access(unit: str, selector: int, write: bool,
+                      qualified: bool, expect_fault: bool,
+                      source: int = 0,
+                      expected_read: int | None = None) -> None:
+        nonlocal address
+        # Two MOVL bundles and three setup bundles precede the access.  The
+        # handler independently checks the saved IIP and complete ISR image.
+        access_ip = address + 0x50
+        emit_movl(21, access_ip)
+        emit_movl(24, (0 if unit == "M" else 1 << h.IA64_ISR_EI_SHIFT))
+        diagnostic = (
+            (selector << 4) | (int(unit == "I") << 3) |
+            (int(write) << 2) | (int(qualified) << 1) |
+            int(expect_fault)
+        )
+        emit(0x01, h.nop_m(), h.adds(8, selector, 0),
+             h.adds(9, diagnostic, 0))
+        emit(0x01, h.nop_m(), h.adds(20, 0, 0),
+             h.adds(29, source, 0))
+        predicate_setup = h.cmp_rr(
+            1, 2, 0, 0, "eq" if qualified else "lt"
+        )
+        emit(0x01, h.nop_m(), h.adds(30, 0x55, 0), predicate_setup)
+        actual_ip = address
+        bundles.append(system.raw_bundle(
+            h, address, unit,
+            raw_access(unit, selector, write, predicate=1),
+        ))
+        address += 0x10
+        if actual_ip != access_ip:
+            raise AssertionError("AR access address accounting drift")
+        address = append_gr_check(
+            h, bundles, address, 20, int(expect_fault), failure
+        )
+        if not write:
+            if expect_fault or not qualified:
+                address = append_gr_check(
+                    h, bundles, address, 30, 0x55, failure
+                )
+            elif expected_read is not None:
+                address = append_gr_check(
+                    h, bundles, address, 30, expected_read, failure
+                )
+
+    emit(0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i())
+    emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(3, 4, 0), h.nop_i())
+    bundles.append(system.raw_bundle(
+        h, address, "M", system.m_system(0x17, r1=4, r2=0, r3=3)
+    ))
+    address += 0x10
+    selector_tuple = tuple(selectors)
+    form_set = frozenset(forms)
+    if unit not in ("M", "I") or not selector_tuple:
+        raise AssertionError("invalid AR selector shard")
+    if not form_set or not form_set <= {
+        "write", "false-write", "false-read", "read",
+    }:
+        raise AssertionError("invalid AR selector form shard")
+    for selector in selector_tuple:
+        legal = ar_selector_is_legal(unit, selector)
+        write_fault = not legal or selector == 17
+        read_fault = not legal
+
+        # Zero is legal for every writable defined AR and gives an exact
+        # readback oracle for all but the clock-backed ITC.
+        if "write" in form_set:
+            append_access(
+                unit, selector, True, True, write_fault, source=0
+            )
+        # Every selector/form is also exercised false-qualified with a
+        # nonzero source and poison destination.
+        if "false-write" in form_set:
+            append_access(
+                unit, selector, True, False, False, source=0x5a
+            )
+        if "false-read" in form_set:
+            append_access(
+                unit, selector, False, False, False
+            )
+        expected_read = 0 if legal and selector != 44 else None
+        if "read" in form_set:
+            append_access(
+                unit, selector, False, True, read_fault,
+                expected_read=expected_read,
+            )
+
+    handler = h.IA64_GENERAL_EXCEPTION_VECTOR
+    bundles.append(system.raw_bundle(
+        h, handler, "M", system.m_system(0x24, r1=22, r3=19)
+    ))
+    handler = append_gr_pair_check(
+        h, bundles, handler + 0x10, 22, 21, failure
+    )
+    bundles.append(system.raw_bundle(
+        h, handler, "M", system.m_system(0x24, r1=23, r3=17)
+    ))
+    handler = append_gr_pair_check(
+        h, bundles, handler + 0x10, 23, 24, failure
+    )
+    bundles.append(h.Bundle(
+        handler, 0x01, h.nop_m(), h.adds(20, 1, 0),
+        h.cmp_rr(1, 2, 0, 0, "lt"),
+    ))
+    handler += 0x10
+    bundles.append(h.Bundle(
+        handler, 0x11, h.nop_m(), h.nop_i(), h.rfi()
+    ))
+
+    return finish_checked_program(
+        h,
+        "AR {} selector shard {}-{} {}".format(
+            unit, selector_tuple[0], selector_tuple[-1],
+            "+".join(forms),
+        ),
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        entry=entry,
+    )
+
+
+def test_application_register_selectors(h: ModuleType, system: ModuleType,
+                                        qemu: Path) -> str:
+    for unit in ("M", "I"):
+        for first in range(0, 128, 32):
+            selectors = range(first, first + 32)
+            forms = ("write", "false-write", "false-read", "read")
+            label = (
+                f"AR {unit} selectors {first}-{first + 31} "
+                f"{'+'.join(forms)}"
+            )
+            try:
+                snapshot = h.run_program(
+                    qemu,
+                    application_register_selector_program(
+                        h, system, unit, selectors, forms
+                    ),
+                    compact_loader=True,
+                    preserve_fault_slot=True,
+                )
+            except Exception as exc:
+                raise AssertionError(f"{label}: {exc}") from exc
+            if snapshot.gr[14] != 1:
+                raise AssertionError(
+                    f"{label} failed: marker={snapshot.gr[14]} "
+                    f"selector={snapshot.gr[8]} "
+                    f"form=0x{snapshot.gr[9]:x} ip=0x{snapshot.ip:x} "
+                    f"expected-iip=0x{snapshot.gr[21]:x} "
+                    f"actual-iip=0x{snapshot.cr_iip:x} "
+                    f"expected-isr=0x{snapshot.gr[24]:x} "
+                    f"actual-isr=0x{snapshot.cr_isr:x} "
+                    f"exception={snapshot.exception_kind}"
+                )
+            if snapshot.gr[4] & (1 << 3):
+                raise AssertionError(
+                    "CPUID[4].ru advertises RUC but the selected AR45 "
+                    "matrix is the reserved-feature profile"
+                )
+    return (
+        "all 128 AR selectors pass enabled and false-qualified M/I read/write "
+        "classification, exact Illegal Operation restart state, ignored "
+        "zero/discard behavior, and BSP read-only behavior"
+    )
 
 
 def general_register_rotation_program(h: ModuleType, size: int):
@@ -706,6 +947,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("complete FR rotation", lambda: test_floating_register_rotation(harness, floating, args.qemu.resolve())),
         ("complete PR rotation", lambda: test_predicate_register_rotation(harness, system, args.qemu.resolve())),
         ("interruption and RFI GR banks", lambda: test_interruption_bank_switch(harness, system, args.qemu.resolve())),
+        ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
     )
     print("TAP version 13")
     print(f"1..{len(tests)}")

@@ -414,6 +414,13 @@
       "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
     },
     {
+      "normative_row": "REG-003-CPUID-RUC-AR45",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.ar.45", "cpu.register.cpuid.4"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
       "normative_row": "REG-004-FR0-READ",
       "surface_disposition": "implemented",
       "implementation_rows": [
@@ -485,6 +492,17 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-006-AR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.ar.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
       "normative_row": "REG-006-BR-INDEX-SPACE",
       "surface_disposition": "implemented",
       "implementation_rows": [],
@@ -513,6 +531,17 @@
       "implementation_selector": {
         "coverage_group": "cpu.register.pr.all-indices",
         "exclude_rows": ["cpu.register.pr.0"]
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-007-AR-ACCESS-CLASSES",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.ar.all-indices",
+        "exclude_rows": []
       },
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]

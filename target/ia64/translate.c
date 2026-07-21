@@ -3117,18 +3117,40 @@ static void ia64_tr_group_load_branch_pfs(DisasContext *ctx, TCGv_i64 value)
                         tcg_constant_i64(0), live, ordinary);
 }
 
+/*
+ * A qualified PFS write needs its SSA candidate and forwarding flag defined
+ * on both predecessors of the predicate guard.  Prepare those persistent
+ * values before emitting the guard; the true arm only stages the candidate.
+ */
+static IA64TrArEffect *ia64_tr_group_prepare_pfs_write(
+    DisasContext *ctx, bool must_write)
+{
+    IA64TrGroupTransaction *group = &ctx->rewrite_group;
+
+    if (!group->ssa.enabled) {
+        return NULL;
+    }
+    ia64_tr_ssa_ensure_branch_pfs_forwarded(&group->ssa);
+    return ia64_tr_group_prepare_ordered_ar_effect(
+        ctx, IA64_AR_PFS, must_write);
+}
+
 static void ia64_tr_group_write_pfs(DisasContext *ctx, TCGv_i64 value,
-                                    bool must_write)
+                                    bool must_write,
+                                    IA64TrArEffect *ssa_write)
 {
     IA64TrGroupTransaction *group = &ctx->rewrite_group;
     TCGLabel *already_saved = NULL;
 
     if (group->ssa.enabled) {
-        ia64_tr_store_ar(ctx, IA64_AR_PFS, value);
+        g_assert(ssa_write != NULL && ssa_write->ssa &&
+                 ssa_write->must_write == must_write);
+        ia64_tr_group_stage_ordered_ar_effect(ctx, ssa_write, value);
         tcg_gen_movi_i64(
             ia64_tr_ssa_ensure_branch_pfs_forwarded(&group->ssa), 1);
         return;
     }
+    g_assert(ssa_write == NULL);
     g_assert(group->active && group->current != NULL);
     if (!group->pfs_must_saved) {
         if (group->pfs_may_saved) {
@@ -12529,6 +12551,7 @@ static void ia64_tr_emit_decoded_application_move(
     }
 
     {
+        IA64TrArEffect *pfs_write = NULL;
         TCGv_i64 value = ia64_tr_scratch_i64(ctx);
         TCGv_i64 nat = ia64_tr_scratch_i64(ctx);
         uint64_t expected[2] = { 0, 0 };
@@ -12543,6 +12566,10 @@ static void ia64_tr_emit_decoded_application_move(
                     (insn->r2 == IA64_AR_PFS) &&
                  instruction->must_pfs ==
                     (insn->r2 == IA64_AR_PFS && insn->qp == 0));
+        if (insn->r2 == IA64_AR_PFS) {
+            pfs_write = ia64_tr_group_prepare_pfs_write(
+                ctx, instruction->must_pfs);
+        }
         skip = ia64_tr_emit_decoded_predicate_guard(ctx, insn);
         if (insn->r2 != IA64_AR_PFS) {
             if (insn->r2 == IA64_AR_ITC &&
@@ -12558,7 +12585,8 @@ static void ia64_tr_emit_decoded_application_move(
         if (insn->r2 == IA64_AR_PFS) {
             ia64_tr_emit_application_write_value_check(
                 ctx, insn, insn->r2, value);
-            ia64_tr_group_write_pfs(ctx, value, instruction->must_pfs);
+            ia64_tr_group_write_pfs(ctx, value, instruction->must_pfs,
+                                    pfs_write);
         } else {
             IA64TrHelperContract contract =
                 ia64_tr_application_write_contract(insn->r2);
@@ -13509,6 +13537,7 @@ static void ia64_tr_emit_decoded_system(
     const IA64OpcodeTraits *traits =
         ia64_opcode_traits_for(insn->opcode);
     IA64TrGrWrite *write = NULL;
+    IA64TrArEffect *pfs_write = NULL;
     TCGLabel *skip;
     TCGLabel *nat_clear;
     TCGv_i64 arg0 = ia64_tr_scratch_i64(ctx);
@@ -13539,6 +13568,11 @@ static void ia64_tr_emit_decoded_system(
         !(descriptor->shape == IA64_TR_SYSTEM_SHAPE_PROBE &&
           insn->probe_fault)) {
         write = ia64_tr_group_prepare_gr(ctx, insn->r1);
+    }
+    if (insn->status == IA64_DECODE_OK &&
+        descriptor->kind == IA64_TR_SYSTEM_MOV_IMMAR &&
+        insn->r2 == IA64_AR_PFS) {
+        pfs_write = ia64_tr_group_prepare_pfs_write(ctx, insn->qp == 0);
     }
 
     /* Qualifying predication precedes every legality, privilege and NaT path. */
@@ -13716,7 +13750,7 @@ static void ia64_tr_emit_decoded_system(
         insn->r2 == IA64_AR_PFS) {
         ia64_tr_emit_application_write_value_check(
             ctx, insn, insn->r2, arg0);
-        ia64_tr_group_write_pfs(ctx, arg0, insn->qp == 0);
+        ia64_tr_group_write_pfs(ctx, arg0, insn->qp == 0, pfs_write);
         ia64_tr_finish_faulting_slot();
         ia64_tr_finish_predicate_guard(skip);
         return;

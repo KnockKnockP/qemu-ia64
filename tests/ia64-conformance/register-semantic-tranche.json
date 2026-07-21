@@ -140,6 +140,57 @@
       "execution": {"lane": "isolated-guest", "probes": ["test_predicate_register_rotation"], "result_observations": ["guest exact predicate comparisons", "endpoint comparisons after every intermediate step", "final zeroed packed PR image and CFM"]},
       "oracle": {"independence": "independent", "derivation": "Bit j of physical predicate n is independently labeled from n; a simple shift register with false injected at p16 defines every expected logical predicate after WTOP writes old logical p63 and rotates"},
       "limitations": ["Loop-branch predicate injection and epilog-count behavior are covered by branch-loop rows"]
+    },
+    {
+      "id": "REG-006-AR-INDEX-SPACE-EXACT", "case_id": 9, "normative_token": 60,
+      "normative_row": "REG-006-AR-INDEX-SPACE",
+      "implementation_selector": {"coverage_group": "cpu.register.ar.all-indices", "exclude_rows": []},
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.1.8", "printed_pages": ["1:28"], "anchor": "AR 112 - AR 127"},
+      "preconditions": ["Execution is at CPL0", "PSR.ic is enabled for precise collected-fault restart", "RSC.mode is zero", "A guest CPUID[4] read confirms ru bit 3 is clear, making optional AR45 reserved"],
+      "inputs": ["Every selector ar0-ar127", "M-unit and I-unit register-form reads and writes", "Enabled p1 and false p1 qualifications", "Zero enabled-write value, nonzero false-write value, and poison read destination"],
+      "expected_results": ["All 128 selectors match the independent Table 3-3 M-only, I-only, reserved, or ignored partition", "Every legal enabled read/write completes", "Every reserved or wrong-unit enabled access takes precise Illegal Operation", "Both ignored ranges are legal in either unit, discard writes, and read zero"],
+      "allowed_results": ["Exactly the Table 3-3 selector/unit classification for all 1,024 read/write/qualification combinations"],
+      "permitted_state_changes": ["Defined writable ARs receive zero", "ITC/RUC clock state", "BSPSTORE/RNAT/RSC state from legal zero writes", "Declared GR/predicate/interrupt observation state"],
+      "required_unchanged_state": ["Reserved AR selectors", "Ignored AR selectors", "False-qualified access destinations and architectural AR state", "Read-only BSP on enabled writes"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["Selector/unit/read-only legality is evaluated only after the qualifying predicate is true"], "committed_prefix": "Each selector access is isolated by stops; a fault commits only its completed setup prefix and leaves the destination poisoned", "restart_action": "The common handler validates IIP and ISR, clears p1, and RFI re-executes the same access nullified before continuing",
+      "applicable_variants": ["all 128 selectors", "M and I units", "read and register-form write", "enabled and false-qualified", "defined, reserved, ignored, read-only, and wrong-unit classes"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_selectors"], "result_observations": ["guest mismatch branch", "per-access handler marker", "exact saved IIP and ISR", "poison read destination", "ignored-register zero read"]},
+      "oracle": {"independence": "independent", "derivation": "Four literal selector sets are transcribed from Intel Volume 1 Table 3-3; expected access disposition is computed from set membership and execution unit without consulting QEMU tables"},
+      "limitations": ["Nonzero field masks, CPL/PSR.si privilege, RSE-mode restrictions, and named AR value semantics remain separate REG-007/REG-008 closure units"]
+    },
+    {
+      "id": "REG-007-AR-ACCESS-CLASSES-EXACT", "case_id": 10, "normative_token": 61,
+      "normative_row": "REG-007-AR-ACCESS-CLASSES",
+      "implementation_selector": {"coverage_group": "cpu.register.ar.all-indices", "exclude_rows": []},
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "mov ar", "printed_pages": ["3:172", "3:173"], "anchor": "An access to an application register from the wrong unit type causes an Illegal Operation fault"},
+      "preconditions": ["Execution is at CPL0 with PSR.ic enabled", "Every enabled write uses a non-reserved zero value", "RSC.mode remains zero", "CPUID[4].ru is clear"],
+      "inputs": ["Every M/I selector and read/write direction", "An otherwise identical false-qualified access for every form", "A nonzero false-write source and poison false-read destination"],
+      "expected_results": ["Wrong-unit, reserved-selector, and enabled BSP-write forms fault without changing their destination", "False qualification suppresses every selector/unit fault and preserves the read destination", "Ignored registers accept both unit forms, discard writes, and return zero", "Defined legal registers accept only their Table 3-3 execution unit"],
+      "allowed_results": ["Exact Illegal Operation versus legal/no-effect classification with precise saved slot state for every selector form"],
+      "permitted_state_changes": ["Zero writes to defined writable ARs", "Declared handler and comparison state"],
+      "required_unchanged_state": ["Destination of every faulting or false-qualified read", "Architectural state for reserved, ignored, read-only, and false-qualified writes"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["False qualification suppresses selector, execution-unit, and read-only checks"], "committed_prefix": "The stopped setup prefix commits; the faulting AR operation and its poisoned destination do not", "restart_action": "The handler proves exact IIP/EI/code, clears the access predicate, and RFI completes the nullified retry exactly once",
+      "applicable_variants": ["reserved selector", "ignored selector", "read-only BSP", "wrong execution unit", "false qualification", "M/I read/write register forms"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_selectors"], "result_observations": ["complete per-form fault marker", "exact CR.IIP and CR.ISR", "destination poison", "zero ignored readback"]},
+      "oracle": {"independence": "independent", "derivation": "The Volume 1 selector partition is combined with Volume 3 mov-ar pseudocode: predicate first, unit/selector legality, read-only legality, ignored read zero, and ignored write discard"},
+      "limitations": ["Reserved nonzero field patterns, NaT priority, privilege transitions, and individual named-AR masks are not claimed here"]
+    },
+    {
+      "id": "REG-003-CPUID-RUC-AR45-EXACT", "case_id": 11, "normative_token": 62,
+      "normative_row": "REG-003-CPUID-RUC-AR45",
+      "implementation_rows": ["cpu.register.ar.45", "cpu.register.cpuid.4"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "3.3.4.3", "printed_pages": ["2:33", "2:34"], "anchor": "The RUC register is reserved when this feature is not supported"},
+      "preconditions": ["The selected CPU profile exposes CPUID register 4", "Execution is at CPL0 with PSR.ic enabled"],
+      "inputs": ["A guest indexed read of CPUID[4]", "Enabled and false-qualified M/I reads and writes of AR45"],
+      "expected_results": ["CPUID[4].ru bit 3 is zero", "Every enabled AR45 access takes precise Illegal Operation", "Every false-qualified AR45 access is inert"],
+      "allowed_results": ["The optional RUC feature is consistently absent from both CPUID advertisement and AR45 selector behavior"],
+      "permitted_state_changes": ["CPUID result GR", "Declared fault-handler observation state"],
+      "required_unchanged_state": ["AR45 backing state", "False-qualified read destination"],
+      "expected_faults": ["Illegal Operation fault"], "fault_priority": ["The absent optional register is reserved after qualification"], "committed_prefix": "Only stopped setup state commits before each enabled AR45 fault", "restart_action": "The handler validates exact IIP/ISR, clears p1, and RFI completes the nullified retry",
+      "applicable_variants": ["CPUID feature advertisement", "M/I read", "M/I write", "enabled", "false-qualified"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_selectors"], "result_observations": ["guest CPUID[4] image", "per-form fault marker", "exact CR.IIP and CR.ISR", "poison read destination"]},
+      "oracle": {"independence": "independent", "derivation": "Intel Volume 2 defines CPUID[4].ru as the RUC availability contract and requires AR45 to be reserved when it is clear"},
+      "limitations": ["RUC counter monotonicity, write serialization, and PSR.si privilege apply only to profiles advertising the optional feature"]
     }
   ]
 }

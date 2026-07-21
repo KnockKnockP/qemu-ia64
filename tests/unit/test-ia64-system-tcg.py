@@ -1429,16 +1429,24 @@ def test_application_register_plane(harness: ModuleType, qemu: Path) -> str:
                            harness.nop_i(), harness.nop_i()),
             raw_bundle(harness, 0x50, "I",
                        harness.mov_argr(30, AR_PFS)),
-            harness.spin_bundle(0x60),
-        ), terminal_ip=0x60,
+            harness.Bundle(0x60, 0x01, harness.nop_m(),
+                           harness.cmp_rr(1, 2, 0, 0, "lt"),
+                           harness.nop_i()),
+            raw_bundle(harness, 0x70, "I",
+                       mov_immar(AR_PFS, 0x33, qp=1, unit="I")),
+            raw_bundle(harness, 0x80, "I",
+                       harness.mov_argr(29, AR_PFS)),
+            harness.spin_bundle(0x90),
+        ), terminal_ip=0x90,
     )
     pfs_immediate_result = harness.run_program(
         qemu, pfs_immediate,
         typed_direct_trace_ips=(0x20, 0x30, 0x50),
     )
     require(pfs_immediate_result.gr[31] == 0x11 and
-            pfs_immediate_result.gr[30] == 0x22,
-            "MOV_IMMAR PFS bypassed ordinary same-group source visibility")
+            pfs_immediate_result.gr[30] == 0x22 and
+            pfs_immediate_result.gr[29] == 0x22,
+            "MOV_IMMAR PFS violated ordinary or false-qualified visibility")
 
     # RSC.pl cannot be made more privileged than the current CPL.  Return to
     # CPL3, request PL0, and observe the clamped PL3 image.

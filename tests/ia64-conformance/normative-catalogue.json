@@ -1219,6 +1219,24 @@
       "required_evidence": "E2"
     },
     {
+      "id": "REG-003-CPUID-RUC-AR45",
+      "requirement_ids": ["REG-003"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "3.3.4.3", "printed_pages": ["2:33", "2:34"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "The RUC register is reserved when this feature is not supported"},
+      "operation": {"kind": "feature-advertisement-consistency", "selector": "CPUID[4].ru and optional AR45/RUC", "encoding": "indexed CPUID read plus M/I register-form AR45 reads and writes"},
+      "legal_inputs": ["CPUID selector 4 and false-qualified AR45 accesses"],
+      "privilege": {"levels": [0], "rule": "The profile is sampled at CPL0; absent RUC remains reserved independently of attempted M/I access unit"},
+      "state_read": ["CPUID[4].ru and AR45 selector availability"], "state_written": ["CPUID observation GR and declared interruption-observation state"],
+      "predication": {"applies": true, "rule": "False qualification suppresses every absent-register legality check and destination update"},
+      "nat_behavior": "NaT-clear sources are used so optional-feature availability is the sole enabled fault cause",
+      "possible_faults": ["Illegal Operation fault for enabled access when CPUID[4].ru is clear"], "fault_priority": ["Qualification precedes absent-register legality"],
+      "committed_prefix": "Only stopped setup state commits before each enabled AR45 fault",
+      "restart_rule": "The handler validates exact IIP and ISR, clears the qualifier, and RFI completes the nullified retry",
+      "permitted_results": ["CPUID[4].ru is zero, every enabled AR45 form faults, and every false-qualified form is inert"],
+      "required_evidence": "E2"
+    },
+    {
       "id": "REG-004-FR0-READ",
       "requirement_ids": [
         "REG-004"
@@ -1527,6 +1545,24 @@
       "required_evidence": "E2"
     },
     {
+      "id": "REG-006-AR-INDEX-SPACE",
+      "requirement_ids": ["REG-006"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "3.1.8", "printed_pages": ["1:28"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "AR 112 - AR 127"},
+      "operation": {"kind": "register-index-space", "selector": "ar0-ar127", "encoding": "M-unit and I-unit register-form reads and writes for every seven-bit AR selector"},
+      "legal_inputs": ["All selectors, both units, both directions, enabled and false qualification, zero enabled writes, nonzero false writes, and poison read destinations"],
+      "privilege": {"levels": [0], "rule": "The complete selector classification is observed at CPL0 with CPUID[4].ru clear"},
+      "state_read": ["Every defined, reserved, ignored, and optional AR selector class"], "state_written": ["Defined writable ARs and declared GR/predicate/interruption observation state"],
+      "predication": {"applies": true, "rule": "False qualification precedes and suppresses unit, selector, and read-only legality checks"},
+      "nat_behavior": "Every enabled source is NaT clear; NaT priority is outside this index-space row",
+      "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Qualification, then selector/unit/read-only legality"],
+      "committed_prefix": "Each stopped setup prefix commits; an enabled illegal access leaves its destination poisoned and does not commit",
+      "restart_rule": "The common handler validates exact IIP and ISR, clears p1, and RFI retries the same access nullified",
+      "permitted_results": ["All 1,024 selector/unit/direction/qualification combinations match Table 3-3; ignored ranges read zero and discard writes"],
+      "required_evidence": "E2"
+    },
+    {
       "id": "REG-006-BR-INDEX-SPACE",
       "requirement_ids": ["REG-006"],
       "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
@@ -1573,6 +1609,24 @@
       "nat_behavior": "Predicate registers do not carry NaT state",
       "possible_faults": [], "fault_priority": [], "committed_prefix": "Each stopped packed predicate transfer commits as one image", "restart_rule": "No restart occurs for legal packed transfers",
       "permitted_results": ["All six readback images match their literal codewords and uniquely identify every p1-p63 bit position"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-007-AR-ACCESS-CLASSES",
+      "requirement_ids": ["REG-007"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Instruction Reference", "section": "3", "printed_pages": ["3:172", "3:173"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "An access to an application register from the wrong unit type causes an Illegal Operation fault"},
+      "operation": {"kind": "application-register-access-class", "selector": "defined, wrong-unit, reserved, ignored, read-only BSP, and absent optional RUC selectors", "encoding": "M/I register-form AR reads and writes"},
+      "legal_inputs": ["Every selector with enabled and false-qualified read/write forms, non-reserved zero enabled writes, nonzero false writes, and poison read destinations"],
+      "privilege": {"levels": [0], "rule": "CPL0 removes independent privilege faults while preserving selector and execution-unit rules"},
+      "state_read": ["Complete AR selector disposition and exact interruption restart state"], "state_written": ["Defined writable ARs and declared GR/predicate/interruption observation state"],
+      "predication": {"applies": true, "rule": "False qualification suppresses wrong-unit, reserved-selector, and read-only faults and preserves the read destination"},
+      "nat_behavior": "NaT-clear inputs isolate access-class behavior from Register NaT Consumption priority",
+      "possible_faults": ["Illegal Operation fault"], "fault_priority": ["Qualification precedes selector, execution-unit, and read-only checks"],
+      "committed_prefix": "The stopped setup prefix commits; the enabled faulting operation and poisoned destination do not",
+      "restart_rule": "The handler proves exact IIP/EI/code, clears p1, and RFI completes the nullified retry once",
+      "permitted_results": ["Defined selectors accept their specified unit, reserved/wrong-unit/BSP-write forms fault, and ignored selectors accept either unit with zero/discard behavior"],
       "required_evidence": "E2"
     },
     {

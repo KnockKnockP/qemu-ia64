@@ -548,7 +548,10 @@ def check_application_register_plane(root: Path) -> None:
             "MOV_ARGR no longer rejects r0/out-of-frame targets")
 
     write_arm = lowering[lowering.index(
-        "    {\n        TCGv_i64 value"):]
+        "    {\n        IA64TrArEffect *pfs_write"):]
+    pfs_prepare = write_arm.index("ia64_tr_group_prepare_pfs_write")
+    predicate_guard = write_arm.index(
+        "ia64_tr_emit_decoded_predicate_guard", pfs_prepare)
     legality = write_arm.index(
         "ia64_tr_emit_application_legality(ctx, insn, true)")
     source = write_arm.index("ia64_tr_group_load_ordinary_gr_pair", legality)
@@ -559,7 +562,8 @@ def check_application_register_plane(root: Path) -> None:
         "ia64_tr_emit_application_privilege(ctx, insn, true)", value)
     committed_write = write_arm.index(
         "gen_helper_application_register_write_committed", privilege)
-    require(legality < source < nat < value < pfs_write and
+    require(pfs_prepare < predicate_guard < legality < source < nat <
+            value < pfs_write and
             legality < source < nat < value < privilege < committed_write,
             "MOV_GRAR legality/NaT/value/privilege/write ordering drifted")
     for token in (
@@ -597,9 +601,21 @@ def check_application_register_plane(root: Path) -> None:
     pfs_special = system_lowering[system_lowering.index(
         "descriptor->kind == IA64_TR_SYSTEM_MOV_IMMAR &&"):
         system_lowering.index("if (descriptor->kind == IA64_TR_SYSTEM_MF")]
-    require(pfs_special.index("ia64_tr_emit_application_write_value_check") <
+    require(pfs_special.index("ia64_tr_group_prepare_pfs_write") <
+            pfs_special.index("ia64_tr_emit_decoded_predicate_guard") <
+            pfs_special.index("ia64_tr_emit_application_write_value_check") <
             pfs_special.index("ia64_tr_group_write_pfs"),
-            "MOV_IMMAR PFS bypasses reserved-value/overlay handling")
+            "MOV_IMMAR PFS preparation/predicate/value ordering drifted")
+
+    pfs_prepare_helper = section(
+        translate,
+        "static IA64TrArEffect *ia64_tr_group_prepare_pfs_write(",
+        "static void ia64_tr_group_write_pfs(",
+    )
+    require("ia64_tr_ssa_ensure_branch_pfs_forwarded" in
+            pfs_prepare_helper and
+            "ia64_tr_group_prepare_ordered_ar_effect" in pfs_prepare_helper,
+            "qualified PFS writes no longer define both SSA predecessors")
 
     writer = section(
         system,
