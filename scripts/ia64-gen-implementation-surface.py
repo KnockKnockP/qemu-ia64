@@ -314,6 +314,26 @@ ARCHITECTURAL_SURFACES = (
         "target/ia64/translate.c", "ia64_tr_emit_decoded_predicate_test",
     ),
     (
+        "cpu.register.rotation.gr", "cpu.register",
+        "general-register rotating-region rename semantics",
+        "target/ia64/insn.c", "env->rse.rrb_gr =",
+    ),
+    (
+        "cpu.register.rotation.fr", "cpu.register",
+        "floating-register rotating-region rename semantics",
+        "target/ia64/insn.c", "env->rse.rrb_fr =",
+    ),
+    (
+        "cpu.register.rotation.pr", "cpu.register",
+        "predicate-register rotating-region rename semantics",
+        "target/ia64/insn.c", "env->rse.rrb_pr =",
+    ),
+    (
+        "cpu.register.gr.bank-switch", "cpu.register",
+        "interruption, RFI, and explicit GR16-GR31 bank selection",
+        "target/ia64/exception.c", "ia64_psr_for_interruption_delivery",
+    ),
+    (
         "cpu.branch.forms", "cpu.branch",
         "direct, indirect, long, conditional, and loop branch forms",
         "target/ia64/translate.c", "ia64_tr_emit_decoded_branch_split",

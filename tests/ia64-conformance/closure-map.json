@@ -516,6 +516,34 @@
       },
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-009-GR-BANK-SWITCH",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.gr.bank-switch"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-010-FR-ROTATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.rotation.fr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-010-GR-ROTATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.rotation.gr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-010-PR-ROTATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.rotation.pr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
     }
   ]
 }
