@@ -1,0 +1,31 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.speculation-semantic-tranche",
+  "schema_version": 1,
+  "profile": "vibtanium-strict-up",
+  "test_id": 706,
+  "cases": [
+    {
+      "id": "ALT-001-INTEGER-NATPAGE-DEFERRAL-EXACT",
+      "case_id": 1,
+      "normative_token": 95,
+      "normative_row": "ALT-001-INTEGER-NATPAGE-DEFERRAL",
+      "implementation_rows": ["cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_chk_s", "cpu.opcode.ia64_op_ld1s", "cpu.opcode.ia64_op_ld1sa", "cpu.opcode.ia64_op_ld2s", "cpu.opcode.ia64_op_ld2sa", "cpu.opcode.ia64_op_ld4s", "cpu.opcode.ia64_op_ld4sa", "cpu.opcode.ia64_op_ld8s", "cpu.opcode.ia64_op_ld8sa"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "2: ld and chk", "printed_pages": ["3:34", "3:35", "3:150", "3:151"], "anchor": "Certain exceptions may be deferred rather than generating a fault"},
+      "preconditions": ["CPL0 executes with PSR.dt and PSR.ic enabled", "A DTC entry maps an aligned WB page whose PTE memory attribute is NaTPage", "The .s and .sa destinations contain distinct literal payloads with clear NaTs", "Each load uses a distinct base and a positive immediate update equal to one or two datum widths"],
+      "inputs": ["Integer widths 1, 2, 4, and 8 bytes", "One ldN.s and one ldN.sa per width", "One integer chk.s recovery branch for the .s destination", "One integer chk.a recovery branch for the .sa destination"],
+      "expected_results": ["Each NaTPage reference is deferred without a delivered interruption", "Each destination acquires NaT; its 64-bit data portion is implementation-specific", "Both immediate base updates retire exactly once despite deferral", "CHK.S branches because the .s destination is NaT", "CHK.A branches because deferred .sa allocated no ALAT entry"],
+      "allowed_results": ["For every width, any two destination data portions plus the exact two updated bases, two NaTs, and two recovery markers are observed with no pending interruption"],
+      "permitted_state_changes": ["The implementation-specific data portions and NaT bits of both destinations", "The two declared base registers", "The two recovery marker registers", "Internal translation and ALAT lookup state required by the instructions"],
+      "required_unchanged_state": ["The NaTPage backing memory", "Unrelated GR, NaT, predicate, and memory state"],
+      "expected_faults": ["No delivered fault; Data NaT Page is deferred by both control-speculative load types"],
+      "fault_priority": ["Enabled predicate and legal operands", "NaTPage translation classification", "Control-speculation deferral", "Base-update retirement", "CHK.S or CHK.A recovery branch"],
+      "committed_prefix": "Each speculative load commits only its architecturally required destination NaT and base update; no memory value or ALAT entry is committed for the deferred reference",
+      "restart_action": "CHK.S and CHK.A each branch to test-owned recovery code; no interruption retry is involved",
+      "applicable_variants": ["ld1.s", "ld1.sa", "ld2.s", "ld2.sa", "ld4.s", "ld4.sa", "ld8.s", "ld8.sa", "integer chk.s", "integer chk.a", "immediate base update"],
+      "execution": {"lane": "bare-metal-batch", "probes": ["integer_speculative_nat_page_defer_case"], "result_observations": ["destination payloads and NaTs", "updated bases", "CHK.S recovery marker", "CHK.A recovery marker", "interruption state", "direct typed traces for all loads and checks"]},
+      "oracle": {"independence": "independent", "derivation": "All widths, addresses, update values, NaT masks, recovery targets, and terminal markers are test-owned literals or direct arithmetic derived from the cited load/check rules; destination data portions are deliberately not compared because Intel defines them as implementation-specific after deferral, and no production translation, ALAT, or exception helper supplies expected values"},
+      "limitations": ["This atomic row covers only integer NaTPage deferral at CPL0; other deferrable and non-deferrable fault classes, successful values, FP forms, false predicates, ALAT-hit optionality, and migration remain separate ALT/MEM/MMU rows"]
+    }
+  ]
+}

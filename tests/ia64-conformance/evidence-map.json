@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 65
+    "row_closing_claims_expected": 66
   },
   "entries": [
     {
@@ -150,14 +150,16 @@
       "ci_tiers": ["affected-edit", "required"],
       "test_registration": "test-ia64-data-plane-tcg",
       "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/speculation-semantic-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/ia64_data_plane_tcg_spec.py"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-data-plane-tcg",
-      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks.",
-      "oracle_independence": "partially-independent",
-      "conformance_role": "candidate",
-      "closes_normative_rows": [],
-      "limitations": ["Legacy cases lack normative IDs, citations, and the complete required variant matrix."]
+      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks, including an exact four-width integer NaTPage matrix in which LD.S and LD.SA set NaTs, retire distinct immediate base updates, leave implementation-specific GR payloads unconstrained, and drive mandatory CHK.S and absent-entry CHK.A recovery through direct typed traces.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["ALT-001-INTEGER-NATPAGE-DEFERRAL"],
+      "limitations": ["Only the explicitly claimed integer NaTPage row has a complete normative contract and independent exact matrix; other legacy cases remain candidates and do not close their broader opcode, floating-point, memory, speculation, cache, atomic, or fault domains."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-static",

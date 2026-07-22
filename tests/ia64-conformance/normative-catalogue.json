@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 15,
+  "catalogue_revision": 16,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -14,6 +14,26 @@
     "vibtanium-default-up"
   ],
   "rows": [
+    {
+      "id": "ALT-001-INTEGER-NATPAGE-DEFERRAL",
+      "requirement_ids": ["ALT-001", "ALT-003", "MEM-003", "MEM-005"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Part 1: Instruction Set Descriptions", "section": "2", "printed_pages": ["3:34", "3:35", "3:150", "3:151"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "Certain exceptions may be deferred rather than generating a fault"},
+      "operation": {"kind": "integer-control-speculative-natpage-deferral", "selector": "ld1.s/sa, ld2.s/sa, ld4.s/sa, and ld8.s/sa followed by integer chk.s or chk.a recovery", "encoding": "M10 immediate-update integer speculative and speculative-advanced loads plus M20/M22 checked branches"},
+      "legal_inputs": ["CPL0 with PSR.dt and PSR.ic enabled", "A DTC entry maps a naturally aligned WB physical page through a NaTPage PTE", "The destinations initially have clear NaTs", "Each immediate update is representable and the destination differs from its base"],
+      "privilege": {"levels": [0], "rule": "The selected loads and checks are application-level instructions; this exact system guest uses CPL0 solely to install its translation"},
+      "state_read": ["DTC translation and NaTPage memory attribute", "load bases", "destination NaT for CHK.S", "destination ALAT identity for CHK.A"],
+      "state_written": ["implementation-specific destination data portions and set NaTs", "post-increment base values", "checked-branch control flow", "no ALAT entry for a deferred speculative-advanced load"],
+      "predication": {"applies": true, "rule": "All selected operations use p0; false qualification is a separate ALT-006 row"},
+      "nat_behavior": "Both .s and .sa defer the NaTPage reference by setting the destination NaT; the GR data portion is implementation-specific and is not an oracle. CHK.S must fail on that NaT, while deferred .sa must leave no ALAT entry so CHK.A also fails.",
+      "possible_faults": ["No interruption is delivered: the Data NaT Page condition is deferred by the selected control-speculative forms"],
+      "fault_priority": ["predicate and operand legality", "NaTPage translation classification", "control-speculation deferral", "base-update retirement", "checked recovery branch"],
+      "committed_prefix": "Each deferred load commits its destination NaT, an implementation-specific destination data portion, and its exact immediate base update; it commits no ALAT entry",
+      "restart_rule": "There is no interruption retry. CHK.S or CHK.A transfers control to compiler-style recovery code when it observes the deferred token or absent entry.",
+      "permitted_results": ["For widths 1, 2, 4, and 8, both loads complete without interruption with arbitrary destination data portions, set both NaTs, retire updates of one and two widths, and take their declared CHK.S and CHK.A recovery targets"],
+      "required_evidence": "E2"
+    },
     {
       "id": "BND-001-BUNDLE-FORMAT",
       "requirement_ids": [

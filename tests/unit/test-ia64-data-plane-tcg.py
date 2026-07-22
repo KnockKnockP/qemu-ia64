@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -66,6 +67,50 @@ IA64_DATA_ACCESS_RIGHTS_VECTOR = 0x5300
 IA64_DATA_NAT_PAGE_VECTOR = 0x5600
 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR = 0x5B00
 IA64_ILLEGAL_OPERATION_VECTOR = 0x5400
+
+INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_chk_s",
+    "cpu.opcode.ia64_op_ld1s",
+    "cpu.opcode.ia64_op_ld1sa",
+    "cpu.opcode.ia64_op_ld2s",
+    "cpu.opcode.ia64_op_ld2sa",
+    "cpu.opcode.ia64_op_ld4s",
+    "cpu.opcode.ia64_op_ld4sa",
+    "cpu.opcode.ia64_op_ld8s",
+    "cpu.opcode.ia64_op_ld8sa",
+)
+
+
+def validate_contract(root: Path) -> str:
+    path = root / "tests/ia64-conformance/speculation-semantic-tranche.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if (document.get("schema") !=
+            "vibtanium.ia64.speculation-semantic-tranche" or
+            document.get("schema_version") != 1):
+        raise AssertionError("speculation tranche schema/version drift")
+    cases = document.get("cases")
+    if not isinstance(cases, list) or len(cases) != 1:
+        raise AssertionError("speculation tranche must contain one atomic case")
+    case = cases[0]
+    if case.get("normative_row") != "ALT-001-INTEGER-NATPAGE-DEFERRAL":
+        raise AssertionError("speculation tranche normative row drift")
+    if case.get("implementation_rows") != list(
+            INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS):
+        raise AssertionError("speculation tranche implementation row drift")
+    if case.get("execution", {}).get("probes") != [
+            "integer_speculative_nat_page_defer_case"]:
+        raise AssertionError("speculation tranche execution probe drift")
+    if case.get("oracle", {}).get("independence") != "independent":
+        raise AssertionError("speculation tranche oracle is not independent")
+    variants = set(case.get("applicable_variants", []))
+    for width in (1, 2, 4, 8):
+        if "ld{}.s".format(width) not in variants or \
+                "ld{}.sa".format(width) not in variants:
+            raise AssertionError(
+                "speculation tranche misses width {} variants".format(width)
+            )
+    return "one exact ALT row covers all four integer .s/.sa widths"
 
 
 def _movl_bundle(address: int, reg: int, value: int) -> object:
@@ -1146,58 +1191,80 @@ def fp_advanced_unsupported_case(memory_attribute: int) -> RuntimeCase:
     )
 
 
-def integer_speculative_nat_page_defer_case() -> RuntimeCase:
+def integer_speculative_nat_page_defer_case(width: int) -> RuntimeCase:
+    if width not in (1, 2, 4, 8):
+        raise ValueError("integer speculative width must be 1, 2, 4, or 8")
     virtual = 0x8000
     physical = 0x2000
+    old_s = 0x1111000000000000 | width
+    old_sa = 0x2222000000000000 | width
     bundles: List[object] = [
         _movl_bundle(0x10, 2, _mapped_pte(physical, 7)),
         _movl_bundle(0x20, 7, virtual),
         _movl_bundle(0x30, 8, virtual),
+        _movl_bundle(0x40, 20, old_s),
+        _movl_bundle(0x50, 21, old_sa),
     ]
     traced: List[int] = []
-    address = _append_dtc_install(bundles, 0x40)
+    address = _append_dtc_install(bundles, 0x60)
     address = _append_m(
         bundles, address,
-        integer_load(8, "s", r1=20, r3=7,
-                     update="imm", imm=8), traced,
+        integer_load(width, "s", r1=20, r3=7,
+                     update="imm", imm=width), traced,
     )
     address = _append_m(
         bundles, address,
-        integer_load(8, "sa", r1=21, r3=8,
-                     update="imm", imm=16), traced,
+        integer_load(width, "sa", r1=21, r3=8,
+                     update="imm", imm=2 * width), traced,
     )
-    check_ip = address
+    first_check = address
+    second_check = first_check + 0x40
+    terminal = second_check + 0x40
     bundles.extend((
-        H.Bundle(check_ip, 0x01,
-                 _chk_a_branch(check_ip, check_ip + 0x20, reg=21),
+        H.Bundle(first_check, 0x01,
+                 _chk_s_branch(first_check, first_check + 0x20, reg=20),
                  H.nop_i(), H.nop_i()),
-        _marker_bundle(check_ip + 0x10, 30, 0xBAD, check_ip + 0x30),
-        _marker_bundle(check_ip + 0x20, 30, 1, check_ip + 0x30),
-        H.spin_bundle(check_ip + 0x30),
+        _marker_bundle(first_check + 0x10, 30, 0xBAD, terminal),
+        _marker_bundle(first_check + 0x20, 30, 1, second_check),
+        H.Bundle(second_check, 0x01,
+                 _chk_a_branch(second_check, second_check + 0x20, reg=21),
+                 H.nop_i(), H.nop_i()),
+        _marker_bundle(second_check + 0x10, 31, 0xBAD, terminal),
+        _marker_bundle(second_check + 0x20, 31, 2, terminal),
+        H.spin_bundle(terminal),
     ))
-    traced.append(check_ip)
+    traced.extend((first_check, second_check))
     program = H.Program(
-        name="LD8.S/SA NaTPage deferral and update retirement",
-        bundles=tuple(bundles), terminal_ip=check_ip + 0x30,
-        data=(H.DataWord(physical, 0xDEADBEEF, 8),),
+        name="LD{}.S/SA NaTPage deferral and checked recovery".format(width),
+        bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
     )
 
     def verify(snapshot) -> str:
-        _no_exception(snapshot, "integer NaTPage speculative deferral")
-        H._require(snapshot.gr[7] == virtual + 8 and
-                   snapshot.gr[8] == virtual + 16,
-                   "LD8.S/SA deferral did not retire base updates")
+        label = "LD{}.S/SA NaTPage deferral".format(width)
+        _no_exception(snapshot, label)
+        H._require(snapshot.gr[7] == virtual + width and
+                   snapshot.gr[8] == virtual + 2 * width,
+                   label + " did not retire exact base updates")
         H._require((snapshot.nat_low & ((1 << 20) | (1 << 21))) ==
                    ((1 << 20) | (1 << 21)),
-                   "LD8.S/SA NaTPage did not stage destination NaTs")
-        H._require(snapshot.gr[30] == 1,
-                   "LD8.SA NaTPage incorrectly recorded an ALAT entry")
-        return ("LD8.S and LD8.SA deferred NaTPage, retired updates, set "
-                "destination NaTs, and left no ALAT record")
+                   label + " did not set both destination NaTs")
+        H._require((snapshot.gr[30], snapshot.gr[31]) == (1, 2),
+                   label + " missed CHK.S or absent-entry CHK.A recovery")
+        return (
+            "LD{0}.S/SA deferred NaTPage, retired updates, set NaTs, and "
+            "took CHK.S plus CHK.A recovery; NaT payloads are unconstrained"
+            .format(
+                width
+            )
+        )
 
     return RuntimeCase(
-        "LD8.S/SA NaTPage deferral", program, tuple(traced), verify,
-        ("IA64_OP_LD8S", "IA64_OP_LD8SA", "IA64_OP_CHK_A"),
+        "LD{}.S/SA NaTPage deferral and recovery".format(width),
+        program, tuple(traced), verify,
+        ("IA64_OP_LD{}S".format(width),
+         "IA64_OP_LD{}SA".format(width),
+         "IA64_OP_CHK_S", "IA64_OP_CHK_A"),
     )
 
 
@@ -1946,7 +2013,8 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
         alat_cache_hint_case(),
         integer_advanced_nat_page_case(), fp_advanced_nat_page_case(),
         *(fp_advanced_unsupported_case(ma) for ma in (4, 5, 6)),
-        integer_speculative_nat_page_defer_case(),
+        *(integer_speculative_nat_page_defer_case(width)
+          for width in (1, 2, 4, 8)),
         fp_speculative_nat_page_defer_case(),
         *(reserved_width_illegal_case(opcode) for opcode in (
             "IA64_OP_LD1FILL", "IA64_OP_LD2FILL", "IA64_OP_LD4FILL",
@@ -1964,6 +2032,7 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
 
 
 def self_check(cases: Sequence[RuntimeCase]) -> str:
+    contract = validate_contract(Path(__file__).resolve().parents[2])
     primary = cases[0]
     H._require(len(primary.program.bundles) - 1 == 63,
                "primary admission inventory is not 63 bundles")
@@ -1996,10 +2065,10 @@ def self_check(cases: Sequence[RuntimeCase]) -> str:
                 "decoder-reserved-width"]
     H._require(len(reserved) == 6,
                "expected six decoder-reserved spill/fill widths")
-    return ("{} programs; 63 primary bundles (57 decoder-live); {} live "
+    return ("{}; {} programs; 63 primary bundles (57 decoder-live); {} live "
             "alias/completer bundles; 12 shadowed split-load encodings; "
             "6 reserved-width rows"
-            .format(len(cases), len(live_aliases)))
+            .format(contract, len(cases), len(live_aliases)))
 
 
 def run_case(qemu: Path, case: RuntimeCase) -> str:
