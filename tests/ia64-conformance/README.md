@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first four exact speculation contracts live in
+The first five exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -44,15 +44,20 @@ non-deferred Unaligned condition, and below an always-deferred NaTPage to lock
 both priority directions. The fourth adds 16 complete width/class probes for
 short-format VHPT selection: a mapped invalid leaf must raise Data TLB, while
 missing walker backing must raise VHPT Translation, with exact original IFA,
-derived IHA, default ITIR, R|SP ISR, and fault-slot evidence. Other data-plane
-cases remain candidate evidence until they receive equally atomic contracts
-and complete variant matrices.
+derived IHA, default ITIR, R|SP ISR, and fault-slot evidence. The fifth adds
+the 72-program recovery-model truth table for `DCR.dm`: all
+three translation selections, all integer widths and both classes must defer
+only when both code-page ITLB.ed and DCR.dm are set. Deferred cases take
+checked recovery after the exact base update; either clear input produces the
+exact immediate vector and matching ISR.ed. Other data-plane cases remain
+candidate evidence until they receive equally atomic contracts and complete
+variant matrices.
 
 The three long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 two-way public gate after the no-recovery
-VHPT-selection checkpoint, `test-ia64-system-tcg` took 47.05 seconds,
-`test-ia64-full-tcg` 48.65 seconds, and `test-ia64-register-tcg` 45.69
-seconds. The expanded data-plane registration passed 137 subtests in 36.98
+matrices execute. On the 2026-07-22 two-way public gate after the
+recovery-model DCR.dm checkpoint, `test-ia64-system-tcg` took 46.89 seconds,
+`test-ia64-full-tcg` 48.69 seconds, and `test-ia64-register-tcg` 45.57
+seconds. The expanded data-plane registration passed 209 subtests in 56.28
 seconds. The RSE suites include five fresh-process
 save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the
