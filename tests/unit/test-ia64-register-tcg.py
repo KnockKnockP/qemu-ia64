@@ -16,7 +16,16 @@ from typing import Callable, Sequence
 PSR_DFL = 1 << 18
 PSR_DFH = 1 << 19
 PSR_BN = 1 << 44
+PSR_PK = 1 << 15
 U64_MASK = (1 << 64) - 1
+
+RSE_DATA_KEY_MISS_VECTOR = 0x1C00
+RSE_DIRTY_BIT_VECTOR = 0x2000
+RSE_DATA_ACCESS_BIT_VECTOR = 0x2800
+RSE_PAGE_FAULT_VECTOR = 0x5000
+RSE_KEY_PERMISSION_VECTOR = 0x5100
+RSE_DATA_ACCESS_RIGHTS_VECTOR = 0x5300
+RSE_DATA_NAT_PAGE_VECTOR = 0x5600
 
 
 def bit_mask(*bits_or_ranges: int | range) -> int:
@@ -229,6 +238,14 @@ RSE_MANDATORY_DTC_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.18",
     "cpu.register.ar.19",
 )
+RSE_MANDATORY_PROTECTION_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.opcode.ia64_op_loadrs",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -326,6 +343,9 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-DTC-RETRY": list(
             RSE_MANDATORY_DTC_IMPLEMENTATION_ROWS
         ),
+        "RSE-007-MANDATORY-PROTECTION-RETRY": list(
+            RSE_MANDATORY_PROTECTION_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -349,12 +369,15 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-DTC-RETRY": [
             "test_rse_mandatory_fault_retry"
         ],
+        "RSE-007-MANDATORY-PROTECTION-RETRY": [
+            "test_rse_mandatory_protection_fault_retry"
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 35:
-        raise AssertionError("register tranche must contain thirty-five cases")
+    if not isinstance(cases, list) or len(cases) != 36:
+        raise AssertionError("register tranche must contain thirty-six cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -463,7 +486,8 @@ def validate_contract(root: Path) -> str:
         "selectors, interruption-access states, complete nine-register AR "
         "and named CR field partitions, 6,208 dirty/RNAT BSPSTORE rebases "
         "plus exact ALLOC, COVER, CLRRRB, LOADRS, and 96-register FLUSHRS "
-        "effects and ALLOC/FLUSHRS/LOADRS DTC fault/RFI retry, "
+        "effects and ALLOC/FLUSHRS/LOADRS DTC plus thirteen mandatory "
+        "RSE protection fault/RFI retries, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -2229,7 +2253,8 @@ def rse_span_for_registers_below(bsp: int, registers: int) -> int:
 
 def append_rse_identity_dtc_mapping(
         h: ModuleType, system: ModuleType, bundles: list[object],
-        address: int, page: int) -> int:
+        address: int, page: int, *, pte: int | None = None,
+        itir: int = 12 << 2) -> int:
     """Install one 4 KiB identity DTC entry while RSE translation is off."""
     bundles.append(system.movl_bundle(h, address, 8, page))
     address += 0x10
@@ -2237,15 +2262,15 @@ def append_rse_identity_dtc_mapping(
         address, 0x01, h.mov_grcr(h.IA64_CR_IFA, 8), h.nop_i(), h.nop_i()
     ))
     address += 0x10
-    bundles.append(h.Bundle(
-        address, 0x01, h.nop_m(), h.adds(9, 12 << 2, 0), h.nop_i()
-    ))
+    bundles.append(system.movl_bundle(h, address, 9, itir))
     address += 0x10
     bundles.append(h.Bundle(
         address, 0x01, h.mov_grcr(h.IA64_CR_ITIR, 9), h.nop_i(), h.nop_i()
     ))
     address += 0x10
-    bundles.append(system.movl_bundle(h, address, 10, page | 0x661))
+    bundles.append(system.movl_bundle(
+        h, address, 10, page | 0x661 if pte is None else pte
+    ))
     address += 0x10
     # ITC.D must terminate its instruction group.
     bundles.append(h.Bundle(
@@ -2260,10 +2285,13 @@ def append_rse_identity_dtc_mapping(
 
 def append_rse_fault_handler(
         h: ModuleType, system: ModuleType, bundles: list[object],
-        mapped_page: int,
-        poison: tuple[tuple[int, int], ...]) -> int:
-    """Repair one RSE DTC miss, poison its committed prefix, and RFI."""
-    address = h.IA64_ALTERNATE_DATA_TLB_VECTOR
+        mapped_page: int, poison: tuple[tuple[int, int], ...], *,
+        vector: int | None = None, repaired_pte: int | None = None,
+        itir: int = 12 << 2,
+        repaired_pkr: tuple[int, int] | None = None) -> int:
+    """Repair one RSE data fault, poison its committed prefix, and RFI."""
+    address = (h.IA64_ALTERNATE_DATA_TLB_VECTOR
+               if vector is None else vector)
     for register, control in (
             (20, h.IA64_CR_IIP), (21, h.IA64_CR_IFA),
             (22, h.IA64_CR_ISR), (23, h.IA64_CR_IFS)):
@@ -2276,14 +2304,34 @@ def append_rse_fault_handler(
         address, 0x01, h.mov_m_argr(24, 18), h.nop_i(), h.nop_i()
     ))
     address += 0x10
-    bundles.append(system.movl_bundle(
-        h, address, 10, mapped_page | 0x661
-    ))
-    address += 0x10
-    bundles.append(h.Bundle(
-        address, 0x0b, h.itc_d(10), h.nop_m(), h.nop_i()
-    ))
-    address += 0x10
+    if repaired_pkr is not None:
+        pkr_index, pkr_value = repaired_pkr
+        bundles.append(system.movl_bundle(h, address, 8, pkr_index))
+        address += 0x10
+        bundles.append(system.movl_bundle(h, address, 9, pkr_value))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, system.m_system(0x03, r2=9, r3=8),
+            h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    if repaired_pte is not None or repaired_pkr is None:
+        bundles.append(system.movl_bundle(
+            h, address, 10,
+            mapped_page | 0x661 if repaired_pte is None else repaired_pte,
+        ))
+        address += 0x10
+        bundles.append(system.movl_bundle(h, address, 9, itir))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_grcr(h.IA64_CR_ITIR, 9),
+            h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x0b, h.itc_d(10), h.nop_m(), h.nop_i()
+        ))
+        address += 0x10
     bundles.append(h.Bundle(
         address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
     ))
@@ -2305,9 +2353,9 @@ def append_rse_fault_handler(
 
 def append_rse_enable_translated_faults(
         h: ModuleType, system: ModuleType, bundles: list[object],
-        address: int) -> int:
+        address: int, *, extra_psr: int = 0) -> int:
     bundles.append(system.movl_bundle(
-        h, address, 8, h.IA64_PSR_IC | h.IA64_PSR_RT
+        h, address, 8, h.IA64_PSR_IC | h.IA64_PSR_RT | extra_psr
     ))
     address += 0x10
     bundles.append(h.Bundle(
@@ -2320,7 +2368,33 @@ def append_rse_enable_translated_faults(
     return address + 0x10
 
 
-def rse_flushrs_fault_retry_program(h: ModuleType, system: ModuleType):
+def append_rse_pkr_write(
+        h: ModuleType, system: ModuleType, bundles: list[object],
+        address: int, index: int, value: int) -> int:
+    """Write one protection-key register and serialize data access."""
+    bundles.append(system.movl_bundle(h, address, 8, index))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 9, value))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, system.m_system(0x03, r2=9, r3=8),
+        h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
+    ))
+    return address + 0x10
+
+
+def rse_flushrs_fault_retry_program(
+        h: ModuleType, system: ModuleType, *, label: str = "DTC",
+        vector: int | None = None, fault_pte: int | None = None,
+        repaired_pte: int | None = None, fault_itir: int = 12 << 2,
+        prefix_pte: int | None = None, prefix_itir: int = 12 << 2,
+        extra_psr: int = 0,
+        initial_pkrs: tuple[tuple[int, int], ...] = (),
+        repaired_pkr: tuple[int, int] | None = None):
     entry = 0x10000
     terminal = 0x70000
     address = entry
@@ -2360,10 +2434,20 @@ def rse_flushrs_fault_retry_program(h: ModuleType, system: ModuleType):
         address += 0x10
 
     address = append_rse_identity_dtc_mapping(
-        h, system, bundles, address, 0x7000
+        h, system, bundles, address, 0x7000,
+        pte=prefix_pte, itir=prefix_itir,
     )
+    if fault_pte is not None:
+        address = append_rse_identity_dtc_mapping(
+            h, system, bundles, address, 0x8000,
+            pte=fault_pte, itir=fault_itir,
+        )
+    for index, value in initial_pkrs:
+        address = append_rse_pkr_write(
+            h, system, bundles, address, index, value
+        )
     address = append_rse_enable_translated_faults(
-        h, system, bundles, address
+        h, system, bundles, address, extra_psr=extra_psr
     )
     fault_ip = address
     bundles.append(h.Bundle(
@@ -2383,11 +2467,13 @@ def rse_flushrs_fault_retry_program(h: ModuleType, system: ModuleType):
     ))
     bundles.append(h.spin_bundle(terminal))
     handler_rfi = append_rse_fault_handler(
-        h, system, bundles, 0x8000, poison
+        h, system, bundles, 0x8000, poison, vector=vector,
+        repaired_pte=repaired_pte, itir=fault_itir,
+        repaired_pkr=repaired_pkr,
     )
     return (
         h.Program(
-            "FLUSHRS mandatory-store DTC fault/RFI retry",
+            f"FLUSHRS mandatory-store {label} fault/RFI retry",
             tuple(bundles), terminal,
             tuple(h.DataWord(0x1800 + (value - 1) * 8, value, 8)
                   for value in range(1, 5)),
@@ -2399,7 +2485,15 @@ def rse_flushrs_fault_retry_program(h: ModuleType, system: ModuleType):
     )
 
 
-def rse_loadrs_fault_retry_program(h: ModuleType, system: ModuleType):
+def rse_loadrs_fault_retry_program(
+        h: ModuleType, system: ModuleType, *, label: str = "DTC",
+        vector: int | None = None, fault_pte: int | None = None,
+        repaired_pte: int | None = None, fault_itir: int = 12 << 2,
+        prefix_pte: int | None = None, prefix_itir: int = 12 << 2,
+        extra_psr: int = 0,
+        initial_pkrs: tuple[tuple[int, int], ...] = (),
+        repaired_pkr: tuple[int, int] | None = None,
+        rsc_pl: int = 0):
     entry = 0x10000
     terminal = 0x70000
     address = entry
@@ -2416,17 +2510,29 @@ def rse_loadrs_fault_retry_program(h: ModuleType, system: ModuleType):
         address, 0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i()
     ))
     address += 0x10
-    bundles.append(system.movl_bundle(h, address, 8, (bsp - base) << 16))
+    bundles.append(system.movl_bundle(
+        h, address, 8, ((bsp - base) << 16) | (rsc_pl << 2)
+    ))
     address += 0x10
     bundles.append(h.Bundle(
         address, 0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i()
     ))
     address += 0x10
     address = append_rse_identity_dtc_mapping(
-        h, system, bundles, address, 0x8000
+        h, system, bundles, address, 0x8000,
+        pte=prefix_pte, itir=prefix_itir,
     )
+    if fault_pte is not None:
+        address = append_rse_identity_dtc_mapping(
+            h, system, bundles, address, 0x7000,
+            pte=fault_pte, itir=fault_itir,
+        )
+    for index, value in initial_pkrs:
+        address = append_rse_pkr_write(
+            h, system, bundles, address, index, value
+        )
     address = append_rse_enable_translated_faults(
-        h, system, bundles, address
+        h, system, bundles, address, extra_psr=extra_psr
     )
     fault_ip = address
     bundles.append(h.Bundle(
@@ -2461,11 +2567,13 @@ def rse_loadrs_fault_retry_program(h: ModuleType, system: ModuleType):
     ))
     bundles.append(h.spin_bundle(terminal))
     handler_rfi = append_rse_fault_handler(
-        h, system, bundles, 0x7000, poison
+        h, system, bundles, 0x7000, poison, vector=vector,
+        repaired_pte=repaired_pte, itir=fault_itir,
+        repaired_pkr=repaired_pkr,
     )
     return (
         h.Program(
-            "LOADRS mandatory-load DTC fault/RFI retry",
+            f"LOADRS mandatory-load {label} fault/RFI retry",
             tuple(bundles), terminal,
             tuple(h.DataWord(base + index * 8, value, 8)
                   for index, value in enumerate(original)),
@@ -2814,6 +2922,162 @@ def test_rse_mandatory_fault_retry(h: ModuleType, system: ModuleType,
         "boundary, expose exact IIP/IFA/ISR.rs and committed BSPSTORE "
         "prefix state, install the missing DTC entry in the physical "
         "handler, and RFI-retry without replaying poisoned committed words"
+    )
+
+
+def rse_protection_fault_cases(access: str) -> tuple[dict[str, object], ...]:
+    """Return architecture-derived mandatory RSE protection-fault cases."""
+    if access not in {"store", "load"}:
+        raise AssertionError(f"unknown RSE protection access {access}")
+
+    page = 0x8000 if access == "store" else 0x7000
+    prefix_page = 0x7000 if access == "store" else 0x8000
+    normal = page | 0x661
+    key = 0x123
+    keyed_itir = (12 << 2) | (key << 8)
+    valid_key = (key << 8) | 1
+    key_disable = 2 if access == "store" else 4
+    cases: list[dict[str, object]] = [
+        {
+            "label": "page-not-present",
+            "vector": RSE_PAGE_FAULT_VECTOR,
+            "kind": "page-fault",
+            "fault_pte": page,
+            "repaired_pte": normal,
+        },
+        {
+            "label": "NaTPage",
+            "vector": RSE_DATA_NAT_PAGE_VECTOR,
+            "kind": "data-nat-page-consumption",
+            "fault_pte": page | 0x67D,
+            "repaired_pte": normal,
+            "isr_code": 0x20,
+        },
+        {
+            "label": "key-miss",
+            "vector": RSE_DATA_KEY_MISS_VECTOR,
+            "kind": "data-key-miss",
+            "fault_pte": normal,
+            "fault_itir": keyed_itir,
+            "extra_psr": PSR_PK,
+            "initial_pkrs": ((0, 1),),
+            "repaired_pkr": (1, valid_key),
+        },
+        {
+            "label": "key-permission",
+            "vector": RSE_KEY_PERMISSION_VECTOR,
+            "kind": "key-permission",
+            "fault_pte": normal,
+            "fault_itir": keyed_itir,
+            "extra_psr": PSR_PK,
+            "initial_pkrs": ((0, 1), (1, valid_key | key_disable)),
+            "repaired_pkr": (1, valid_key),
+        },
+        {
+            "label": "access-rights",
+            "vector": RSE_DATA_ACCESS_RIGHTS_VECTOR,
+            "kind": "data-access-rights",
+            "fault_pte": page | (0x61 if access == "store" else 0x661),
+            "repaired_pte": (normal if access == "store"
+                             else page | 0x7E1),
+            "prefix_pte": (None if access == "store"
+                           else prefix_page | 0x7E1),
+        },
+        {
+            "label": "access-bit",
+            "vector": RSE_DATA_ACCESS_BIT_VECTOR,
+            "kind": "data-access-bit",
+            "fault_pte": page | 0x641,
+            "repaired_pte": normal,
+        },
+    ]
+    if access == "load":
+        cases[4]["rsc_pl"] = 3
+    if access == "store":
+        cases.append({
+            "label": "dirty-bit",
+            "vector": RSE_DIRTY_BIT_VECTOR,
+            "kind": "dirty-bit",
+            "fault_pte": page | 0x621,
+            "repaired_pte": normal,
+        })
+    return tuple(cases)
+
+
+def test_rse_mandatory_protection_fault_retry(
+        h: ModuleType, system: ModuleType, qemu: Path) -> str:
+    """Exercise every protection fault legal for mandatory RSE traffic."""
+    completed: list[str] = []
+    for access in ("store", "load"):
+        for case in rse_protection_fault_cases(access):
+            label = str(case["label"])
+            vector = int(case["vector"])
+            expected_kind = str(case["kind"])
+            kwargs = {
+                key: value for key, value in case.items()
+                if key not in {"kind", "isr_code"}
+            }
+            if access == "store":
+                program, fault_ip, handler_rfi, poison = \
+                    rse_flushrs_fault_retry_program(h, system, **kwargs)
+                fault_address = 0x8000
+                expected_words = (
+                    poison[0][1], poison[1][1], poison[2][1], 3, 4,
+                )
+                expected_isr = ((1 << 33) | h.IA64_ISR_RS |
+                                int(case.get("isr_code", 0)))
+            else:
+                program, fault_ip, handler_rfi, original = \
+                    rse_loadrs_fault_retry_program(h, system, **kwargs)
+                fault_address = 0x7FF8
+                expected_words = original
+                expected_isr = (h.IA64_ISR_R | h.IA64_ISR_RS |
+                                int(case.get("isr_code", 0)))
+
+            snapshot = h.run_program(
+                qemu, program, compact_loader=True,
+                preserve_fault_slot=True,
+                typed_direct_trace_ips=(fault_ip,),
+                typed_rfi_traces=(handler_rfi,),
+            )
+            expected_psr = (h.IA64_PSR_IC | h.IA64_PSR_RT |
+                            int(case.get("extra_psr", 0)))
+            if (snapshot.ip != program.terminal_ip or
+                    snapshot.exception_kind != expected_kind or
+                    snapshot.exception_vector != vector or
+                    snapshot.exception_source != fault_ip or
+                    snapshot.exception_address != fault_address or
+                    snapshot.gr[20] != fault_ip or
+                    snapshot.gr[21] != fault_address or
+                    snapshot.gr[22] != expected_isr or
+                    snapshot.gr[23] != 0 or
+                    snapshot.gr[24] != 0x8000 or
+                    snapshot.gr[8:13] != expected_words or
+                    snapshot.rse_bsp != 0x8010 or
+                    snapshot.rse_bspstore != 0x8010 or
+                    (snapshot.psr & expected_psr) != expected_psr):
+                raise AssertionError(
+                    "RSE {} {} fault/retry mismatch: ip=0x{:x} "
+                    "exc={}/0x{:x} source/address=0x{:x}/0x{:x} "
+                    "IIP/IFA/ISR/IFS=0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+                    "words={} BSP=0x{:x}/0x{:x} PSR=0x{:x}".format(
+                        access, label, snapshot.ip,
+                        snapshot.exception_kind, snapshot.exception_vector,
+                        snapshot.exception_source,
+                        snapshot.exception_address, snapshot.gr[20],
+                        snapshot.gr[21], snapshot.gr[22], snapshot.gr[23],
+                        tuple(hex(value) for value in snapshot.gr[8:13]),
+                        snapshot.rse_bsp, snapshot.rse_bspstore,
+                        snapshot.psr,
+                    )
+                )
+            completed.append(f"{access}:{label}")
+
+    return (
+        "mandatory FLUSHRS stores and LOADRS loads raised, repaired, and "
+        "RFI-retried all 13 present/NaTPage/key/rights/A/D protection "
+        "cases with exact ISR.rs state and no committed-prefix replay: "
+        + ", ".join(completed)
     )
 
 
@@ -3972,6 +4236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
         ("RSE control effects", lambda: test_rse_control_effects(harness, system, args.qemu.resolve())),
         ("RSE mandatory fault/retry", lambda: test_rse_mandatory_fault_retry(harness, system, args.qemu.resolve())),
+        ("RSE mandatory protection fault/retry", lambda: test_rse_mandatory_protection_fault_retry(harness, system, args.qemu.resolve())),
         ("ALLOC frame and spill effects", lambda: test_alloc_effects(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),

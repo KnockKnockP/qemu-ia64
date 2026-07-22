@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 7,
+  "catalogue_revision": 8,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2155,6 +2155,26 @@
       "committed_prefix": "Each successful mandatory register or RNAT word advances BSPSTORE before the next word. The faulting word and instruction-final state do not commit: ALLOC retains its old frame until retry, while FLUSHRS and LOADRS retain only the completed backing-store prefix.",
       "restart_rule": "The handler observes IFS.v zero, the issuing instruction in IIP, the faulting address in IFA, exact ISR.rs/access bits, and BSPSTORE at the fault word boundary; after installing the missing DTC entry, RFI retries the issuing instruction from that architectural prefix without replaying earlier words.",
       "permitted_results": ["ALLOC, FLUSHRS, and LOADRS each raise exactly one Alternate Data TLB fault at the selected page boundary, preserve the handler-poisoned committed prefix, complete the untouched suffix once, and finish with exact frame, pointer, payload, and RSE-translation state"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-007-MANDATORY-PROTECTION-RETRY",
+      "requirement_ids": ["RSE-007", "RSE-004", "RSE-005", "RSE-009"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "4.1.8", "printed_pages": ["2:69", "2:70", "2:71", "2:144", "2:145", "2:146"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "After the translation entry is loaded, additional TLB faults are checked"},
+      "operation": {"kind": "mandatory-rse-protection-fault-retry", "selector": "FLUSHRS mandatory stores and LOADRS mandatory loads crossing a 4 KiB boundary after a committed prefix for every applicable translated protection-fault class", "encoding": "legal first-in-group FLUSHRS or LOADRS followed by the exact fault-vector handler, architectural translation/PKR repair, and RFI"},
+      "legal_inputs": ["PSR.ic and PSR.rt enabled and serialized", "PSR.pk additionally enabled for key cases", "A legal readable/writable prefix page and an adjacent entry selecting one Page Not Present, NaTPage, Key Miss, Key Permission, Access Rights, Access Bit, or store-only Dirty Bit condition", "Complete frames and legal RSE instruction fields"],
+      "privilege": {"levels": [0], "rule": "The guest executes at CPL0; mandatory references use RSC.pl zero except the load access-rights variant deliberately uses RSC.pl three, and the interruption handler executes physically at CPL0"},
+      "state_read": ["dirty stacked-register values and NaTs", "LOADRS backing image", "RSE DTC entries and protection keys", "RSC.pl", "BSP and BSPSTORE"],
+      "state_written": ["committed backing-store prefix", "BSPSTORE and RSE.BspLoad", "precise IIP, IFA, ISR, and IFS interruption state", "repaired DTC entry or PKR", "remaining mandatory backing-store suffix", "LOADRS physical values"],
+      "predication": {"applies": false, "rule": "FLUSHRS and LOADRS are unpredicated"},
+      "nat_behavior": "The store prefix includes two register words and one RNAT word; the load prefix includes two register words before a faulting RNAT address. NaTPage faults carry ISR code 0x20, and handler poisoning distinguishes prefix replay from exact continuation.",
+      "possible_faults": ["Data Page Not Present", "Data NaT Page Consumption", "Data Key Miss", "Key Permission", "Data Access Rights", "Data Access Bit", "Dirty Bit for mandatory stores"],
+      "fault_priority": ["instruction legality and complete-frame preconditions", "RSE address translation", "Page Not Present", "NaTPage", "Key Miss", "Key Permission", "Access Rights", "Access Bit", "Dirty Bit", "instruction completion"],
+      "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE before the next word. The faulting word and instruction-final state do not commit; repair must continue from the exact prefix.",
+      "restart_rule": "The handler observes IFS.v zero, the issuing instruction in IIP, the faulting address in IFA, exact ISR.rs/access/code bits, and BSPSTORE at the fault boundary; after replacing the PTE or PKR, RFI retries with saved PSR.rt and PSR.pk intact without replaying poisoned prefix words.",
+      "permitted_results": ["All thirteen store/load variants raise exactly one selected protection fault, retain poisoned committed words, complete the untouched suffix once, and finish with exact pointer, payload, interruption, and translated-protection state"],
       "required_evidence": "E2"
     }
   ]
