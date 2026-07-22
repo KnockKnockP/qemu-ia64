@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first six exact speculation contracts live in
+The first seven exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -55,16 +55,23 @@ and both classes cross Page Not Present, Key Miss, Key Permission, Access
 Rights, Access Bit, and Data Debug with the condition-specific bit plus
 ITLB.ed set, that DCR bit clear, and ITLB.ed clear. It therefore distinguishes
 all six DCR bits and proves both hardware deferral with checked recovery and
-precise immediate delivery. Other data-plane cases remain
+precise immediate delivery. The seventh adds the complete 78-program
+`PSR.ic=0` always-defer matrix from Volume 2 Table 5-4: all nine translated
+conditions cover every integer width and both classes, while Unaligned covers
+all six naturally applicable width/class forms. Each case proves no delivered
+interruption, destination NaT, exact width-sized base retirement, CHK.S or
+absent-entry CHK.A recovery, preserved condition controls, and an exact zero
+DCR. The matching `PSR.ic=1` rows provide the immediate-fault contrast.
+Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
-The three long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 two-way public gate after the complete DCR
-recovery checkpoint, `test-ia64-system-tcg` took 46.98 seconds,
-`test-ia64-full-tcg` 48.49 seconds, and `test-ia64-register-tcg` 45.54
-seconds. The expanded data-plane registration passed 353 subtests in 95.04
-seconds, and the complete selected result interval was 188.836 seconds. The
+The long-running tests are intentionally quiet while their internal TAP
+matrices execute. On the 2026-07-22 two-way public gate after the PSR.ic=0
+checkpoint, `test-ia64-system-tcg` took 47.04 seconds,
+`test-ia64-full-tcg` 48.64 seconds, and `test-ia64-register-tcg` 45.55
+seconds. The expanded data-plane registration passed 431 subtests in 116.34
+seconds, and the complete selected result interval was 196.703 seconds. The
 RSE suites include five fresh-process
 save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the

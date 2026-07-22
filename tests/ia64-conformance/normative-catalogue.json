@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 21,
+  "catalogue_revision": 22,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -14,6 +14,26 @@
     "vibtanium-default-up"
   ],
   "rows": [
+    {
+      "id": "ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC",
+      "requirement_ids": ["ALT-001", "ALT-002", "MEM-003", "MEM-005", "MEM-007", "MEM-012", "MEM-014", "MMU-007", "MMU-009", "MMU-011", "MMU-012", "MMU-013", "MMU-014"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Interruptions", "section": "5.5.5", "printed_pages": ["2:105", "2:106", "2:107"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "When PSR.ic is 0 and regardless of the state of DCR"},
+      "operation": {"kind": "integer-control-speculative-psr-ic-zero-always-defer", "selector": "ld1.s/sa, ld2.s/sa, ld4.s/sa, and ld8.s/sa across all ten Table 5-4 conditions whose equation contains !PSR.ic", "encoding": "M10 immediate-update control-speculative loads followed by M20 CHK.S or M22 CHK.A"},
+      "legal_inputs": ["Serialized PSR.ic=0, PSR.it=0, PSR.ed=0, and CR.DCR=0", "PSR.dt plus test-owned RR/PTA/DTC/PTE/ITIR/PKR/DBR state constructs each translated condition", "PSR.ac and a naturally misaligned address construct Unaligned Data Reference", "The Access Rights probes execute at CPL3 while all other loads execute at CPL0", "Distinct legal destination and base registers with a width-sized immediate update"],
+      "privilege": {"levels": [0, 3], "rule": "The loads and checks are application-level; privileged setup configures translation, keys, debug, DCR, and interruption state, while Access Rights is selected by executing its load and recovery at CPL3."},
+      "state_read": ["PSR.ic, PSR.it, PSR.ed, PSR.dt, PSR.pk, PSR.db, PSR.ac, and CPL", "CR.DCR", "RR, PTA, DTC, PTE, ITIR, PKR, and DBR condition state", "load base, destination NaT, and destination ALAT identity"],
+      "state_written": ["destination NaT with implementation-specific data", "exact width-sized base update", "checked-recovery control flow", "no delivered interruption and no ALAT entry for deferred .sa"],
+      "predication": {"applies": true, "rule": "All selected loads and checks use p0; false qualification remains a separate ALT-006 row."},
+      "nat_behavior": "With PSR.ic zero, every selected .s and .sa condition defers by writing destination NaT and retiring the update. CHK.S observes that NaT; CHK.A observes the absent ALAT entry from deferred .sa.",
+      "possible_faults": ["No delivered fault", "The deferred conditions are Alternate Data TLB, VHPT Data, Data TLB, Data Page Not Present, Data Key Miss, Data Key Permission, Data Access Rights, Data Access Bit, Data Debug, and Unaligned Data Reference"],
+      "fault_priority": ["predicate and operand legality", "selected qualified Table 5-4 condition", "PSR.ic=0 always-defer decision", "destination NaT and base-update retirement", "checked recovery"],
+      "committed_prefix": "Each load commits only its destination NaT, implementation-specific data, and exact base update; it commits no ordinary loaded value or ALAT entry and delivers no interruption",
+      "restart_rule": "There is no interruption retry. CHK.S or CHK.A transfers through test-owned recovery after observing the deferred token or absent entry.",
+      "permitted_results": ["All 72 translated width/class/condition combinations and all six naturally unaligned width/class combinations defer, set destination NaT, retire the exact update, and take checked recovery with PSR.ic and DCR still zero"],
+      "required_evidence": "E2"
+    },
     {
       "id": "ALT-001-INTEGER-NATPAGE-DEFERRAL",
       "requirement_ids": ["ALT-001", "ALT-003", "MEM-003", "MEM-005"],
