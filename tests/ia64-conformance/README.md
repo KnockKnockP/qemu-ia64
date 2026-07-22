@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first seven exact speculation contracts live in
+The first eight exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -62,16 +62,27 @@ all six naturally applicable width/class forms. Each case proves no delivered
 interruption, destination NaT, exact width-sized base retirement, CHK.S or
 absent-entry CHK.A recovery, preserved condition controls, and an exact zero
 DCR. The matching `PSR.ic=1` rows provide the immediate-fault contrast.
+The eighth adds the complete 110-program first-restart `PSR.ed=1` matrix:
+all eight integer `.s`/`.sa` width/class forms cross a valid WB reference and
+the thirteen non-alignment Table 5-4 conditions, while Unaligned covers its
+six naturally applicable forms. Every case proves that software-forced
+deferral precedes address, translation, protection, debug, alignment, and
+data access; retires the exact update; purges the corresponding `.sa` ALAT
+entry; clears `PSR.ed`; takes checked recovery; and lets the following
+same-form safe load return its exact WB value normally.
 Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 two-way public gate after the PSR.ic=0
-checkpoint, `test-ia64-system-tcg` took 47.04 seconds,
-`test-ia64-full-tcg` 48.64 seconds, and `test-ia64-register-tcg` 45.55
-seconds. The expanded data-plane registration passed 431 subtests in 116.34
-seconds, and the complete selected result interval was 196.703 seconds. The
+matrices execute. On the 2026-07-22 serialized public gate after the PSR.ed
+checkpoint, `test-ia64-system-tcg` took 47.09 seconds,
+`test-ia64-full-tcg` 48.48 seconds, and `test-ia64-register-tcg` 45.58
+seconds. The expanded data-plane registration passed 541 subtests in 147.12
+seconds, and all 50 selected tests passed in 395.6 seconds. A preceding fully
+parallel run completed all tests but lost one system-TCG QEMU to the fixed
+five-second HMP startup bound; that suite passed in isolation and in the
+serialized gate. The
 RSE suites include five fresh-process
 save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the

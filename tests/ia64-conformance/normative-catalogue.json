@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 22,
+  "catalogue_revision": 23,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -92,6 +92,26 @@
       "committed_prefix": "A deferred load commits only its destination NaT, implementation-specific data, and exact update; an immediate load commits no destination, NaT, update, ALAT, or later effect",
       "restart_rule": "Deferred .s and .sa transfer through CHK.S and absent-entry CHK.A recovery. An immediate handler observes ISR.ed from the code ITC entry and may repair, software-defer, or retry CR.IIP.",
       "permitted_results": ["All 48 ITLB.ed=1/condition-bit=1 width/class/fault combinations defer and take checked recovery", "All 48 ITLB.ed=1/condition-bit=0 combinations raise the selected vector with exact R|SP|ED and no load effects", "All 48 ITLB.ed=0/condition-bit=1 combinations raise the selected vector with exact R|SP and ED clear and no load effects"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-001-INTEGER-SOFTWARE-DEFER-PSR-ED",
+      "requirement_ids": ["ALT-001", "ALT-002", "MEM-003", "MEM-005", "MEM-007", "MEM-012", "MEM-014", "MMU-007", "MMU-009", "MMU-011", "MMU-012", "MMU-013", "MMU-014"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Interruptions", "section": "5.5.5", "printed_pages": ["2:24", "2:106", "2:107", "2:579"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "When PSR.ed is 1, then a deferred exception indicator"},
+      "operation": {"kind": "integer-control-speculative-software-deferral", "selector": "the first restarted ld1/2/4/8.s or .sa across every integer-applicable Table 5-4 condition and a valid WB reference", "encoding": "RFI into an M10 immediate-update speculative load followed by M20 CHK.S or M22 CHK.A and a same-form safe control load"},
+      "legal_inputs": ["RFI makes the qualified load the first restarted instruction with IPSR.ed=1, PSR.ic=1, PSR.it=0, and CR.DCR=0", "Test-owned physical or translated state selects a valid WB reference or exactly one integer-applicable Table 5-4 condition", "The destination differs from the base and each immediate update equals the access width", "A distinct safe WB translation is installed for the same load form after recovery"],
+      "privilege": {"levels": [0, 3], "rule": "The loads and checks are application-level; privileged setup configures IPSR.ed, translation, keys, debug, alignment, and interruption state, while the Access Rights probes select CPL3."},
+      "state_read": ["PSR.ed and first-restart state", "PSR.ic, PSR.it, PSR.dt, PSR.pk, PSR.db, PSR.ac, and CPL", "CR.DCR", "RR, PTA, DTC, PTE, ITIR, PKR, DBR, base NaT, and ALAT condition state"],
+      "state_written": ["destination NaT with implementation-specific data", "exact width-sized base update", "corresponding .sa ALAT purge", "PSR.ed clear", "checked-recovery control flow and exact safe-load result"],
+      "predication": {"applies": true, "rule": "The restarted load and check use p0; predicated-off first-restart behavior remains a separate ALT-006 row."},
+      "nat_behavior": "PSR.ed forces destination NaT before base-NaT, translation, protection, debug, alignment, or data access. A NaT base remains NaT while its update retires. CHK.S observes destination NaT and CHK.A observes the purged or absent ALAT entry.",
+      "possible_faults": ["No delivered fault from the forced load or following safe load", "The suppressed conditions span Register NaT, Unimplemented Data Address, Alternate Data TLB, VHPT Data, Data TLB, Data Page Not Present, Data NaT Page, Data Key Miss, Data Key Permission, Data Access Rights, Data Access Bit, Data Debug, and Unaligned Data Reference"],
+      "fault_priority": ["predicate and operand legality", "first-restart PSR.ed action", "destination deferred indicator, exact post-increment, and .sa ALAT purge without data reference", "PSR.ed consumption", "checked recovery", "normal following load"],
+      "committed_prefix": "The forced load commits only destination NaT with implementation-specific data, its exact post-increment, corresponding .sa ALAT purge, and PSR.ed consumption; it performs no data reference",
+      "restart_rule": "RFI supplies IPSR.ed for exactly the first restarted speculative load. That load clears PSR.ed; checked recovery then reaches a same-form load which executes normally.",
+      "permitted_results": ["All 104 width/class combinations across the valid reference and thirteen non-alignment conditions defer, update, recover, clear PSR.ed, and complete the safe load", "All six ld2/4/8.s/sa naturally unaligned combinations have the same forced-deferral and one-shot behavior"],
       "required_evidence": "E2"
     },
     {
