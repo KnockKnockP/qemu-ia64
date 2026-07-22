@@ -13,6 +13,7 @@ ia64_ss.add(files(
   'mem.c',
   'opcode-traits.c',
   'perf.c',
+  'pmu.c',
   'profile.c',
   'rse.c',
   'system-plane.c',

@@ -17,8 +17,17 @@ mkdir -p "$build_dir"
 cd "$build_dir"
 
 debug_cflags=${QEMU_IA64_DEBUG_CFLAGS:--O0 -g -DVIBTANIUM_DIAGNOSTICS=1}
+build_ar=${QEMU_IA64_AR:-}
+if [ -z "$build_ar" ]; then
+    if command -v llvm-ar >/dev/null 2>&1; then
+        build_ar=llvm-ar
+    else
+        build_ar=ar
+    fi
+fi
 CFLAGS="$debug_cflags" \
 CXXFLAGS="$debug_cflags" \
+AR="$build_ar" \
 "$qemu_root/configure" \
     --target-list=ia64-softmmu \
     --disable-docs \

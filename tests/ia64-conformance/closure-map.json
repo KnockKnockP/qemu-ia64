@@ -591,6 +591,13 @@
       "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
     },
     {
+      "normative_row": "REG-003-CPUID-FIXED-SELECTOR-DOMAIN",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.cpuid.0", "cpu.register.cpuid.1", "cpu.register.cpuid.2", "cpu.register.cpuid.3", "cpu.register.cpuid.4"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "REG-003-CPUID-RUC-AR45",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.register.ar.45", "cpu.register.cpuid.4"],

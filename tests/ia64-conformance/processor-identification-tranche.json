@@ -1,0 +1,31 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.processor-identification-tranche",
+  "schema_version": 1,
+  "profile": "vibtanium-strict-up",
+  "test_id": 709,
+  "cases": [
+    {
+      "id": "REG-003-CPUID-FIXED-SELECTOR-DOMAIN-EXACT",
+      "case_id": 1,
+      "normative_token": 124,
+      "normative_row": "REG-003-CPUID-FIXED-SELECTOR-DOMAIN",
+      "implementation_rows": ["cpu.register.cpuid.0", "cpu.register.cpuid.1", "cpu.register.cpuid.2", "cpu.register.cpuid.3", "cpu.register.cpuid.4"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.1.11", "printed_pages": ["1:34", "1:35"], "anchor": "All registers beyond register CPUID[3].number are reserved and raise a Reserved Register/Field fault if they are accessed"},
+      "preconditions": ["Execution is at CPL0 with PSR.ic enabled and serialized", "Every selector GR is NaT-clear", "The common General Exception handler advances CR.IIP by one bundle and executes RFI"],
+      "inputs": ["Every low selector from zero through 255", "High-bit aliases 0x100 and 0x8000000000000004"],
+      "expected_results": ["CPUID0 through CPUID4 equal the declared synthetic profile", "Both high-bit selectors alias their low-eight-bit fixed register", "Selectors 5 through 255 each raise ISR.code 0x30", "Fault count is 251, mismatch count is zero, and the terminal bundle is reached"],
+      "allowed_results": ["The nonarchitectural diagnostic exception record may retain the final delivered General Exception after architectural RFI completion"],
+      "permitted_state_changes": ["Implemented-read destination GRs", "Interruption control registers", "Test-owned selector, fault, and mismatch registers"],
+      "required_unchanged_state": ["The immutable CPUID bank", "The reserved-read destination", "Guest code and unrelated architectural state"],
+      "expected_faults": ["Reserved Register/Field for every selector CPUID5 through CPUID255"],
+      "fault_priority": ["qualification", "selector NaT", "selector bound", "destination update"],
+      "committed_prefix": "Each fixed read commits once; each reserved read commits only the handler counters before RFI continues at the next bundle.",
+      "restart_action": "Validate ISR.code 0x30, add 16 to CR.IIP, write CR.IIP, and execute RFI for each of 251 faults.",
+      "applicable_variants": ["five fixed registers", "251 reserved registers", "ignored selector bit 8", "ignored selector bit 63", "exact fault repair count"],
+      "execution": {"lane": "bare-metal-batch", "probes": ["test_cpuid_selector_domain"], "result_observations": ["CPUID destination GRs", "alias destination GRs", "fault and ISR mismatch counters", "final diagnostic exception record", "terminal IP"]},
+      "oracle": {"independence": "independent", "derivation": "The fixed values, selector boundary, ignored high bits, ISR code, and 251-fault count are test-owned literals derived from the cited CPUID register layouts and indirect-register access rule."},
+      "limitations": ["CPL1 through CPL3 equivalence, false qualification, and selector NaT priority are separate closure units"]
+    }
+  ]
+}

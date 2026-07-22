@@ -11,7 +11,7 @@
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
 #include "target/ia64/perf.h"
-#include "target/ia64/system-plane.h"
+#include "target/ia64/pmu.h"
 #include "trace-target_ia64.h"
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)

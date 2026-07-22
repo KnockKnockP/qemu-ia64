@@ -92,7 +92,11 @@ tests = {
 
 if 'ia64-softmmu' in target_dirs
   tests += {
-    'test-ia64-vmstate': [migration, io],
+    'test-ia64-vmstate': [
+      migration,
+      io,
+      meson.project_source_root() / 'target/ia64/pmu.c',
+    ],
   }
 endif
 
@@ -346,6 +350,12 @@ test('test-ia64-alat-lifecycle-tranche-static', python,
 
 test('test-ia64-performance-monitor-tranche-static', python,
      args: [meson.project_source_root() / 'scripts/ia64-validate-performance-monitor-tranche.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-processor-identification-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-processor-identification-tranche.py',
             '--root', meson.project_source_root()],
      timeout: 30,
      suite: ['unit'])

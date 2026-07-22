@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 58
+dependencies installed, configure, build, fetch the public manuals, run all 59
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -22,6 +22,9 @@ environment values are not copied into them. `QEMU_IA64_BUILD_DIR`,
 `QEMU_IA64_CONFORMANCE_OUTPUT_DIR`, `QEMU_IA64_CONFORMANCE_PROFILE`, and
 `QEMU_IA64_TEST_JOBS` override the corresponding defaults.
 `QEMU_IA64_BUILD_JOBS` changes the conservative four-job build parallelism.
+`QEMU_IA64_AR` overrides the archiver; the public build wrapper prefers
+`llvm-ar` when installed because current MINGW64 GNU `ar` can spend more than
+15 minutes rebuilding QEMU's thin utility archive without producing output.
 
 Implementation-surface schema version 2 treats only source-proven live or
 guest-selectable state as implemented. Register storage alone is not enough.
@@ -207,3 +210,18 @@ classified honestly instead of being counted as live untested storage, while
 the twelve implemented selectors and PAL discovery contract have passing E2
 ownership. Performance-event selection and counting remain unadvertised and
 unclaimed.
+
+The CPUID selector checkpoint raises the gate to 59/59 in 196.848 seconds of
+runtime report time (307 seconds including the one-time host rebuild).
+`test-ia64-system-tcg` passes 18 subtests in 50.21 seconds. Its new program
+checks the exact CPUID0-4 profile, proves that selector bits above bit 7 are
+ignored, and validates/repairs all 251 Reserved Register/Field faults for
+CPUID5-255. CPUID4 now advertises the implemented long-branch facility along
+with the existing `cz` and `x2` facilities. The 124-row catalogue has 95
+exact row-closing claims. Its 2,103-row executed join contains 95
+`implemented-tested`, 1,458 `implemented-untested`, 7
+`advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,465
+blockers and no test or infrastructure failure. PMU profile logic now lives
+in a shared module, so migration post-load sanitization is linked and tested
+without coupling the VMState unit to the target-only system transaction
+module.

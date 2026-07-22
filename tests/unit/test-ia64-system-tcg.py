@@ -454,6 +454,99 @@ def test_performance_register_selector_domains(harness: ModuleType,
             "masked, ignored, and zero-read expectations")
 
 
+def cpuid_selector_domain_program(harness: ModuleType):
+    expected = (
+        0x49656E69756E6547,
+        0x000000006C65746E,
+        0,
+        0x0000000200000004,
+        0x0000000300000001,
+    )
+    bundles: List[object] = [
+        raw_bundle(harness, 0x10, "M", m_mask(6, PSR_IC)),
+        raw_bundle(harness, 0x20, "M", m_serial(0x31)),
+        harness.Bundle(0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 0, 0), harness.adds(9, 0, 0)),
+    ]
+    address = 0x40
+    for selector, destination in enumerate(range(16, 21)):
+        bundles.append(movl_bundle(harness, address, 3, selector))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x17, r1=destination, r3=3)
+        ))
+        address += 0x10
+
+    for selector, destination in ((0x100, 21), ((1 << 63) | 4, 22)):
+        bundles.append(movl_bundle(harness, address, 3, selector))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x17, r1=destination, r3=3)
+        ))
+        address += 0x10
+
+    for selector in range(5, 256):
+        bundles.append(movl_bundle(harness, address, 3, selector))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x17, r1=5, r3=3)
+        ))
+        address += 0x10
+
+    terminal_ip = address
+    bundles.extend((
+        harness.spin_bundle(terminal_ip),
+        raw_bundle(harness, GENERAL_VECTOR, "M",
+                   harness.mov_crgr(10, 17)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x10, "I",
+                   harness.extr(12, 10, 0, 16)),
+        harness.Bundle(GENERAL_VECTOR + 0x20, 0x01, harness.nop_m(),
+                       harness.cmp_imm(1, 2, ISR_RESERVED_REGISTER_FIELD,
+                                       12, "eq"), harness.nop_i()),
+        harness.Bundle(GENERAL_VECTOR + 0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 1, 8, qp=2),
+                       harness.adds(9, 1, 9)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x40, "M",
+                   harness.mov_crgr(11, CR_IIP)),
+        harness.Bundle(GENERAL_VECTOR + 0x50, 0x01, harness.nop_m(),
+                       harness.adds(11, 16, 11), harness.nop_i()),
+        raw_bundle(harness, GENERAL_VECTOR + 0x60, "M",
+                   harness.mov_grcr(CR_IIP, 11)),
+        harness.Bundle(GENERAL_VECTOR + 0x70, 0x11, harness.nop_m(),
+                       harness.nop_i(), harness.rfi()),
+    ))
+    return harness.Program(
+        name="CPUID fixed and reserved selector domain",
+        bundles=tuple(bundles), terminal_ip=terminal_ip,
+    ), expected
+
+
+def test_cpuid_selector_domain(harness: ModuleType, qemu: Path) -> str:
+    program, expected = cpuid_selector_domain_program(harness)
+    snapshot = harness.run_program(qemu, program, compact_loader=True)
+    require(snapshot.ip == program.terminal_ip,
+            "CPUID selector-domain program stopped at 0x{:x} after {} faults"
+            .format(snapshot.ip, snapshot.gr[9]))
+    require(snapshot.exception_pending and
+            snapshot.exception_kind == "general-exception" and
+            snapshot.exception_vector == GENERAL_VECTOR,
+            "CPUID traversal did not retain the final fault observation")
+    require(snapshot.gr[16:21] == expected,
+            "CPUID fixed-register profile mismatch: {}".format(
+                tuple("0x{:016x}".format(value)
+                      for value in snapshot.gr[16:21])))
+    require(snapshot.gr[21] == expected[0] and snapshot.gr[22] == expected[4],
+            "CPUID indirect access did not ignore selector bits above bit 7")
+    require(snapshot.gr[9] == 251,
+            "CPUID reserved domain raised {} faults, expected 251".format(
+                snapshot.gr[9]))
+    require(snapshot.gr[8] == 0,
+            "CPUID reserved domain produced {} wrong ISR codes".format(
+                snapshot.gr[8]))
+    return ("CPUID0-4 match the synthetic profile, high selector bits are "
+            "ignored, and every selector 5-255 faults and resumes exactly once")
+
+
 def pal_perf_mon_program(harness: ModuleType, buffer: int,
                          *, observe_buffer: bool):
     bundles: List[object] = [
@@ -2055,6 +2148,8 @@ def main() -> int:
         ("system-register round trips", test_move_roundtrips),
         ("performance register selector domains",
          test_performance_register_selector_domains),
+        ("CPUID fixed and reserved selector domain",
+         test_cpuid_selector_domain),
         ("PAL performance monitor discovery",
          test_pal_performance_monitor_info),
         ("generated NaT matrix", test_nat_matrix),

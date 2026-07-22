@@ -33,6 +33,9 @@ static void test_reset_state(void)
     g_assert_cmphex(env.cr[IA64_CR_ITV], ==, UINT64_C(1) << 16);
     g_assert_cmphex(env.cpuid[0], ==, UINT64_C(0x49656e69756e6547));
     g_assert_cmphex(env.cpuid[1], ==, UINT64_C(0x000000006c65746e));
+    g_assert_cmphex(env.cpuid[2], ==, 0);
+    g_assert_cmphex(env.cpuid[3], ==, UINT64_C(0x0000000200000004));
+    g_assert_cmphex(env.cpuid[4], ==, UINT64_C(0x0000000300000001));
     for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
         g_assert_false(env.alat.entries[i].valid);
         g_assert_cmpuint(env.alat.entries[i].target, ==, 0);

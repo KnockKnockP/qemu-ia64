@@ -6,8 +6,8 @@
 #include "insn.h"
 #include "mem.h"
 #include "migration/vmstate.h"
+#include "pmu.h"
 #include "qemu/error-report.h"
-#include "system-plane.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_RSE_PHYSICAL_COUNT IA64_MAX_STACKED_REGS

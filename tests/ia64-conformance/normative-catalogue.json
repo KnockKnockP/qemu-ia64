@@ -1719,6 +1719,26 @@
       "required_evidence": "E2"
     },
     {
+      "id": "REG-003-CPUID-FIXED-SELECTOR-DOMAIN",
+      "requirement_ids": ["REG-003", "REG-006"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "3.1.11", "printed_pages": ["1:34", "1:35"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "All registers beyond register CPUID[3].number are reserved and raise a Reserved Register/Field fault if they are accessed"},
+      "operation": {"kind": "fixed-cpuid-selector-domain", "selector": "CPUID0 through CPUID255 plus selectors with nonzero bits above bit 7", "encoding": "legal M43 mov r1=cpuid[r3] with a NaT-clear selector GR"},
+      "legal_inputs": ["All 256 low eight-bit selector values", "Selector 0x100 as an alias of CPUID0", "Selector bit 63 plus low selector 4 as an alias of CPUID4"],
+      "privilege": {"levels": [0], "rule": "The selector/value contract is isolated at CPL0; unprivileged-access equivalence is a separate closure unit"},
+      "state_read": ["CPUID0 through CPUID4 fixed synthetic profile values", "CPUID3.number", "low eight bits of the indirect selector"],
+      "state_written": ["Destination GRs for implemented selectors", "CR.IIP, CR.ISR, CR.IPSR, and the diagnostic exception observation for reserved selectors", "test-owned fault and mismatch counters"],
+      "predication": {"applies": true, "rule": "This row uses p0 so every selector access is enabled; false qualification is covered by the system admission matrix"},
+      "nat_behavior": "Every selector source is NaT-clear so selector bounds are the sole enabled fault cause",
+      "possible_faults": ["Reserved Register/Field fault for each selector from CPUID5 through CPUID255"],
+      "fault_priority": ["enabled qualification", "selector NaT consumption", "implemented-selector bound", "destination update"],
+      "committed_prefix": "Each implemented read commits its exact destination once. Each reserved read commits no destination, while the handler increments its count and advances CR.IIP by one bundle.",
+      "restart_rule": "The common General Exception handler validates ISR.code 0x30, advances CR.IIP to the following bundle, and executes RFI exactly once for every reserved selector.",
+      "permitted_results": ["CPUID0 and CPUID1 contain GenuineIntel with unused bytes zero, CPUID2 is zero, CPUID3 is 0x0000000200000004, and CPUID4 is 0x0000000300000001", "High selector bits do not affect the selected fixed register", "Exactly 251 Reserved Register/Field faults occur with zero ISR mismatches and execution reaches the terminal bundle"],
+      "required_evidence": "E2"
+    },
+    {
       "id": "REG-003-CPUID-RUC-AR45",
       "requirement_ids": ["REG-003"],
       "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],

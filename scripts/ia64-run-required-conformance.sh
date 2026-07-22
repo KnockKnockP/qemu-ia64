@@ -47,6 +47,7 @@ set +e
     qemu:test-ia64-normative-catalogue \
     qemu:test-ia64-alat-lifecycle-tranche-static \
     qemu:test-ia64-performance-monitor-tranche-static \
+    qemu:test-ia64-processor-identification-tranche-static \
     qemu:test-ia64-runner-protocol \
     qemu:test-ia64-first-architectural-tranche-static \
     qemu:test-ia64-correctness-lessons-static \

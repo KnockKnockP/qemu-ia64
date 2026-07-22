@@ -75,8 +75,9 @@ void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env)
     env->cpuid[0] = UINT64_C(0x49656e69756e6547);
     env->cpuid[1] = UINT64_C(0x000000006c65746e);
     env->cpuid[2] = 0;
-    env->cpuid[3] = (UINT64_C(2) << 32) | 4;
-    env->cpuid[4] = (UINT64_C(1) << 32) | (UINT64_C(1) << 33);
+    env->cpuid[3] = (UINT64_C(2) << 32) | (IA64_CPUID_COUNT - 1);
+    env->cpuid[4] = IA64_CPUID_FEATURE_LB | IA64_CPUID_FEATURE_CZ |
+                    IA64_CPUID_FEATURE_X2;
 }
 
 bool ia64_issue_group_preserve_ar_source(CPUIA64State *env, uint32_t reg,

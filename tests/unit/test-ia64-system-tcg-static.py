@@ -854,6 +854,7 @@ def check_control_register_partition(root: Path) -> None:
 
 def check_performance_monitor_contract(root: Path) -> None:
     cpu = (root / "target/ia64/cpu.h").read_text(encoding="utf-8")
+    pmu = (root / "target/ia64/pmu.c").read_text(encoding="utf-8")
     system = (root / "target/ia64/system-plane.c").read_text(
         encoding="utf-8"
     )
@@ -871,6 +872,9 @@ def check_performance_monitor_contract(root: Path) -> None:
         "bool ia64_pmu_pmd_implemented(unsigned index)",
         "return index < IA64_PMU_GENERIC_FIRST + IA64_PMU_GENERIC_COUNT;",
         "index >= IA64_PMU_GENERIC_FIRST &&",
+    ):
+        require(token in pmu, "PMU product contract lost " + token)
+    for token in (
         "env->pmc[index] = value & ia64_pmu_pmc_writable_mask(index);",
         "env->pmd[index] = value & ia64_pmu_pmd_writable_mask(index);",
     ):
