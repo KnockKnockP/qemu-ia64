@@ -11,6 +11,7 @@
     "test-ia64-alat-lifecycle-tranche-static",
     "test-ia64-conformance-closure",
     "test-ia64-correctness-lessons-static",
+    "test-ia64-debug-register-tranche-static",
     "test-ia64-decoder-bundle-tranche-static",
     "test-ia64-evidence-map",
     "test-ia64-first-architectural-tranche-static",
@@ -493,6 +494,13 @@
       ]
     },
     {
+      "normative_row": "PAL-012-DEBUG-REGISTER-DISCOVERY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["platform.firmware.pal-debug-info"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "PAL-012-PERF-MON-REGISTER-DISCOVERY",
       "surface_disposition": "implemented",
       "implementation_rows": ["platform.firmware.pal-perf-mon-info"],
@@ -709,6 +717,13 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-006-DBR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_mov_dbrgr_indexed", "cpu.opcode.ia64_op_mov_grdbr_indexed", "cpu.register.dbr.0", "cpu.register.dbr.1", "cpu.register.dbr.10", "cpu.register.dbr.11", "cpu.register.dbr.12", "cpu.register.dbr.13", "cpu.register.dbr.14", "cpu.register.dbr.15", "cpu.register.dbr.2", "cpu.register.dbr.3", "cpu.register.dbr.4", "cpu.register.dbr.5", "cpu.register.dbr.6", "cpu.register.dbr.7", "cpu.register.dbr.8", "cpu.register.dbr.9"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "REG-006-FR-INDEX-SPACE",
       "surface_disposition": "implemented",
       "implementation_rows": [],
@@ -718,6 +733,13 @@
       },
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-006-IBR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_mov_gribr_indexed", "cpu.opcode.ia64_op_mov_ibrgr_indexed", "cpu.register.ibr.0", "cpu.register.ibr.1", "cpu.register.ibr.10", "cpu.register.ibr.11", "cpu.register.ibr.12", "cpu.register.ibr.13", "cpu.register.ibr.14", "cpu.register.ibr.15", "cpu.register.ibr.2", "cpu.register.ibr.3", "cpu.register.ibr.4", "cpu.register.ibr.5", "cpu.register.ibr.6", "cpu.register.ibr.7", "cpu.register.ibr.8", "cpu.register.ibr.9"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
       "normative_row": "REG-006-PMC-INDEX-SPACE",
@@ -774,11 +796,25 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-007-DBR-FIELD-SEMANTICS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.dbr.0", "cpu.register.dbr.1", "cpu.register.dbr.10", "cpu.register.dbr.11", "cpu.register.dbr.12", "cpu.register.dbr.13", "cpu.register.dbr.14", "cpu.register.dbr.15", "cpu.register.dbr.2", "cpu.register.dbr.3", "cpu.register.dbr.4", "cpu.register.dbr.5", "cpu.register.dbr.6", "cpu.register.dbr.7", "cpu.register.dbr.8", "cpu.register.dbr.9"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "REG-007-FPSR-FIELD-SEMANTICS",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.register.ar.40"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-007-IBR-FIELD-SEMANTICS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.ibr.0", "cpu.register.ibr.1", "cpu.register.ibr.10", "cpu.register.ibr.11", "cpu.register.ibr.12", "cpu.register.ibr.13", "cpu.register.ibr.14", "cpu.register.ibr.15", "cpu.register.ibr.2", "cpu.register.ibr.3", "cpu.register.ibr.4", "cpu.register.ibr.5", "cpu.register.ibr.6", "cpu.register.ibr.7", "cpu.register.ibr.8", "cpu.register.ibr.9"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
       "normative_row": "REG-007-LOCAL-CR-FIELD-SEMANTICS",

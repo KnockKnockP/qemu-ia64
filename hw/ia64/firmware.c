@@ -438,9 +438,19 @@ static IA64FirmwareResult pal_performance_monitor_info(CPUIA64State *env,
     return firmware_success(pm_info, 0, 0);
 }
 
+static IA64FirmwareResult pal_debug_info(uint64_t arg0, uint64_t arg1,
+                                         uint64_t arg2)
+{
+    if (arg0 != 0 || arg1 != 0 || arg2 != 0) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    return firmware_success(IA64_IBR_COUNT / 2, IA64_DBR_COUNT / 2, 0);
+}
+
 static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
                                        uint64_t function_id,
-                                       uint64_t arg0, uint64_t arg1)
+                                       uint64_t arg0, uint64_t arg1,
+                                       uint64_t arg2)
 {
     switch (function_id) {
     case IA64_PAL_CACHE_FLUSH:
@@ -497,7 +507,7 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_VERSION_PROC:
         return firmware_success(IA64_PAL_VERSION, IA64_PAL_VERSION, 0);
     case IA64_PAL_DEBUG_INFO:
-        return firmware_success(8, 8, 0);
+        return pal_debug_info(arg0, arg1, arg2);
     case IA64_PAL_FREQUENCY_BASE:
         return firmware_success(IA64_FIRMWARE_DEFAULT_BASE_FREQUENCY, 0, 0);
     case IA64_PAL_FREQUENCY_RATIOS:
@@ -954,7 +964,7 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
             arg2 = ia64_read_gr(env, 35);
         }
         ia64_perf_count_pal_call(function_id);
-        result = dispatch_pal(env, function_id, arg0, arg1);
+        result = dispatch_pal(env, function_id, arg0, arg1, arg2);
         firmware_trace_call(env, "pal", pal_procedure_name(function_id),
                             function_id, arg0, arg1, arg2, result);
         firmware_write_result(env, result, !static_call);

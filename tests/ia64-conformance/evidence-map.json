@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 95
+    "row_closing_claims_expected": 100
   },
   "entries": [
     {
@@ -311,6 +311,25 @@
       "conformance_role": "supporting",
       "closes_normative_rows": [],
       "limitations": ["Source structure alone does not prove guest-visible semantics."]
+    },
+    {
+      "id": "meson:test-ia64-debug-register-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-debug-register-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-debug-register-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/debug-register-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-debug-register-tranche-static",
+      "scope": "Static integrity, citation equality, stable identity, implementation mapping, executable probe-set, and independent-oracle validation for five atomic debug-register selector, field, and PAL contracts.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Metadata validation supports but does not replace the E2 debug-register and PAL runtime results."]
     },
     {
       "id": "meson:test-ia64-decode",
@@ -1066,16 +1085,17 @@
       "ci_tiers": ["affected-edit", "required"],
       "test_registration": "test-ia64-system-tcg",
       "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/debug-register-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/performance-monitor-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/processor-identification-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-system-tcg",
-      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including the exact CPUID fixed/reserved domain, independent all-256-selector PMC and PMD matrices, and exact PAL_PERF_MON_INFO success and invalid-argument buffers.",
+      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including exact CPUID, PMC/PMD, IBR/DBR selector domains and exact PAL performance/debug discovery success and invalid-argument calls.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-003-CPUID-FIXED-SELECTOR-DOMAIN", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE"],
-      "limitations": ["The four cited CPUID/PMU rows have atomic contracts; legacy system programs outside those rows still lack per-case catalogue, citation, and restart metadata, and PMU event counting remains unimplemented and unclaimed."]
+      "closes_normative_rows": ["PAL-012-DEBUG-REGISTER-DISCOVERY", "PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-003-CPUID-FIXED-SELECTOR-DOMAIN", "REG-006-DBR-INDEX-SPACE", "REG-006-IBR-INDEX-SPACE", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE", "REG-007-DBR-FIELD-SEMANTICS", "REG-007-IBR-FIELD-SEMANTICS"],
+      "limitations": ["The nine cited CPUID, PMU, and debug-register rows have atomic contracts; legacy system programs outside those rows still lack per-case metadata, and exhaustive debug-match/IA-32 behavior plus PMU event counting remain unclaimed."]
     },
     {
       "id": "meson:test-ia64-system-tcg-static",

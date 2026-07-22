@@ -225,3 +225,25 @@ blockers and no test or infrastructure failure. PMU profile logic now lives
 in a shared module, so migration post-load sanitization is linked and tested
 without coupling the VMState unit to the target-only system transaction
 module.
+
+The debug-register selector/PAL checkpoint raises the public gate to 60/60 in
+197.746 seconds. `test-ia64-system-tcg` passes 20 subtests in 55.70 seconds.
+Its two new selector programs give every IBR0-15 and DBR0-15 a distinct valid
+image, delay readback until the complete bank is populated, verify the exact
+even-address and odd-control masks, prove selector bits above bit 7 are
+ignored, and execute both access directions for every reserved selector
+16-255. Each bank therefore validates 480 Reserved Register/Field faults and
+repairs every CR.IIP with RFI; the combined run requires zero ISR or value
+mismatches. Existing admission, NaT, privilege, reserved-form, and real
+instruction/data debug probes remain part of the declared evidence set.
+
+`PAL_DEBUG_INFO` now derives its eight instruction and eight data pair counts
+from the product register-bank constants, receives all three PAL arguments,
+and rejects each nonzero reserved argument with status -2. The five atomic
+catalogue rows and their validator are entirely public and require no
+Vibtanium checkout. Broader debug address/access variants, hardware-debugger
+pair reservation, and IA-32 debug behavior remain explicit later units. The
+129-row catalogue has 100 exact row-closing claims. Its 2,074-row join contains
+100 `implemented-tested`, 1,424 `implemented-untested`, 7
+`advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,431
+blockers with no test or infrastructure failure.

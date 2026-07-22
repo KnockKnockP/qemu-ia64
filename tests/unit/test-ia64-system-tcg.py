@@ -547,6 +547,182 @@ def test_cpuid_selector_domain(harness: ModuleType, qemu: Path) -> str:
             "ignored, and every selector 5-255 faults and resumes exactly once")
 
 
+def debug_register_selector_domain_program(harness: ModuleType, bank: str):
+    if bank == "ibr":
+        write_x6, read_x6 = 0x02, 0x12
+        ignored_mask = 7 << 60
+        enabled_bits = 1 << 63
+        serialization = 0x31
+    elif bank == "dbr":
+        write_x6, read_x6 = 0x01, 0x11
+        ignored_mask = 3 << 60
+        enabled_bits = (1 << 63) | (1 << 62)
+        serialization = 0x30
+    else:
+        raise ValueError("unknown debug-register bank: " + bank)
+
+    def register_value(index: int) -> int:
+        if index % 2 == 0:
+            return 0x1000000000000000 | (index << 12)
+        return enabled_bits | (((index // 2) + 1) << 56) | \
+            0x0000FFFFFFFFFF00 | index
+
+    bundles: List[object] = [
+        raw_bundle(harness, 0x10, "M", m_mask(6, PSR_IC)),
+        raw_bundle(harness, 0x20, "M", m_serial(0x31)),
+        harness.Bundle(0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 0, 0), harness.adds(9, 0, 0)),
+        harness.Bundle(0x40, 0x01, harness.nop_m(),
+                       harness.adds(20, 0, 0), harness.nop_i()),
+    ]
+    address = 0x50
+
+    # Give every implemented register a distinct independently derived image.
+    # Reading all images back only after the bank is populated detects aliasing
+    # between any pair, rather than merely proving one selector at a time.
+    for index in range(16):
+        bundles.append(movl_bundle(
+            harness, address, 2, register_value(index)
+        ))
+        address += 0x10
+        bundles.append(movl_bundle(harness, address, 3, index))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(write_x6, r2=2, r3=3)
+        ))
+        address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_serial(serialization)
+    ))
+    address += 0x10
+
+    for index in range(16):
+        bundles.append(movl_bundle(harness, address, 3, index))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(read_x6, r1=4, r3=3)
+        ))
+        address += 0x10
+        bundles.append(movl_bundle(
+            harness, address, 5, register_value(index)
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.adds(20, 1, 20, qp=2), harness.nop_i()
+        ))
+        address += 0x10
+
+    # An all-ones write independently checks every ignored control bit.  The
+    # two selectors deliberately differ above bit 7 and must both select one.
+    alias_value = U64_MASK & ~ignored_mask
+    bundles.append(movl_bundle(harness, address, 2, U64_MASK))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 3, 0x101))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(write_x6, r2=2, r3=3)
+    ))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_serial(serialization)
+    ))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 3, (1 << 63) | 1))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(read_x6, r1=4, r3=3)
+    ))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 5, alias_value))
+    address += 0x10
+    bundles.append(harness.Bundle(
+        address, 0x01, harness.nop_m(),
+        harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+    ))
+    address += 0x10
+    bundles.append(harness.Bundle(
+        address, 0x01, harness.nop_m(),
+        harness.adds(20, 1, 20, qp=2), harness.nop_i()
+    ))
+    address += 0x10
+
+    # Both access directions must reject every low-byte selector outside the
+    # sixteen-register product bank.  The common handler validates the exact
+    # Reserved Register/Field ISR code and resumes at the following bundle.
+    for selector in range(16, 256):
+        bundles.append(movl_bundle(harness, address, 3, selector))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(read_x6, r1=4, r3=3)
+        ))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(write_x6, r2=2, r3=3)
+        ))
+        address += 0x10
+
+    terminal_ip = address
+    require(terminal_ip < GENERAL_VECTOR,
+            "debug-register selector program overlaps General vector")
+    bundles.extend((
+        harness.spin_bundle(terminal_ip),
+        raw_bundle(harness, GENERAL_VECTOR, "M",
+                   harness.mov_crgr(10, 17)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x10, "I",
+                   harness.extr(12, 10, 0, 16)),
+        harness.Bundle(GENERAL_VECTOR + 0x20, 0x01, harness.nop_m(),
+                       harness.cmp_imm(1, 2, ISR_RESERVED_REGISTER_FIELD,
+                                       12, "eq"), harness.nop_i()),
+        harness.Bundle(GENERAL_VECTOR + 0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 1, 8, qp=2),
+                       harness.adds(9, 1, 9)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x40, "M",
+                   harness.mov_crgr(11, CR_IIP)),
+        harness.Bundle(GENERAL_VECTOR + 0x50, 0x01, harness.nop_m(),
+                       harness.adds(11, 16, 11), harness.nop_i()),
+        raw_bundle(harness, GENERAL_VECTOR + 0x60, "M",
+                   harness.mov_grcr(CR_IIP, 11)),
+        harness.Bundle(GENERAL_VECTOR + 0x70, 0x11, harness.nop_m(),
+                       harness.nop_i(), harness.rfi()),
+    ))
+    return harness.Program(
+        name="{} complete selector domain".format(bank.upper()),
+        bundles=tuple(bundles), terminal_ip=terminal_ip,
+    )
+
+
+def test_debug_register_selector_domains(harness: ModuleType,
+                                         qemu: Path) -> str:
+    for bank in ("ibr", "dbr"):
+        program = debug_register_selector_domain_program(harness, bank)
+        snapshot = harness.run_program(qemu, program, compact_loader=True)
+        require(snapshot.ip == program.terminal_ip,
+                "{} selector traversal stopped at 0x{:x}".format(
+                    bank.upper(), snapshot.ip))
+        require(snapshot.exception_pending and
+                snapshot.exception_kind == "general-exception" and
+                snapshot.exception_vector == GENERAL_VECTOR,
+                bank.upper() + " traversal did not retain its final fault")
+        require(snapshot.gr[9] == 480,
+                "{} reserved selectors raised {} faults, expected 480".format(
+                    bank.upper(), snapshot.gr[9]))
+        require(snapshot.gr[8] == 0,
+                "{} reserved selectors produced {} wrong ISR codes".format(
+                    bank.upper(), snapshot.gr[8]))
+        require(snapshot.gr[20] == 0,
+                "{} implemented bank produced {} value/alias mismatches".format(
+                    bank.upper(), snapshot.gr[20]))
+    return ("all 16 IBRs and DBRs are distinct with exact control masks; high "
+            "selector bits are ignored and all 480 reserved read/write forms "
+            "fault and resume per bank")
+
+
 def pal_perf_mon_program(harness: ModuleType, buffer: int,
                          *, observe_buffer: bool):
     bundles: List[object] = [
@@ -616,6 +792,46 @@ def test_pal_performance_monitor_info(harness: ModuleType, qemu: Path) -> str:
     return ("PAL_PERF_MON_INFO packs four 60-bit pairs, publishes exact "
             "PMC/PMD masks, zeroes unadvertised event masks, and rejects "
             "null or misaligned buffers")
+
+
+def pal_debug_info_program(harness: ModuleType, arg0: int, arg1: int,
+                           arg2: int):
+    return harness.Program(
+        name="PAL_DEBUG_INFO args {:x}/{:x}/{:x}".format(arg0, arg1, arg2),
+        bundles=(
+            movl_bundle(harness, 0x10, 28, 11),
+            movl_bundle(harness, 0x20, 29, arg0),
+            movl_bundle(harness, 0x30, 30, arg1),
+            movl_bundle(harness, 0x40, 31, arg2),
+            harness.Bundle(0x50, 0x11, harness.nop_m(), harness.nop_i(),
+                           harness.br_call(0x50, 0x8F000, 0)),
+            harness.spin_bundle(0x60),
+        ), terminal_ip=0x60,
+    )
+
+
+def test_pal_debug_info(harness: ModuleType, qemu: Path) -> str:
+    valid = harness.run_program(
+        qemu, pal_debug_info_program(harness, 0, 0, 0)
+    )
+    require(not valid.exception_pending and valid.gr[8] == 0,
+            "valid PAL_DEBUG_INFO call failed")
+    require((valid.gr[9], valid.gr[10], valid.gr[11]) == (8, 8, 0),
+            "PAL_DEBUG_INFO did not publish eight IBR/DBR pairs")
+
+    invalid_status = U64_MASK - 1
+    for arguments in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+        result = harness.run_program(
+            qemu, pal_debug_info_program(harness, *arguments)
+        )
+        require(not result.exception_pending and
+                result.gr[8] == invalid_status,
+                "PAL_DEBUG_INFO accepted reserved arguments {}".format(
+                    arguments))
+        require((result.gr[9], result.gr[10], result.gr[11]) == (0, 0, 0),
+                "invalid PAL_DEBUG_INFO call returned payload data")
+    return ("PAL_DEBUG_INFO reports the exact eight implemented IBR/DBR "
+            "pairs and rejects each nonzero reserved argument with -2")
 
 
 def nat_operands(spec: SystemOpcodeSpec) -> Tuple[str, ...]:
@@ -2150,8 +2366,11 @@ def main() -> int:
          test_performance_register_selector_domains),
         ("CPUID fixed and reserved selector domain",
          test_cpuid_selector_domain),
+        ("debug register selector domains",
+         test_debug_register_selector_domains),
         ("PAL performance monitor discovery",
          test_pal_performance_monitor_info),
+        ("PAL debug-register discovery", test_pal_debug_info),
         ("generated NaT matrix", test_nat_matrix),
         ("generated privilege matrix", test_privilege_matrix),
         ("reserved and predicate priority", test_reserved_matrix),

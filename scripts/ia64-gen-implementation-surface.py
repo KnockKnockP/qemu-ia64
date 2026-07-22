@@ -117,6 +117,13 @@ ARCHITECTURAL_SURFACES = (
         "static void vibtanium_reset(MachineState *machine, ResetType type)",
     ),
     (
+        "platform.firmware.pal-debug-info",
+        "platform.firmware",
+        "PAL debug-register pair discovery and argument validation",
+        "hw/ia64/firmware.c",
+        "static IA64FirmwareResult pal_debug_info(",
+    ),
+    (
         "platform.firmware.pal-perf-mon-info",
         "platform.firmware",
         "PAL performance-monitor metadata and implementation masks",
