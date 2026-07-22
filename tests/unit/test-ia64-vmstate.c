@@ -1515,87 +1515,145 @@ static void test_alat_target_type_round_trip(void)
 {
     IA64AlatState source = { 0 };
     IA64AlatState destination;
+    static const uint8_t targets[] = { 1, 2, 126, 127, 2, 3, 126, 127 };
+    static const uint8_t widths[] = { 1, 2, 4, 8, 4, 8, 10, 16 };
 
-    source.next = 2;
-    source.entries[0] = (IA64AlatEntry) {
-        .valid = true,
-        .target = 12,
-        .target_type = IA64_ALAT_TARGET_GR,
-        .width = 8,
-        .physical = true,
-        .address = UINT64_C(0x12345000),
-    };
-    source.entries[1] = (IA64AlatEntry) {
-        .valid = true,
-        .target = 47,
-        .target_type = IA64_ALAT_TARGET_FR,
-        .width = 10,
-        .physical = false,
-        .address = UINT64_C(0xfeed0000),
-    };
+    source.next = 31;
+    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
+        source.entries[i] = (IA64AlatEntry) {
+            .valid = true,
+            .target = targets[i],
+            .target_type = i < 4 ? IA64_ALAT_TARGET_GR :
+                                   IA64_ALAT_TARGET_FR,
+            .width = widths[i],
+            .physical = (i & 1) == 0,
+            .address = UINT64_C(0x12345000) + i * UINT64_C(0x1010),
+        };
+    }
 
     g_assert_cmpint(save_alat_with_vmsd(&source, &vmstate_alat), ==, 0);
     memset(&destination, 0xa5, sizeof(destination));
     g_assert_cmpint(load_alat_with_current_vmsd(&destination), ==, 0);
 
-    g_assert_cmpuint(destination.next, ==, 2);
-    g_assert_true(destination.entries[0].valid);
-    g_assert_cmpuint(destination.entries[0].target_type, ==,
-                     IA64_ALAT_TARGET_GR);
-    g_assert_cmpuint(destination.entries[0].target, ==, 12);
-    g_assert_cmpuint(destination.entries[0].width, ==, 8);
-    g_assert_true(destination.entries[0].physical);
-    g_assert_cmphex(destination.entries[0].address, ==,
-                    UINT64_C(0x12345000));
-    g_assert_true(destination.entries[1].valid);
-    g_assert_cmpuint(destination.entries[1].target_type, ==,
-                     IA64_ALAT_TARGET_FR);
-    g_assert_cmpuint(destination.entries[1].target, ==, 47);
-    g_assert_cmpuint(destination.entries[1].width, ==, 10);
-    g_assert_false(destination.entries[1].physical);
-    g_assert_cmphex(destination.entries[1].address, ==,
-                    UINT64_C(0xfeed0000));
+    g_assert_cmpuint(destination.next, ==, 31);
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        g_assert_cmpint(destination.entries[i].valid, ==,
+                        source.entries[i].valid);
+        g_assert_cmpuint(destination.entries[i].target_type, ==,
+                         source.entries[i].target_type);
+        g_assert_cmpuint(destination.entries[i].target, ==,
+                         source.entries[i].target);
+        g_assert_cmpuint(destination.entries[i].width, ==,
+                         source.entries[i].width);
+        g_assert_cmpint(destination.entries[i].physical, ==,
+                        source.entries[i].physical);
+        g_assert_cmphex(destination.entries[i].address, ==,
+                        source.entries[i].address);
+    }
     /* These summaries remain transient wire-independent GR-only state. */
     g_assert_cmpuint(destination.valid_mask, ==, 0);
     g_assert_cmphex(destination.gr_mask[0], ==, 0);
     g_assert_cmphex(destination.gr_mask[1], ==, 0);
+    for (unsigned i = 0; i < IA64_GR_COUNT; i++) {
+        g_assert_cmpuint(destination.gr_refcount[i], ==, 0);
+    }
+}
+
+static void assert_alat_vmstate_rejected(const IA64AlatState *candidate)
+{
+    IA64AlatState loaded = *candidate;
+
+    g_assert_cmpint(ia64_alat_vmstate_post_load(&loaded, 1), ==, -EINVAL);
+    g_assert_cmpint(ia64_alat_vmstate_pre_save(&loaded), ==, -EINVAL);
+    g_assert_cmpint(save_alat_with_vmsd(&loaded, &vmstate_alat), ==, -EINVAL);
 }
 
 static void test_alat_vmstate_rejects_invalid_entries(void)
 {
-    IA64AlatState alat = { 0 };
-
-    alat.entries[0].target_type = IA64_ALAT_TARGET_TYPE_COUNT;
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, -EINVAL);
-
-    memset(&alat, 0, sizeof(alat));
-    alat.entries[0] = (IA64AlatEntry) {
-        .valid = true,
-        .target = 0,
-        .target_type = IA64_ALAT_TARGET_GR,
-        .width = 8,
+    static const uint8_t invalid_types[] = {
+        2, UINT8_MAX,
     };
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, -EINVAL);
+    static const uint8_t invalid_gr_targets[] = { 0, 128, UINT8_MAX };
+    static const uint8_t invalid_fr_targets[] = { 0, 1, 128, UINT8_MAX };
+    static const uint8_t invalid_gr_widths[] = {
+        0, 3, 5, 7, 9, 16, UINT8_MAX,
+    };
+    static const uint8_t invalid_fr_widths[] = {
+        0, 3, 5, 7, 9, 11, 15, 17, UINT8_MAX,
+    };
+    static const uint8_t invalid_cursors[] = {
+        32, UINT8_MAX,
+    };
+    IA64AlatState valid = { 0 };
 
-    alat.entries[0].target = 12;
-    alat.entries[0].width = 10;
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, -EINVAL);
+    valid.entries[0] = (IA64AlatEntry) {
+        .valid = true,
+        .target = 1,
+        .target_type = IA64_ALAT_TARGET_GR,
+        .width = 1,
+    };
+    valid.next = 31;
+    g_assert_cmpint(ia64_alat_vmstate_post_load(&valid, 1), ==, 0);
+    g_assert_cmpint(ia64_alat_vmstate_pre_save(&valid), ==, 0);
 
-    alat.entries[0].target_type = IA64_ALAT_TARGET_FR;
-    alat.entries[0].target = 1;
-    alat.entries[0].width = 8;
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, -EINVAL);
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_types); i++) {
+        IA64AlatState alat = valid;
 
-    alat.entries[0].target = 12;
-    alat.entries[0].width = 2;
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, -EINVAL);
+        /* Target type is schema metadata even for an inactive entry. */
+        alat.entries[1].target_type = invalid_types[i];
+        assert_alat_vmstate_rejected(&alat);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_gr_targets); i++) {
+        IA64AlatState alat = valid;
 
-    alat.entries[0].width = 16;
-    alat.next = IA64_ALAT_COUNT;
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, -EINVAL);
+        alat.entries[0].target = invalid_gr_targets[i];
+        assert_alat_vmstate_rejected(&alat);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_fr_targets); i++) {
+        IA64AlatState alat = valid;
 
-    alat.next = 1;
-    g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, 1), ==, 0);
+        alat.entries[0].target_type = IA64_ALAT_TARGET_FR;
+        alat.entries[0].target = invalid_fr_targets[i];
+        alat.entries[0].width = 4;
+        assert_alat_vmstate_rejected(&alat);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_gr_widths); i++) {
+        IA64AlatState alat = valid;
+
+        alat.entries[0].width = invalid_gr_widths[i];
+        assert_alat_vmstate_rejected(&alat);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_fr_widths); i++) {
+        IA64AlatState alat = valid;
+
+        alat.entries[0].target_type = IA64_ALAT_TARGET_FR;
+        alat.entries[0].target = 2;
+        alat.entries[0].width = invalid_fr_widths[i];
+        assert_alat_vmstate_rejected(&alat);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_cursors); i++) {
+        IA64AlatState alat = valid;
+
+        alat.next = invalid_cursors[i];
+        assert_alat_vmstate_rejected(&alat);
+    }
+
+    for (int version = -1; version <= 2; version++) {
+        IA64AlatState alat = valid;
+
+        if (version != 1) {
+            g_assert_cmpint(ia64_alat_vmstate_post_load(&alat, version), ==,
+                            -EINVAL);
+        }
+    }
+
+    /* Inactive payload fields are semantically ignored, not malformed. */
+    valid.entries[1].target = UINT8_MAX;
+    valid.entries[1].width = UINT8_MAX;
+    valid.entries[1].physical = true;
+    valid.entries[1].address = UINT64_MAX;
+    g_assert_cmpint(ia64_alat_vmstate_post_load(&valid, 1), ==, 0);
+    g_assert_cmpint(save_alat_with_vmsd(&valid, &vmstate_alat), ==, 0);
 }
 
 static void test_collection_state_subsection_round_trip(void)

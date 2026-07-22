@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 54
+dependencies installed, configure, build, fetch the public manuals, run all 56
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -124,6 +124,17 @@ handler reuses both target names, executes `invala`, and returns by typed
 `rfi` to mandatory user misses. Remote stores, semaphores, and `ptc.ga` are
 multiprocessor coherence obligations and are not applicable to the enforced
 single-CPU `vibtanium-strict-up` and `vibtanium-default-up` profiles.
+A separate two-case `alat-lifecycle-tranche.json` now owns the lifecycle
+boundary instead of overloading instruction-semantic rows. Its E2 program
+establishes physical GR20 and FR21 tags, stops on a real GDB breakpoint,
+saves in one QEMU, loads in a fresh QEMU, accepts the same-type hit or
+pessimistic miss Intel permits, and requires cross-type GR/FR checks to
+recover. Its focused E1 registration round-trips all eight legal GR/FR width
+classes at target and cursor boundaries, both address modes, and exact
+persistent fields, then rejects representative lower, gap, upper, version,
+and cursor members of every malformed semantic partition on both load and
+save. Inactive non-type payload remains explicitly ignored rather than being
+misclassified as malformed.
 The register tranche also executes Intel Volume 2 sections 6.11.1 and 6.11.2
 as one interrupted-context oracle. Four BREAK handlers cover an empty frame,
 an immediate RNAT slot, one complete RNAT collection, and the maximum
@@ -145,10 +156,19 @@ seconds. The established data-plane shard passed 637 subtests in 180.23
 seconds, checkpoint 28 passed 42 in 12.50 seconds, checkpoint 29 passed 206
 in 58.77 seconds, checkpoint 30 passed 96 in 36.76 seconds, and checkpoint 32
 passed three in 2.30 seconds; all 54 selected tests passed in 200.536 seconds
-of report wall time. The former
-single 180-second registration limit was an infrastructure timeout once the
+of report wall time. The ALAT lifecycle checkpoint raises the current gate to
+56/56 in 205.622 seconds:
+`test-ia64-system-tcg` took 49.93 seconds, `test-ia64-full-tcg` 52.79 seconds,
+`test-ia64-register-tcg` 50.87 seconds, the 637-case data-plane shard 183.21
+seconds, the focused two-case ALAT VMState registration 0.07 seconds, and the
+lifecycle contract validator 0.37 seconds. The 117-row catalogue now has 88
+exact row-closing claims. Its 2,112-row executed join contains 88
+`implemented-tested`, 1,974 `implemented-untested`, 7
+`advertised-untested`, and 43 `known-unimplemented` rows, leaving 1,981
+blockers with no test or infrastructure failure. The former single 180-second
+registration limit was an infrastructure timeout once the
 combined inventory reached 679 programs, not a semantic hang. The current
-984-program inventory remains deliberately split by evidence ownership. The
+985-program inventory remains deliberately split by evidence ownership. The
 gate defaults to four workers to avoid unrestricted host contention without
 weakening any per-test timeout. The
 RSE suites include five fresh-process

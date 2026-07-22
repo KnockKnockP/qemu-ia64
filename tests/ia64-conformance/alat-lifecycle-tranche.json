@@ -1,0 +1,53 @@
+{
+  "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
+  "schema": "vibtanium.ia64.alat-lifecycle-tranche",
+  "schema_version": 1,
+  "profile": "vibtanium-strict-up",
+  "test_id": 707,
+  "cases": [
+    {
+      "id": "ALT-007-ALAT-MIGRATION-DEBUG-SAFETY-EXACT",
+      "case_id": 1,
+      "normative_token": 116,
+      "normative_row": "ALT-007-ALAT-MIGRATION-DEBUG-SAFETY",
+      "implementation_rows": ["cpu.alat.vmstate", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.4.5.3", "printed_pages": ["1:65", "1:66", "1:67"], "anchor": "invalidate any ALAT entry at any"},
+      "preconditions": ["Physical WBL memory holds one literal eight-byte GR20 payload and one literal single-precision FR21 payload", "LD8.A r20 and LDFS.A f21 retire before the debugger checkpoint", "No CHK.A executes before the source stops at bundle 0x40"],
+      "inputs": ["One direct fresh-QEMU control execution", "One source QEMU with a GDB software breakpoint at 0x40", "One HMP savevm checkpoint and a distinct destination QEMU that loads it", "Same-type GR20/FR21 and cross-type FR20/GR21 CHK.A probes"],
+      "expected_results": ["Source and destination guest-visible checkpoints are exact apart from nonarchitectural current-slot diagnostics", "Direct and migrated same-type checks each produce a valid hit-or-pessimistic-miss marker", "Both direct and migrated cross-type checks take mandatory recovery", "Both continuations reach terminal IP 0x100 without interruption"],
+      "allowed_results": ["GR20 and FR21 may independently remain present or be pessimistically invalidated before either same-type check", "The direct and migrated optional check outcomes need not equal each other", "Internal replacement and transient lookup state is not a guest-visible oracle"],
+      "permitted_state_changes": ["The two advanced-load destinations", "Persistent and transient ALAT state", "Debugger and save/load host state", "Four declared marker registers"],
+      "required_unchanged_state": ["Both test-owned backing values", "Unrelated guest architectural state", "GR/FR target-type identity"],
+      "expected_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "The two advanced loads commit before the external debugger stop; the restore may retain or discard entries but cannot manufacture or retag one",
+      "restart_action": "A fresh destination resumes directly at bundle 0x40 and completes the same optional-hit and mandatory-cross-type safety graph",
+      "applicable_variants": ["physical eight-byte GR20 advanced-load tag", "physical single-precision FR21 advanced-load tag", "integer CHK.A", "floating CHK.A", "GDB breakpoint", "HMP savevm/loadvm", "fresh destination process"],
+      "execution": {"lane": "bare-metal-batch", "probes": ["test_alat_migration_debug_safety"], "result_observations": ["source and restored architectural snapshots", "same-type hit-or-miss markers", "mandatory cross-type recovery markers", "source and destination direct typed traces", "terminal IP and exception state"]},
+      "oracle": {"independence": "independent", "derivation": "Addresses, payloads, GR/FR target identities, checkpoint IP, recovery graph, legal optional outcomes, mandatory cross-type misses, and checkpoint comparison are test-owned literals derived from Intel Volume 1 sections 4.4.5.3.1 and 4.4.5.3.2; no production ALAT or migration helper supplies an expected guest result"},
+      "limitations": ["Reset and replay treatment remain separate ALT-007 atomic rows", "The test exercises physical WBL entries; translated-address persistence remains covered at the serializer field level rather than this runtime path"]
+    },
+    {
+      "id": "ALT-008-ALAT-VMSTATE-VALIDATION-EXACT",
+      "case_id": 2,
+      "normative_token": 117,
+      "normative_row": "ALT-008-ALAT-VMSTATE-VALIDATION",
+      "implementation_rows": ["cpu.alat.vmstate"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.4.5.3.1", "printed_pages": ["1:65", "1:66"], "anchor": "A new entry is allocated in the ALAT which contains the new ALAT register tag, the load access size, and a tag derived from the physical memory address"},
+      "preconditions": ["The current ALAT wire version is one and contains thirty-two entry payloads plus one replacement cursor", "The optional target-type subsection distinguishes GR and FR entries while an absent subsection defaults to legacy GR", "Transient valid masks, GR masks, and reference counts are explicitly outside the wire image"],
+      "inputs": ["Eight active legal entries crossing all GR and FR widths, low/high targets, physical/virtual address modes, distinct 64-bit addresses, and cursor 31", "Invalid target types 2 and 255", "Every lower/upper invalid GR and FR target partition", "Every gap and outer invalid width partition for GR and FR", "Invalid cursors 32 and 255 plus versions -1, 0, and 2", "One inactive entry with arbitrary ignored target, width, physical, and address payload"],
+      "expected_results": ["Every persistent field of all eight active entries and cursor 31 round-trips exactly", "All transient masks and refcounts load clear", "Every malformed active field, schema target type, cursor, and unsupported version is rejected", "The same malformed field rows fail both incoming post-load and outgoing pre-save paths", "The inactive arbitrary payload remains accepted because only its target-type schema metadata is live"],
+      "allowed_results": ["Inactive non-type payload is preserved or ignored without becoming a live entry", "The generic VMState layer may report additional transport framing errors before the ALAT callback", "Error text is diagnostic and is not the result oracle"],
+      "permitted_state_changes": ["The isolated destination ALAT persistent image on successful load", "The isolated transient summaries, which must become zero", "Host error state for a rejected save or load"],
+      "required_unchanged_state": ["No CPU or guest memory exists in the isolated validator fixture", "Rejected candidates cannot become an accepted destination image"],
+      "expected_faults": ["EINVAL from the ALAT validator for each malformed semantic field or unsupported version"],
+      "fault_priority": ["wire version", "replacement cursor", "target type", "active target register", "active access width", "successful field publication"],
+      "committed_prefix": "Successful v1 input publishes every persistent field atomically; any rejected semantic field prevents an accepted image and any rejected output prevents a valid checkpoint",
+      "restart_action": "No guest restart exists; the host save/load call returns success only for the complete valid image and EINVAL for each malformed candidate",
+      "applicable_variants": ["GR widths 1/2/4/8", "FR widths 4/8/10/16", "GR targets 1 through 127", "FR targets 2 through 127", "physical and virtual address tags", "cursor 0 through 31", "legacy GR default", "current target-type subsection"],
+      "execution": {"lane": "host-unit", "probes": ["test_alat_target_type_round_trip", "test_alat_vmstate_rejects_invalid_entries"], "result_observations": ["exact persistent field equality", "zero transient summaries", "incoming post-load return", "outgoing pre-save and VMState save return", "version rejection and inactive-payload acceptance"]},
+      "oracle": {"independence": "independent", "derivation": "The legal GR/FR target ranges, complete width sets, thirty-two-entry cursor boundary, field literals, invalid equivalence partitions, and version outcomes are declared in the test from the cited ALAT definition and frozen v1 wire contract; they are not enumerated from the production validator under test"},
+      "limitations": ["Generic truncated-stream and I/O transport failures are owned by QEMU's common VMState tests", "This atomic row validates the current v1 semantic field schema rather than compatibility with a future version"]
+    }
+  ]
+}

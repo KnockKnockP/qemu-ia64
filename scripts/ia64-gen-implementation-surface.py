@@ -96,6 +96,13 @@ class SurfaceError(RuntimeError):
 
 ARCHITECTURAL_SURFACES = (
     (
+        "cpu.alat.vmstate",
+        "cpu.speculation",
+        "ALAT migration persistence and incoming-state validation",
+        "target/ia64/machine.c",
+        "static const VMStateDescription vmstate_alat =",
+    ),
+    (
         "cpu.bundle.format",
         "cpu.bundle",
         "128-bit bundle field extraction",

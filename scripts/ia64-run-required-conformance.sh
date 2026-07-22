@@ -34,6 +34,7 @@ set +e
     qemu:test-ia64-memory-exceptions \
     qemu:test-ia64-rse-spine \
     qemu:test-ia64-vmstate \
+    qemu:test-ia64-alat-vmstate \
     qemu:test-ia64-full-tcg-static \
     qemu:test-ia64-platform-static \
     qemu:test-ia64-packed-tcg-static \
@@ -43,6 +44,7 @@ set +e
     qemu:test-ia64-register-tcg-static \
     qemu:test-ia64-opcode-ledger \
     qemu:test-ia64-normative-catalogue \
+    qemu:test-ia64-alat-lifecycle-tranche-static \
     qemu:test-ia64-runner-protocol \
     qemu:test-ia64-first-architectural-tranche-static \
     qemu:test-ia64-correctness-lessons-static \

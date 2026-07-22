@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 86
+    "row_closing_claims_expected": 88
   },
   "entries": [
     {
@@ -43,6 +43,44 @@
       "conformance_role": "candidate",
       "closes_normative_rows": [],
       "limitations": ["Transactions are not yet mapped to platform catalogue rows and citations."]
+    },
+    {
+      "id": "meson:test-ia64-alat-lifecycle-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-alat-lifecycle-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-alat-lifecycle-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/alat-lifecycle-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-alat-lifecycle-tranche-static",
+      "scope": "Static integrity, citation, implementation-surface, executable-probe, and independent-oracle validation for the atomic ALAT lifecycle contracts.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Metadata validation supports but does not replace either executable ALAT result."]
+    },
+    {
+      "id": "meson:test-ia64-alat-vmstate",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-alat-vmstate",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/alat-lifecycle-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-vmstate.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-alat-vmstate",
+      "scope": "Focused independent ALAT v1 VMState matrix: all legal GR/FR widths and boundary targets, both address modes, exact persistent-field round trip, zero transient summaries, and incoming/outgoing rejection of every invalid semantic-field partition, cursor boundary, and unsupported version.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["ALT-008-ALAT-VMSTATE-VALIDATION"],
+      "limitations": ["QEMU's generic VMState layer owns truncated framing and transport I/O failures; fresh-process guest-visible ALAT safety is a separate E2 row."]
     },
     {
       "id": "meson:test-ia64-bundle",
@@ -455,15 +493,16 @@
       "ci_tiers": ["affected-edit", "required"],
       "test_registration": "test-ia64-full-tcg",
       "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/alat-lifecycle-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/register-semantic-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-full-tcg",
-      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; BR.RET-origin and valid-IFS-RFI-origin current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots. The RFI-origin pair also distinguishes one-time valid-IFS restoration from IFS.v-zero continuation and requires the pre-source-IC-zero IIPA retention rule.",
+      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; BR.RET-origin and valid-IFS-RFI-origin current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots. A dedicated ALAT program carries live GR/FR tags through a GDB stop and fresh-process save/load, accepts Intel-permitted pessimistic misses, and requires both cross-type probes to recover.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION", "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
-      "limitations": ["Only the two explicitly enumerated PFS rows and two current-frame fill-fault migration rows are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
+      "closes_normative_rows": ["ALT-007-ALAT-MIGRATION-DEBUG-SAFETY", "REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION", "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
+      "limitations": ["Only the explicitly enumerated ALAT, PFS, and current-frame migration rows are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
     },
     {
       "id": "meson:test-ia64-full-tcg-static",

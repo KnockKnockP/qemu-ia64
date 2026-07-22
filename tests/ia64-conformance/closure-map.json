@@ -8,6 +8,7 @@
     "description": "Candidate registrations have E-level and CI-tier classifications, but close rows only through explicit evidence claims."
   },
   "infrastructure_tests": [
+    "test-ia64-alat-lifecycle-tranche-static",
     "test-ia64-conformance-closure",
     "test-ia64-correctness-lessons-static",
     "test-ia64-decoder-bundle-tranche-static",
@@ -155,6 +156,20 @@
       "implementation_rows": ["cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld1a", "cpu.opcode.ia64_op_ld1sa", "cpu.opcode.ia64_op_ld2a", "cpu.opcode.ia64_op_ld2sa", "cpu.opcode.ia64_op_ld4a", "cpu.opcode.ia64_op_ld4sa", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ld8sa"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-alat-tcg"]
+    },
+    {
+      "normative_row": "ALT-007-ALAT-MIGRATION-DEBUG-SAFETY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.alat.vmstate", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg"]
+    },
+    {
+      "normative_row": "ALT-008-ALAT-VMSTATE-VALIDATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.alat.vmstate"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-vmstate"]
     },
     {
       "normative_row": "BND-001-BUNDLE-FORMAT",

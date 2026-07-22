@@ -258,6 +258,16 @@ foreach test_name, extra: tests
        timeout: slow_tests.get(test_name, 30),
        priority: slow_tests.get(test_name, 30),
        suite: ['unit'])
+  if test_name == 'test-ia64-vmstate'
+    test('test-ia64-alat-vmstate', exe,
+         depends: test_deps.get(test_name, []),
+         env: test_env,
+         args: ['--tap', '-p', '/ia64/vmstate/alat'],
+         protocol: 'tap',
+         timeout: slow_tests.get(test_name, 30),
+         priority: slow_tests.get(test_name, 30),
+         suite: ['unit'])
+  endif
 endforeach
 
 test('test-ia64-full-tcg-static', python,
@@ -315,6 +325,12 @@ test('test-ia64-normative-catalogue', python,
      args: [meson.project_source_root() / 'scripts/ia64-validate-normative-catalogue.py',
             '--root', meson.project_source_root(),
             '--manual-dir', meson.project_source_root() / 'tests' / 'ia64-conformance' / 'manuals'],
+     timeout: 30,
+     suite: ['unit'])
+
+test('test-ia64-alat-lifecycle-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-alat-lifecycle-tranche.py',
+            '--root', meson.project_source_root()],
      timeout: 30,
      suite: ['unit'])
 

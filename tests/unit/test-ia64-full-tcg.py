@@ -911,6 +911,21 @@ def ld8_advanced(r1: int, r3: int, qp: int = 0) -> int:
     )
 
 
+def ldfs_advanced(f1: int, r3: int, qp: int = 0) -> int:
+    """Encode M6 ``ldfs.a f1 = [r3]`` for floating ALAT testing."""
+    if not 0 <= f1 < 128 or not 0 <= r3 < 128:
+        raise ValueError("advanced-load FR/GR operands must fit in seven bits")
+    if not 0 <= qp < 64:
+        raise ValueError("qualifying predicate must fit in six bits")
+    return (
+        op(6)
+        | bitfield(0x0a, 30, 6)
+        | bitfield(r3, 20, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+
 def ld8_check_clear(r1: int, r3: int, qp: int = 0) -> int:
     """Encode M1 ``ld8.c.clr r1 = [r3]`` for GR forwarding tests."""
     if not 0 <= r1 < 128 or not 0 <= r3 < 128:
@@ -927,15 +942,16 @@ def ld8_check_clear(r1: int, r3: int, qp: int = 0) -> int:
 
 
 def chk_a(r2: int, source: int, target: int, *,
-          clear: bool = False, qp: int = 0) -> int:
-    """Encode integer M22 ``chk.a[.clr] r2,target``."""
+          floating: bool = False, clear: bool = False,
+          qp: int = 0) -> int:
+    """Encode M22/M23 ``chk.a[.clr] r2,target`` for a GR or FR."""
     if not 0 <= r2 < 128:
         raise ValueError("advanced-check source must fit in seven bits")
     if not 0 <= qp < 64:
         raise ValueError("qualifying predicate must fit in six bits")
     field = branch_target_field(source, target)
     return (
-        bitfield(5 if clear else 4, 33, 3)
+        bitfield((6 if floating else 4) + int(clear), 33, 3)
         | bitfield(field & 0xfffff, 13, 20)
         | bitfield((field >> 20) & 1, 36, 1)
         | bitfield(r2, 6, 7)
@@ -3705,6 +3721,61 @@ def typed_epoch_migration_program() -> Program:
         ),
         terminal_ip=0x60,
         data=(DataWord(data_address, data_value, 8),),
+    )
+
+
+def alat_migration_debug_safety_program() -> Program:
+    """Carry live GR/FR ALAT tags across a debugger save/load boundary."""
+    return Program(
+        name="ALAT fresh-process migration and debugger safety",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(10, 0x1800, 0),
+                   adds(11, 0x1820, 0)),
+            Bundle(0x20, 0x01, ld8_advanced(20, 10),
+                   adds(24, 0, 0), adds(25, 0, 0)),
+            Bundle(0x30, 0x01, ldfs_advanced(21, 11),
+                   adds(26, 0, 0), adds(27, 0, 0)),
+
+            # The GDB checkpoint is at 0x40.  Intel permits either original
+            # entry to have been pessimistically discarded.  Record a hit as
+            # one and a miss as two, then rejoin without preferring either.
+            Bundle(0x40, 0x01, chk_a(20, 0x40, 0x60),
+                   nop_i(), nop_i()),
+            Bundle(0x50, 0x11, nop_m(), adds(24, 1, 0),
+                   br_cond(0x50, 0x70)),
+            Bundle(0x60, 0x11, nop_m(), adds(24, 2, 0),
+                   br_cond(0x60, 0x70)),
+            Bundle(0x70, 0x01,
+                   chk_a(21, 0x70, 0x90, floating=True),
+                   nop_i(), nop_i()),
+            Bundle(0x80, 0x11, nop_m(), adds(25, 1, 0),
+                   br_cond(0x80, 0xA0)),
+            Bundle(0x90, 0x11, nop_m(), adds(25, 2, 0),
+                   br_cond(0x90, 0xA0)),
+
+            # Numeric register identity is not enough: a GR20 entry must
+            # never satisfy an FR20 check and an FR21 entry must never satisfy
+            # a GR21 check.  These two probes therefore require recovery.
+            Bundle(0xA0, 0x01,
+                   chk_a(20, 0xA0, 0xC0, floating=True),
+                   nop_i(), nop_i()),
+            Bundle(0xB0, 0x11, nop_m(), adds(26, 0xBAD, 0),
+                   br_cond(0xB0, 0xD0)),
+            Bundle(0xC0, 0x11, nop_m(), adds(26, 1, 0),
+                   br_cond(0xC0, 0xD0)),
+            Bundle(0xD0, 0x01, chk_a(21, 0xD0, 0xF0),
+                   nop_i(), nop_i()),
+            Bundle(0xE0, 0x11, nop_m(), adds(27, 0xBAD, 0),
+                   br_cond(0xE0, 0x100)),
+            Bundle(0xF0, 0x11, nop_m(), adds(27, 1, 0),
+                   br_cond(0xF0, 0x100)),
+            spin_bundle(0x100),
+        ),
+        terminal_ip=0x100,
+        data=(
+            DataWord(0x1800, 0x1122334455667788, 8),
+            DataWord(0x1820, 0x3FC00000, 4),
+        ),
     )
 
 
@@ -8754,6 +8825,63 @@ def test_typed_epoch_savevm_migration(qemu: Path) -> str:
     )
 
 
+def _require_alat_migration_safety(snapshot: Snapshot, label: str) -> None:
+    _require(not snapshot.exception_pending,
+             label + " raised an exception")
+    _require(snapshot.ip == 0x100,
+             label + " missed terminal IP 0x100")
+    _require(
+        snapshot.gr[24] in (1, 2) and snapshot.gr[25] in (1, 2),
+        "{} produced an invalid permitted-hit marker: r24={} r25={}"
+        .format(label, snapshot.gr[24], snapshot.gr[25]),
+    )
+    _require(
+        snapshot.gr[26] == 1 and snapshot.gr[27] == 1,
+        "{} produced a false cross-type ALAT hit: r26=0x{:x} r27=0x{:x}"
+        .format(label, snapshot.gr[26], snapshot.gr[27]),
+    )
+
+
+def test_alat_migration_debug_safety(qemu: Path) -> str:
+    program = alat_migration_debug_safety_program()
+    traced = (0x20, 0x30, 0x40, 0x70, 0xA0, 0xD0)
+    direct = run_program(qemu, program, typed_direct_trace_ips=traced)
+    _require_alat_migration_safety(direct, "direct ALAT control")
+
+    result = run_savevm_migration(qemu, program, checkpoint_ip=0x40)
+    _require(not result.checkpoint.exception_pending,
+             "ALAT source checkpoint has a pending exception")
+    _require(
+        result.checkpoint.ip == 0x40 and
+        all(result.checkpoint.gr[reg] == 0 for reg in range(24, 28)),
+        "source did not stop after exactly the GR/FR advanced-load seeds",
+    )
+    restored_differences = successful_snapshot_differences(
+        result.checkpoint, result.restored
+    )
+    _require(
+        not restored_differences,
+        "fresh QEMU did not restore the architectural ALAT checkpoint:\n  "
+        + "\n  ".join(restored_differences),
+    )
+    _require_alat_migration_safety(
+        result.final, "debugger/savevm ALAT destination"
+    )
+
+    _require_typed_direct_trace(result.source_trace, 0x20)
+    _require_typed_direct_trace(result.source_trace, 0x30)
+    for ip in traced[2:]:
+        _require_typed_direct_trace(result.destination_trace, ip)
+
+    return (
+        "live GR20/FR21 ALAT tags cross a real GDB breakpoint and "
+        "fresh-process save/load with exact architectural state; each "
+        "original tag may hit or pessimistically miss as Intel permits, "
+        "while FR20 and GR21 always recover and prove no stale or cross-type "
+        "false hit"
+    )
+
+
 def test_typed_branch_forward_savevm_migration(qemu: Path) -> str:
     program = typed_branch_forward_migration_program()
     result = run_savevm_migration(qemu, program, checkpoint_ip=0x20)
@@ -11460,7 +11588,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..35")
+    print("1..36")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -11497,6 +11625,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 33 - emitted NaT lattice accounting")
         print("not ok 34 - family-wide generated-code density")
         print("not ok 35 - exact helper contracts")
+        print("not ok 36 - ALAT migration and debugger safety")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -11553,6 +11682,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("family-wide generated-code density",
          test_generated_code_density_families),
         ("exact helper contracts", test_exact_helper_contracts),
+        ("ALAT migration and debugger safety",
+         test_alat_migration_debug_safety),
     )
     failures = 0
     for index, (name, test) in enumerate(tests, start=1):
