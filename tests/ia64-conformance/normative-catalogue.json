@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 10,
+  "catalogue_revision": 11,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2155,6 +2155,26 @@
       "committed_prefix": "A protection fault leaves the exact successful mandatory prefix committed. After repair, the same reference may take Data Debug before memory access; disabling the DBR and retrying continues without replaying either prefix.",
       "restart_rule": "The first handler repairs only the denying PTE or PKR and executes RFI; the second observes the same issuing IIP and faulting IFA with ISR.rs one, disables the DBR, and executes RFI. With PSR.dd set, exactly the first successful matching mandatory reference is suppressed and clears saved PSR.dd before the next reference faults.",
       "permitted_results": ["All thirteen protection variants raise the selected protection fault before one exact Data Debug fault on the same mandatory reference, with both retries preserving a poisoned committed prefix", "One FLUSHRS store and one LOADRS load variant suppress exactly their first matching mandatory reference through PSR.dd, then raise one Data Debug fault on the next reference and complete without replay"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-007-MANDATORY-DATA-NESTED-RETRY",
+      "requirement_ids": ["RSE-007", "RSE-004", "RSE-005", "RSE-008", "RSE-009", "MMU-011", "MMU-016", "EXC-006", "EXC-007", "EXC-008", "EXC-009"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Parts 1 and 2: System Architecture and Memory Management", "section": "5.4.4", "printed_pages": ["2:71", "2:101", "2:102", "2:144", "2:145", "2:146", "2:576", "2:577"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Unlike other nested interruptions, the hardware does not update ISR when a Data Nested TLB fault is delivered"},
+      "operation": {"kind": "mandatory-rse-data-nested-tlb-repair", "selector": "FLUSHRS mandatory stores and LOADRS mandatory loads missing a DTC translation while PSR.ic is serialized zero, with the VHPT walker alternately disabled and enabled", "encoding": "legal first-in-group FLUSHRS or LOADRS in an outer-handler resource context, Data Nested TLB vector repair through a register address convention and direct branch retry, followed by the preserved outer RFI"},
+      "legal_inputs": ["PSR.ic is zero and non-in-flight while PSR.rt is one", "All eleven interruption resources contain a legal distinct outer-handler image", "One 4 KiB identity DTC page admits an exact mandatory prefix and the adjacent page is absent", "The missing mandatory address is retained in a general register for the Data Nested convention", "PTA.ve and RR.ve are disabled in two cases and enabled in two cases"],
+      "privilege": {"levels": [0], "rule": "The outer handler, Data Nested vector, mandatory RSE reference, and final RFI execute at CPL0 with RSC.pl zero"},
+      "state_read": ["dirty stacked-register values and NaTs or LOADRS backing image", "PSR.ic non-in-flight state and PSR.rt", "all eleven interruption resources", "register-convention missing address", "RSE DTC, PTA, RR0, BSP, and BSPSTORE state"],
+      "state_written": ["one repaired DTC entry", "committed backing-store prefix and remaining suffix", "BSPSTORE and RSE.BspLoad", "Data Nested vector control flow", "temporary IFA and ITIR handler operands restored before direct retry", "outer-handler RFI result"],
+      "predication": {"applies": false, "rule": "FLUSHRS and LOADRS are unpredicated"},
+      "nat_behavior": "Store and load cases cross an RNAT collection position. Handler poisoning distinguishes exact mandatory-prefix continuation from replay after the direct nested retry.",
+      "possible_faults": ["Data Nested TLB converted from Alternate Data TLB or VHPT-enabled Data TLB miss"],
+      "fault_priority": ["instruction legality and complete-frame preconditions", "mandatory RSE translation miss", "PSR.ic zero and non-in-flight Data Nested selection before walker or normal miss delivery", "register-convention repair", "mandatory backing-store access", "outer-handler completion and RFI"],
+      "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE. Data Nested entry preserves the exact prefix and every pre-existing interruption resource; poisoning proves direct retry starts at the uncommitted word.",
+      "restart_rule": "Because Data Nested does not update IFA or ISR, its handler consumes the missing address from r14, saves all eleven outer resources in r20-r30, installs the DTC entry, restores temporary IFA/ITIR/IHA use, and branches directly to the issuing RSE instruction. The completed outer handler then executes its original RFI through the preserved IPSR/IIP/IFS image.",
+      "permitted_results": ["FLUSHRS store and LOADRS load each take exactly one Data Nested TLB fault with the walker disabled and enabled", "All eleven interruption resources remain bit-exact across nested entry and repair", "The handler-visible BSPSTORE is the exact uncommitted word, poison remains intact, the suffix completes once, and the original outer RFI reaches its saved continuation with PSR.ic and PSR.rt restored"],
       "required_evidence": "E2"
     },
     {

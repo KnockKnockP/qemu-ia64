@@ -24,6 +24,7 @@ U64_MASK = (1 << 64) - 1
 RSE_DATA_KEY_MISS_VECTOR = 0x1C00
 RSE_VHPT_TRANSLATION_VECTOR = 0x0000
 RSE_DATA_TLB_VECTOR = 0x0800
+RSE_DATA_NESTED_TLB_VECTOR = 0x1400
 RSE_DIRTY_BIT_VECTOR = 0x2000
 RSE_DATA_ACCESS_BIT_VECTOR = 0x2800
 RSE_PAGE_FAULT_VECTOR = 0x5000
@@ -275,6 +276,28 @@ RSE_MANDATORY_VHPT_IMPLEMENTATION_ROWS = (
     "cpu.register.rr.0",
     "cpu.register.scalar.psr",
 )
+RSE_MANDATORY_DATA_NESTED_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.opcode.ia64_op_loadrs",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+    "cpu.register.cr.16",
+    "cpu.register.cr.17",
+    "cpu.register.cr.19",
+    "cpu.register.cr.20",
+    "cpu.register.cr.21",
+    "cpu.register.cr.22",
+    "cpu.register.cr.23",
+    "cpu.register.cr.24",
+    "cpu.register.cr.25",
+    "cpu.register.cr.26",
+    "cpu.register.cr.27",
+    "cpu.register.cr.8",
+    "cpu.register.rr.0",
+    "cpu.register.scalar.psr",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -381,6 +404,9 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-VHPT-RETRY": list(
             RSE_MANDATORY_VHPT_IMPLEMENTATION_ROWS
         ),
+        "RSE-007-MANDATORY-DATA-NESTED-RETRY": list(
+            RSE_MANDATORY_DATA_NESTED_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -414,12 +440,15 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-VHPT-RETRY": [
             "test_rse_mandatory_vhpt_translation_paths",
         ],
+        "RSE-007-MANDATORY-DATA-NESTED-RETRY": [
+            "test_rse_mandatory_data_nested_tlb_retry",
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 38:
-        raise AssertionError("register tranche must contain thirty-eight cases")
+    if not isinstance(cases, list) or len(cases) != 39:
+        raise AssertionError("register tranche must contain thirty-nine cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -532,6 +561,7 @@ def validate_contract(root: Path) -> str:
         "RSE protection fault/RFI retries, thirteen protection-to-Data-Debug "
         "priority chains, two PSR.dd one-reference suppression retries, and "
         "six short-VHPT hit/Data-TLB/VHPT-fault paths, "
+        "four mandatory-RSE Data-Nested outer-handler retries, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -2832,6 +2862,286 @@ def rse_loadrs_fault_retry_program(
     return result + (debug_rfi,)
 
 
+def append_rse_data_nested_context(
+        h: ModuleType, system: ModuleType, bundles: list[object],
+        address: int, outer_return: int) -> tuple[int, tuple[int, ...]]:
+    """Establish one serialized IC=0 outer-handler resource image."""
+    saved_psr = h.IA64_PSR_IC | h.IA64_PSR_RT
+    controls = (
+        (h.IA64_CR_IPSR, saved_psr),
+        (h.IA64_CR_ISR, 0x1111),
+        (h.IA64_CR_IIP, outer_return),
+        (h.IA64_CR_IFA, 0x3333),
+        (h.IA64_CR_ITIR, 0x4444),
+        (h.IA64_CR_IIPA, 0x5550),
+        (h.IA64_CR_IFS, 0x6666),
+        (24, 0x7777),
+        (RSE_CR_IHA, 0x8888),
+        (26, 0x9999),
+        (27, 0xAAAA),
+    )
+
+    # RSE translation is enabled while interruption collection stays clear.
+    # SRLZ.D makes IC=0 non-in-flight before the mandatory reference.
+    bundles.append(system.movl_bundle(h, address, 8, h.IA64_PSR_RT))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_gr_to_psr_l(8), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for control, value in controls:
+        bundles.append(system.movl_bundle(h, address, 8, value))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_grcr(control, 8), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    return address, tuple(value for _, value in controls)
+
+
+def append_rse_data_nested_handler(
+        h: ModuleType, system: ModuleType, bundles: list[object], *,
+        retry_ip: int, fault_address_register: int, mapped_page: int,
+        poison: tuple[tuple[int, int], ...]) -> int:
+    """Repair an IC=0 RSE miss without overwriting outer resources."""
+    address = RSE_DATA_NESTED_TLB_VECTOR
+    controls = (
+        h.IA64_CR_IPSR,
+        h.IA64_CR_ISR,
+        h.IA64_CR_IIP,
+        h.IA64_CR_IFA,
+        h.IA64_CR_ITIR,
+        h.IA64_CR_IIPA,
+        h.IA64_CR_IFS,
+        24,
+        RSE_CR_IHA,
+        26,
+        27,
+    )
+    for register, control in enumerate(controls, 20):
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_crgr(register, control),
+            h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_m_argr(31, 18), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.nop_m(), h.adds(15, 1, 15), h.nop_i()
+    ))
+    address += 0x10
+
+    # The Data Nested convention supplies the missing address out of band.
+    # ITC.D temporarily consumes IFA/ITIR, so restore the outer handler's
+    # preserved values before returning directly to its faulting instruction.
+    bundles.append(h.Bundle(
+        address, 0x01,
+        h.mov_grcr(h.IA64_CR_IFA, fault_address_register),
+        h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 9, 12 << 2))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_grcr(h.IA64_CR_ITIR, 9),
+        h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 10, mapped_page | 0x661))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x0b, h.itc_d(10), h.nop_m(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x09, h.mov_grcr(h.IA64_CR_IFA, 23),
+        h.mov_grcr(h.IA64_CR_ITIR, 24), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_grcr(RSE_CR_IHA, 28),
+        h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for backing_address, value in poison:
+        bundles.append(system.movl_bundle(h, address, 8, backing_address))
+        address += 0x10
+        bundles.append(system.movl_bundle(h, address, 9, value))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.st8(9, 8), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(),
+        h.br_cond(address, retry_ip)
+    ))
+    return address
+
+
+def rse_mandatory_data_nested_tlb_program(
+        h: ModuleType, system: ModuleType, access: str,
+        vhpt_enabled: bool):
+    """Build one outer-handler mandatory RSE Data Nested repair case."""
+    if access not in {"store", "load"}:
+        raise AssertionError("Data Nested RSE access must be store or load")
+    entry = 0x10000
+    terminal = 0x70000
+    address = entry
+    bundles: list[object] = []
+    base = 0x7FE8
+    bsp = 0x8010
+    original = (0x41, 0x42, 0, 0x43, 0x44)
+
+    if access == "store":
+        bundles.append(system.movl_bundle(h, address, 29, base))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        for value in range(1, 5):
+            bundles.append(h.Bundle(
+                address, 0x01, h.alloc(31, 1, 1, 0),
+                h.nop_i(), h.nop_i()
+            ))
+            address += 0x10
+            bundles.append(h.Bundle(
+                address, 0x01, h.nop_m(),
+                h.adds(9, 0x1800 + (value - 1) * 8, 0), h.nop_i()
+            ))
+            address += 0x10
+            bundles.append(h.Bundle(
+                address, 0x01, h.ld8_fill(32, 9),
+                h.nop_i(), h.nop_i()
+            ))
+            address += 0x10
+            call_ip = address
+            bundles.append(h.Bundle(
+                address, 0x11, h.nop_m(), h.nop_i(),
+                h.br_call(call_ip, call_ip + 0x10, 0)
+            ))
+            address += 0x10
+        address = append_rse_identity_dtc_mapping(
+            h, system, bundles, address, 0x7000
+        )
+        mapped_page = 0x8000
+        fault_address = 0x8000
+        poison = (
+            (0x7FE8, 0x1111111111111111),
+            (0x7FF0, 0x2222222222222222),
+            (0x7FF8, 0x3333333333333333),
+        )
+        expected_words = tuple(value for _, value in poison) + (3, 4)
+        data = tuple(
+            h.DataWord(0x1800 + (value - 1) * 8, value, 8)
+            for value in range(1, 5)
+        )
+    else:
+        bundles.append(system.movl_bundle(h, address, 29, bsp))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        bundles.append(system.movl_bundle(
+            h, address, 8, (bsp - base) << 16
+        ))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        address = append_rse_identity_dtc_mapping(
+            h, system, bundles, address, 0x8000
+        )
+        mapped_page = 0x7000
+        fault_address = 0x7FF8
+        poison = (
+            (0x8000, 0xAAAAAAAAAAAAAAAA),
+            (0x8008, 0xBBBBBBBBBBBBBBBB),
+        )
+        expected_words = original
+        data = tuple(
+            h.DataWord(base + index * 8, value, 8)
+            for index, value in enumerate(original)
+        )
+
+    if vhpt_enabled:
+        address = append_rse_short_vhpt_configuration(
+            h, system, bundles, address
+        )
+    address, saved_controls = append_rse_data_nested_context(
+        h, system, bundles, address, terminal
+    )
+    # Data Nested does not update IFA.  Keep the mandatory reference address
+    # in the explicit register convention consumed by its vector handler.
+    bundles.append(system.movl_bundle(h, address, 14, fault_address))
+    address += 0x10
+    fault_ip = address
+    bundles.append(h.Bundle(
+        address, 0x01,
+        (0x0C if access == "store" else 0x0A) << 27,
+        h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+
+    if access == "load":
+        for backing_address in (0x7FE8, 0x7FF0, 0x7FF8, 0x8000, 0x8008):
+            bundles.append(system.movl_bundle(h, address, 8, backing_address))
+            address += 0x10
+            bundles.append(h.Bundle(
+                address, 0x01, h.st8(0, 8), h.nop_i(), h.nop_i()
+            ))
+            address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, 0x0C << 27, h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    for register, backing_address in enumerate(
+            (0x7FE8, 0x7FF0, 0x7FF8, 0x8000, 0x8008), 8):
+        bundles.append(system.movl_bundle(h, address, 13, backing_address))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.ld8(register, 13), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    outer_rfi = address
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(), h.rfi()
+    ))
+    bundles.append(h.spin_bundle(terminal))
+    handler_retry = append_rse_data_nested_handler(
+        h, system, bundles, retry_ip=fault_ip,
+        fault_address_register=14, mapped_page=mapped_page, poison=poison,
+    )
+    return (
+        h.Program(
+            "{} mandatory RSE {} Data Nested repair".format(
+                "VHPT-enabled" if vhpt_enabled else "alternate",
+                access,
+            ),
+            tuple(bundles), terminal, data, entry=entry,
+        ),
+        fault_ip,
+        fault_address,
+        outer_rfi,
+        handler_retry,
+        saved_controls,
+        expected_words,
+    )
+
+
 def rse_alloc_fault_retry_program(h: ModuleType, system: ModuleType):
     entry = 0x10000
     terminal = 0x70000
@@ -3634,6 +3944,83 @@ def test_rse_mandatory_vhpt_translation_paths(
         "short-format VHPT hit, repaired an invalid-entry Data TLB fault, "
         "and repaired a missing-backing VHPT Translation fault without "
         "committed-prefix replay: " + ", ".join(completed)
+    )
+
+
+def test_rse_mandatory_data_nested_tlb_retry(
+        h: ModuleType, system: ModuleType, qemu: Path) -> str:
+    """Prove IC=0 RSE Data Nested repair and outer-handler return."""
+    completed: list[str] = []
+    for access in ("store", "load"):
+        for vhpt_enabled in (False, True):
+            (
+                program,
+                fault_ip,
+                fault_address,
+                outer_rfi,
+                handler_retry,
+                saved_controls,
+                expected_words,
+            ) = rse_mandatory_data_nested_tlb_program(
+                h, system, access, vhpt_enabled
+            )
+            snapshot = h.run_program(
+                qemu,
+                program,
+                compact_loader=True,
+                preserve_fault_slot=True,
+                typed_direct_trace_ips=(fault_ip,),
+                typed_rfi_traces=(outer_rfi,),
+            )
+            label = "vhpt-data" if vhpt_enabled else "alternate-data"
+            expected_psr = h.IA64_PSR_IC | h.IA64_PSR_RT
+            if (snapshot.ip != program.terminal_ip or
+                    snapshot.exception_kind != "data-nested-tlb" or
+                    snapshot.exception_vector != RSE_DATA_NESTED_TLB_VECTOR or
+                    snapshot.exception_source != fault_ip or
+                    snapshot.exception_address != fault_address or
+                    snapshot.gr[20:31] != saved_controls or
+                    snapshot.gr[31] != 0x8000 or
+                    snapshot.gr[14] != fault_address or
+                    snapshot.gr[15] != 1 or
+                    snapshot.gr[8:13] != expected_words or
+                    snapshot.cr_ipsr != saved_controls[0] or
+                    snapshot.cr_isr != saved_controls[1] or
+                    snapshot.cr_iip != saved_controls[2] or
+                    snapshot.cr_ifa != saved_controls[3] or
+                    snapshot.cr_iipa != saved_controls[5] or
+                    snapshot.rse_bsp != 0x8010 or
+                    snapshot.rse_bspstore != 0x8010 or
+                    snapshot.psr != expected_psr or
+                    snapshot.psr_ic_inflight):
+                raise AssertionError(
+                    "RSE {} {} Data Nested mismatch: ip=0x{:x} "
+                    "exc={}/0x{:x} source/address=0x{:x}/0x{:x} "
+                    "controls={} expected-controls={} fault-BSPSTORE=0x{:x} "
+                    "count={} words={} BSP=0x{:x}/0x{:x} PSR=0x{:x} "
+                    "inflight={} handler-branch=0x{:x}".format(
+                        access, label, snapshot.ip,
+                        snapshot.exception_kind, snapshot.exception_vector,
+                        snapshot.exception_source,
+                        snapshot.exception_address,
+                        tuple(hex(value) for value in snapshot.gr[20:31]),
+                        tuple(hex(value) for value in saved_controls),
+                        snapshot.gr[31], snapshot.gr[15],
+                        tuple(hex(value) for value in snapshot.gr[8:13]),
+                        snapshot.rse_bsp, snapshot.rse_bspstore,
+                        snapshot.psr, snapshot.psr_ic_inflight,
+                        handler_retry,
+                    )
+                )
+            completed.append(f"{access}:{label}")
+
+    return (
+        "serialized PSR.ic=0 converted alternate and VHPT-enabled mandatory "
+        "FLUSHRS/LOADRS misses to Data Nested TLB, preserved all eleven "
+        "interruption resources and the committed RSE prefix, repaired via "
+        "the register-convention address, directly retried the outer-handler "
+        "instruction once, and retained its original RFI context: "
+        + ", ".join(completed)
     )
 
 
@@ -4796,6 +5183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("RSE mandatory Data Debug priority/retry", lambda: test_rse_mandatory_data_debug_priority_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory PSR.dd one-shot", lambda: test_rse_mandatory_psr_dd_one_shot(harness, system, args.qemu.resolve())),
         ("RSE mandatory VHPT translation paths", lambda: test_rse_mandatory_vhpt_translation_paths(harness, system, args.qemu.resolve())),
+        ("RSE mandatory Data Nested TLB retry", lambda: test_rse_mandatory_data_nested_tlb_retry(harness, system, args.qemu.resolve())),
         ("ALLOC frame and spill effects", lambda: test_alloc_effects(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),

@@ -30,9 +30,9 @@ tests can close complete architectural index spaces without creating one test
 executable per register.
 
 The three long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 public gate after the short-VHPT RSE
-checkpoint, `test-ia64-system-tcg` took 47.46 seconds,
-`test-ia64-full-tcg` 46.13 seconds, and `test-ia64-register-tcg` 41.90
+matrices execute. On the 2026-07-22 public gate after the Data Nested RSE
+checkpoint, `test-ia64-system-tcg` took 47.37 seconds,
+`test-ia64-full-tcg` 46.23 seconds, and `test-ia64-register-tcg` 43.02
 seconds. With parallel execution Meson may pause near the end of the progress
 display until these processes complete; the per-test timeouts still detect a
 genuine hang.
