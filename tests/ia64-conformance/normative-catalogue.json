@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 18,
+  "catalogue_revision": 19,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -72,6 +72,26 @@
       "committed_prefix": "Only earlier instructions commit; the faulting load commits no destination, NaT, base update, ALAT, or memory effect",
       "restart_rule": "CR.IIP and IPSR.ri identify the exact faulting M slot for handler repair and retry.",
       "permitted_results": ["All 40 width/class protection probes raise the declared vector with exact R|SP state and no load effects", "All 22 aligned, unaligned, or deferred-NaTPage Data Debug probes raise vector 0x5900 with exact R|SP state and no load effects"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-002-INTEGER-NO-RECOVERY-VHPT",
+      "requirement_ids": ["ALT-002", "MEM-003", "MEM-005", "MEM-012", "MMU-007", "MMU-009", "MMU-011"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1 and Part 2: Addressing, Interruptions, and Memory Management", "section": "5.5.5", "printed_pages": ["2:62", "2:65", "2:105", "2:173", "2:575", "2:579"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "VHPT Searching"},
+      "operation": {"kind": "integer-control-speculative-no-recovery-vhpt-selection", "selector": "ld1.s/sa, ld2.s/sa, ld4.s/sa, and ld8.s/sa across invalid-leaf and missing-backing short-VHPT paths", "encoding": "M10 immediate-update integer speculative and speculative-advanced loads"},
+      "legal_inputs": ["CPL0 with serialized PSR.ic=1, PSR.dt=1, PSR.it=0, and PSR.ed=0", "Region zero RR.ve=1 and RR.ps=12 with PTA.vf=0 and PTA.size=15", "No original DTC translation", "Either a mapped IHA page containing invalid entry 0x3 or no IHA-page DTC translation", "Legal distinct destination and base registers with a representable width-sized update"],
+      "privilege": {"levels": [0], "rule": "The loads are application-level; CPL0 is used only to configure RR, PTA, DTC, and interruption state."},
+      "state_read": ["PSR.ic, PSR.it, PSR.ed, and PSR.dt", "RR.ve, RR.ps, PTA.vf, PTA.size, and DTC lookup state", "the 8-byte short-format VHPT leaf", "load base and destination state"],
+      "state_written": ["precise interruption-collection state", "CR.IHA and CR.ITIR walker evidence"],
+      "predication": {"applies": true, "rule": "All selected operations use p0; false qualification remains a separate ALT-006 row."},
+      "nat_behavior": "A non-deferred VHPT Translation or Data TLB fault writes neither destination data nor NaT and retires no base update.",
+      "possible_faults": ["VHPT Data through the VHPT Translation vector when the walker's IHA access misses the DTC", "Data TLB when the mapped short-format leaf is invalid"],
+      "fault_priority": ["predicate and operand legality", "original DTC miss", "enabled short-format VHPT walk", "walker-backing translation before leaf validity", "no-recovery delivery", "precise interruption collection"],
+      "committed_prefix": "Only earlier instructions commit; the faulting load commits no destination, NaT, base update, ALAT, or memory effect",
+      "restart_rule": "CR.IHA and CR.ITIR describe walker backing repair while CR.IFA retains the original address and CR.IIP/IPSR.ri identify the exact faulting M slot.",
+      "permitted_results": ["All eight invalid-entry width/class probes reach Data TLB vector 0x0800 with exact R|SP, IHA=0x40, ITIR.ps=12, and no load effects", "All eight missing-backing width/class probes reach VHPT Translation vector 0x0000 with the same exact original and walker state and no load effects"],
       "required_evidence": "E2"
     },
     {

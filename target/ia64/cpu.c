@@ -255,10 +255,12 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  env->nat.unat, env->nat.rnat);
     qemu_fprintf(f, "CR.IVA %016" PRIx64 "  CR.IIP %016" PRIx64
                     "  CR.ISR %016" PRIx64 "  CR.IFA %016" PRIx64
-                    "  CR.IIPA %016" PRIx64 "  CR.IPSR %016" PRIx64 "\n",
+                    "  CR.IIPA %016" PRIx64 "  CR.IPSR %016" PRIx64
+                    "  CR.IHA %016" PRIx64 "  CR.ITIR %016" PRIx64 "\n",
                  env->cr[IA64_CR_IVA], env->cr[IA64_CR_IIP],
                  env->cr[IA64_CR_ISR], env->cr[IA64_CR_IFA],
-                 env->cr[IA64_CR_IIPA], env->cr[IA64_CR_IPSR]);
+                 env->cr[IA64_CR_IIPA], env->cr[IA64_CR_IPSR],
+                 env->cr[IA64_CR_IHA], env->cr[IA64_CR_ITIR]);
     qemu_fprintf(f, "EXC PENDING %u KIND %s VECTOR %04" PRIx64
                     " SOURCE %016" PRIx64 " ADDRESS %016" PRIx64 "\n",
                  env->exception.pending, ia64_exception_name(env->exception.kind),

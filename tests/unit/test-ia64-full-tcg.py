@@ -113,6 +113,8 @@ class Snapshot:
     cr_ifa: int
     cr_iipa: int
     cr_ipsr: int
+    cr_iha: int
+    cr_itir: int
     exception_pending: bool
     exception_kind: str
     exception_vector: int
@@ -4355,7 +4357,8 @@ def parse_snapshot(output: str) -> Snapshot:
     control = _required_match(
         r"^CR\.IVA\s+([0-9a-f]+)\s+CR\.IIP\s+([0-9a-f]+)\s+"
         r"CR\.ISR\s+([0-9a-f]+)\s+CR\.IFA\s+([0-9a-f]+)\s+"
-        r"CR\.IIPA\s+([0-9a-f]+)\s+CR\.IPSR\s+([0-9a-f]+)\s*$",
+        r"CR\.IIPA\s+([0-9a-f]+)\s+CR\.IPSR\s+([0-9a-f]+)\s+"
+        r"CR\.IHA\s+([0-9a-f]+)\s+CR\.ITIR\s+([0-9a-f]+)\s*$",
         output,
         "control-register state",
     )
@@ -4415,6 +4418,8 @@ def parse_snapshot(output: str) -> Snapshot:
         cr_ifa=int(control.group(4), 16),
         cr_iipa=int(control.group(5), 16),
         cr_ipsr=int(control.group(6), 16),
+        cr_iha=int(control.group(7), 16),
+        cr_itir=int(control.group(8), 16),
         exception_pending=bool(int(exception.group(1), 10)),
         exception_kind=exception.group(2).lower(),
         exception_vector=int(exception.group(3), 16),
