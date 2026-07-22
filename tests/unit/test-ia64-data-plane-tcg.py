@@ -188,6 +188,45 @@ ALAT_RSE_WRAP_IMPLEMENTATION_ROWS = tuple(sorted((
     "cpu.register.scalar.cfm",
 )))
 
+ALAT_CLRRRB_SOFTWARE_INVALIDATION_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.branch.loop-state",
+    "cpu.opcode.ia64_op_alloc",
+    "cpu.opcode.ia64_op_br_ctop",
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_clrrrb",
+    "cpu.opcode.ia64_op_invala",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.opcode.ia64_op_ldfs",
+    "cpu.register.ar.65",
+    "cpu.register.scalar.cfm",
+)))
+
+ALAT_MEMORY_REMAP_SOFTWARE_INVALIDATION_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_invala",
+    "cpu.opcode.ia64_op_itc_d",
+    "cpu.opcode.ia64_op_ld8",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.opcode.ia64_op_ldfs",
+    "cpu.opcode.ia64_op_ptc_l",
+    "cpu.register.scalar.psr",
+)))
+
+ALAT_INVOLUNTARY_RETURN_INVALIDATION_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_br_ret",
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_invala",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.opcode.ia64_op_ldfs",
+    "cpu.opcode.ia64_op_rfi",
+    "cpu.register.ar.44",
+    "cpu.register.cr.1",
+    "cpu.register.cr.16",
+    "cpu.register.cr.65",
+    "cpu.register.cr.72",
+    "cpu.register.scalar.psr",
+)))
+
 RSE_PHYSICAL_WRAP_IMPLEMENTATION_ROWS = tuple(sorted((
     "cpu.opcode.ia64_op_alloc",
     "cpu.opcode.ia64_op_br_call",
@@ -209,9 +248,9 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 17:
+    if not isinstance(cases, list) or len(cases) != 20:
         raise AssertionError(
-            "speculation tranche must contain seventeen atomic cases")
+            "speculation tranche must contain twenty atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC",
@@ -228,7 +267,10 @@ def validate_contract(root: Path) -> str:
             "ALT-004-ALAT-RSE-PHYSICAL-STACK-WRAP",
             "ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY",
             "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION",
+            "ALT-005-ALAT-CLRRRB-SOFTWARE-INVALIDATION",
+            "ALT-005-ALAT-INVOLUNTARY-RETURN-INVALIDATION",
             "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION",
+            "ALT-005-ALAT-MEMORY-REMAP-SOFTWARE-INVALIDATION",
             "ALT-006-INTEGER-FALSE-PREDICATE",
             "RSE-006-ALLOC-PHYSICAL-STACK-WRAP-SPILL-FILL"}:
         raise AssertionError("speculation tranche normative rows drifted")
@@ -323,6 +365,30 @@ def validate_contract(root: Path) -> str:
             "invala_all_entries_case",
             "invala_selected_entries_case"]:
         raise AssertionError("ALAT invalidation execution probes drifted")
+    clrrrb_invalidation = by_row[
+        "ALT-005-ALAT-CLRRRB-SOFTWARE-INVALIDATION"]
+    if clrrrb_invalidation.get("implementation_rows") != list(
+            ALAT_CLRRRB_SOFTWARE_INVALIDATION_IMPLEMENTATION_ROWS):
+        raise AssertionError("CLRRRB/ALAT implementation rows drifted")
+    if clrrrb_invalidation.get("execution", {}).get("probes") != [
+            "clrrrb_software_alat_invalidation_case"]:
+        raise AssertionError("CLRRRB/ALAT execution probe drifted")
+    memory_remap = by_row[
+        "ALT-005-ALAT-MEMORY-REMAP-SOFTWARE-INVALIDATION"]
+    if memory_remap.get("implementation_rows") != list(
+            ALAT_MEMORY_REMAP_SOFTWARE_INVALIDATION_IMPLEMENTATION_ROWS):
+        raise AssertionError("memory-remap/ALAT implementation rows drifted")
+    if memory_remap.get("execution", {}).get("probes") != [
+            "memory_remap_software_alat_invalidation_case"]:
+        raise AssertionError("memory-remap/ALAT execution probe drifted")
+    involuntary_return = by_row[
+        "ALT-005-ALAT-INVOLUNTARY-RETURN-INVALIDATION"]
+    if involuntary_return.get("implementation_rows") != list(
+            ALAT_INVOLUNTARY_RETURN_INVALIDATION_IMPLEMENTATION_ROWS):
+        raise AssertionError("involuntary-return ALAT implementation rows drifted")
+    if involuntary_return.get("execution", {}).get("probes") != [
+            "involuntary_user_return_alat_invalidation_case"]:
+        raise AssertionError("involuntary-return ALAT execution probe drifted")
     false_predicate = by_row["ALT-006-INTEGER-FALSE-PREDICATE"]
     if false_predicate.get("implementation_rows") != list(
             ALAT_FALSE_PREDICATE_IMPLEMENTATION_ROWS):
@@ -452,9 +518,10 @@ def validate_contract(root: Path) -> str:
                 "DCR protection/debug row misses width {} variants".format(
                     width)
             )
-    return ("seventeen exact ALT/RSE rows cover physical-stack wrap/spill, "
+    return ("twenty exact ALT/RSE rows cover physical-stack wrap/spill, "
             "physical-alias, byte-overlap, "
-            "semaphore, register-remap, target identity, local/explicit "
+            "semaphore, register-remap, target identity, CLRRRB, memory-remap, "
+            "involuntary-return, local/explicit "
             "invalidation, false predication, non-faulting speculation "
             "attributes, "
             "PSR.ed software deferral, PSR.ic=0 always-defer, deferred "
@@ -673,6 +740,7 @@ class RuntimeCase:
     opcode_coverage: Tuple[str, ...]
     preserve_fault_slot: bool = False
     compact_loader: bool = False
+    rfi_trace_ips: Tuple[int, ...] = ()
 
 
 def _no_exception(snapshot, label: str) -> None:
@@ -3724,6 +3792,251 @@ def stacked_call_alat_remap_case() -> RuntimeCase:
     )
 
 
+def clrrrb_software_alat_invalidation_case() -> RuntimeCase:
+    """Invalidate GR and FR tags after CLRRRB changes their name mapping."""
+    bundles: List[object] = [
+        H.Bundle(0x10000, 0x01,
+                 H.alloc(31, 8, 8, 1), H.nop_i(), H.nop_i()),
+        _movl_bundle(0x10010, 7, 0x1800),
+        _movl_bundle(0x10020, 8, 0x1820),
+        _movl_bundle(0x10030, 1, 1),
+        H.Bundle(0x10040, 0x01,
+                 H.nop_m(), H.mov_i_grar(65, 1), H.nop_i()),
+        H.Bundle(0x10050, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_loop("ctop", 0x10050, 0x10060)),
+        H.Bundle(0x10060, 0x01,
+                 integer_load(8, "a", r1=32, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10070, 0x01,
+                 floating_load("IA64_OP_LDFS", attr="a", f1=32, r3=8),
+                 H.nop_i(), H.nop_i()),
+        # CLRRRB is B4 with x6=4.  Under one rotation logical r32 names the
+        # reset mapping's r39, while f32 names the reset mapping's f127.
+        H.Bundle(0x10080, 0x11, H.nop_m(), H.nop_i(), 0x20000000),
+        H.Bundle(0x10090, 0x01,
+                 cache_control("IA64_OP_INVALA"), H.nop_i(), H.nop_i()),
+    ]
+    address, gr_check = _append_alat_miss_probe(
+        bundles, 0x100A0, reg=39, marker_reg=30)
+    address, fr_check = _append_alat_miss_probe(
+        bundles, address, reg=127, marker_reg=31, fp=True)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "CLRRRB software ALAT invalidation"
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(0x1800, 0x1122334455667788, 8),
+              H.DataWord(0x1820, 0x3FC00000, 4)),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and
+                   (snapshot.gr[30], snapshot.gr[31]) == (1, 1),
+                   label + " left a remapped GR or FR tag visible")
+        H._require(((snapshot.cfm >> 18) & 0x7f) == 0 and
+                   ((snapshot.cfm >> 25) & 0x7f) == 0,
+                   label + " did not leave GR/FR rename bases cleared")
+        return ("CLRRRB cleared both rename bases; the following INVALA "
+                "forced mandatory misses through the physical r39/f127 aliases")
+
+    return RuntimeCase(
+        label, program,
+        (0x10060, 0x10070, 0x10080, 0x10090, gr_check, fr_check),
+        verify,
+        ("IA64_OP_ALLOC", "IA64_OP_BR_CTOP", "IA64_OP_LD8A",
+         "IA64_OP_LDFS", "IA64_OP_CLRRRB", "IA64_OP_INVALA",
+         "IA64_OP_CHK_A"),
+    )
+
+
+def memory_remap_software_alat_invalidation_case() -> RuntimeCase:
+    """Purge/reinstall one VA, then explicitly discard its old ALAT tags."""
+    virtual = 0x8000
+    old_physical = 0x2000
+    new_physical = 0x3000
+    old_value = 0x1122334455667788
+    new_value = 0x8877665544332211
+    bundles: List[object] = [
+        _movl_bundle(0x10000, 7, virtual),
+        _movl_bundle(0x10010, 8, virtual + 0x20),
+        _movl_bundle(0x10020, 2, _mapped_pte(old_physical, 0)),
+    ]
+    address = _append_dtc_install(bundles, 0x10030)
+    H._require(address == 0x100A0, "memory-remap setup address drifted")
+    bundles.extend((
+        H.Bundle(0x100A0, 0x01,
+                 integer_load(8, "a", r1=20, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x100B0, 0x01,
+                 floating_load("IA64_OP_LDFS", attr="a", f1=20, r3=8),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x100C0, 0x01,
+                 H.rsm(H.IA64_PSR_IC | H.IA64_PSR_DT),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x100D0, 0x01,
+                 H.srlz_i(), H.nop_i(), H.nop_i()),
+        H.Bundle(0x100E0, 0x01,
+                 H.srlz_d(), H.nop_i(), H.nop_i()),
+        # PTC.L r4,r7 purges the dynamic 4-KiB DTC mapping for the VA.
+        H.Bundle(0x100F0, 0x0B,
+                 _m_system(0x09, r2=4, r3=7), H.nop_m(), H.nop_i()),
+        H.Bundle(0x10100, 0x01,
+                 H.srlz_d(), H.nop_i(), H.nop_i()),
+        _movl_bundle(0x10110, 2, _mapped_pte(new_physical, 0)),
+    ))
+    address = _append_dtc_install(
+        bundles, 0x10120, enable_translation=False)
+    H._require(address == 0x10170, "memory-remap reinstall address drifted")
+    bundles.extend((
+        H.Bundle(0x10170, 0x01,
+                 cache_control("IA64_OP_INVALA"), H.nop_i(), H.nop_i()),
+        H.Bundle(0x10180, 0x01,
+                 H.ssm(H.IA64_PSR_IC | H.IA64_PSR_DT),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10190, 0x01,
+                 H.srlz_i(), H.nop_i(), H.nop_i()),
+        H.Bundle(0x101A0, 0x01,
+                 H.ld8(22, 7), H.nop_i(), H.nop_i()),
+    ))
+    address, gr_check = _append_alat_miss_probe(
+        bundles, 0x101B0, reg=20, marker_reg=30)
+    address, fr_check = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=31, fp=True)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "virtual-to-physical remap software ALAT invalidation"
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(old_physical, old_value, 8),
+              H.DataWord(old_physical + 0x20, 0x3FC00000, 4),
+              H.DataWord(new_physical, new_value, 8),
+              H.DataWord(new_physical + 0x20, 0x40000000, 4)),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[20] == old_value and
+                   snapshot.gr[22] == new_value,
+                   label + " did not prove the old and new physical mappings")
+        H._require((snapshot.gr[30], snapshot.gr[31]) == (1, 1),
+                   label + " left an old GR or FR tag visible")
+        return ("PTC.L plus ITC.D changed the VA from the old to the new "
+                "physical page; INVALA forced both old-target checks to miss")
+
+    return RuntimeCase(
+        label, program,
+        (0x10060, 0x100A0, 0x100B0, 0x100F0, 0x10150, 0x10170,
+         0x101A0, gr_check, fr_check),
+        verify,
+        ("IA64_OP_ITC_D", "IA64_OP_LD8A", "IA64_OP_LDFS",
+         "IA64_OP_PTC_L", "IA64_OP_INVALA", "IA64_OP_LD8",
+         "IA64_OP_CHK_A"),
+    )
+
+
+def involuntary_user_return_alat_invalidation_case() -> RuntimeCase:
+    """Invalidate user GR/FR tags after an involuntary external interrupt."""
+    user_entry = 0x10000
+    bundles: List[object] = [
+        H.Bundle(0x10, 0x01, H.mov_m_argr(10, H.IA64_AR_ITC),
+                 H.adds(12, 0x40, 0), H.adds(13, 1, 0)),
+        H.Bundle(0x20, 0x01, H.nop_m(), H.shl_imm(13, 13, 27), H.nop_i()),
+        H.Bundle(0x30, 0x01, H.nop_m(), H.add(11, 10, 13), H.nop_i()),
+        H.Bundle(0x40, 0x01, H.mov_grcr(H.IA64_CR_ITV, 12),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x50, 0x01, H.mov_grcr(H.IA64_CR_ITM, 11),
+                 H.nop_i(), H.nop_i()),
+        _movl_bundle(0x60, 9, 3 << 62),
+        _movl_bundle(0x70, 14, user_entry),
+        H.Bundle(0x80, 0x01, H.nop_m(), H.mov_gr_to_pfs(9),
+                 H.mov_grbr(6, 14)),
+        H.Bundle(0x90, 0x01, H.ssm(H.IA64_PSR_IC | H.IA64_PSR_I),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0xA0, 0x01, H.srlz_i(), H.nop_i(), H.nop_i()),
+        H.Bundle(0xB0, 0x11, H.nop_m(), H.nop_i(), H.br_ret(6)),
+
+        _movl_bundle(0x10000, 7, 0x1800),
+        _movl_bundle(0x10010, 8, 0x1820),
+        _movl_bundle(0x10020, 9, 0x1840),
+        _movl_bundle(0x10030, 10, 0x1860),
+        H.Bundle(0x10040, 0x01,
+                 integer_load(8, "a", r1=20, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10050, 0x01,
+                 floating_load("IA64_OP_LDFS", attr="a", f1=20, r3=8),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10060, 0x01, H.nop_m(), H.adds(23, 1, 0), H.nop_i()),
+        H.Bundle(0x10070, 0x01, H.nop_m(),
+                 H.cmp_rr(1, 2, 0, 24, "lt"), H.nop_i()),
+        H.Bundle(0x10080, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_cond(0x10080, 0x100A0, qp=1)),
+        H.Bundle(0x10090, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_cond(0x10090, 0x10070)),
+
+        # The handler deliberately reuses both user target names before the
+        # full invalidation, modelling the scratch-register contamination that
+        # makes user-return INVALA mandatory rather than merely defensive.
+        H.Bundle(0x3000, 0x01, H.mov_crgr(15, H.IA64_CR_IVR),
+                 H.adds(26, 0, 23), H.nop_i()),
+        H.Bundle(0x3010, 0x01, H.mov_crgr(25, H.IA64_CR_IPSR),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x3020, 0x01,
+                 integer_load(8, "a", r1=20, r3=9),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x3030, 0x01,
+                 floating_load("IA64_OP_LDFS", attr="a", f1=20, r3=10),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x3040, 0x01,
+                 cache_control("IA64_OP_INVALA"), H.nop_i(), H.nop_i()),
+        H.Bundle(0x3050, 0x01, H.nop_m(), H.adds(24, 1, 0), H.nop_i()),
+        H.Bundle(0x3060, 0x11, H.nop_m(), H.nop_i(), H.rfi()),
+    ]
+    address, gr_check = _append_alat_miss_probe(
+        bundles, 0x100A0, reg=20, marker_reg=30)
+    address, fr_check = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=31, fp=True)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "involuntary user-return full ALAT invalidation"
+    handler_gr_value = 0x8877665544332211
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(0x1800, 0x1122334455667788, 8),
+              H.DataWord(0x1820, 0x3FC00000, 4),
+              H.DataWord(0x1840, handler_gr_value, 8),
+              H.DataWord(0x1860, 0x40000000, 4)),
+    )
+
+    def verify(snapshot) -> str:
+        H._require(snapshot.exception_pending and
+                   snapshot.exception_kind == "external-interrupt",
+                   label + " did not retain the expected interrupt record")
+        H._require(snapshot.ip == terminal and snapshot.gr[15] == 0x40 and
+                   snapshot.gr[24] == 1,
+                   label + " did not consume the timer vector and return")
+        H._require(snapshot.gr[26] == 1 and ((snapshot.gr[25] >> 32) & 3) == 3,
+                   label + " did not interrupt after user tags at CPL3")
+        H._require(snapshot.gr[20] == handler_gr_value and
+                   (snapshot.gr[30], snapshot.gr[31]) == (1, 1),
+                   label + " retained user or handler scratch ALAT state")
+        return ("a CPL3 timer interruption observed both user tags, reused "
+                "their GR/FR names, executed full INVALA, and RFI returned to "
+                "mandatory misses")
+
+    return RuntimeCase(
+        label, program,
+        (0x40, 0x50, 0x10040, 0x10050, 0x3020, 0x3030, 0x3040,
+         gr_check, fr_check),
+        verify,
+        ("IA64_OP_BR_RET", "IA64_OP_LD8A", "IA64_OP_LDFS",
+         "IA64_OP_INVALA", "IA64_OP_RFI", "IA64_OP_CHK_A"),
+        rfi_trace_ips=(0x3060,),
+    )
+
+
 def _rse_register_address(base: int, index: int) -> int:
     """Return one independently derived backing-store register address."""
     if base & 7 or index < 0:
@@ -4812,6 +5125,14 @@ def checkpoint_30_cases() -> Tuple[RuntimeCase, ...]:
                  for frame_size in range(1, 97))
 
 
+def checkpoint_32_cases() -> Tuple[RuntimeCase, ...]:
+    return (
+        clrrrb_software_alat_invalidation_case(),
+        memory_remap_software_alat_invalidation_case(),
+        involuntary_user_return_alat_invalidation_case(),
+    )
+
+
 def runtime_cases() -> Tuple[RuntimeCase, ...]:
     return (
         primary_admission_case(), alias_admission_case(), atomic_case(),
@@ -4910,6 +5231,7 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
         *checkpoint_28_cases(),
         *checkpoint_29_cases(),
         *checkpoint_30_cases(),
+        *checkpoint_32_cases(),
     )
 
 
@@ -4953,6 +5275,8 @@ def self_check(cases: Sequence[RuntimeCase]) -> str:
                "checkpoint 29 ALAT shard is not 206 programs")
     H._require(len(checkpoint_30_cases()) == 96,
                "checkpoint 30 ALAT/RSE shard is not 96 programs")
+    H._require(len(checkpoint_32_cases()) == 3,
+               "checkpoint 32 ALAT coherency shard is not 3 programs")
     return ("{}; {} programs; 63 primary bundles (57 decoder-live); {} live "
             "alias/completer bundles; 12 shadowed split-load encodings; "
             "6 reserved-width rows"
@@ -4964,6 +5288,7 @@ def run_case(qemu: Path, case: RuntimeCase) -> str:
         qemu, case.program,
         preserve_fault_slot=case.preserve_fault_slot,
         typed_direct_trace_ips=case.trace_ips,
+        typed_rfi_traces=case.rfi_trace_ips,
         one_bundle_per_tb=True,
         compact_loader=case.compact_loader,
     )
@@ -4984,7 +5309,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--group",
         choices=("all", "base", "checkpoint-28", "checkpoint-29",
-                 "checkpoint-30"),
+                 "checkpoint-30", "checkpoint-32"),
         default="all",
         help="run the complete inventory or one Meson-sized shard",
     )
@@ -4998,18 +5323,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     checkpoint_28_count = len(checkpoint_28_cases())
     checkpoint_29_count = len(checkpoint_29_cases())
     checkpoint_30_count = len(checkpoint_30_cases())
+    checkpoint_32_count = len(checkpoint_32_cases())
     if args.group == "base":
         cases = all_cases[:-(checkpoint_28_count + checkpoint_29_count +
-                             checkpoint_30_count)]
+                             checkpoint_30_count + checkpoint_32_count)]
     elif args.group == "checkpoint-28":
         cases = all_cases[-(checkpoint_28_count + checkpoint_29_count +
-                            checkpoint_30_count):
-                          -(checkpoint_29_count + checkpoint_30_count)]
+                            checkpoint_30_count + checkpoint_32_count):
+                          -(checkpoint_29_count + checkpoint_30_count +
+                            checkpoint_32_count)]
     elif args.group == "checkpoint-29":
-        cases = all_cases[-(checkpoint_29_count + checkpoint_30_count):
-                          -checkpoint_30_count]
+        cases = all_cases[-(checkpoint_29_count + checkpoint_30_count +
+                            checkpoint_32_count):
+                          -(checkpoint_30_count + checkpoint_32_count)]
     elif args.group == "checkpoint-30":
-        cases = all_cases[-checkpoint_30_count:]
+        cases = all_cases[-(checkpoint_30_count + checkpoint_32_count):
+                          -checkpoint_32_count]
+    elif args.group == "checkpoint-32":
+        cases = all_cases[-checkpoint_32_count:]
     else:
         cases = all_cases
 

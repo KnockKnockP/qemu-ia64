@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 53
+dependencies installed, configure, build, fetch the public manuals, run all 54
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first seventeen exact speculation contracts live in
+The first twenty exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -114,6 +114,16 @@ exact spilled word, restored value and NaT, terminal CFM, BOF, BSP, BSPSTORE,
 and backing-store load pointer. A descendant CHK.A must recover rather than
 falsely hit the parent tag after physical-stack wrap, while Intel's permitted
 earlier pessimistic eviction remains valid.
+The eighteenth through twentieth contracts close the remaining applicable
+single-processor ALAT software-coherency sequences. One rotation creates GR
+and FR physical-target aliases across `clrrrb`, followed by the required full
+`invala`. One virtual page is proven to move between distinct physical pages
+through `ptc.l` and `itc.d` before old GR/FR tags are invalidated. Finally, a
+real timer involuntarily interrupts CPL3 after user GR/FR advanced loads; the
+handler reuses both target names, executes `invala`, and returns by typed
+`rfi` to mandatory user misses. Remote stores, semaphores, and `ptc.ga` are
+multiprocessor coherence obligations and are not applicable to the enforced
+single-CPU `vibtanium-strict-up` and `vibtanium-default-up` profiles.
 The register tranche also executes Intel Volume 2 sections 6.11.1 and 6.11.2
 as one interrupted-context oracle. Four BREAK handlers cover an empty frame,
 an immediate RNAT slot, one complete RNAT collection, and the maximum
@@ -129,15 +139,16 @@ variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
 matrices execute. On the 2026-07-22 default four-worker public gate after the
-interrupted-context RSE checkpoint, `test-ia64-system-tcg` took 47.53 seconds,
-`test-ia64-full-tcg` 49.26 seconds, and `test-ia64-register-tcg` 47.87
-seconds. The established data-plane shard passed 637 subtests in 173.32
-seconds, checkpoint 28 passed 42 in 11.92 seconds, checkpoint 29 passed 206
-in 56.25 seconds, and checkpoint 30 passed 96 in 36.23 seconds; all 53
-selected tests passed in 193.407 seconds of report wall time. The former
+ALAT software-coherency checkpoint, `test-ia64-system-tcg` took 49.56 seconds,
+`test-ia64-full-tcg` 50.62 seconds, and `test-ia64-register-tcg` 48.90
+seconds. The established data-plane shard passed 637 subtests in 180.23
+seconds, checkpoint 28 passed 42 in 12.50 seconds, checkpoint 29 passed 206
+in 58.77 seconds, checkpoint 30 passed 96 in 36.76 seconds, and checkpoint 32
+passed three in 2.30 seconds; all 54 selected tests passed in 200.536 seconds
+of report wall time. The former
 single 180-second registration limit was an infrastructure timeout once the
 combined inventory reached 679 programs, not a semantic hang. The current
-981-program inventory remains deliberately split by evidence ownership. The
+984-program inventory remains deliberately split by evidence ownership. The
 gate defaults to four workers to avoid unrestricted host contention without
 weakening any per-test timeout. The
 RSE suites include five fresh-process

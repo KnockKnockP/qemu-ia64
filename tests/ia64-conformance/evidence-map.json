@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 83
+    "row_closing_claims_expected": 86
   },
   "entries": [
     {
@@ -178,7 +178,7 @@
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
       "closes_normative_rows": ["ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY", "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION", "ALT-006-INTEGER-FALSE-PREDICATE"],
-      "limitations": ["BSPSTORE context changes, interruption/remote invalidation, cache/ptc.ga, broader floating predication, migration, and malformed state remain separate work."]
+      "limitations": ["Remote invalidation, cache removal, broader floating predication, migration, and malformed state remain separate work; later rows close applicable local context and interruption sequences."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-checkpoint-29",
@@ -197,7 +197,7 @@
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
       "closes_normative_rows": ["ALT-004-ALAT-PHYSICAL-ALIAS-IDENTITY", "ALT-004-ALAT-REGISTER-REMAP-IDENTITY", "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION"],
-      "limitations": ["BSPSTORE context replacement, interruption and remote invalidation, cache-line removal, ptc.ga, cmp8xchg16, floating-width breadth, migration, replay, debug, and malformed ALAT state remain separate work."]
+      "limitations": ["Remote invalidation, cache-line removal, ptc.ga, cmp8xchg16, floating-width breadth, migration, replay, debug, and malformed ALAT state remain separate work; later rows close applicable local context and interruption sequences."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-checkpoint-30",
@@ -216,7 +216,26 @@
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
       "closes_normative_rows": ["ALT-004-ALAT-RSE-PHYSICAL-STACK-WRAP", "RSE-006-ALLOC-PHYSICAL-STACK-WRAP-SPILL-FILL"],
-      "limitations": ["BSPSTORE context replacement, interruption/RFI entry, remote invalidation, cache-line removal, ptc.ga, floating-width breadth, migration, replay, debug, and malformed ALAT/RSE state remain separate work."]
+      "limitations": ["Remote invalidation, cache-line removal, ptc.ga, floating-width breadth, migration, replay, debug, and malformed ALAT/RSE state remain separate work; later rows close BSPSTORE context replacement and applicable interruption/RFI coherency."]
+    },
+    {
+      "id": "meson:test-ia64-data-plane-tcg-checkpoint-32",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-alat-coherency-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/speculation-semantic-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-alat-coherency-tcg",
+      "scope": "Guest-executed three-program ALAT software-coherency shard: CLRRRB register remap, local virtual-to-physical DTC remap, and a real involuntary CPL3 timer interruption with handler scratch-tag contamination and typed RFI.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["ALT-005-ALAT-CLRRRB-SOFTWARE-INVALIDATION", "ALT-005-ALAT-INVOLUNTARY-RETURN-INVALIDATION", "ALT-005-ALAT-MEMORY-REMAP-SOFTWARE-INVALIDATION"],
+      "limitations": ["The normative platform is single-processor, so remote-store/semaphore and remote ptc.ga ALAT coherence are not applicable; cache-line removal, DMA, nested interrupts, selective system-call invalidation, and migration remain separate work."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-static",

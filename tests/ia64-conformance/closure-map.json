@@ -122,11 +122,32 @@
       "candidate_tests": ["test-ia64-alat-alias-tcg"]
     },
     {
+      "normative_row": "ALT-005-ALAT-CLRRRB-SOFTWARE-INVALIDATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.loop-state", "cpu.opcode.ia64_op_alloc", "cpu.opcode.ia64_op_br_ctop", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_clrrrb", "cpu.opcode.ia64_op_invala", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs", "cpu.register.ar.65", "cpu.register.scalar.cfm"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-coherency-tcg"]
+    },
+    {
+      "normative_row": "ALT-005-ALAT-INVOLUNTARY-RETURN-INVALIDATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_br_ret", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_invala", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs", "cpu.opcode.ia64_op_rfi", "cpu.register.ar.44", "cpu.register.cr.1", "cpu.register.cr.16", "cpu.register.cr.65", "cpu.register.cr.72", "cpu.register.scalar.psr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-coherency-tcg"]
+    },
+    {
       "normative_row": "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_invala", "cpu.opcode.ia64_op_invalat", "cpu.opcode.ia64_op_ld1a", "cpu.opcode.ia64_op_ld2a", "cpu.opcode.ia64_op_ld4a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs", "cpu.opcode.ia64_op_st1", "cpu.opcode.ia64_op_st2", "cpu.opcode.ia64_op_st4", "cpu.opcode.ia64_op_st8", "cpu.opcode.ia64_op_xchg1", "cpu.opcode.ia64_op_xchg2", "cpu.opcode.ia64_op_xchg4", "cpu.opcode.ia64_op_xchg8"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-alat-tcg"]
+    },
+    {
+      "normative_row": "ALT-005-ALAT-MEMORY-REMAP-SOFTWARE-INVALIDATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_invala", "cpu.opcode.ia64_op_itc_d", "cpu.opcode.ia64_op_ld8", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs", "cpu.opcode.ia64_op_ptc_l", "cpu.register.scalar.psr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-coherency-tcg"]
     },
     {
       "normative_row": "ALT-006-INTEGER-FALSE-PREDICATE",

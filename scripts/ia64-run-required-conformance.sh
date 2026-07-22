@@ -73,6 +73,7 @@ set +e
     qemu:test-ia64-alat-tcg \
     qemu:test-ia64-alat-alias-tcg \
     qemu:test-ia64-alat-rse-wrap-tcg \
+    qemu:test-ia64-alat-coherency-tcg \
     qemu:test-ia64-full-tcg \
     qemu:test-ia64-tcp-migration \
     qemu:test-ia64-packed-tcg \
