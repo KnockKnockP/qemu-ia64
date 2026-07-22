@@ -20,6 +20,11 @@
 #define IA64_PSR_TB_BIT   UINT64_C(0x0000000004000000)
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
 #define IA64_DCR_DM_BIT   UINT64_C(0x0000000000000100)
+#define IA64_DCR_DP_BIT   UINT64_C(0x0000000000000200)
+#define IA64_DCR_DK_BIT   UINT64_C(0x0000000000000400)
+#define IA64_DCR_DX_BIT   UINT64_C(0x0000000000000800)
+#define IA64_DCR_DR_BIT   UINT64_C(0x0000000000001000)
+#define IA64_DCR_DA_BIT   UINT64_C(0x0000000000002000)
 #define IA64_DCR_DD_BIT   UINT64_C(0x0000000000004000)
 #define IA64_PTE_P_BIT    UINT64_C(0x0000000000000001)
 #define IA64_PTE_A_BIT    UINT64_C(0x0000000000000020)
@@ -290,7 +295,19 @@ static void test_speculative_load_exception_records_isr_sp_ed(void)
 
 static void test_control_speculative_load_deferral_policy(void)
 {
+    static const struct {
+        IA64TranslateStatus status;
+        uint64_t dcr;
+    } qualified[] = {
+        { IA64_TRANSLATE_TLB_MISS,       IA64_DCR_DM_BIT },
+        { IA64_TRANSLATE_NOT_PRESENT,    IA64_DCR_DP_BIT },
+        { IA64_TRANSLATE_KEY_MISS,       IA64_DCR_DK_BIT },
+        { IA64_TRANSLATE_KEY_PERMISSION, IA64_DCR_DX_BIT },
+        { IA64_TRANSLATE_ACCESS_DENIED,  IA64_DCR_DR_BIT },
+        { IA64_TRANSLATE_ACCESS_BIT,     IA64_DCR_DA_BIT },
+    };
     CPUIA64State env;
+    IA64TranslateResult result = { 0 };
     vaddr ip = 0x4000;
     vaddr miss = 0x6000;
     uint64_t itir = test_rr(0x33, 12, false);
@@ -310,12 +327,21 @@ static void test_control_speculative_load_deferral_policy(void)
     env.rr[0] = test_rr(0x33, 12, false);
     g_assert_true(ia64_install_translation(&env, true, false, 0, ip,
                                            code_pte_ed, itir));
+    for (unsigned i = 0; i < ARRAY_SIZE(qualified); i++) {
+        result.status = qualified[i].status;
+        env.cr[IA64_CR_DCR] = qualified[i].dcr;
+        g_assert_true(ia64_control_speculative_load_fault_deferred(
+                          &env, &result));
+        env.cr[IA64_CR_DCR] = 0;
+        g_assert_false(ia64_control_speculative_load_fault_deferred(
+                           &env, &result));
+        env.cr[IA64_CR_DCR] = qualified[(i + 1) % ARRAY_SIZE(qualified)].dcr;
+        g_assert_false(ia64_control_speculative_load_fault_deferred(
+                           &env, &result));
+    }
+    env.cr[IA64_CR_DCR] = IA64_DCR_DM_BIT;
     g_assert_true(ia64_control_speculative_load_defer(&env, 1, false,
                                                       miss, 8, NULL));
-
-    env.cr[IA64_CR_DCR] = 0;
-    g_assert_false(ia64_control_speculative_load_defer(&env, 1, false,
-                                                       miss, 8, NULL));
     g_assert_false(ia64_control_speculative_load_defer(&env, 0, false,
                                                        miss, 8, NULL));
 }

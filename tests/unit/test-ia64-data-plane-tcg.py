@@ -84,6 +84,12 @@ IA64_ILLEGAL_OPERATION_VECTOR = 0x5400
 IA64_CR_DCR = 0
 IA64_CR_PTA = 8
 IA64_DCR_DM = 1 << 8
+IA64_DCR_DP = 1 << 9
+IA64_DCR_DK = 1 << 10
+IA64_DCR_DX = 1 << 11
+IA64_DCR_DR = 1 << 12
+IA64_DCR_DA = 1 << 13
+IA64_DCR_DD = 1 << 14
 
 INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS = (
     "cpu.opcode.ia64_op_chk_a",
@@ -112,15 +118,16 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 5:
-        raise AssertionError("speculation tranche must contain five atomic cases")
+    if not isinstance(cases, list) or len(cases) != 6:
+        raise AssertionError("speculation tranche must contain six atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-NATPAGE-DEFERRAL",
             "ALT-002-INTEGER-NO-RECOVERY-FAULTS",
             "ALT-002-INTEGER-NO-RECOVERY-PROTECTION",
             "ALT-002-INTEGER-NO-RECOVERY-VHPT",
-            "ALT-001-INTEGER-RECOVERY-DCR-DM"}:
+            "ALT-001-INTEGER-RECOVERY-DCR-DM",
+            "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG"}:
         raise AssertionError("speculation tranche normative rows drifted")
     deferred = by_row["ALT-001-INTEGER-NATPAGE-DEFERRAL"]
     if deferred.get("implementation_rows") != list(
@@ -159,6 +166,14 @@ def validate_contract(root: Path) -> str:
     if recovery.get("execution", {}).get("probes") != [
             "integer_speculative_dm_recovery_case"]:
         raise AssertionError("DCR.dm execution probes drifted")
+    recovery_other = by_row[
+        "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG"]
+    if recovery_other.get("implementation_rows") != list(
+            INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS):
+        raise AssertionError("DCR protection/debug implementation rows drifted")
+    if recovery_other.get("execution", {}).get("probes") != [
+            "integer_speculative_dcr_recovery_case"]:
+        raise AssertionError("DCR protection/debug execution probes drifted")
     if any(case.get("oracle", {}).get("independence") != "independent"
            for case in cases):
         raise AssertionError("speculation tranche oracle is not independent")
@@ -167,6 +182,8 @@ def validate_contract(root: Path) -> str:
     protection_variants = set(protection.get("applicable_variants", []))
     vhpt_variants = set(vhpt.get("applicable_variants", []))
     recovery_variants = set(recovery.get("applicable_variants", []))
+    recovery_other_variants = set(
+        recovery_other.get("applicable_variants", []))
     for width in (1, 2, 4, 8):
         if "ld{}.s".format(width) not in variants or \
                 "ld{}.sa".format(width) not in variants:
@@ -193,10 +210,16 @@ def validate_contract(root: Path) -> str:
             raise AssertionError(
                 "DCR.dm row misses width {} variants".format(width)
             )
-    return ("five exact ALT rows cover deferred NaTPage plus no-recovery "
+        if "ld{}.s".format(width) not in recovery_other_variants or \
+                "ld{}.sa".format(width) not in recovery_other_variants:
+            raise AssertionError(
+                "DCR protection/debug row misses width {} variants".format(
+                    width)
+            )
+    return ("six exact ALT rows cover deferred NaTPage plus no-recovery "
             "translation, alignment, protection, debug, VHPT-translation, "
-            "Data-TLB, and recovery-model DCR.dm behavior for every "
-            "applicable integer width")
+            "Data-TLB, and the complete recovery-model DCR deferral-bit "
+            "behavior for every applicable integer width")
 
 
 def _movl_bundle(address: int, reg: int, value: int) -> object:
@@ -1832,6 +1855,189 @@ def integer_speculative_dm_recovery_case(
     )
 
 
+def integer_speculative_dcr_recovery_case(
+        width: int, memory_class: str, condition: str,
+        control: str) -> RuntimeCase:
+    if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
+        raise ValueError("DCR case requires ld1/2/4/8.s or .sa")
+    conditions = {
+        "page-not-present": (
+            IA64_DCR_DP, "page-fault", IA64_PAGE_FAULT_VECTOR),
+        "key-miss": (
+            IA64_DCR_DK, "data-key-miss", IA64_DATA_KEY_MISS_VECTOR),
+        "key-permission": (
+            IA64_DCR_DX, "key-permission", IA64_KEY_PERMISSION_VECTOR),
+        "access-rights": (
+            IA64_DCR_DR, "data-access-rights",
+            IA64_DATA_ACCESS_RIGHTS_VECTOR),
+        "access-bit": (
+            IA64_DCR_DA, "data-access-bit", IA64_DATA_ACCESS_BIT_VECTOR),
+        "data-debug": (
+            IA64_DCR_DD, "data-debug", IA64_DATA_DEBUG_VECTOR),
+    }
+    if condition not in conditions:
+        raise ValueError("unknown DCR condition " + condition)
+    if control not in ("defer", "dcr-clear", "ed-clear"):
+        raise ValueError("unknown DCR control " + control)
+
+    dcr_bit, kind, vector = conditions[condition]
+    virtual = 0x8000
+    physical = 0x2000
+    code_page = 0x10000
+    key = 0x123
+    itir = 12 << 2
+    pte = _mapped_pte(physical, 0)
+    psr = H.IA64_PSR_IC | H.IA64_PSR_DT | IA64_PSR_IT
+    pkrs: Tuple[Tuple[int, int], ...] = ()
+    if condition == "page-not-present":
+        pte = physical
+    elif condition == "key-miss":
+        itir |= key << 8
+        psr |= IA64_PSR_PK
+        pkrs = ((0, 1),)
+    elif condition == "key-permission":
+        itir |= key << 8
+        psr |= IA64_PSR_PK
+        pkrs = ((0, 1), (1, (key << 8) | 1 | (1 << 2)))
+    elif condition == "access-rights":
+        psr |= 3 << 32
+    elif condition == "access-bit":
+        pte &= ~(1 << 5)
+    else:
+        psr |= IA64_PSR_DB
+
+    itlb_ed = control != "ed-clear"
+    dcr_enabled = control != "dcr-clear"
+    deferred = itlb_ed and dcr_enabled
+    dcr = dcr_bit if dcr_enabled else 0
+    old_target = (0x5700000000000000 | (width << 4) |
+                  int(memory_class == "sa"))
+    bundles: List[object] = [
+        _movl_bundle(code_page, 2, pte),
+        _movl_bundle(code_page + 0x10, 7, virtual),
+        _movl_bundle(code_page + 0x20, 20, old_target),
+    ]
+    address = _append_dtc_install(
+        bundles, code_page + 0x30, itir=itir,
+        enable_translation=False,
+    )
+    for index, value in pkrs:
+        address = _append_indexed_system_write(
+            bundles, address, x6=0x03, index=index, value=value,
+        )
+    if condition == "data-debug":
+        debug_control = ((1 << 63) | (1 << 56) |
+                         0x00FFFFFFFFFFFFFF)
+        address = _append_indexed_system_write(
+            bundles, address, x6=0x01, index=0, value=virtual,
+        )
+        address = _append_indexed_system_write(
+            bundles, address, x6=0x01, index=1, value=debug_control,
+        )
+
+    handler_page = vector & ~0xFFF
+    bundles.extend((
+        _movl_bundle(address, 2, _mapped_pte(handler_page, 0)),
+        _movl_bundle(address + 0x10, 11, handler_page),
+    ))
+    address = _append_itc_install(
+        bundles, address + 0x20, pte_reg=2, virtual_reg=11,
+    )
+    code_pte = _mapped_pte(code_page, 0)
+    if condition == "access-rights":
+        code_pte |= 3 << 7
+    if itlb_ed:
+        code_pte |= 1 << 52
+    bundles.extend((
+        _movl_bundle(address, 2, code_pte),
+        _movl_bundle(address + 0x10, 10, code_page),
+    ))
+    address = _append_itc_install(
+        bundles, address + 0x20, pte_reg=2, virtual_reg=10,
+    )
+    bundles.extend((
+        _movl_bundle(address, 9, dcr),
+        H.Bundle(address + 0x10, 0x01,
+                 H.mov_grcr(IA64_CR_DCR, 9), H.nop_i(), H.nop_i()),
+        H.Bundle(address + 0x20, 0x01,
+                 H.srlz_d(), H.nop_i(), H.nop_i()),
+        H.Bundle(address + 0x30, 0x01,
+                 H.mov_crgr(31, IA64_CR_DCR), H.nop_i(), H.nop_i()),
+    ))
+    fault_ip = _append_rfi_state(bundles, address + 0x40, psr)
+    fault_raw = integer_load(
+        width, memory_class, r1=20, r3=7,
+        update="imm", imm=width,
+    )
+    _append_m(bundles, fault_ip, fault_raw, [], trace=False)
+    label = "LD{}.{} DCR {} {}".format(
+        width, memory_class.upper(), condition, control)
+
+    if deferred:
+        check_ip = fault_ip + 0x10
+        recovery = check_ip + 0x20
+        terminal = check_ip + 0x50
+        check_raw = (_chk_s_branch(check_ip, recovery, reg=20)
+                     if memory_class == "s" else
+                     _chk_a_branch(check_ip, recovery, reg=20))
+        bundles.extend((
+            H.Bundle(check_ip, 0x01, check_raw, H.nop_i(), H.nop_i()),
+            _marker_bundle(check_ip + 0x10, 30, 0xBAD, terminal),
+            H.Bundle(recovery, 0x01,
+                     H.nop_m(), H.nop_i(), H.nop_i()),
+            _marker_bundle(recovery + 0x10, 30, 1, terminal),
+            H.spin_bundle(terminal),
+        ))
+        trace_ips = (fault_ip, check_ip)
+    else:
+        bundles.append(H._exception_vector_spin(vector))
+        terminal = vector
+        trace_ips = (fault_ip,)
+
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=code_page,
+    )
+
+    def verify(snapshot) -> str:
+        if deferred:
+            _no_exception(snapshot, label)
+            H._require(snapshot.ip == terminal,
+                       label + " did not reach recovery terminal")
+            H._require(snapshot.gr[7] == virtual + width and
+                       (snapshot.nat_low & (1 << 20)) != 0,
+                       label + " did not retire update plus destination NaT")
+            H._require(snapshot.gr[30] == 1 and
+                       snapshot.gr[31] == dcr_bit,
+                       label + " missed checked recovery or exact DCR bit")
+            H._require((snapshot.psr & psr) == psr,
+                       label + " lost active recovery-model controls")
+            return (label + " deferred to destination NaT, retired the exact "
+                    "base update, and took checked recovery")
+
+        expected_isr = H.IA64_ISR_R | IA64_ISR_SP
+        if itlb_ed:
+            expected_isr |= IA64_ISR_ED
+        _require_speculative_immediate_fault(
+            snapshot, label=label, fault_ip=fault_ip, fault_raw=fault_raw,
+            address=virtual, kind=kind, vector=vector,
+            old_target=old_target, expected_isr=expected_isr,
+        )
+        H._require((snapshot.cr_ipsr & psr) == psr,
+                   label + " lost active translated-code controls")
+        return (label + " raised exact {} with ISR.ed={} and no load/update "
+                "retirement".format(kind, int(itlb_ed)))
+
+    opcodes = ["IA64_OP_LD{}{}".format(width, memory_class.upper())]
+    if deferred:
+        opcodes.append("IA64_OP_CHK_S" if memory_class == "s" else
+                       "IA64_OP_CHK_A")
+    return RuntimeCase(
+        label, program, trace_ips, verify, tuple(opcodes), not deferred,
+    )
+
+
 def integer_speculative_protection_fault_case(
         width: int, memory_class: str, condition: str) -> RuntimeCase:
     if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
@@ -2765,6 +2971,14 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
               width, memory_class, fault_class, control)
           for fault_class in ("alternate", "invalid-entry", "missing-backing")
           for control in ("defer", "dm-clear", "ed-clear")
+          for width in (1, 2, 4, 8) for memory_class in ("s", "sa")),
+        *(integer_speculative_dcr_recovery_case(
+              width, memory_class, condition, control)
+          for condition in (
+              "page-not-present", "key-miss", "key-permission",
+              "access-rights", "access-bit", "data-debug",
+          )
+          for control in ("defer", "dcr-clear", "ed-clear")
           for width in (1, 2, 4, 8) for memory_class in ("s", "sa")),
         fp_speculative_nat_page_defer_case(),
         *(reserved_width_illegal_case(opcode) for opcode in (

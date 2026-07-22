@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 70
+    "row_closing_claims_expected": 71
   },
   "entries": [
     {
@@ -155,11 +155,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-data-plane-tcg",
-      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks, including exact integer NaTPage deferral, 20-program no-recovery miss/alignment, 62-program no-recovery page/key/rights/access-bit/debug matrices, 16-program short-VHPT fault selection, and the 72-program recovery-model ITLB.ed/DCR.dm conjunction across Alternate Data TLB, VHPT Data, and Data TLB with exact deferred recovery or immediate interruption state.",
+      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks, including exact integer NaTPage deferral, 20-program no-recovery miss/alignment, 62-program no-recovery page/key/rights/access-bit/debug matrices, 16-program short-VHPT fault selection, the 72-program recovery-model ITLB.ed/DCR.dm conjunction across Alternate Data TLB, VHPT Data, and Data TLB, and the 144-program condition-specific ITLB.ed/DCR.dp/dk/dx/dr/da/dd conjunction matrix with exact deferred recovery or immediate interruption state.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["ALT-001-INTEGER-NATPAGE-DEFERRAL", "ALT-001-INTEGER-RECOVERY-DCR-DM", "ALT-002-INTEGER-NO-RECOVERY-FAULTS", "ALT-002-INTEGER-NO-RECOVERY-PROTECTION", "ALT-002-INTEGER-NO-RECOVERY-VHPT"],
-      "limitations": ["Only the explicitly claimed integer NaTPage, no-recovery, and recovery-model DCR.dm rows have complete normative contracts and independent exact matrices; the other DCR bits, always-defer, PSR.ed, spontaneous deferral, other simultaneous conditions, successful/long-format VHPT, and legacy cases remain candidates and do not close their broader opcode, floating-point, memory, speculation, cache, atomic, or fault domains."]
+      "closes_normative_rows": ["ALT-001-INTEGER-NATPAGE-DEFERRAL", "ALT-001-INTEGER-RECOVERY-DCR-DM", "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG", "ALT-002-INTEGER-NO-RECOVERY-FAULTS", "ALT-002-INTEGER-NO-RECOVERY-PROTECTION", "ALT-002-INTEGER-NO-RECOVERY-VHPT"],
+      "limitations": ["Only the explicitly claimed integer NaTPage, no-recovery, and recovery-model DCR rows have complete normative contracts and independent exact matrices; always-defer, PSR.ed, spontaneous deferral, other simultaneous conditions, successful/long-format VHPT, and legacy cases remain candidates and do not close their broader opcode, floating-point, memory, speculation, cache, atomic, or fault domains."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-static",

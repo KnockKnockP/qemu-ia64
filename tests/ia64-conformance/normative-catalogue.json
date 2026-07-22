@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 20,
+  "catalogue_revision": 21,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -52,6 +52,26 @@
       "committed_prefix": "A deferred load commits only its destination NaT, implementation-specific data, and exact update; an immediate load commits no destination, NaT, update, ALAT, or later effect",
       "restart_rule": "Deferred .s and .sa transfer through CHK.S and absent-entry CHK.A recovery. An immediate handler observes ISR.ed from the code ITC entry and may repair, software-defer, or retry CR.IIP.",
       "permitted_results": ["All 24 ITLB.ed=1/DCR.dm=1 width/class/fault combinations defer and take checked recovery", "All 24 ITLB.ed=1/DCR.dm=0 combinations raise the selected vector with exact R|SP|ED and no load effects", "All 24 ITLB.ed=0/DCR.dm=1 combinations raise the selected vector with exact R|SP and ED clear and no load effects"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG",
+      "requirement_ids": ["ALT-001", "ALT-002", "MEM-003", "MEM-005", "MEM-012", "MEM-014", "MMU-012", "MMU-013", "MMU-014"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Interruptions", "section": "5.5.5", "printed_pages": ["2:31", "2:32", "2:105", "2:106", "2:107"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Qualified Exception Deferral"},
+      "operation": {"kind": "integer-control-speculative-recovery-dcr-protection-debug", "selector": "ld1.s/sa, ld2.s/sa, ld4.s/sa, and ld8.s/sa across Data Page Not Present, Data Key Miss, Data Key Permission, Data Access Rights, Data Access Bit, and Data Debug under each complete minimal ITLB.ed/DCR conjunction", "encoding": "M10 immediate-update control-speculative loads followed by M20 CHK.S or M22 CHK.A when deferred"},
+      "legal_inputs": ["Serialized PSR.ic=1, PSR.it=1, PSR.dt=1, and PSR.ed=0", "An identity ITC code translation and translated interruption-vector page", "The code ITC entry has ed equal to the selected control", "Exactly the DCR bit corresponding to the selected condition is set or all DCR deferral bits are clear", "Test-owned PTE, ITIR key, PKR, CPL, and DBR state selects exactly one qualified condition", "Distinct legal destination and base registers with a width-sized update"],
+      "privilege": {"levels": [0, 3], "rule": "The loads and checks are application-level; privileged setup configures ITC, DTC, DCR, PKR, DBR, and interruption state, while the Access Rights probe executes at CPL3."},
+      "state_read": ["PSR.ic, PSR.it, PSR.ed, PSR.dt, PSR.pk, PSR.db, and CPL", "the current code ITC.ed bit", "CR.DCR.dp, dk, dx, dr, da, and dd", "DTC PTE presence, key, access-rights, and accessed-bit state", "PKR and DBR state", "load base, destination NaT, and destination ALAT identity"],
+      "state_written": ["deferred destination NaT with implementation-specific data", "deferred width-sized base update", "checked-recovery control flow", "or precise interruption state with no load effects"],
+      "predication": {"applies": true, "rule": "All selected loads and checks use p0; false qualification remains a separate ALT-006 row."},
+      "nat_behavior": "When ITLB.ed and the DCR bit assigned to the qualified condition are both one, .s and .sa write destination NaT and retire the update; CHK.S observes the NaT and CHK.A observes the absent ALAT entry. Otherwise destination data and NaT remain unchanged.",
+      "possible_faults": ["No delivered fault after condition-specific hardware deferral", "Data Page Not Present", "Data Key Miss", "Data Key Permission", "Data Access Rights", "Data Access Bit", "Data Debug"],
+      "fault_priority": ["predicate and operand legality", "selected qualified translation, protection, or debug condition", "PSR.ic and PSR.it model", "ITLB.ed and condition-specific DCR conjunction", "hardware deferral or precise immediate delivery", "checked recovery after deferral"],
+      "committed_prefix": "A deferred load commits only its destination NaT, implementation-specific data, and exact update; an immediate load commits no destination, NaT, update, ALAT, or later effect",
+      "restart_rule": "Deferred .s and .sa transfer through CHK.S and absent-entry CHK.A recovery. An immediate handler observes ISR.ed from the code ITC entry and may repair, software-defer, or retry CR.IIP.",
+      "permitted_results": ["All 48 ITLB.ed=1/condition-bit=1 width/class/fault combinations defer and take checked recovery", "All 48 ITLB.ed=1/condition-bit=0 combinations raise the selected vector with exact R|SP|ED and no load effects", "All 48 ITLB.ed=0/condition-bit=1 combinations raise the selected vector with exact R|SP and ED clear and no load effects"],
       "required_evidence": "E2"
     },
     {

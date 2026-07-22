@@ -16,6 +16,8 @@
 #define IA64_DCR_BE_BIT UINT64_C(0x0000000000000002)
 #define IA64_DCR_DM_BIT UINT64_C(0x0000000000000100)
 #define IA64_DCR_DP_BIT UINT64_C(0x0000000000000200)
+#define IA64_DCR_DK_BIT UINT64_C(0x0000000000000400)
+#define IA64_DCR_DX_BIT UINT64_C(0x0000000000000800)
 #define IA64_DCR_DR_BIT UINT64_C(0x0000000000001000)
 #define IA64_DCR_DA_BIT UINT64_C(0x0000000000002000)
 #define IA64_DCR_DD_BIT UINT64_C(0x0000000000004000)
@@ -1714,6 +1716,10 @@ bool ia64_control_speculative_load_fault_deferred(
         return recovery_model && (dcr & IA64_DCR_DM_BIT) != 0;
     case IA64_TRANSLATE_NOT_PRESENT:
         return recovery_model && (dcr & IA64_DCR_DP_BIT) != 0;
+    case IA64_TRANSLATE_KEY_MISS:
+        return recovery_model && (dcr & IA64_DCR_DK_BIT) != 0;
+    case IA64_TRANSLATE_KEY_PERMISSION:
+        return recovery_model && (dcr & IA64_DCR_DX_BIT) != 0;
     case IA64_TRANSLATE_ACCESS_BIT:
         return recovery_model && (dcr & IA64_DCR_DA_BIT) != 0;
     case IA64_TRANSLATE_ACCESS_DENIED:
