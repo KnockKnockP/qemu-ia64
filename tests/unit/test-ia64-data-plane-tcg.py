@@ -146,6 +146,38 @@ ALAT_FALSE_PREDICATE_IMPLEMENTATION_ROWS = tuple(sorted((
       for width in (1, 2, 4, 8) for suffix in ("a", "sa")),
 )))
 
+ALAT_PHYSICAL_ALIAS_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_chk_a",
+    *("cpu.opcode.ia64_op_ld{}a".format(width)
+      for width in (1, 2, 4, 8)),
+    *("cpu.opcode.ia64_op_st{}".format(width)
+      for width in (1, 2, 4, 8)),
+)))
+
+ALAT_OVERLAP_SEMAPHORE_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_fetchadd4",
+    "cpu.opcode.ia64_op_fetchadd8",
+    "cpu.register.ar.32",
+    *("cpu.opcode.ia64_op_ld{}a".format(width)
+      for width in (1, 2, 4, 8)),
+    *("cpu.opcode.ia64_op_{}{}".format(stem, width)
+      for stem in ("st", "xchg", "cmpxchg")
+      for width in (1, 2, 4, 8)),
+)))
+
+ALAT_REMAP_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.branch.loop-state",
+    "cpu.opcode.ia64_op_alloc",
+    "cpu.opcode.ia64_op_br_call",
+    "cpu.opcode.ia64_op_br_ctop",
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.opcode.ia64_op_ldfs",
+    "cpu.register.ar.65",
+    "cpu.register.scalar.cfm",
+)))
+
 
 def validate_contract(root: Path) -> str:
     path = root / "tests/ia64-conformance/speculation-semantic-tranche.json"
@@ -155,9 +187,9 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 12:
+    if not isinstance(cases, list) or len(cases) != 15:
         raise AssertionError(
-            "speculation tranche must contain twelve atomic cases")
+            "speculation tranche must contain fifteen atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC",
@@ -169,7 +201,10 @@ def validate_contract(root: Path) -> str:
             "ALT-001-INTEGER-RECOVERY-DCR-DM",
             "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG",
             "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES",
+            "ALT-004-ALAT-PHYSICAL-ALIAS-IDENTITY",
+            "ALT-004-ALAT-REGISTER-REMAP-IDENTITY",
             "ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY",
+            "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION",
             "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION",
             "ALT-006-INTEGER-FALSE-PREDICATE"}:
         raise AssertionError("speculation tranche normative rows drifted")
@@ -213,6 +248,31 @@ def validate_contract(root: Path) -> str:
             "integer_mismatched_clear_case",
             "banked_gr_alat_identity_case"]:
         raise AssertionError("ALAT identity execution probes drifted")
+    physical_alias = by_row["ALT-004-ALAT-PHYSICAL-ALIAS-IDENTITY"]
+    if physical_alias.get("implementation_rows") != list(
+            ALAT_PHYSICAL_ALIAS_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT physical-alias implementation rows drifted")
+    if physical_alias.get("execution", {}).get("probes") != [
+            "physical_alias_store_alat_invalidation_case"]:
+        raise AssertionError("ALAT physical-alias execution probe drifted")
+    remap = by_row["ALT-004-ALAT-REGISTER-REMAP-IDENTITY"]
+    if remap.get("implementation_rows") != list(
+            ALAT_REMAP_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT register-remap implementation rows drifted")
+    if remap.get("execution", {}).get("probes") != [
+            "rotating_gr_alat_remap_case",
+            "rotating_fr_alat_remap_case",
+            "stacked_call_alat_remap_case"]:
+        raise AssertionError("ALAT register-remap execution probes drifted")
+    overlap = by_row[
+        "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION"]
+    if overlap.get("implementation_rows") != list(
+            ALAT_OVERLAP_SEMAPHORE_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT overlap/semaphore implementation drifted")
+    if overlap.get("execution", {}).get("probes") != [
+            "integer_partial_store_alat_invalidation_case",
+            "integer_semaphore_alat_invalidation_case"]:
+        raise AssertionError("ALAT overlap/semaphore probes drifted")
     invalidation = by_row[
         "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION"]
     if invalidation.get("implementation_rows") != list(
@@ -353,7 +413,8 @@ def validate_contract(root: Path) -> str:
                 "DCR protection/debug row misses width {} variants".format(
                     width)
             )
-    return ("twelve exact ALT rows cover ALAT identity, local/explicit "
+    return ("fifteen exact ALT rows cover physical-alias, byte-overlap, "
+            "semaphore, register-remap, target identity, local/explicit "
             "invalidation, false predication, non-faulting speculation "
             "attributes, "
             "PSR.ed software deferral, PSR.ic=0 always-defer, deferred "
@@ -543,6 +604,22 @@ def _append_alat_miss_probe(bundles: List[object], address: int, *,
                  H.nop_i(), H.nop_i()),
         _marker_bundle(address + 0x10, marker_reg, 0xBAD, successor),
         _marker_bundle(recovery, marker_reg, 1, successor),
+    ))
+    return successor, address
+
+
+def _append_alat_edge_probe(bundles: List[object], address: int, *,
+                            reg: int, marker_reg: int,
+                            fp: bool = False) -> Tuple[int, int]:
+    """Record hit as one and recovery as two without preferring either."""
+    recovery = address + 0x20
+    successor = address + 0x30
+    bundles.extend((
+        H.Bundle(address, 0x01,
+                 _chk_a_branch(address, recovery, reg=reg, fp=fp),
+                 H.nop_i(), H.nop_i()),
+        _marker_bundle(address + 0x10, marker_reg, 1, successor),
+        _marker_bundle(recovery, marker_reg, 2, successor),
     ))
     return successor, address
 
@@ -3255,6 +3332,357 @@ def banked_gr_alat_identity_case() -> RuntimeCase:
     )
 
 
+def physical_alias_store_alat_invalidation_case(
+        load_width: int, store_width: int) -> RuntimeCase:
+    """A store through another VA invalidates by overlapping PA range."""
+    if load_width not in (1, 2, 4, 8) or store_width not in (1, 2, 4, 8):
+        raise ValueError("physical-alias widths must be 1, 2, 4, or 8")
+    first_virtual = 0x8008
+    second_virtual = 0x9008
+    physical_page = 0x2000
+    physical = physical_page + 8
+    initial = 0x1020304050607080
+    replacement = 0xA1B2C3D4E5F60718
+    store_mask = (1 << (store_width * 8)) - 1
+    bundles: List[object] = [
+        _movl_bundle(0x10000, 7, first_virtual),
+        _movl_bundle(0x10010, 8, second_virtual),
+        _movl_bundle(0x10020, 21, replacement),
+        _movl_bundle(0x10030, 2, _mapped_pte(physical_page, 0)),
+    ]
+    address = _append_dtc_install(
+        bundles, 0x10040, virtual_reg=7, enable_translation=False)
+    bundles.append(_movl_bundle(
+        address, 2, _mapped_pte(physical_page, 0)))
+    address = _append_dtc_install(
+        bundles, address + 0x10, virtual_reg=8)
+    advanced_ip = address
+    address = _append_m(
+        bundles, address,
+        integer_load(load_width, "a", r1=20, r3=7), [])
+    store_ip = address
+    address = _append_m(
+        bundles, address, ordinary_store(store_width, 21, 8), [])
+    reload_ip = address
+    address = _append_m(
+        bundles, address, ordinary_load(store_width, 22, 8), [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "LD{}.A/ST{} physical-alias invalidation".format(
+        load_width, store_width)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, initial, 8),), entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and
+                   snapshot.gr[22] == (replacement & store_mask),
+                   label + " did not expose the exact alias-store value")
+        H._require(snapshot.gr[30] == 1,
+                   label + " retained an entry under its physical alias")
+        return (label + " resolved both VAs to one PA, committed the store, "
+                "and forced the following CHK.A miss")
+
+    return RuntimeCase(
+        label, program, (advanced_ip, store_ip, reload_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(load_width),
+         "IA64_OP_ST{}".format(store_width), "IA64_OP_CHK_A"),
+    )
+
+
+def integer_partial_store_alat_invalidation_case(
+        load_width: int, store_width: int, displacement: int) -> RuntimeCase:
+    """Exercise one byte-exact overlap between an advanced load and store."""
+    if load_width not in (1, 2, 4, 8) or store_width not in (1, 2, 4, 8):
+        raise ValueError("partial-overlap widths must be 1, 2, 4, or 8")
+    if not -(store_width - 1) <= displacement < load_width:
+        raise ValueError("store displacement does not overlap load range")
+    physical = 0x2000
+    load_address = physical + 0x10
+    store_address = load_address + displacement
+    replacement = 0x91A2B3C4D5E6F708
+    store_mask = (1 << (store_width * 8)) - 1
+    _, _, address, bundles = _successful_speculation_fixture(
+        load_width, "limited")
+    bundles.extend((
+        _movl_bundle(address, 7, load_address),
+        _movl_bundle(address + 0x10, 8, store_address),
+        _movl_bundle(address + 0x20, 21, replacement),
+    ))
+    address += 0x30
+    advanced_ip = address
+    address = _append_m(
+        bundles, address,
+        integer_load(load_width, "a", r1=20, r3=7), [])
+    store_ip = address
+    address = _append_m(
+        bundles, address, ordinary_store(store_width, 21, 8), [])
+    reload_ip = address
+    address = _append_m(
+        bundles, address, ordinary_load(store_width, 22, 8), [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "LD{}.A/ST{} byte overlap {:+d}".format(
+        load_width, store_width, displacement)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(
+            H.DataWord(physical + 0x08, 0x0011223344556677, 8),
+            H.DataWord(physical + 0x10, 0x8899AABBCCDDEEFF, 8),
+            H.DataWord(physical + 0x18, 0x1021324354657687, 8),
+        ), entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and
+                   snapshot.gr[22] == (replacement & store_mask),
+                   label + " did not commit the exact store bytes")
+        H._require(snapshot.gr[30] == 1,
+                   label + " retained an overlapping ALAT region")
+        return (label + " committed the overlapping bytes and forced the "
+                "following CHK.A miss")
+
+    return RuntimeCase(
+        label, program, (advanced_ip, store_ip, reload_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(load_width),
+         "IA64_OP_ST{}".format(store_width), "IA64_OP_CHK_A"),
+    )
+
+
+def integer_semaphore_alat_invalidation_case(
+        load_width: int, semaphore: str, semaphore_width: int, *,
+        release: bool = False, match: bool = True) -> RuntimeCase:
+    """Cross load/semaphore widths and the cmpxchg success condition."""
+    if load_width not in (1, 2, 4, 8):
+        raise ValueError("advanced-load width must be 1, 2, 4, or 8")
+    if semaphore not in ("xchg", "cmpxchg", "fetchadd"):
+        raise ValueError("unknown semaphore " + semaphore)
+    if semaphore == "fetchadd":
+        if semaphore_width not in (4, 8):
+            raise ValueError("fetchadd width must be 4 or 8")
+    elif semaphore_width not in (1, 2, 4, 8):
+        raise ValueError("semaphore width must be 1, 2, 4, or 8")
+    if semaphore == "xchg" and release:
+        raise ValueError("xchg has no release form")
+    if semaphore != "cmpxchg" and not match:
+        raise ValueError("only cmpxchg has a mismatch outcome")
+
+    physical = 0x2000
+    memory_address = physical + 0x10
+    initial = 5 if semaphore == "fetchadd" else 0x1020304050607080
+    width_mask = (1 << (semaphore_width * 8)) - 1
+    old = initial & width_mask
+    replacement = 0x718293A4B5C6D7E8 & width_mask
+    _, _, address, bundles = _successful_speculation_fixture(
+        load_width, "limited")
+    bundles.extend((
+        _movl_bundle(address, 7, memory_address),
+        _movl_bundle(address + 0x10, 8, memory_address),
+        _movl_bundle(address + 0x20, 21, replacement),
+    ))
+    address += 0x30
+    if semaphore == "cmpxchg":
+        compare = old if match else old ^ 1
+        bundles.extend((
+            _movl_bundle(address, 12, compare),
+            H.Bundle(address + 0x10, 0x01,
+                     H.mov_m_grar(32, 12), H.nop_i(), H.nop_i()),
+        ))
+        address += 0x20
+
+    advanced_ip = address
+    address = _append_m(
+        bundles, address,
+        integer_load(load_width, "a", r1=20, r3=7), [])
+    atomic_opcode = "IA64_OP_{}{}".format(
+        semaphore.upper(), semaphore_width)
+    atomic_ip = address
+    address = _append_m(
+        bundles, address,
+        atomic(atomic_opcode, r1=22, r2=21, r3=8,
+               release=release, inc_index=3), [])
+    reload_ip = address
+    address = _append_m(
+        bundles, address, ordinary_load(semaphore_width, 23, 8), [])
+    if semaphore == "cmpxchg" and not match:
+        address, check_ip = _append_alat_edge_probe(
+            bundles, address, reg=20, marker_reg=30)
+    else:
+        address, check_ip = _append_alat_miss_probe(
+            bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+
+    ordering = ".rel" if release else ".acq"
+    outcome = " mismatch" if semaphore == "cmpxchg" and not match else ""
+    label = "LD{}.A/{}{}{} overlap".format(
+        load_width, semaphore.upper() + str(semaphore_width), ordering,
+        outcome)
+    if semaphore == "fetchadd":
+        expected_memory = (old + 1) & width_mask
+    elif semaphore == "cmpxchg" and not match:
+        expected_memory = old
+    else:
+        expected_memory = replacement
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(memory_address, initial, 8),), entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[22] == old and
+                   snapshot.gr[23] == expected_memory,
+                   label + " returned or stored the wrong value")
+        if semaphore == "cmpxchg" and not match:
+            H._require(snapshot.gr[30] in (1, 2),
+                       label + " produced an impossible ALAT edge")
+            return (label + " performed no store; its ALAT edge remained "
+                    "within Intel's pessimistic-eviction allowance")
+        H._require(snapshot.gr[30] == 1,
+                   label + " retained an entry after a successful store")
+        return (label + " committed once and forced the following CHK.A "
+                "miss")
+
+    return RuntimeCase(
+        label, program, (advanced_ip, atomic_ip, reload_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(load_width), atomic_opcode,
+         "IA64_OP_CHK_A"),
+    )
+
+
+def rotating_gr_alat_remap_case(sor: int) -> RuntimeCase:
+    """One loop rotation must not expose the old physical GR through r32."""
+    if not 1 <= sor <= 12:
+        raise ValueError("GR SOR encoding must be 1 through 12")
+    loaded = 0x1122334455667788
+    bundles: List[object] = [
+        H.Bundle(0x10000, 0x01,
+                 H.alloc(31, 96, 96, sor), H.nop_i(), H.nop_i()),
+        _movl_bundle(0x10010, 7, 0x1800),
+        _movl_bundle(0x10020, 1, 1),
+        H.Bundle(0x10030, 0x01,
+                 H.nop_m(), H.mov_i_grar(65, 1), H.nop_i()),
+        H.Bundle(0x10040, 0x01,
+                 integer_load(8, "a", r1=32, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10050, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_loop("ctop", 0x10050, 0x10060)),
+        H.Bundle(0x10060, 0x01,
+                 H.nop_m(), H.adds(20, 0, 33), H.nop_i()),
+    ]
+    address, check_ip = _append_alat_miss_probe(
+        bundles, 0x10070, reg=32, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    rotating_count = sor * 8
+    label = "{}-GR rotation ALAT physical-target remap".format(
+        rotating_count)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(0x1800, loaded, 8),), entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[20] == loaded,
+                   label + " did not rotate old logical r32 into r33")
+        H._require(snapshot.gr[30] == 1,
+                   label + " exposed old physical r32 through new r32")
+        return (label + " preserved the rotated value in r33 while CHK.A "
+                "r32 took recovery")
+
+    return RuntimeCase(
+        label, program, (0x10040, check_ip), verify,
+        ("IA64_OP_ALLOC", "IA64_OP_LD8A", "IA64_OP_BR_CTOP",
+         "IA64_OP_CHK_A"),
+    )
+
+
+def rotating_fr_alat_remap_case() -> RuntimeCase:
+    """One loop rotation must not expose the old physical FR through f32."""
+    bundles: List[object] = [
+        H.Bundle(0x10000, 0x01,
+                 H.alloc(31, 8, 8, 1), H.nop_i(), H.nop_i()),
+        _movl_bundle(0x10010, 7, 0x1800),
+        _movl_bundle(0x10020, 1, 1),
+        H.Bundle(0x10030, 0x01,
+                 H.nop_m(), H.mov_i_grar(65, 1), H.nop_i()),
+        H.Bundle(0x10040, 0x01,
+                 floating_load("IA64_OP_LDFS", attr="a", f1=32, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10050, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_loop("ctop", 0x10050, 0x10060)),
+    ]
+    address, check_ip = _append_alat_miss_probe(
+        bundles, 0x10060, reg=32, marker_reg=30, fp=True)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "rotating FR ALAT physical-target remap"
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(0x1800, 0x3FC00000, 4),), entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[30] == 1,
+                   label + " exposed old physical f32 through new f32")
+        return label + " forced CHK.A f32 recovery after one loop rotation"
+
+    return RuntimeCase(
+        label, program, (0x10040, check_ip), verify,
+        ("IA64_OP_ALLOC", "IA64_OP_LDFS", "IA64_OP_BR_CTOP",
+         "IA64_OP_CHK_A"),
+    )
+
+
+def stacked_call_alat_remap_case() -> RuntimeCase:
+    """A call-frame transition must not reuse a caller-local ALAT tag."""
+    bundles: List[object] = [
+        H.Bundle(0x10000, 0x01,
+                 H.alloc(31, 8, 8, 0), H.nop_i(), H.nop_i()),
+        _movl_bundle(0x10010, 7, 0x1800),
+        H.Bundle(0x10020, 0x01,
+                 integer_load(8, "a", r1=32, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10030, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_call(0x10030, 0x10050, 0)),
+        H.spin_bundle(0x10040),
+        H.Bundle(0x10050, 0x01,
+                 H.alloc(31, 8, 8, 0), H.nop_i(), H.nop_i()),
+    ]
+    address, check_ip = _append_alat_miss_probe(
+        bundles, 0x10060, reg=32, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "stacked call-frame ALAT physical-target remap"
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(0x1800, 0x1122334455667788, 8),),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[30] == 1,
+                   label + " exposed the caller-local physical r32 tag")
+        return label + " forced CHK.A r32 recovery in the callee frame"
+
+    return RuntimeCase(
+        label, program, (0x10020, check_ip), verify,
+        ("IA64_OP_ALLOC", "IA64_OP_LD8A", "IA64_OP_BR_CALL",
+         "IA64_OP_CHK_A"),
+    )
+
+
 def integer_speculative_protection_fault_case(
         width: int, memory_class: str, condition: str) -> RuntimeCase:
     if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
@@ -4174,6 +4602,41 @@ def checkpoint_28_cases() -> Tuple[RuntimeCase, ...]:
     )
 
 
+def checkpoint_29_cases() -> Tuple[RuntimeCase, ...]:
+    return (
+        *(physical_alias_store_alat_invalidation_case(
+              load_width, store_width)
+          for load_width in (1, 2, 4, 8)
+          for store_width in (1, 2, 4, 8)),
+        *(integer_partial_store_alat_invalidation_case(
+              load_width, store_width, displacement)
+          for load_width in (1, 2, 4, 8)
+          for store_width in (1, 2, 4, 8)
+          for displacement in range(-(store_width - 1), load_width)),
+        *(integer_semaphore_alat_invalidation_case(
+              load_width, "xchg", semaphore_width)
+          for load_width in (1, 2, 4, 8)
+          for semaphore_width in (1, 2, 4, 8)),
+        *(integer_semaphore_alat_invalidation_case(
+              load_width, "cmpxchg", semaphore_width, release=release)
+          for release in (False, True)
+          for load_width in (1, 2, 4, 8)
+          for semaphore_width in (1, 2, 4, 8)),
+        *(integer_semaphore_alat_invalidation_case(
+              width, "cmpxchg", width, release=release, match=False)
+          for release in (False, True)
+          for width in (1, 2, 4, 8)),
+        *(integer_semaphore_alat_invalidation_case(
+              load_width, "fetchadd", semaphore_width, release=release)
+          for release in (False, True)
+          for load_width in (1, 2, 4, 8)
+          for semaphore_width in (4, 8)),
+        *(rotating_gr_alat_remap_case(sor) for sor in range(1, 13)),
+        rotating_fr_alat_remap_case(),
+        stacked_call_alat_remap_case(),
+    )
+
+
 def runtime_cases() -> Tuple[RuntimeCase, ...]:
     return (
         primary_admission_case(), alias_admission_case(), atomic_case(),
@@ -4270,6 +4733,7 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
         checked_branch_gr_case(),
         checked_branch_fr_case(), checked_branch_disabled_fr_case(),
         *checkpoint_28_cases(),
+        *checkpoint_29_cases(),
     )
 
 
@@ -4309,6 +4773,8 @@ def self_check(cases: Sequence[RuntimeCase]) -> str:
                "expected six decoder-reserved spill/fill widths")
     H._require(len(checkpoint_28_cases()) == 42,
                "checkpoint 28 ALAT shard is not 42 programs")
+    H._require(len(checkpoint_29_cases()) == 206,
+               "checkpoint 29 ALAT shard is not 206 programs")
     return ("{}; {} programs; 63 primary bundles (57 decoder-live); {} live "
             "alias/completer bundles; 12 shadowed split-load encodings; "
             "6 reserved-width rows"
@@ -4337,7 +4803,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--self-check", action="store_true",
                         help="construct and validate programs without QEMU")
     parser.add_argument(
-        "--group", choices=("all", "base", "checkpoint-28"), default="all",
+        "--group",
+        choices=("all", "base", "checkpoint-28", "checkpoint-29"),
+        default="all",
         help="run the complete inventory or one Meson-sized shard",
     )
     args = parser.parse_args(argv)
@@ -4347,11 +4815,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("data-plane runtime self-check: " + detail)
         return 0
 
-    checkpoint_count = len(checkpoint_28_cases())
+    checkpoint_28_count = len(checkpoint_28_cases())
+    checkpoint_29_count = len(checkpoint_29_cases())
     if args.group == "base":
-        cases = all_cases[:-checkpoint_count]
+        cases = all_cases[:-(checkpoint_28_count + checkpoint_29_count)]
     elif args.group == "checkpoint-28":
-        cases = all_cases[-checkpoint_count:]
+        cases = all_cases[-(checkpoint_28_count + checkpoint_29_count):
+                          -checkpoint_29_count]
+    elif args.group == "checkpoint-29":
+        cases = all_cases[-checkpoint_29_count:]
     else:
         cases = all_cases
 

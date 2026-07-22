@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 51
+dependencies installed, configure, build, fetch the public manuals, run all 52
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first twelve exact speculation contracts live in
+The first fifteen exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -92,20 +92,35 @@ for all or selected represented tags. The twelfth adds 16 nonzero-predicate
 programs: every integer `.a` and `.sa` width executes through true p1, while
 false p2 points at an otherwise faulting unimplemented address and must leave
 destination, NaT, base, memory-access, and ALAT state unchanged.
+The thirteenth adds all 16 integer advanced-load/store width pairs through two
+distinct virtual pages mapped to one physical page. Exact store/reload values
+and mandatory CHK.A recovery prove that invalidation uses physical ranges,
+not coincident virtual addresses. The fourteenth adds 176 overlap/semaphore
+programs: all 104 nonempty byte intersections across the sixteen load/store
+width pairs, sixteen cross-width XCHG cases, thirty-two acquire/release
+successful CMPXCHG cases, eight failed-CMPXCHG controls, and sixteen
+acquire/release FETCHADD cases. Successful stores must force recovery; failed
+CMPXCHG must leave memory unchanged while its ALAT edge remains within
+Intel's explicit pessimistic-eviction allowance. The fifteenth adds every
+legal nonzero GR rotating-region size, one rotating-FR case, and one stacked
+call-frame transition. Each prevents an ALAT tag for the former physical
+target from creating a false hit under the remapped logical r32 or f32 name.
 Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 serialized public gate after the ALAT
-identity/invalidation/predication checkpoint, `test-ia64-system-tcg` took
-46.98 seconds, `test-ia64-full-tcg` 48.11 seconds, and
-`test-ia64-register-tcg` 45.55 seconds. The established data-plane shard
-passed 637 subtests in 171.76 seconds and the new ALAT shard passed 42 in
-11.52 seconds; all 51 selected tests passed in 425.265 seconds. The former
+matrices execute. On the 2026-07-22 serialized public gate after the physical-
+alias/overlap/remap checkpoint, `test-ia64-system-tcg` took 47.29 seconds,
+`test-ia64-full-tcg` 48.36 seconds, and `test-ia64-register-tcg` 45.51
+seconds. The established data-plane shard passed 637 subtests in 172.24
+seconds, checkpoint 28 passed 42 in 11.64 seconds, and the new 206-program
+ALAT alias shard passed in 55.75 seconds; all 52 selected tests passed in
+482.333 seconds. The former
 single 180-second registration limit was an infrastructure timeout once the
-combined inventory reached 679 programs, not a semantic hang. The serialized
-lane avoids the fixed five-second HMP-startup
+combined inventory reached 679 programs, not a semantic hang. The current
+885-program inventory remains deliberately split by evidence ownership. The
+serialized lane avoids the fixed five-second HMP-startup
 contention seen under unrestricted host parallelism without weakening any
 per-test timeout. The
 RSE suites include five fresh-process

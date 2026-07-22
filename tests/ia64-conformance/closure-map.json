@@ -87,11 +87,32 @@
       "candidate_tests": ["test-ia64-data-plane-tcg"]
     },
     {
+      "normative_row": "ALT-004-ALAT-PHYSICAL-ALIAS-IDENTITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld1a", "cpu.opcode.ia64_op_ld2a", "cpu.opcode.ia64_op_ld4a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_st1", "cpu.opcode.ia64_op_st2", "cpu.opcode.ia64_op_st4", "cpu.opcode.ia64_op_st8"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-alias-tcg"]
+    },
+    {
+      "normative_row": "ALT-004-ALAT-REGISTER-REMAP-IDENTITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.branch.loop-state", "cpu.opcode.ia64_op_alloc", "cpu.opcode.ia64_op_br_call", "cpu.opcode.ia64_op_br_ctop", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs", "cpu.register.ar.65", "cpu.register.scalar.cfm"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-alias-tcg"]
+    },
+    {
       "normative_row": "ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.opcode.ia64_op_bsw0", "cpu.opcode.ia64_op_bsw1", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld1a", "cpu.opcode.ia64_op_ld1c_clr", "cpu.opcode.ia64_op_ld2a", "cpu.opcode.ia64_op_ld2c_clr", "cpu.opcode.ia64_op_ld4a", "cpu.opcode.ia64_op_ld4c_clr", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ld8c_clr", "cpu.opcode.ia64_op_ldfs", "cpu.register.scalar.psr"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-alat-tcg"]
+    },
+    {
+      "normative_row": "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_cmpxchg1", "cpu.opcode.ia64_op_cmpxchg2", "cpu.opcode.ia64_op_cmpxchg4", "cpu.opcode.ia64_op_cmpxchg8", "cpu.opcode.ia64_op_fetchadd4", "cpu.opcode.ia64_op_fetchadd8", "cpu.opcode.ia64_op_ld1a", "cpu.opcode.ia64_op_ld2a", "cpu.opcode.ia64_op_ld4a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_st1", "cpu.opcode.ia64_op_st2", "cpu.opcode.ia64_op_st4", "cpu.opcode.ia64_op_st8", "cpu.opcode.ia64_op_xchg1", "cpu.opcode.ia64_op_xchg2", "cpu.opcode.ia64_op_xchg4", "cpu.opcode.ia64_op_xchg8", "cpu.register.ar.32"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-alias-tcg"]
     },
     {
       "normative_row": "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION",

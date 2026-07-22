@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 77
+    "row_closing_claims_expected": 80
   },
   "entries": [
     {
@@ -178,7 +178,26 @@
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
       "closes_normative_rows": ["ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY", "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION", "ALT-006-INTEGER-FALSE-PREDICATE"],
-      "limitations": ["Physical memory aliases, stacked/rotating aliases, partial overlaps, failed atomics, RSE/context/interruption/remote invalidation, and broader floating predication remain separate work."]
+      "limitations": ["RSE spill/wrap and BSPSTORE context changes, interruption/remote invalidation, cache/ptc.ga, broader floating predication, migration, and malformed state remain separate work."]
+    },
+    {
+      "id": "meson:test-ia64-data-plane-tcg-checkpoint-29",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-alat-alias-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/speculation-semantic-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-alat-alias-tcg",
+      "scope": "Guest-executed 206-program ALAT shard: every integer physical-alias width pair, every ordinary-store byte-overlap partition, successful and failed XCHG/CMPXCHG/FETCHADD matrices, every GR rotating size, rotating FR, and stacked call-frame remapping.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["ALT-004-ALAT-PHYSICAL-ALIAS-IDENTITY", "ALT-004-ALAT-REGISTER-REMAP-IDENTITY", "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION"],
+      "limitations": ["RSE physical-stack wrap/spill behavior, BSPSTORE context replacement, interruption and remote invalidation, cache-line removal, ptc.ga, cmp8xchg16, floating-width breadth, migration, replay, debug, and malformed ALAT state remain separate work."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-static",
