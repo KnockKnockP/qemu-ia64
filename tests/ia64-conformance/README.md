@@ -175,6 +175,7 @@ exact row-closing claims. Its 2,112-row executed join contains 88
 `implemented-tested`, 1,974 `implemented-untested`, 7
 `advertised-untested`, and 43 `known-unimplemented` rows, leaving 1,981
 blockers with no test or infrastructure failure.
+
 The reset/replay checkpoint raises the current gate to 57/57 in 206.529
 seconds: `test-ia64-full-tcg` passed 38 subtests in 55.10 seconds, the focused
 reset image passed in 0.04 seconds, `test-ia64-system-tcg` took 49.87 seconds,
@@ -247,3 +248,31 @@ pair reservation, and IA-32 debug behavior remain explicit later units. The
 100 `implemented-tested`, 1,424 `implemented-untested`, 7
 `advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,431
 blockers with no test or infrastructure failure.
+
+The protection-key checkpoint raises the public gate to 61/61 in 194.468
+seconds. `test-ia64-system-tcg` passes 23 subtests in 57.58 seconds. Its new
+register-file program gives PKR0-15 distinct valid keys before delayed
+readback, proves that only selector bits7:0 participate, exercises read and
+write for every nonexistent selector 16-255, and rejects all 36 reserved
+field bits without changing a committed sentinel. A second state machine
+proves that a new valid duplicate key clears only the old entry's valid bit;
+an invalid same-key write neither steals ownership nor mutates prior fields.
+
+Translated read, write, and instruction-fetch programs independently select
+read-disable, write-disable, execute-disable, data-key-miss, and
+instruction-key-miss paths. Their handlers publish exact fault metadata,
+install a permissive key, issue the access-class serialization, and RFI to a
+single successful retry. The instruction handler has its own identity ITR
+and distinct key because interruption delivery preserves `PSR.it` and
+`PSR.pk`. Separate cases prove that clearing `PSR.pk` bypasses both data and
+instruction key checks.
+
+Static inspection also found that `PAL_VM_SUMMARY` encoded PKR/DTR/ITR counts
+where the PAL ABI requires maximum indices. It now returns 15/7/7, validates
+all three reserved arguments, and is cross-checked against the executable
+register banks. Five new public atomic contracts raise the catalogue to 134
+rows and 105 row-closing claims. The 2,061-row executed join contains 105
+`implemented-tested`, 1,406 `implemented-untested`, 7
+`advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,413
+blockers. No Vibtanium checkout, restricted source, private workflow, or
+guest-specific behavior is needed to build or run this coverage.

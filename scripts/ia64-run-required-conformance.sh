@@ -49,6 +49,7 @@ set +e
     qemu:test-ia64-performance-monitor-tranche-static \
     qemu:test-ia64-processor-identification-tranche-static \
     qemu:test-ia64-debug-register-tranche-static \
+    qemu:test-ia64-protection-key-tranche-static \
     qemu:test-ia64-runner-protocol \
     qemu:test-ia64-first-architectural-tranche-static \
     qemu:test-ia64-correctness-lessons-static \

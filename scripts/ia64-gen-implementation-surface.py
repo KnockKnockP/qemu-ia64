@@ -131,6 +131,13 @@ ARCHITECTURAL_SURFACES = (
         "static IA64FirmwareResult pal_performance_monitor_info(",
     ),
     (
+        "platform.firmware.pal-vm-summary",
+        "platform.firmware",
+        "PAL virtual-memory profile and register maximum indices",
+        "hw/ia64/firmware.c",
+        "static IA64FirmwareResult pal_vm_summary(",
+    ),
+    (
         "cpu.bundle.format",
         "cpu.bundle",
         "128-bit bundle field extraction",

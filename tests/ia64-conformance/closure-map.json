@@ -21,6 +21,7 @@
     "test-ia64-packed-integer-tranche-static",
     "test-ia64-performance-monitor-tranche-static",
     "test-ia64-predicate-branch-tranche-static",
+    "test-ia64-protection-key-tranche-static",
     "test-ia64-register-tcg-static",
     "test-ia64-runner-protocol",
     "test-ia64-scalar-integer-tranche-static"
@@ -494,6 +495,24 @@
       ]
     },
     {
+      "normative_row": "MMU-012-PROTECTION-KEY-ACCESS",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.pkr.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "PAL-008-VM-SUMMARY-PROFILE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["platform.firmware.pal-vm-summary"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "PAL-012-DEBUG-REGISTER-DISCOVERY",
       "surface_disposition": "implemented",
       "implementation_rows": ["platform.firmware.pal-debug-info"],
@@ -742,6 +761,17 @@
       "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
+      "normative_row": "REG-006-PKR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_mov_grpkr_indexed", "cpu.opcode.ia64_op_mov_pkrgr_indexed"],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.pkr.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "REG-006-PMC-INDEX-SPACE",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.register.pmc.0", "cpu.register.pmc.1", "cpu.register.pmc.2", "cpu.register.pmc.3", "cpu.register.pmc.4", "cpu.register.pmc.5", "cpu.register.pmc.6", "cpu.register.pmc.7"],
@@ -829,6 +859,28 @@
       "implementation_rows": ["cpu.register.ar.64"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-007-PKR-FIELD-SEMANTICS",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.pkr.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "REG-007-PKR-KEY-UNIQUENESS",
+      "surface_disposition": "implemented",
+      "implementation_rows": [],
+      "implementation_selector": {
+        "coverage_group": "cpu.register.pkr.all-indices",
+        "exclude_rows": []
+      },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
       "normative_row": "REG-007-RSC-FIELD-SEMANTICS",

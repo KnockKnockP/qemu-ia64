@@ -44,10 +44,14 @@ ALT_DTLB_VECTOR = 0x1000
 ALT_ITLB_VECTOR = 0x0C00
 DEBUG_VECTOR = 0x5900
 UNALIGNED_VECTOR = 0x5A00
+INSTRUCTION_KEY_MISS_VECTOR = 0x1800
+DATA_KEY_MISS_VECTOR = 0x1C00
+KEY_PERMISSION_VECTOR = 0x5100
 PSR_BE = 1 << 1
 PSR_AC = 1 << 3
 PSR_IC = 1 << 13
 PSR_I = 1 << 14
+PSR_PK = 1 << 15
 PSR_DT = 1 << 17
 PSR_DI = 1 << 22
 PSR_SI = 1 << 23
@@ -85,6 +89,7 @@ ISR_PRIVILEGED_OPERATION = 0x10
 ISR_PRIVILEGED_REGISTER = 0x20
 ISR_RESERVED_REGISTER_FIELD = 0x30
 ISR_DISABLED_ISA_TRANSITION = 0x40
+PKR_MASK = 0x00000000FFFFFF0F
 
 # Intel SDM Vol. 3, itr/itc operation pseudocode: PSR.ic == 1 takes
 # Illegal Operation before privilege, operand-NaT, and reserved-field checks.
@@ -723,6 +728,485 @@ def test_debug_register_selector_domains(harness: ModuleType,
             "fault and resume per bank")
 
 
+def protection_key_selector_domain_program(harness: ModuleType):
+    def register_value(index: int) -> int:
+        return ((0x100 + index) << 8) | 1 | ((index & 7) << 1)
+
+    bundles: List[object] = [
+        raw_bundle(harness, 0x10, "M", m_mask(6, PSR_IC)),
+        raw_bundle(harness, 0x20, "M", m_serial(0x31)),
+        harness.Bundle(0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 0, 0), harness.adds(9, 0, 0)),
+        harness.Bundle(0x40, 0x01, harness.nop_m(),
+                       harness.adds(20, 0, 0), harness.nop_i()),
+    ]
+    address = 0x50
+
+    for index in range(16):
+        bundles.append(movl_bundle(
+            harness, address, 2, register_value(index)
+        ))
+        address += 0x10
+        bundles.append(movl_bundle(harness, address, 3, index))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x03, r2=2, r3=3)
+        ))
+        address += 0x10
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x30)))
+    address += 0x10
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x31)))
+    address += 0x10
+
+    for index in range(16):
+        bundles.append(movl_bundle(harness, address, 3, index))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x13, r1=4, r3=3)
+        ))
+        address += 0x10
+        bundles.append(movl_bundle(
+            harness, address, 5, register_value(index)
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.adds(20, 1, 20, qp=2), harness.nop_i()
+        ))
+        address += 0x10
+
+    # Both high-bit forms select PKR15.  The all-implemented-bits value also
+    # checks v/wd/rd/xd and every one of the product's 24 key bits.
+    bundles.append(movl_bundle(harness, address, 2, PKR_MASK))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 3, 0x10F))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(0x03, r2=2, r3=3)
+    ))
+    address += 0x10
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x30)))
+    address += 0x10
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x31)))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 3, (1 << 63) | 15))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(0x13, r1=4, r3=3)
+    ))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 5, PKR_MASK))
+    address += 0x10
+    bundles.append(harness.Bundle(
+        address, 0x01, harness.nop_m(),
+        harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+    ))
+    address += 0x10
+    bundles.append(harness.Bundle(
+        address, 0x01, harness.nop_m(),
+        harness.adds(20, 1, 20, qp=2), harness.nop_i()
+    ))
+    address += 0x10
+
+    # Every nonexistent low-byte selector must fault in both directions.
+    for selector in range(16, 256):
+        bundles.append(movl_bundle(harness, address, 3, selector))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x13, r1=4, r3=3)
+        ))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x03, r2=2, r3=3)
+        ))
+        address += 0x10
+
+    # PKR15 is the commitment sentinel for every reserved-field write.
+    bundles.append(movl_bundle(harness, address, 3, 15))
+    address += 0x10
+    for bit in tuple(range(4, 8)) + tuple(range(32, 64)):
+        bundles.append(movl_bundle(harness, address, 2, 1 << bit))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x03, r2=2, r3=3)
+        ))
+        address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(0x13, r1=4, r3=3)
+    ))
+    address += 0x10
+    bundles.append(movl_bundle(harness, address, 5, PKR_MASK))
+    address += 0x10
+    bundles.append(harness.Bundle(
+        address, 0x01, harness.nop_m(),
+        harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+    ))
+    address += 0x10
+    bundles.append(harness.Bundle(
+        address, 0x01, harness.nop_m(),
+        harness.adds(20, 1, 20, qp=2), harness.nop_i()
+    ))
+    address += 0x10
+
+    terminal_ip = address
+    require(terminal_ip < GENERAL_VECTOR,
+            "PKR selector program overlaps General vector")
+    bundles.extend((
+        harness.spin_bundle(terminal_ip),
+        raw_bundle(harness, GENERAL_VECTOR, "M",
+                   harness.mov_crgr(10, 17)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x10, "I",
+                   harness.extr(12, 10, 0, 16)),
+        harness.Bundle(GENERAL_VECTOR + 0x20, 0x01, harness.nop_m(),
+                       harness.cmp_imm(1, 2, ISR_RESERVED_REGISTER_FIELD,
+                                       12, "eq"), harness.nop_i()),
+        harness.Bundle(GENERAL_VECTOR + 0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 1, 8, qp=2),
+                       harness.adds(9, 1, 9)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x40, "M",
+                   harness.mov_crgr(11, CR_IIP)),
+        harness.Bundle(GENERAL_VECTOR + 0x50, 0x01, harness.nop_m(),
+                       harness.adds(11, 16, 11), harness.nop_i()),
+        raw_bundle(harness, GENERAL_VECTOR + 0x60, "M",
+                   harness.mov_grcr(CR_IIP, 11)),
+        harness.Bundle(GENERAL_VECTOR + 0x70, 0x11, harness.nop_m(),
+                       harness.nop_i(), harness.rfi()),
+    ))
+    return harness.Program(
+        name="PKR complete selector and field domain",
+        bundles=tuple(bundles), terminal_ip=terminal_ip,
+    )
+
+
+def protection_key_uniqueness_program(harness: ModuleType):
+    key = 0x654321 << 8
+    first = key | 1 | 2
+    second = key | 1 | 4
+    invalid = key | 8
+    final = key | 1 | 8
+    bundles: List[object] = []
+    address = 0x10
+
+    def write(index: int, value: int) -> None:
+        nonlocal address
+        bundles.append(movl_bundle(harness, address, 2, value))
+        address += 0x10
+        bundles.append(movl_bundle(harness, address, 3, index))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(0x03, r2=2, r3=3)
+        ))
+        address += 0x10
+
+    def read(index: int, destination: int) -> None:
+        nonlocal address
+        bundles.append(movl_bundle(harness, address, 3, index))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M",
+            m_system(0x13, r1=destination, r3=3)
+        ))
+        address += 0x10
+
+    write(0, first)
+    write(1, second)
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x30)))
+    address += 0x10
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x31)))
+    address += 0x10
+    read(0, 20)
+    read(1, 21)
+    write(2, invalid)
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x30)))
+    address += 0x10
+    read(1, 22)
+    read(2, 23)
+    write(15, final)
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x30)))
+    address += 0x10
+    bundles.append(raw_bundle(harness, address, "M", m_serial(0x31)))
+    address += 0x10
+    read(0, 24)
+    read(1, 25)
+    read(2, 26)
+    read(15, 27)
+    bundles.append(harness.spin_bundle(address))
+    expected = (first & ~1, second, second, invalid,
+                first & ~1, second & ~1, invalid, final)
+    return harness.Program(
+        name="PKR duplicate-key invalidation",
+        bundles=tuple(bundles), terminal_ip=address,
+    ), expected
+
+
+def test_protection_key_register_file(harness: ModuleType,
+                                      qemu: Path) -> str:
+    domain = protection_key_selector_domain_program(harness)
+    snapshot = harness.run_program(qemu, domain, compact_loader=True)
+    require(snapshot.ip == domain.terminal_ip,
+            "PKR selector traversal stopped at 0x{:x}".format(snapshot.ip))
+    require(snapshot.exception_pending and
+            snapshot.exception_kind == "general-exception" and
+            snapshot.exception_vector == GENERAL_VECTOR,
+            "PKR traversal did not retain its final field fault")
+    require(snapshot.gr[9] == 516,
+            "PKR traversal raised {} faults, expected 516".format(
+                snapshot.gr[9]))
+    require(snapshot.gr[8] == 0 and snapshot.gr[20] == 0,
+            "PKR traversal found {} ISR and {} value mismatches".format(
+                snapshot.gr[8], snapshot.gr[20]))
+
+    uniqueness, expected = protection_key_uniqueness_program(harness)
+    result = harness.run_program(qemu, uniqueness)
+    require(not result.exception_pending and result.gr[20:28] == expected,
+            "PKR duplicate-key transition mismatch: {}".format(
+                tuple("0x{:x}".format(value) for value in result.gr[20:28])))
+    return ("all 16 PKRs are distinct; high selector bits are ignored; 480 "
+            "reserved accesses and all 36 reserved field bits fault; valid "
+            "duplicate keys invalidate only prior v bits")
+
+
+def protection_key_data_program(harness: ModuleType, *, access: str,
+                                initial_pkr: int, fault_vector: int | None,
+                                enable_pk: bool = True):
+    virtual = 0x8000
+    physical = 0x4000
+    key = 0x123456
+    pte = physical | 0x661
+    itir = (12 << 2) | (key << 8)
+    repair = (key << 8) | 1
+    stored = 0xCAFEBABE11223344
+    bundles: List[object] = [
+        movl_bundle(harness, 0x10, 2, pte),
+        movl_bundle(harness, 0x20, 7, virtual),
+        movl_bundle(harness, 0x30, 4, itir),
+        movl_bundle(harness, 0x40, 5, stored),
+        raw_bundle(harness, 0x50, "M",
+                   m_system(0x2C, r2=7, r3=CR_IFA)),
+        raw_bundle(harness, 0x60, "M",
+                   m_system(0x2C, r2=4, r3=CR_ITIR)),
+        opcode_bundle(harness, 0x70, SPEC_BY_OPCODE["IA64_OP_ITC_D"],
+                      m_system(0x2E, r2=2)),
+        raw_bundle(harness, 0x80, "M", m_serial(0x30)),
+        movl_bundle(harness, 0x90, 2, initial_pkr),
+        movl_bundle(harness, 0xA0, 3, 0),
+        raw_bundle(harness, 0xB0, "M",
+                   m_system(0x03, r2=2, r3=3)),
+        raw_bundle(harness, 0xC0, "M", m_serial(0x30)),
+        raw_bundle(harness, 0xD0, "M", m_serial(0x31)),
+        raw_bundle(harness, 0xE0, "M",
+                   m_mask(6, PSR_DT | PSR_IC |
+                          (PSR_PK if enable_pk else 0))),
+        raw_bundle(harness, 0xF0, "M", m_serial(0x31)),
+    ]
+    fault_ip = 0x100
+    if access == "read":
+        bundles.append(harness.Bundle(
+            fault_ip, 0x01, harness.ld8(20, 7),
+            harness.nop_i(), harness.nop_i()
+        ))
+        terminal_ip = 0x110
+    elif access == "write":
+        bundles.extend((
+            harness.Bundle(fault_ip, 0x01, harness.st8(5, 7),
+                           harness.nop_i(), harness.nop_i()),
+            harness.Bundle(0x110, 0x01, harness.ld8(20, 7),
+                           harness.nop_i(), harness.nop_i()),
+        ))
+        terminal_ip = 0x120
+    else:
+        raise ValueError("unknown protection-key data access: " + access)
+    bundles.append(harness.spin_bundle(terminal_ip))
+    if fault_vector is not None:
+        bundles.extend((
+            movl_bundle(harness, fault_vector, 2, repair),
+            movl_bundle(harness, fault_vector + 0x10, 3, 0),
+            raw_bundle(harness, fault_vector + 0x20, "M",
+                       m_system(0x03, r2=2, r3=3)),
+            raw_bundle(harness, fault_vector + 0x30, "M", m_serial(0x30)),
+            harness.Bundle(fault_vector + 0x40, 0x11, harness.nop_m(),
+                           harness.nop_i(), harness.rfi()),
+        ))
+    return harness.Program(
+        name="PKR {} {}".format(
+            access, "bypass" if fault_vector is None else "repair"),
+        bundles=tuple(bundles), terminal_ip=terminal_ip,
+        data=(harness.DataWord(physical, 0x8877665544332211, 8),),
+    ), fault_ip, virtual, stored
+
+
+def protection_key_instruction_program(
+        harness: ModuleType, *, initial_pkr: int,
+        fault_vector: int | None, enable_pk: bool = True):
+    virtual = 0x8000
+    physical = 0x2000
+    key = 0x123456
+    itir = (12 << 2) | (key << 8)
+    repair = (key << 8) | 1
+    bundles: List[object] = []
+    address = 0x10
+
+    def emit_movl(reg: int, value: int) -> None:
+        nonlocal address
+        bundles.append(movl_bundle(harness, address, reg, value))
+        address += 0x10
+
+    def emit_raw(raw: int) -> None:
+        nonlocal address
+        bundles.append(raw_bundle(harness, address, "M", raw))
+        address += 0x10
+
+    def write_pkr(slot: int, value: int) -> None:
+        emit_movl(9, value)
+        emit_movl(3, slot)
+        emit_raw(m_system(0x03, r2=9, r3=3))
+
+    def install_itr(slot: int, mapped_virtual: int,
+                    mapped_physical: int, mapped_itir: int) -> None:
+        nonlocal address
+        emit_movl(2, mapped_physical | 0x661)
+        emit_movl(7, mapped_virtual)
+        emit_movl(4, mapped_itir)
+        emit_movl(3, slot)
+        emit_raw(m_system(0x2C, r2=7, r3=CR_IFA))
+        emit_raw(m_system(0x2C, r2=4, r3=CR_ITIR))
+        bundles.append(opcode_bundle(
+            harness, address, SPEC_BY_OPCODE["IA64_OP_ITR_I"],
+            m_system(0x0F, r2=2, r3=3)
+        ))
+        address += 0x10
+
+    write_pkr(0, initial_pkr)
+    if fault_vector is not None:
+        # Interruption delivery preserves PSR.it and PSR.pk.  Give the
+        # handler page its own identity ITR and non-conflicting valid key so
+        # the handler itself cannot recursively take a key or TLB fault.
+        handler_key = 0xABCDEF
+        write_pkr(1, (handler_key << 8) | 1)
+    emit_raw(m_serial(0x30))
+    emit_raw(m_serial(0x31))
+    install_itr(0, virtual, physical, itir)
+    if fault_vector is not None:
+        handler_page = fault_vector & ~0xFFF
+        install_itr(1, fault_vector, handler_page,
+                    (12 << 2) | (handler_key << 8))
+
+    emit_movl(8, PSR_IT | PSR_IC | (PSR_PK if enable_pk else 0))
+    emit_raw(m_system(0x2C, r2=8, r3=CR_IPSR))
+    emit_movl(7, virtual)
+    emit_raw(m_system(0x2C, r2=7, r3=CR_IIP))
+    entry_rfi_ip = address
+    bundles.append(harness.Bundle(
+        address, 0x11, harness.nop_m(), harness.nop_i(), harness.rfi()
+    ))
+    address += 0x10
+    require(address < INSTRUCTION_KEY_MISS_VECTOR,
+            "PKR instruction setup overlaps interruption vectors")
+    bundles.extend((
+        harness.Bundle(physical, 0x01, harness.nop_m(),
+                       harness.adds(20, 0x5A, 0), harness.nop_i()),
+        harness.Bundle(physical + 0x10, 0x11, harness.nop_m(),
+                       harness.nop_i(),
+                       harness.br_cond(virtual + 0x10, virtual + 0x10)),
+    ))
+    if fault_vector is not None:
+        bundles.extend((
+            movl_bundle(harness, fault_vector, 2, repair),
+            movl_bundle(harness, fault_vector + 0x10, 3, 0),
+            raw_bundle(harness, fault_vector + 0x20, "M",
+                       m_system(0x03, r2=2, r3=3)),
+            raw_bundle(harness, fault_vector + 0x30, "M", m_serial(0x31)),
+            harness.Bundle(fault_vector + 0x40, 0x11, harness.nop_m(),
+                           harness.nop_i(), harness.rfi()),
+        ))
+    return harness.Program(
+        name="PKR instruction {} vector {}".format(
+            "bypass" if fault_vector is None else "repair",
+            "none" if fault_vector is None else "0x{:x}".format(
+                fault_vector)),
+        bundles=tuple(bundles), terminal_ip=virtual + 0x10,
+    ), virtual, entry_rfi_ip
+
+
+def test_protection_key_permissions(harness: ModuleType,
+                                    qemu: Path) -> str:
+    key = 0x123456 << 8
+    data_cases = (
+        ("read", key | 1 | 4, KEY_PERMISSION_VECTOR,
+         "key-permission", ISR_R, 0x8877665544332211),
+        ("write", key | 1 | 2, KEY_PERMISSION_VECTOR,
+         "key-permission", ISR_W, 0xCAFEBABE11223344),
+        ("read", (0x654321 << 8) | 1, DATA_KEY_MISS_VECTOR,
+         "data-key-miss", ISR_R, 0x8877665544332211),
+    )
+    for access, pkr, vector, kind, isr_access, expected in data_cases:
+        program, fault_ip, virtual, _stored = protection_key_data_program(
+            harness, access=access, initial_pkr=pkr, fault_vector=vector
+        )
+        result = harness.run_program(
+            qemu, program, one_bundle_per_tb=True,
+            typed_rfi_traces=(vector + 0x40,),
+        )
+        require(result.ip == program.terminal_ip and result.gr[20] == expected,
+                program.name + " did not repair, retry, and complete")
+        require(result.exception_kind == kind and
+                result.exception_vector == vector and
+                result.cr_iip == fault_ip and result.cr_ifa == virtual and
+                (result.cr_isr & (ISR_R | ISR_W | ISR_X)) == isr_access,
+                program.name + " published wrong interruption metadata")
+
+    instruction_cases = (
+        (key | 1 | 8, KEY_PERMISSION_VECTOR,
+         "key-permission"),
+        ((0x654321 << 8) | 1, INSTRUCTION_KEY_MISS_VECTOR,
+         "instruction-key-miss"),
+    )
+    for pkr, vector, kind in instruction_cases:
+        program, virtual, entry_rfi_ip = protection_key_instruction_program(
+            harness, initial_pkr=pkr, fault_vector=vector
+        )
+        result = harness.run_program(
+            qemu, program, one_bundle_per_tb=True,
+            typed_rfi_traces=(entry_rfi_ip, vector + 0x40),
+        )
+        require(result.ip == program.terminal_ip and result.gr[20] == 0x5A,
+                program.name + " did not repair and execute mapped code")
+        require(result.exception_kind == kind and
+                result.exception_vector == vector and
+                result.cr_iip == virtual and
+                (result.cr_isr & (ISR_R | ISR_W | ISR_X)) == ISR_X,
+                program.name + " published wrong fetch-fault metadata")
+
+    data_bypass, _fault_ip, _virtual, _stored = protection_key_data_program(
+        harness, access="read", initial_pkr=key | 1 | 4,
+        fault_vector=None, enable_pk=False,
+    )
+    bypass = harness.run_program(qemu, data_bypass)
+    require(not bypass.exception_pending and
+            bypass.gr[20] == 0x8877665544332211,
+            "PSR.pk=0 did not bypass data PKR checks")
+    instruction_bypass, _virtual, entry_rfi_ip = (
+        protection_key_instruction_program(
+            harness, initial_pkr=key | 1 | 8,
+            fault_vector=None, enable_pk=False,
+        )
+    )
+    fetch = harness.run_program(
+        qemu, instruction_bypass, typed_rfi_traces=(entry_rfi_ip,),
+        one_bundle_per_tb=True,
+    )
+    require(not fetch.exception_pending and fetch.gr[20] == 0x5A,
+            "PSR.pk=0 did not bypass instruction PKR checks")
+    return ("read, write, and execute disables plus data/instruction key "
+            "misses publish exact faults, repair through RFI, and PSR.pk=0 "
+            "bypasses both translated access classes")
+
+
 def pal_perf_mon_program(harness: ModuleType, buffer: int,
                          *, observe_buffer: bool):
     bundles: List[object] = [
@@ -832,6 +1316,55 @@ def test_pal_debug_info(harness: ModuleType, qemu: Path) -> str:
                 "invalid PAL_DEBUG_INFO call returned payload data")
     return ("PAL_DEBUG_INFO reports the exact eight implemented IBR/DBR "
             "pairs and rejects each nonzero reserved argument with -2")
+
+
+def pal_vm_summary_program(harness: ModuleType, arg0: int, arg1: int,
+                           arg2: int):
+    return harness.Program(
+        name="PAL_VM_SUMMARY args {:x}/{:x}/{:x}".format(
+            arg0, arg1, arg2),
+        bundles=(
+            movl_bundle(harness, 0x10, 28, 8),
+            movl_bundle(harness, 0x20, 29, arg0),
+            movl_bundle(harness, 0x30, 30, arg1),
+            movl_bundle(harness, 0x40, 31, arg2),
+            harness.Bundle(0x50, 0x11, harness.nop_m(), harness.nop_i(),
+                           harness.br_call(0x50, 0x8F000, 0)),
+            harness.spin_bundle(0x60),
+        ), terminal_ip=0x60,
+    )
+
+
+def test_pal_virtual_memory_summary(harness: ModuleType,
+                                    qemu: Path) -> str:
+    expected_info1 = (
+        1 | (44 << 1) | (24 << 8) | (15 << 16) | (18 << 24) |
+        (7 << 32) | (7 << 40) | (1 << 48) | (1 << 56)
+    )
+    expected_info2 = 50 | (18 << 8)
+    valid = harness.run_program(
+        qemu, pal_vm_summary_program(harness, 0, 0, 0)
+    )
+    require(not valid.exception_pending and valid.gr[8] == 0,
+            "valid PAL_VM_SUMMARY call failed")
+    require((valid.gr[9], valid.gr[10], valid.gr[11]) ==
+            (expected_info1, expected_info2, 0),
+            "PAL_VM_SUMMARY returned an incorrect VM profile")
+
+    invalid_status = U64_MASK - 1
+    for arguments in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+        result = harness.run_program(
+            qemu, pal_vm_summary_program(harness, *arguments)
+        )
+        require(not result.exception_pending and
+                result.gr[8] == invalid_status,
+                "PAL_VM_SUMMARY accepted reserved arguments {}".format(
+                    arguments))
+        require((result.gr[9], result.gr[10], result.gr[11]) == (0, 0, 0),
+                "invalid PAL_VM_SUMMARY call returned payload data")
+    return ("PAL_VM_SUMMARY reports max indices 15/7/7 for the implemented "
+            "PKR/DTR/ITR banks, the exact VM profile, and rejects every "
+            "nonzero reserved argument with -2")
 
 
 def nat_operands(spec: SystemOpcodeSpec) -> Tuple[str, ...]:
@@ -2368,9 +2901,13 @@ def main() -> int:
          test_cpuid_selector_domain),
         ("debug register selector domains",
          test_debug_register_selector_domains),
+        ("protection key register file",
+         test_protection_key_register_file),
+        ("protection key permissions", test_protection_key_permissions),
         ("PAL performance monitor discovery",
          test_pal_performance_monitor_info),
         ("PAL debug-register discovery", test_pal_debug_info),
+        ("PAL virtual-memory summary", test_pal_virtual_memory_summary),
         ("generated NaT matrix", test_nat_matrix),
         ("generated privilege matrix", test_privilege_matrix),
         ("reserved and predicate priority", test_reserved_matrix),

@@ -357,10 +357,10 @@ static uint64_t pal_vm_summary1(void)
     return hardware_walker |
            (physical_address_size << 1) |
            (key_size << 8) |
-           ((uint64_t)IA64_PKR_COUNT << 16) |
+           ((uint64_t)(IA64_PKR_COUNT - 1) << 16) |
            (hash_tag_id << 24) |
-           (IA64_MINIMUM_TRANSLATION_REGISTER_COUNT << 32) |
-           (IA64_MINIMUM_TRANSLATION_REGISTER_COUNT << 40) |
+           ((uint64_t)(IA64_DTR_COUNT - 1) << 32) |
+           ((uint64_t)(IA64_ITR_COUNT - 1) << 40) |
            (unique_translation_caches << 48) |
            (translation_cache_levels << 56);
 }
@@ -371,6 +371,15 @@ static uint64_t pal_vm_summary2(void)
     const uint64_t region_identifier_size = 18;
 
     return implemented_va_msb | (region_identifier_size << 8);
+}
+
+static IA64FirmwareResult pal_vm_summary(uint64_t arg0, uint64_t arg1,
+                                         uint64_t arg2)
+{
+    if (arg0 != 0 || arg1 != 0 || arg2 != 0) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    return firmware_success(pal_vm_summary1(), pal_vm_summary2(), 0);
 }
 
 static uint64_t pal_single_processor_logical_overview(void)
@@ -488,7 +497,7 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_MEMORY_ATTRIBUTES:
         return firmware_success(0, 0, 0);
     case IA64_PAL_VIRTUAL_MEMORY_SUMMARY:
-        return firmware_success(pal_vm_summary1(), pal_vm_summary2(), 0);
+        return pal_vm_summary(arg0, arg1, arg2);
     case IA64_PAL_VIRTUAL_MEMORY_INFO:
         return firmware_success(pal_supported_page_size_mask(), 61, 0);
     case IA64_PAL_VIRTUAL_MEMORY_PAGE_SIZE:
