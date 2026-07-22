@@ -1972,6 +1972,44 @@
       "possible_faults": [], "fault_priority": [], "committed_prefix": "Each stopped predicate transfer, WTOP, and comparison commits independently", "restart_rule": "No restart occurs for legal operands",
       "permitted_results": ["After one step p16 is false and p17-p63 contain old p16-p62; every later endpoint follows the independent shift-and-zero-fill oracle; after 48 steps all rotating predicates are false and RRB.PR is zero"],
       "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-005-BSPSTORE-DIRTY-RNAT-MATRIX",
+      "requirement_ids": ["RSE-005", "RSE-006"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "6.5.3", "printed_pages": ["2:140", "2:141"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "the BSP pointer is set to the address presented plus the size of the dirty partition plus the size of any intervening NaT collections"},
+      "operation": {"kind": "dirty-bspstore-rebase", "selector": "dirty sizes 0 through 96 and BSPSTORE address slots 0 through 63", "encoding": "real alloc/call dirty growth followed by stopped mov to BSPSTORE and BSP observation"},
+      "legal_inputs": ["Every dirty-partition size from zero through 96", "Every BSPSTORE RNAT-relative offset from zero through 63", "Complete frames and implemented mapped addresses"],
+      "privilege": {"levels": [0], "rule": "The complete RSE pointer matrix executes in the system guest with RSC.mode zero"},
+      "state_read": ["dirty-partition size", "presented BSPSTORE address and RNAT-relative offset", "BSP"],
+      "state_written": ["BSPSTORE", "BSP", "RSE.BspLoad", "architecturally undefined RNAT contents"],
+      "predication": {"applies": true, "rule": "The complete dirty matrix uses p0; false qualification and same-group visibility are established by REG-008-BSPSTORE-BSP-REBASE-EFFECT"},
+      "nat_behavior": "The BSP address skips one RNAT collection word after each 63 backing-store register slots; the post-write RNAT value is undefined",
+      "possible_faults": [], "fault_priority": [],
+      "committed_prefix": "Each stopped call grows one dirty register and each stopped BSPSTORE write atomically rebases all three RSE pointers",
+      "restart_rule": "No restart occurs for complete frames and implemented mapped addresses",
+      "permitted_results": ["For each of 6,208 cases BSP equals aligned BSPSTORE plus eight times the dirty count plus eight times floor((offset + dirty) / 63)"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-006-FLUSHRS-DIRTY-EFFECT",
+      "requirement_ids": ["RSE-006", "RSE-004", "RSE-005"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v3-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 3: Instruction Set Reference", "revision": "2.3", "volume": 3, "part": "Part 1: Instruction Set Descriptions", "section": "2", "printed_pages": ["3:75", "3:76"], "manual_file": "itanium-architecture-vol-3-manual.pdf", "anchor": "After this instruction completes execution BSPSTORE is equal to BSP"},
+      "operation": {"kind": "mandatory-rse-flush", "selector": "96 dirty stacked registers spanning completed and partial RNAT collections", "encoding": "legal slot-zero flushrs first in its instruction group"},
+      "legal_inputs": ["A complete 96-register dirty partition", "Distinct values one through 96 with alternating NaTs", "A mapped writable backing store starting at RNAT-relative offset 63"],
+      "privilege": {"levels": [0], "rule": "The mandatory RSE flush executes at CPL0 with RSC.mode zero"},
+      "state_read": ["dirty stacked-register values and NaTs", "BSP", "BSPSTORE", "AR.RNAT"],
+      "state_written": ["backing-store register and RNAT words", "AR.RNAT", "BSPSTORE", "RSE.BspLoad", "dirty-partition size"],
+      "predication": {"applies": false, "rule": "FLUSHRS is architecturally unpredicated and must be first in its instruction group"},
+      "nat_behavior": "Dirty register NaTs are written into the address-selected RNAT collection; a completed collection is stored and the final partial collection remains in AR.RNAT",
+      "possible_faults": [], "fault_priority": [],
+      "committed_prefix": "Mandatory RSE stores commit in backing-store order; successful completion empties the dirty partition and sets BSPSTORE equal to BSP",
+      "restart_rule": "No restart occurs for the selected valid mapped writable backing store",
+      "permitted_results": ["All 96 payloads and NaTs occupy their exact register/RNAT positions, BSPSTORE equals BSP, and BspLoad is either preserved at the original BSPSTORE or advanced to BSP"],
+      "required_evidence": "E2"
     }
   ]
 }

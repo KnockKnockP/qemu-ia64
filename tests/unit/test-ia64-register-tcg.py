@@ -189,6 +189,16 @@ AR_PFS_RETURN_EFFECT_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.66",
     "cpu.register.scalar.cfm",
 )
+RSE_BSPSTORE_DIRTY_IMPLEMENTATION_ROWS = (
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+)
+RSE_FLUSHRS_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -256,6 +266,12 @@ def validate_contract(root: Path) -> str:
         "REG-008-PFS-RETURN-EFFECT": list(
             AR_PFS_RETURN_EFFECT_IMPLEMENTATION_ROWS
         ),
+        "RSE-005-BSPSTORE-DIRTY-RNAT-MATRIX": list(
+            RSE_BSPSTORE_DIRTY_IMPLEMENTATION_ROWS
+        ),
+        "RSE-006-FLUSHRS-DIRTY-EFFECT": list(
+            RSE_FLUSHRS_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -263,12 +279,18 @@ def validate_contract(root: Path) -> str:
         ],
         "REG-008-PFS-CALL-EFFECT": ["test_typed_call_branches"],
         "REG-008-PFS-RETURN-EFFECT": ["test_typed_return_branches"],
+        "RSE-005-BSPSTORE-DIRTY-RNAT-MATRIX": [
+            "test_application_register_bspstore_rebase"
+        ],
+        "RSE-006-FLUSHRS-DIRTY-EFFECT": [
+            "test_application_register_bspstore_rebase"
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 25:
-        raise AssertionError("register tranche must contain twenty-five cases")
+    if not isinstance(cases, list) or len(cases) != 27:
+        raise AssertionError("register tranche must contain twenty-seven cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -367,7 +389,8 @@ def validate_contract(root: Path) -> str:
         "complete GR/FR/PR/BR indices, 12 GR rotating sizes, 96 FR bases, "
         "48 PR bases, all 128 AR selectors in both units, all 128 CR "
         "selectors, interruption-access states, complete nine-register AR "
-        "and named CR field partitions, all 64 BSPSTORE rebase offsets, "
+        "and named CR field partitions, 6,208 dirty/RNAT BSPSTORE rebases "
+        "plus an exact 96-register FLUSHRS backing image, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -1660,6 +1683,7 @@ def application_register_bspstore_rebase_program(h: ModuleType):
 
 
 def test_application_register_bspstore_rebase(h: ModuleType,
+                                              system: ModuleType,
                                               qemu: Path) -> str:
     program = application_register_bspstore_rebase_program(h)
     snapshot = h.run_program(qemu, program, compact_loader=True)
@@ -1679,10 +1703,188 @@ def test_application_register_bspstore_rebase(h: ModuleType,
             f"0x{snapshot.rse_bspstore:x}/"
             f"0x{snapshot.rse_bspload:x}/0x{snapshot.rse_bsp:x}"
         )
+    dirty_cases = 0
+    for dirty_start, dirty_end in ((0, 48), (49, 96)):
+        dirty_program, shard_cases = \
+            application_register_bspstore_dirty_matrix_program(
+                h, system, dirty_start, dirty_end
+            )
+        dirty_snapshot = h.run_program(
+            qemu, dirty_program, compact_loader=True
+        )
+        if (dirty_snapshot.gr[14] != 1 or
+                dirty_snapshot.ip != dirty_program.terminal_ip):
+            raise AssertionError(
+                f"BSPSTORE dirty-partition shard {dirty_start}-{dirty_end} "
+                "failed: "
+                f"ip=0x{dirty_snapshot.ip:x} marker={dirty_snapshot.gr[14]} "
+                f"BSPSTORE=0x{dirty_snapshot.rse_bspstore:x} "
+                f"BSP=0x{dirty_snapshot.rse_bsp:x}"
+            )
+        final_store = 0x19f8
+        final_bsp = bspstore_dirty_expected_bsp(final_store, dirty_end)
+        expected_store = final_bsp if dirty_end == 96 else final_store
+        allowed_bspload = (
+            {final_store, final_bsp} if dirty_end == 96 else {final_store}
+        )
+        if (dirty_snapshot.rse_bspstore != expected_store or
+                dirty_snapshot.rse_bspload not in allowed_bspload or
+                dirty_snapshot.rse_bsp != final_bsp):
+            raise AssertionError(
+                f"final {dirty_end}-word dirty rebase expected "
+                "post-program BSPSTORE/BSP/BSPLOAD "
+                f"0x{expected_store:x}/0x{final_bsp:x}/"
+                f"{sorted(hex(value) for value in allowed_bspload)}, got "
+                f"0x{dirty_snapshot.rse_bspstore:x}/"
+                f"0x{dirty_snapshot.rse_bsp:x}/"
+                f"0x{dirty_snapshot.rse_bspload:x}"
+            )
+        dirty_cases += shard_cases
+        if dirty_end == 96:
+            expected_partial_rnat = 0xaaaaaaaa
+            if (dirty_snapshot.rse_rnat != expected_partial_rnat or
+                    dirty_snapshot.gr[24] != expected_partial_rnat):
+                raise AssertionError(
+                    "flushrs final partial RNAT expected 0xaaaaaaaa, got "
+                    f"state=0x{dirty_snapshot.rse_rnat:x} "
+                    f"read=0x{dirty_snapshot.gr[24]:x}"
+                )
     return (
-        "all 64 BSPSTORE address offsets and all ignored low-bit patterns "
-        "pass exact BSP rebasing, offset-63 RNAT-slot skipping, false "
-        "qualification, same-group old-image visibility, and BSPLOAD state"
+        "all 64 empty-partition BSPSTORE offsets and ignored low-bit patterns "
+        "pass exact rebasing, false qualification, and same-group visibility; "
+        f"{dirty_cases} additional cases exhaust dirty sizes 0-96 against "
+        "all RNAT offsets, followed by exact 96-register/RNAT flush traffic"
+    )
+
+
+def bspstore_dirty_expected_bsp(bspstore: int, dirty: int) -> int:
+    if bspstore & 7:
+        raise AssertionError("BSPSTORE oracle requires an aligned address")
+    if not 0 <= dirty <= 96:
+        raise AssertionError("dirty-register count must be in 0..96")
+    slot = (bspstore >> 3) & 0x3f
+    intervening_rnats = (slot + dirty) // 63
+    return bspstore + (dirty + intervening_rnats) * 8
+
+
+def application_register_bspstore_dirty_matrix_program(
+        h: ModuleType, system: ModuleType,
+        dirty_start: int, dirty_end: int):
+    if not 0 <= dirty_start <= dirty_end <= 96:
+        raise AssertionError("dirty matrix shard must be within 0..96")
+    failure = 0x100000
+    terminal = 0x100030
+    address = 0x10000
+    bundles: list[object] = []
+    case_count = 0
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    # Alternating UNAT bits turn every odd numbered local into a NaT while
+    # retaining a distinct payload.  Calls move these value/NaT pairs into
+    # the dirty partition; flushrs later proves their backing-store order and
+    # address-selected RNAT collection independently of the rebase checks.
+    emit_movl(8, 0x5555555555555555)
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+
+    for dirty in range(dirty_end + 1):
+        if dirty:
+            # Each real call preserves a one-local caller frame, growing the
+            # dirty partition by exactly one register while leaving a
+            # zero-sized callee frame for the BSPSTORE observations.
+            emit(0x01, h.alloc(31, 1, 1, 0), h.nop_i(), h.nop_i())
+            data_address = 0x1000 + (dirty - 1) * 8
+            emit(0x01, h.nop_m(), h.adds(9, data_address, 0), h.nop_i())
+            emit(0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i())
+            call_ip = address
+            emit(0x11, h.nop_m(), h.nop_i(),
+                 h.br_call(call_ip, call_ip + 0x10, 0))
+
+        if dirty < dirty_start:
+            continue
+        for selector in range(64):
+            bspstore = 0x1800 + selector * 8
+            expected_bsp = bspstore_dirty_expected_bsp(bspstore, dirty)
+            emit(0x01, h.nop_m(), h.adds(29, bspstore, 0),
+                 h.adds(28, expected_bsp, 0))
+            emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+            emit(0x01, h.mov_m_argr(21, 17), h.nop_i(), h.nop_i())
+            address = append_gr_pair_check(
+                h, bundles, address, 21, 28, failure
+            )
+            case_count += 1
+
+    if dirty_end == 96:
+        # FLUSHRS is the first instruction in its group and is unpredicated.
+        # It must write the oldest dirty value first, insert each RNAT word at
+        # offset 63, and finish with BSPSTORE equal to BSP.
+        emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+        emit(0x09, h.mov_m_argr(22, 18), h.mov_m_argr(23, 17), h.nop_i())
+        final_pointer = bspstore_dirty_expected_bsp(0x19f8, 96)
+        emit(0x01, h.nop_m(), h.adds(28, final_pointer, 0), h.nop_i())
+        address = append_gr_pair_check(
+            h, bundles, address, 22, 28, failure
+        )
+        address = append_gr_pair_check(
+            h, bundles, address, 23, 28, failure
+        )
+
+        backing_address = 0x19f8
+        for value in range(1, 97):
+            if ((backing_address >> 3) & 0x3f) == 0x3f:
+                backing_address += 8
+            emit(0x01, h.nop_m(), h.adds(10, backing_address, 0),
+                 h.nop_i())
+            emit(0x01, h.ld8(20, 10), h.nop_i(), h.nop_i())
+            address = append_gr_check(
+                h, bundles, address, 20, value, failure
+            )
+            backing_address += 8
+
+        # Values 1..63 have NaT on odd values, which occupy even address
+        # selectors 0..62.  The completed collection is therefore the exact
+        # alternating word below.  The initial 0x19f8 collection remains
+        # unconstrained because mov-to-BSPSTORE makes entry RNAT undefined.
+        emit(0x01, h.nop_m(), h.adds(10, 0x1bf8, 0), h.nop_i())
+        emit(0x01, h.ld8(20, 10), h.nop_i(), h.nop_i())
+        emit_movl(28, 0x5555555555555555)
+        address = append_gr_pair_check(
+            h, bundles, address, 20, 28, failure
+        )
+
+        # Values 64..96 occupy selectors 0..32 of the partial collection.
+        # Their odd-valued members select bits 1,3,...,31.
+        emit(0x01, h.mov_m_argr(24, 19), h.nop_i(), h.nop_i())
+        emit_movl(28, 0xaaaaaaaa)
+        address = append_gr_pair_check(
+            h, bundles, address, 24, 28, failure
+        )
+
+    return (
+        finish_checked_program(
+            h,
+            "BSPSTORE dirty/RNAT crossing matrix {}-{}".format(
+                dirty_start, dirty_end
+            ),
+            bundles,
+            address,
+            failure=failure,
+            terminal=terminal,
+            data=tuple(
+                h.DataWord(0x1000 + (dirty - 1) * 8, dirty, 8)
+                for dirty in range(1, dirty_end + 1)
+            ),
+            entry=0x10000,
+        ),
+        case_count,
     )
 
 
@@ -2447,7 +2649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("interruption and RFI GR banks", lambda: test_interruption_bank_switch(harness, system, args.qemu.resolve())),
         ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
-        ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, args.qemu.resolve())),
+        ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),
         ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),

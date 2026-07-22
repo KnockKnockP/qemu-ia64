@@ -394,7 +394,7 @@
       "restart_action": "No restart occurs for complete-frame, implemented-address inputs", "applicable_variants": ["all address selectors 0 through 63", "all low-bit patterns", "RNAT-slot boundary", "false qualification", "same-group source overlay"],
       "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_bspstore_rebase"], "result_observations": ["64 exact BSPSTORE/BSP pairs", "final internal BSPLOAD", "false-qualified pointer triple", "same-group old images", "post-stop new images"]},
       "oracle": {"independence": "independent", "derivation": "The expected BSP is the aligned presented address plus zero dirty words and the one architecturally fixed RNAT collection word only when address bits 8:3 equal 63; no production RSE helper is imported"},
-      "limitations": ["Nonempty dirty-partition sizes, clean-partition invalidation, undefined post-write RNAT data, mandatory backing-store traffic, faults, and migration are separate RSE/MMU/EXC/SYS rows"]
+      "limitations": ["Clean-partition invalidation, undefined post-write RNAT data, faults, and migration are separate RSE/MMU/EXC/SYS rows"]
     },
     {
       "id": "REG-008-PFS-CALL-EFFECT-EXACT", "case_id": 24, "normative_token": 75,
@@ -429,6 +429,40 @@
       "execution": {"lane": "bare-metal-batch", "probes": ["test_typed_return_branches"], "result_observations": ["exact CFM/EC/PFS", "aligned target and BR source", "RSE partitions and pointers", "filled values and NaTs", "IIP/IIPA/IFA/ISR/IPSR", "fault-prefix memory", "fresh-process checkpoint and final state", "typed return/RFI traces"]},
       "oracle": {"independence": "independent", "derivation": "Expected frame fields, privilege/trap order, RSE addresses, RNAT placement, fill prefix, and retry results are computed from literal PFS/backing images and the published return/RSE rules without importing production helpers"},
       "limitations": ["Reserved or oversized bad-PFS return faults, arbitrary fill lengths, access rights, memory attributes, nested interruptions, and MP ordering remain separate REG/RSE/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "RSE-005-BSPSTORE-DIRTY-RNAT-MATRIX-EXACT", "case_id": 26, "normative_token": 77,
+      "normative_row": "RSE-005-BSPSTORE-DIRTY-RNAT-MATRIX",
+      "implementation_rows": ["cpu.register.ar.17", "cpu.register.ar.18"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "6.5.3", "printed_pages": ["2:140", "2:141"], "anchor": "the BSP pointer is set to the address presented plus the size of the dirty partition plus the size of any intervening NaT collections"},
+      "preconditions": ["RSC.mode is zero", "Every current and caller frame is complete", "Real equal-fallthrough br.call transitions grow one dirty local per frame", "Every presented BSPSTORE address is implemented and mapped as architectural state"],
+      "inputs": ["Every dirty-partition size from zero through 96 registers", "Every BSPSTORE address offset from zero through 63 register slots", "All 6,208 Cartesian size/offset combinations"],
+      "expected_results": ["BSPSTORE and RSE.BspLoad equal the aligned presented address", "BSP equals the aligned address plus eight bytes per dirty register plus eight bytes per intervening RNAT collection", "The exact independent formula is base + 8 * (dirty + floor((offset + dirty) / 63))"],
+      "allowed_results": ["Exactly one BSP value for each of the 6,208 combinations; post-write RNAT contents are undefined"],
+      "permitted_state_changes": ["BSPSTORE", "BSP", "RSE.BspLoad", "Architecturally undefined RNAT contents", "Declared GR, predicate, and call-frame state"],
+      "required_unchanged_state": ["Dirty-partition size and values", "Current and caller frame completeness", "Unrelated application and control registers"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Each stopped call grows one dirty register; each stopped BSPSTORE write atomically rebases the three RSE pointers", "restart_action": "No restart occurs for complete frames and implemented mapped addresses",
+      "applicable_variants": ["dirty sizes 0 through 96", "all 64 RNAT-relative offsets", "zero, single, and double RNAT crossings"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_bspstore_rebase"], "result_observations": ["6,208 exact BSP comparisons", "BSPSTORE pointer", "RSE.BspLoad", "current dirty-partition size"]},
+      "oracle": {"independence": "independent", "derivation": "The expected pointer is calculated from the published 63-register plus one-RNAT layout using literal dirty count and address slot; no production RSE helper or state is imported"},
+      "limitations": ["Clean-partition invalidation, undefined RNAT payload, backing-store faults, interruption boundaries, and migration remain separate RSE/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "RSE-006-FLUSHRS-DIRTY-EFFECT-EXACT", "case_id": 27, "normative_token": 78,
+      "normative_row": "RSE-006-FLUSHRS-DIRTY-EFFECT",
+      "implementation_rows": ["cpu.opcode.ia64_op_flushrs", "cpu.register.ar.17", "cpu.register.ar.18", "cpu.register.ar.19"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "flushrs", "printed_pages": ["3:75", "3:76"], "anchor": "After this instruction completes execution BSPSTORE is equal to BSP"},
+      "preconditions": ["RSC.mode is zero", "A complete 96-register dirty partition contains distinct values one through 96", "Alternating dirty registers carry NaT", "BSPSTORE starts at mapped writable offset 63 and UNAT starts at 0x5555555555555555"],
+      "inputs": ["One legal unpredicated flushrs encoded in slot zero as the first instruction in its group", "A 96-register dirty partition crossing two RNAT collection positions"],
+      "expected_results": ["All 96 dirty values are stored exactly once and in architectural backing-store order while RNAT slots are skipped", "The completed RNAT word is 0x5555555555555555 and the final partial AR.RNAT image is 0x00000000aaaaaaaa", "BSPSTORE equals BSP at 0x1d08 after completion", "RSE.BspLoad may remain at the original 0x19f8 or advance to 0x1d08"],
+      "allowed_results": ["The two architecturally permitted BspLoad values with the one exact memory, RNAT, BSP, and BSPSTORE image"],
+      "permitted_state_changes": ["The 96 backing-store register words and completed RNAT collection", "AR.RNAT", "BSPSTORE", "RSE.BspLoad", "Dirty-partition size"],
+      "required_unchanged_state": ["BSP", "Distinct dirty register payload and NaT order", "Memory outside the declared backing-store image"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Each mandatory RSE store commits in backing-store order; successful completion empties the dirty partition and makes BSPSTORE equal BSP", "restart_action": "No restart occurs for the valid mapped writable backing store",
+      "applicable_variants": ["96 dirty registers", "completed and partial RNAT collections", "NaT and ordinary values", "both permitted post-flush BspLoad policies"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_bspstore_rebase"], "result_observations": ["96 exact backing-store payloads", "completed RNAT word", "partial AR.RNAT image", "BSP", "BSPSTORE", "RSE.BspLoad"]},
+      "oracle": {"independence": "independent", "derivation": "Expected data and NaT positions are enumerated directly from literal values, address slots, and the published 63-register RNAT layout; the production spill helper is not imported"},
+      "limitations": ["Fault and retry behavior, interrupt boundaries, other traffic lengths, clean-partition fills, and migration remain separate RSE/MMU/EXC/SYS rows"]
     }
   ]
 }
