@@ -117,6 +117,13 @@ ARCHITECTURAL_SURFACES = (
         "static void vibtanium_reset(MachineState *machine, ResetType type)",
     ),
     (
+        "platform.firmware.pal-perf-mon-info",
+        "platform.firmware",
+        "PAL performance-monitor metadata and implementation masks",
+        "hw/ia64/firmware.c",
+        "static IA64FirmwareResult pal_performance_monitor_info(",
+    ),
+    (
         "cpu.bundle.format",
         "cpu.bundle",
         "128-bit bundle field extraction",
@@ -477,6 +484,8 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
     text = cpu_h.read_text(encoding="utf-8")
     defines = parse_integer_defines(text)
     aliases = parse_named_registers(text)
+    pmu_first = defines["IA64_PMU_GENERIC_FIRST"]
+    pmu_count = defines["IA64_PMU_GENERIC_COUNT"]
     rows: list[dict[str, Any]] = []
     for (bank, count_name, storage, access_class,
          access_path, access_anchor) in REGISTER_BANKS:
@@ -491,6 +500,22 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
             raise SurfaceError(f"register storage {storage!r} is not declared")
         require_source_anchor(root, access_path, access_anchor)
         for index in range(count):
+            status = "live"
+            field_behavior = "not-yet-classified"
+            if bank == "pmc":
+                implemented = index < pmu_first + pmu_count
+                status = "live" if implemented else "known-unimplemented"
+                field_behavior = (
+                    "architected-minimum-pmu" if implemented else
+                    "unimplemented-zero-read-ignore-write"
+                )
+            elif bank == "pmd":
+                implemented = pmu_first <= index < pmu_first + pmu_count
+                status = "live" if implemented else "known-unimplemented"
+                field_behavior = (
+                    "architected-minimum-generic-counter" if implemented else
+                    "unimplemented-zero-read-ignore-write"
+                )
             attributes: dict[str, Any] = {
                 "bank": bank,
                 "index": index,
@@ -504,7 +529,7 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
                     "last": count - 1,
                     "cardinality": count,
                 },
-                "field_behavior": "not-yet-classified",
+                "field_behavior": field_behavior,
             }
             if (bank, index) in aliases:
                 attributes["named_alias"] = aliases[(bank, index)]
@@ -512,7 +537,7 @@ def register_rows(root: Path) -> list[dict[str, Any]]:
                 "id": f"cpu.register.{bank}.{index}",
                 "kind": "cpu.register",
                 "name": f"{bank}{index}",
-                "status": "live",
+                "status": status,
                 "attributes": attributes,
                 "provenance": [
                     {

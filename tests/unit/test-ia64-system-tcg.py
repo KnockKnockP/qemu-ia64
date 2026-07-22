@@ -313,13 +313,18 @@ def build_move_roundtrip(harness: ModuleType) -> MoveProgram:
     # do not weaken the semantic golden.
     emit_movl(3, 0)
     bank_rows = (
-        (0x03, 0x13, 12, 0x0000000000012301),  # PKR
-        (0x02, 0x12, 14, 0x0000000000001234),  # IBR
-        (0x01, 0x11, 15, 0x0000000000005678),  # DBR
-        (0x04, 0x14, 16, 0x00000000000009AB),  # PMC
-        (0x05, 0x15, 17, 0x0000000000000DEF),  # PMD
+        (0x03, 0x13, 12, 0x0000000000012301,
+         0x0000000000012301),  # PKR
+        (0x02, 0x12, 14, 0x0000000000001234,
+         0x0000000000001234),  # IBR
+        (0x01, 0x11, 15, 0x0000000000005678,
+         0x0000000000005678),  # DBR
+        (0x04, 0x14, 16, 0x00000000000009AB,
+         0x00000000000000A1),  # PMC0 architected writable bits
+        (0x05, 0x15, 17, 0x0000000000000DEF,
+         0x0000000000000000),  # PMD0 is not implemented
     )
-    for write_x6, read_x6, destination, value in bank_rows:
+    for write_x6, read_x6, destination, value, readback in bank_rows:
         emit_movl(2, value)
         emit_m(m_system(write_x6, r2=2, r3=3))
         if write_x6 == 0x02:       # IBR affects instruction breakpoints.
@@ -327,7 +332,7 @@ def build_move_roundtrip(harness: ModuleType) -> MoveProgram:
         elif write_x6 in {0x03, 0x01}:  # PKR/DBR affect data access.
             emit_serial()
         emit_m(m_system(read_x6, r1=destination, r3=3))
-        expected[destination] = value
+        expected[destination] = readback
 
     # User mask is independently writable at every CPL.
     emit_movl(2, PSR_BE)
@@ -382,6 +387,142 @@ def test_move_roundtrips(harness: ModuleType, qemu: Path) -> str:
     require(not (snapshot.nat_low & ((1 << 7) | (1 << 10))),
             "MOV_PSRGR did not clear a PSR destination NaT")
     return "all 24 AR/CR/system-register move rows match independent goldens"
+
+
+def performance_register_domain_program(harness: ModuleType, bank: str):
+    if bank == "pmc":
+        write_x6, read_x6 = 0x04, 0x14
+        expected_changes = {0: 0xF1, 1: 0, 4: 0xFF7F, 8: 0}
+    elif bank == "pmd":
+        write_x6, read_x6 = 0x05, 0x15
+        expected_changes = {0: 0, 4: (1 << 60) - 1, 8: 0}
+    else:
+        raise ValueError("unknown performance register bank: " + bank)
+
+    bundles: List[object] = [
+        movl_bundle(harness, 0x10, 2, U64_MASK),
+        harness.Bundle(0x20, 0x01, harness.nop_m(),
+                       harness.adds(3, 0, 0), harness.adds(20, 0, 0)),
+    ]
+    address = 0x30
+    for index in range(256):
+        if index in expected_changes:
+            bundles.append(movl_bundle(
+                harness, address, 5, expected_changes[index]
+            ))
+            address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(write_x6, r2=2, r3=3)
+        ))
+        address += 0x10
+        bundles.append(raw_bundle(harness, address, "M", m_serial(0x30)))
+        address += 0x10
+        bundles.append(raw_bundle(
+            harness, address, "M", m_system(read_x6, r1=4, r3=3)
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.adds(20, 1, 20, qp=2), harness.adds(3, 1, 3)
+        ))
+        address += 0x10
+    bundles.append(harness.spin_bundle(address))
+    return harness.Program(
+        name="{} complete selector domain".format(bank.upper()),
+        bundles=tuple(bundles), terminal_ip=address,
+    )
+
+
+def test_performance_register_selector_domains(harness: ModuleType,
+                                               qemu: Path) -> str:
+    for bank in ("pmc", "pmd"):
+        program = performance_register_domain_program(harness, bank)
+        snapshot = harness.run_program(qemu, program, compact_loader=True)
+        require(not snapshot.exception_pending,
+                bank.upper() + " selector matrix raised an exception")
+        require(snapshot.gr[3] == 256,
+                bank.upper() + " selector matrix did not cover 256 indices")
+        require(snapshot.gr[20] == 0,
+                "{} selector matrix found {} mismatches".format(
+                    bank.upper(), snapshot.gr[20]))
+    return ("all 256 PMC and 256 PMD selectors obey independent implemented, "
+            "masked, ignored, and zero-read expectations")
+
+
+def pal_perf_mon_program(harness: ModuleType, buffer: int,
+                         *, observe_buffer: bool):
+    bundles: List[object] = [
+        movl_bundle(harness, 0x10, 28, 15),
+        movl_bundle(harness, 0x20, 29, buffer),
+        harness.Bundle(0x30, 0x01, harness.nop_m(),
+                       harness.adds(30, 0, 0), harness.adds(31, 0, 0)),
+        harness.Bundle(0x40, 0x11, harness.nop_m(), harness.nop_i(),
+                       harness.br_call(0x40, 0x8F000, 0)),
+    ]
+    address = 0x50
+    if observe_buffer:
+        bundles.append(movl_bundle(harness, address, 13, 0x1800))
+        address += 0x10
+        destinations = tuple(range(14, 28)) + (6, 7)
+        for destination in destinations:
+            bundles.append(harness.Bundle(
+                address, 0x01, harness.ld8(destination, 13),
+                harness.adds(13, 8, 13), harness.nop_i()
+            ))
+            address += 0x10
+    bundles.append(harness.spin_bundle(address))
+    return harness.Program(
+        name="PAL_PERF_MON_INFO buffer 0x{:x}".format(buffer),
+        bundles=tuple(bundles), terminal_ip=address,
+        data=tuple(
+            harness.DataWord(0x1800 + offset, 0xA5A5A5A5A5A5A5A5, 8)
+            for offset in range(0, 128, 8)
+        ),
+    )
+
+
+def test_pal_performance_monitor_info(harness: ModuleType, qemu: Path) -> str:
+    valid = harness.run_program(
+        qemu, pal_perf_mon_program(harness, 0x1800, observe_buffer=True)
+    )
+    observed = tuple(valid.gr[reg] for reg in tuple(range(14, 28)) + (6, 7))
+    expected = (0xFF, 0, 0, 0, 0xF0) + (0,) * 11
+    require(not valid.exception_pending and valid.gr[8] == 0,
+            "valid PAL_PERF_MON_INFO call failed")
+    require(valid.gr[9] == 4 | (60 << 8) and
+            valid.gr[10] == 0 and valid.gr[11] == 0,
+            "PAL_PERF_MON_INFO did not return packed generic/width metadata")
+    require(observed == expected,
+            "PAL_PERF_MON_INFO mask buffer mismatch: {}".format(
+                tuple("0x{:x}".format(value) for value in observed)))
+
+    invalid_status = U64_MASK - 1
+    for buffer in (0, 0x1801):
+        result = harness.run_program(
+            qemu,
+            pal_perf_mon_program(
+                harness, buffer, observe_buffer=(buffer != 0)
+            ),
+        )
+        require(not result.exception_pending and result.gr[8] == invalid_status,
+                "PAL_PERF_MON_INFO accepted buffer 0x{:x}".format(buffer))
+        require(result.gr[9] == 0 and result.gr[10] == 0 and
+                result.gr[11] == 0,
+                "invalid PAL_PERF_MON_INFO call returned payload data")
+        if buffer != 0:
+            observed_invalid = tuple(
+                result.gr[reg] for reg in tuple(range(14, 28)) + (6, 7)
+            )
+            require(observed_invalid == (0xA5A5A5A5A5A5A5A5,) * 16,
+                    "misaligned PAL buffer was modified")
+    return ("PAL_PERF_MON_INFO packs four 60-bit pairs, publishes exact "
+            "PMC/PMD masks, zeroes unadvertised event masks, and rejects "
+            "null or misaligned buffers")
 
 
 def nat_operands(spec: SystemOpcodeSpec) -> Tuple[str, ...]:
@@ -610,15 +751,15 @@ def test_privilege_matrix(harness: ModuleType, qemu: Path) -> str:
             ar_fault.slot_valid and ar_fault.slot_ri == 0,
             "MOV_IMMAR privileged-register fault metadata is imprecise")
 
-    # PMD0..PMD3 are unprivileged generic counters.  PMC.pm does not turn
-    # them into a Privileged Register fault and must not hide their value.
+    # Generic PMD4 is user-readable when PSR.sp and PMC4.pm are both clear.
+    # PMD reads never raise Privileged Register at nonzero CPL.
     pmd_program = harness.Program(
         name="MOV_PMDGR conditional privileged-register",
         bundles=(
             raw_bundle(harness, 0x10, "M", m_mask(6, PSR_IC)),
             raw_bundle(harness, 0x20, "M", m_serial(0x31)),
-            movl_bundle(harness, 0x30, 2, 1 << 6),
-            movl_bundle(harness, 0x40, 3, 0),
+            movl_bundle(harness, 0x30, 2, 0),
+            movl_bundle(harness, 0x40, 3, 4),
             raw_bundle(harness, 0x50, "M",
                        m_system(0x04, r2=2, r3=3)),
             movl_bundle(harness, 0x60, 2, 0x1234),
@@ -643,7 +784,7 @@ def test_privilege_matrix(harness: ModuleType, qemu: Path) -> str:
         typed_direct_trace_ips=(0x10, 0x20, 0x50, 0x70, 0x80, 0xE0),
     )
     require(not pmd_fault.exception_pending and pmd_fault.gr[20] == 0x1234,
-            "PMC.pm incorrectly hid or faulted a generic PMD0 read at CPL3")
+            "user-readable generic PMD4 did not return its value at CPL3")
     return ("{} unconditional CPL0 checks plus conditional AR/PMD policy "
             "pass".format(len(privileged)))
 
@@ -1912,6 +2053,10 @@ def main() -> int:
         ("predicated 57-row admission", test_predicated_admission),
         ("unpredicated control rows", test_control_rows),
         ("system-register round trips", test_move_roundtrips),
+        ("performance register selector domains",
+         test_performance_register_selector_domains),
+        ("PAL performance monitor discovery",
+         test_pal_performance_monitor_info),
         ("generated NaT matrix", test_nat_matrix),
         ("generated privilege matrix", test_privilege_matrix),
         ("reserved and predicate priority", test_reserved_matrix),

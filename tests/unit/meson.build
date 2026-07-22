@@ -344,6 +344,12 @@ test('test-ia64-alat-lifecycle-tranche-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-performance-monitor-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-performance-monitor-tranche.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-runner-protocol', python,
      args: [meson.project_source_root() / 'scripts/ia64-validate-conformance-runner.py',
             '--check',

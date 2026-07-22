@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 91
+    "row_closing_claims_expected": 94
   },
   "entries": [
     {
@@ -784,6 +784,25 @@
       "limitations": ["Source structure alone does not prove packed instruction results."]
     },
     {
+      "id": "meson:test-ia64-performance-monitor-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-performance-monitor-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-performance-monitor-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/performance-monitor-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-performance-monitor-tranche-static",
+      "scope": "Static integrity, citation equality, stable identity, implementation-surface mapping, executable-probe, and independent-oracle validation for the three atomic PMU selector and PAL discovery contracts.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Metadata validation supports but does not replace the E2 selector and PAL runtime results."]
+    },
+    {
       "id": "meson:test-ia64-platform-static",
       "kind": "source-check",
       "lane": "manifest-static",
@@ -1028,14 +1047,15 @@
       "ci_tiers": ["affected-edit", "required"],
       "test_registration": "test-ia64-system-tcg",
       "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/performance-monitor-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-system-tcg",
-      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs.",
-      "oracle_independence": "partially-independent",
-      "conformance_role": "candidate",
-      "closes_normative_rows": [],
-      "limitations": ["Legacy programs lack per-case catalogue, citation, and restart metadata."]
+      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including independent all-256-selector PMC and PMD matrices plus exact PAL_PERF_MON_INFO success and invalid-argument buffers.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE"],
+      "limitations": ["The three cited PMU rows have atomic contracts; legacy system programs outside those rows still lack per-case catalogue, citation, and restart metadata, and PMU event counting remains unimplemented and unclaimed."]
     },
     {
       "id": "meson:test-ia64-system-tcg-static",

@@ -852,6 +852,49 @@ def check_control_register_partition(root: Path) -> None:
             "reserved CR fields must fault before ignored fields normalize")
 
 
+def check_performance_monitor_contract(root: Path) -> None:
+    cpu = (root / "target/ia64/cpu.h").read_text(encoding="utf-8")
+    system = (root / "target/ia64/system-plane.c").read_text(
+        encoding="utf-8"
+    )
+    firmware = (root / "hw/ia64/firmware.c").read_text(encoding="utf-8")
+    for token in (
+        "#define IA64_PMU_GENERIC_FIRST 4",
+        "#define IA64_PMU_GENERIC_COUNT 4",
+        "#define IA64_PMU_COUNTER_WIDTH 60",
+    ):
+        require(token in cpu, "PMU product profile lost " + token)
+    for token in (
+        "#define IA64_PMC0_WRITABLE_MASK UINT64_C(0x00000000000000f1)",
+        "#define IA64_GENERIC_PMC_WRITABLE_MASK UINT64_C(0x000000000000ff7f)",
+        "bool ia64_pmu_pmc_implemented(unsigned index)",
+        "bool ia64_pmu_pmd_implemented(unsigned index)",
+        "return index < IA64_PMU_GENERIC_FIRST + IA64_PMU_GENERIC_COUNT;",
+        "index >= IA64_PMU_GENERIC_FIRST &&",
+        "env->pmc[index] = value & ia64_pmu_pmc_writable_mask(index);",
+        "env->pmd[index] = value & ia64_pmu_pmd_writable_mask(index);",
+    ):
+        require(token in system, "PMU selector contract lost " + token)
+    pal = section(
+        firmware,
+        "static IA64FirmwareResult pal_performance_monitor_info(",
+        "static IA64FirmwareResult dispatch_pal(",
+    )
+    for token in (
+        "uint8_t masks[128] = { 0 }",
+        "buffer == 0 || (buffer & 7) != 0",
+        "ia64_pmu_pmc_implemented(index)",
+        "ia64_pmu_pmd_implemented(index)",
+        "masks[0x20 + index / 8]",
+        "firmware_guest_write_bytes(env, buffer, masks, sizeof(masks))",
+        "IA64_PMU_GENERIC_COUNT",
+        "IA64_PMU_COUNTER_WIDTH << 8",
+    ):
+        require(token in pal, "PAL PMU discovery contract lost " + token)
+    require("masks[0x40" not in pal and "masks[0x60" not in pal,
+            "PAL must not advertise unimplemented PMU event counting")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -860,6 +903,7 @@ def main() -> int:
 
     check_variant_matrix()
     check_control_register_partition(root)
+    check_performance_monitor_contract(root)
     check_inventory(root)
     check_traits(root)
     check_translate(root)

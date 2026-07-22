@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 57
+dependencies installed, configure, build, fetch the public manuals, run all 58
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -191,3 +191,19 @@ save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the
 progress display until these processes complete; the per-test timeouts still
 detect a genuine hang.
+
+The PMU selector/PAL checkpoint raises the gate to 58/58 in 203.5 seconds.
+`test-ia64-system-tcg` passes 17 subtests in 51.35 seconds, including every
+one of the 256 PMC and 256 PMD selectors plus exact `PAL_PERF_MON_INFO`
+success and invalid-argument buffers. Full-TCG passes 38 subtests in 53.56
+seconds, register-TCG 25 in 49.21 seconds, and the 637-case data-plane shard
+in 181.22 seconds. The 123-row catalogue has 94 exact row-closing claims. Its
+2,106-row executed join contains 94 `implemented-tested`, 1,462
+`implemented-untested`, 7 `advertised-untested`, and 543
+`known-unimplemented` rows, leaving 1,469 blockers and no test or
+infrastructure failure. The 512-blocker reduction is mainly an inventory
+correction: 500 PMC/PMD selectors that the product does not implement are now
+classified honestly instead of being counted as live untested storage, while
+the twelve implemented selectors and PAL discovery contract have passing E2
+ownership. Performance-event selection and counting remain unadvertised and
+unclaimed.

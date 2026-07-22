@@ -11,6 +11,7 @@
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
 #include "target/ia64/perf.h"
+#include "target/ia64/system-plane.h"
 #include "trace-target_ia64.h"
 
 #define IA64_REGION_OFFSET_MASK UINT64_C(0x1fffffffffffffff)
@@ -33,8 +34,6 @@
 #define IA64_PAL_UNIQUE_CACHES UINT64_C(2)
 #define IA64_PAL_DATA_OR_UNIFIED_CACHE_TYPE UINT64_C(2)
 #define IA64_PROCESSOR_IDENTIFIER_REGISTER_COUNT UINT64_C(5)
-#define IA64_IMPLEMENTED_PERF_MON_REGISTER_COUNT UINT64_C(8)
-#define IA64_MAXIMUM_PERF_MON_REGISTER_COUNT UINT64_C(256)
 #define IA64_MINIMUM_PHYSICAL_STACKED_REGISTERS UINT64_C(96)
 #define IA64_MINIMUM_TRANSLATION_REGISTER_COUNT UINT64_C(8)
 #define IA64_SAL_STATE_INFO_TYPE_COUNT UINT64_C(4)
@@ -410,6 +409,35 @@ static IA64FirmwareResult pal_brand_info(CPUIA64State *env,
     return firmware_success(0, 0, 0);
 }
 
+static IA64FirmwareResult pal_performance_monitor_info(CPUIA64State *env,
+                                                        uint64_t buffer)
+{
+    uint8_t masks[128] = { 0 };
+    uint64_t pm_info;
+
+    if (buffer == 0 || (buffer & 7) != 0) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+
+    for (unsigned index = 0; index < IA64_PMC_COUNT; index++) {
+        if (ia64_pmu_pmc_implemented(index)) {
+            masks[index / 8] |= 1u << (index % 8);
+        }
+        if (ia64_pmu_pmd_implemented(index)) {
+            masks[0x20 + index / 8] |= 1u << (index % 8);
+        }
+    }
+    /*
+     * Event collection is not yet implemented, so the cycle and retired-
+     * bundle capability masks at 0x40 and 0x60 remain zero.  This is an
+     * explicit non-advertisement, not a successful no-op event engine.
+     */
+    firmware_guest_write_bytes(env, buffer, masks, sizeof(masks));
+    pm_info = IA64_PMU_GENERIC_COUNT |
+              ((uint64_t)IA64_PMU_COUNTER_WIDTH << 8);
+    return firmware_success(pm_info, 0, 0);
+}
+
 static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
                                        uint64_t function_id,
                                        uint64_t arg0, uint64_t arg1)
@@ -484,8 +512,7 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
                                 IA64_PAL_FREQ_RATIO(1, 1),
                                 IA64_PAL_FREQ_RATIO(1, 1));
     case IA64_PAL_PERFORMANCE_MONITOR_INFO:
-        return firmware_success(IA64_IMPLEMENTED_PERF_MON_REGISTER_COUNT,
-                                IA64_MAXIMUM_PERF_MON_REGISTER_COUNT, 0);
+        return pal_performance_monitor_info(env, arg0);
     case IA64_PAL_PREFETCH_VISIBILITY:
         return firmware_success(1, 0, 0);
     case IA64_PAL_LOGICAL_TO_PHYSICAL:

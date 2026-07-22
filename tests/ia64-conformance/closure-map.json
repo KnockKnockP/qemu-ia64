@@ -18,6 +18,7 @@
     "test-ia64-memory-boundary-tranche-static",
     "test-ia64-normative-catalogue",
     "test-ia64-packed-integer-tranche-static",
+    "test-ia64-performance-monitor-tranche-static",
     "test-ia64-predicate-branch-tranche-static",
     "test-ia64-register-tcg-static",
     "test-ia64-runner-protocol",
@@ -492,6 +493,13 @@
       ]
     },
     {
+      "normative_row": "PAL-012-PERF-MON-REGISTER-DISCOVERY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["platform.firmware.pal-perf-mon-info"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "PKD-001-LANE-WIDTHS",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.packed.lane-widths"],
@@ -703,6 +711,20 @@
       },
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-006-PMC-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.pmc.0", "cpu.register.pmc.1", "cpu.register.pmc.2", "cpu.register.pmc.3", "cpu.register.pmc.4", "cpu.register.pmc.5", "cpu.register.pmc.6", "cpu.register.pmc.7"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "REG-006-PMD-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.pmd.4", "cpu.register.pmd.5", "cpu.register.pmd.6", "cpu.register.pmd.7"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
       "normative_row": "REG-006-PR-INDEX-SPACE",

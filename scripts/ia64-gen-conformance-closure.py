@@ -62,7 +62,9 @@ TEST_EXECUTION_STATES = (
     "test-infrastructure-failure",
 )
 IMPLEMENTED_STATUSES = ("live",)
-UNIMPLEMENTED_STATUSES = ("decoder-dead-alias", "illegal")
+UNIMPLEMENTED_STATUSES = (
+    "decoder-dead-alias", "illegal", "known-unimplemented",
+)
 ADVERTISED_STATUSES = ("runtime-exposed",)
 SPDX_DECLARATION = "SPDX-" + "License-Identifier: GPL-2.0-or-later"
 

@@ -7,6 +7,7 @@
 #include "mem.h"
 #include "migration/vmstate.h"
 #include "qemu/error-report.h"
+#include "system-plane.h"
 
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_RSE_PHYSICAL_COUNT IA64_MAX_STACKED_REGS
@@ -824,6 +825,7 @@ static int ia64_env_post_load(void *opaque, int version_id)
     env->memory.next_dtc %= IA64_TC_COUNT;
     ia64_translation_lookup_cache_flush(env);
     ia64_alat_reconstruct_transients(env);
+    ia64_pmu_sanitize_state(env);
     /*
      * Guest time continues from the serialized ITC value; re-derive the
      * clock offset and re-arm the CR.ITM deadline for the new clock.  The
