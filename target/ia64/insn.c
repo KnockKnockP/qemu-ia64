@@ -30,7 +30,6 @@
 #define IA64_FPSR_STATUS_FIELD_MASK UINT64_C(0x1fff)
 #define IA64_FPSR_STATUS_RC_SHIFT 4
 #define IA64_FPSR_STATUS_RC_MASK 0x3
-#define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PSR_I_BIT UINT64_C(0x0000000000004000)
 #define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_MFL_BIT UINT64_C(0x0000000000000010)
@@ -63,7 +62,8 @@ static bool ia64_interrupt_vector_pending(CPUIA64State *env,
 
 static uint64_t ia64_default_region_register(unsigned index)
 {
-    return ((uint64_t)(index & 0x00ffffff) << 8) | (UINT64_C(12) << 2);
+    return ((uint64_t)(index & IA64_RID_MASK) << IA64_RR_RID_SHIFT) |
+           (UINT64_C(12) << IA64_RR_PS_SHIFT);
 }
 
 void ia64_cpu_init_synthetic_cpuid(CPUIA64State *env)

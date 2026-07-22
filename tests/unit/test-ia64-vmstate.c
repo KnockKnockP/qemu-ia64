@@ -470,6 +470,21 @@ static int load_interrupt_state(IA64InterruptState *interrupt)
     return ret;
 }
 
+static uint64_t test_region_register(unsigned rid, unsigned page_size,
+                                     bool vhpt_enabled)
+{
+    return ((uint64_t)rid << IA64_RR_RID_SHIFT) |
+           ((uint64_t)page_size << IA64_RR_PS_SHIFT) |
+           (vhpt_enabled ? IA64_RR_VE_BIT : 0);
+}
+
+static void init_region_registers(CPUIA64State *env)
+{
+    for (unsigned i = 0; i < IA64_RR_COUNT; i++) {
+        env->rr[i] = test_region_register(i, 12, false);
+    }
+}
+
 static void init_cpu_stream(IA64CPU *cpu, uint64_t last_successful_bundle,
                             bool psr_ic_inflight)
 {
@@ -483,6 +498,7 @@ static void init_cpu_stream(IA64CPU *cpu, uint64_t last_successful_bundle,
     env->rse.invalid = IA64_GR_COUNT - IA64_STATIC_GR_COUNT;
     env->last_successful_bundle = last_successful_bundle;
     env->psr_ic_inflight = psr_ic_inflight;
+    init_region_registers(env);
 }
 
 static void init_typed_source(CPUIA64State *env)
@@ -1302,6 +1318,7 @@ static void test_post_load_reconstructs_wrapped_rotating_mirror(void)
 
     env->instruction_group_start = true;
     env->pr = 1;
+    init_region_registers(env);
     seed_physical_logical_mapping(env, IA64_STACKED_GR_COUNT - 7, 3, 19);
     g_assert_cmpint(ia64_env_pre_load(env), ==, 0);
     g_assert_cmphex(env->rse.logical_nat[0], ==, 0);
@@ -1358,6 +1375,7 @@ static void test_post_load_v8_reconstructs_logical_mirror(void)
 
     env->instruction_group_start = true;
     env->pr = 1;
+    init_region_registers(env);
     env->interrupt.timer_compare_latched = 1;
     seed_physical_logical_mapping(
         env, IA64_STACKED_GR_COUNT - 1, 2, 24);
@@ -1765,6 +1783,69 @@ static void test_typed_only_version_boundary(void)
     g_assert_cmpint(ia64_rse_vmstate_post_load(&rse, 4), ==, -EINVAL);
 }
 
+static void test_region_register_vmstate_profile(void)
+{
+    static const uint8_t page_sizes[IA64_RR_COUNT] = {
+        12, 13, 14, 16, 18, 20, 22, 28,
+    };
+    static const uint64_t invalid_values[] = {
+        (UINT64_C(12) << IA64_RR_PS_SHIFT) | (UINT64_C(1) << 1),
+        (UINT64_C(12) << IA64_RR_PS_SHIFT) | (UINT64_C(1) << 26),
+        UINT64_C(21) << IA64_RR_PS_SHIFT,
+        UINT64_C(30) << IA64_RR_PS_SHIFT,
+    };
+    static const struct {
+        uint32_t rid;
+        uint8_t page_size;
+    } invalid_translation_profiles[] = {
+        { 0, 21 },
+        { 0, 30 },
+        { 1U << IA64_RID_BITS, 12 },
+    };
+    IA64CPU source;
+    IA64CPU destination;
+
+    init_cpu_stream(&source, 0, false);
+    for (unsigned i = 0; i < IA64_RR_COUNT; i++) {
+        unsigned rid = i == IA64_RR_COUNT - 1 ? IA64_RID_MASK
+                                               : 0x100 + i;
+
+        source.env.rr[i] = test_region_register(rid, page_sizes[i], i & 1);
+    }
+    source.env.memory.dtc[0].valid = true;
+    source.env.memory.dtc[0].rid = IA64_RID_MASK;
+    source.env.memory.dtc[0].page_size = 28;
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_collection_test_root), ==, 0);
+    init_cpu_stream(&destination, 0, false);
+    g_assert_cmpint(load_cpu_with_current_root(&destination), ==, 0);
+    g_assert_cmpmem(destination.env.rr, sizeof(destination.env.rr),
+                    source.env.rr, sizeof(source.env.rr));
+    g_assert_true(destination.env.memory.dtc[0].valid);
+    g_assert_cmpuint(destination.env.memory.dtc[0].rid, ==, IA64_RID_MASK);
+    g_assert_cmpuint(destination.env.memory.dtc[0].page_size, ==, 28);
+
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_values); i++) {
+        init_cpu_stream(&source, 0, false);
+        source.env.rr[3] = invalid_values[i];
+        g_assert_cmpint(save_cpu_with_vmsd(
+                            &source, &vmstate_collection_test_root), ==, 0);
+        init_cpu_stream(&destination, 0, false);
+        g_assert_cmpint(load_cpu_with_current_root(&destination), ==, -EINVAL);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(invalid_translation_profiles); i++) {
+        init_cpu_stream(&source, 0, false);
+        source.env.memory.dtc[0].valid = true;
+        source.env.memory.dtc[0].rid = invalid_translation_profiles[i].rid;
+        source.env.memory.dtc[0].page_size =
+            invalid_translation_profiles[i].page_size;
+        g_assert_cmpint(save_cpu_with_vmsd(
+                            &source, &vmstate_collection_test_root), ==, 0);
+        init_cpu_stream(&destination, 0, false);
+        g_assert_cmpint(load_cpu_with_current_root(&destination), ==, -EINVAL);
+    }
+}
+
 static void assert_rse_canonical_equal(const IA64RSEState *actual,
                                        const IA64RSEState *expected)
 {
@@ -2074,6 +2155,8 @@ int main(int argc, char **argv)
                     test_collection_state_subsection_round_trip);
     g_test_add_func("/ia64/vmstate/typed-only-version-boundary",
                     test_typed_only_version_boundary);
+    g_test_add_func("/ia64/vmstate/region-register/profile-round-trip-reject",
+                    test_region_register_vmstate_profile);
     g_test_add_func("/ia64/vmstate/rse/v5-complete-incomplete-round-trip",
                     test_rse_v5_complete_and_incomplete_round_trip);
     g_test_add_func("/ia64/vmstate/rse/cpu-v6-active-cfle-round-trip",

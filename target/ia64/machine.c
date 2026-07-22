@@ -787,6 +787,24 @@ static int ia64_validate_issue_group_overlay(CPUIA64State *env)
     return 0;
 }
 
+static int ia64_validate_translation_entry_profile(
+    const IA64TranslationEntry *entry, const char *bank, unsigned index)
+{
+    if (!entry->valid) {
+        return 0;
+    }
+    if (entry->page_size >= 64 ||
+        (IA64_INSERTABLE_PAGE_SIZE_MASK &
+         (UINT64_C(1) << entry->page_size)) == 0 ||
+        entry->rid > IA64_RID_MASK) {
+        error_report("IA-64 migration stream has invalid %s%u profile "
+                     "rid=0x%x ps=%u", bank, index, entry->rid,
+                     entry->page_size);
+        return -EINVAL;
+    }
+    return 0;
+}
+
 static int ia64_env_post_load(void *opaque, int version_id)
 {
     CPUIA64State *env = opaque;
@@ -808,6 +826,29 @@ static int ia64_env_post_load(void *opaque, int version_id)
         error_report("unsupported IA-64 environment VMState version %d",
                      version_id);
         return -EINVAL;
+    }
+    for (unsigned i = 0; i < IA64_RR_COUNT; i++) {
+        if (!ia64_region_register_value_valid(env->rr[i])) {
+            error_report("IA-64 migration stream has invalid RR%u value "
+                         "0x%016" PRIx64, i, env->rr[i]);
+            return -EINVAL;
+        }
+    }
+    for (unsigned i = 0; i < IA64_ITR_COUNT; i++) {
+        if (ia64_validate_translation_entry_profile(
+                &env->memory.itr[i], "ITR", i) < 0 ||
+            ia64_validate_translation_entry_profile(
+                &env->memory.dtr[i], "DTR", i) < 0) {
+            return -EINVAL;
+        }
+    }
+    for (unsigned i = 0; i < IA64_TC_VMSTATE_COUNT; i++) {
+        if (ia64_validate_translation_entry_profile(
+                &env->memory.itc[i], "ITC", i) < 0 ||
+            ia64_validate_translation_entry_profile(
+                &env->memory.dtc[i], "DTC", i) < 0) {
+            return -EINVAL;
+        }
     }
     ia64_rse_reconstruct_transients(env);
     /*

@@ -276,3 +276,33 @@ rows and 105 row-closing claims. The 2,061-row executed join contains 105
 `advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,413
 blockers. No Vibtanium checkout, restricted source, private workflow, or
 guest-specific behavior is needed to build or run this coverage.
+
+The region-register checkpoint raises the public gate to 62/62 in 207.354
+seconds. `test-ia64-system-tcg` passes 25 subtests in 59.14 seconds. Public
+Intel Volume 2 Table 4-5 and sections 4.1.1.7/4.1.2 expose two profile
+contradictions found by static inspection: the execution path accepted 24 RID
+bits while PAL reported 18, and the execution and PAL page-size sets disagreed
+with each other and with the architected insertable/purgeable sets. The target
+now has one shared 18-bit-RID, ten-insertable-size, eleven-purgeable-size
+contract used by RR moves, translation insertion/purge, PAL, reset, hashing,
+and migration validation.
+
+The E2 RR guest gives all eight region registers distinct images, poisons every
+ignored selector bit, exercises VE, all eighteen RID bits, all ten insertable
+page sizes, every reserved singleton bit, and all other six-bit page-size
+encodings. Its General Exception handler repairs exactly 93 Reserved
+Register/Field faults with zero ISR, value, or commitment mismatches. A second
+program inserts two translations for the same virtual page under distinct
+RIDs and proves serialized RR switches select their independent physical
+values. `PAL_VM_PAGE_SIZE` now publishes the same exact masks and rejects each
+nonzero reserved argument. The E1 VMState test preserves all valid RR fields
+and rejects reserved, over-width-RID, and non-architected page-size images.
+
+Four public atomic contracts raise the catalogue to 138 rows and 109
+row-closing claims. The 2,056-row executed join contains 109
+`implemented-tested`, 1,397 `implemented-untested`, 7
+`advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,404
+blockers with no test or infrastructure failure. The full configured Meson
+run also passes 216 tests with two expected skips. RR migration remains
+supporting E1 evidence until an attributed fresh-process E2 boundary is added;
+translation-register slots are the next bounded architectural family.

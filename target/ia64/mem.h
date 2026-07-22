@@ -75,6 +75,15 @@ uint8_t ia64_va_region(vaddr address);
 uint32_t ia64_region_id(uint64_t rr);
 bool ia64_region_vhpt_enabled(uint64_t rr);
 bool ia64_page_size_supported(uint8_t page_size);
+bool ia64_purge_page_size_supported(uint8_t page_size);
+static inline bool ia64_region_register_value_valid(uint64_t rr)
+{
+    uint8_t page_size = (rr >> IA64_RR_PS_SHIFT) & 0x3f;
+
+    return (rr & ~IA64_RR_IMPLEMENTED_MASK) == 0 &&
+           (IA64_INSERTABLE_PAGE_SIZE_MASK &
+            (UINT64_C(1) << page_size)) != 0;
+}
 bool ia64_translation_insert_fields_valid(uint64_t translation_format,
                                           uint64_t itir);
 bool ia64_translation_insert_has_permission(uint64_t translation_format);

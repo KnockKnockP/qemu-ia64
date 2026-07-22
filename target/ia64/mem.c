@@ -189,7 +189,7 @@ uint8_t ia64_va_region(vaddr address)
 
 uint32_t ia64_region_id(uint64_t rr)
 {
-    return (rr >> 8) & 0x00ffffff;
+    return (rr >> IA64_RR_RID_SHIFT) & IA64_RID_MASK;
 }
 
 bool ia64_region_vhpt_enabled(uint64_t rr)
@@ -278,23 +278,16 @@ uint64_t ia64_vhpt_tag(CPUIA64State *env, vaddr address)
 
 bool ia64_page_size_supported(uint8_t page_size)
 {
-    switch (page_size) {
-    case 12:
-    case 13:
-    case 14:
-    case 16:
-    case 18:
-    case 20:
-    case 21:
-    case 22:
-    case 24:
-    case 26:
-    case 28:
-    case 30:
-        return true;
-    default:
-        return false;
-    }
+    return page_size < 64 &&
+           (IA64_INSERTABLE_PAGE_SIZE_MASK &
+            (UINT64_C(1) << page_size)) != 0;
+}
+
+bool ia64_purge_page_size_supported(uint8_t page_size)
+{
+    return page_size < 64 &&
+           (IA64_PURGEABLE_PAGE_SIZE_MASK &
+            (UINT64_C(1) << page_size)) != 0;
 }
 
 bool ia64_translation_insert_fields_valid(uint64_t translation_format,
@@ -1112,7 +1105,7 @@ bool ia64_firmware_identity_tlb_fill(CPUIA64State *env, vaddr address,
 static IA64TranslationEntry ia64_purge_probe(CPUIA64State *env, vaddr address,
                                              uint8_t page_size)
 {
-    if (!ia64_page_size_supported(page_size)) {
+    if (!ia64_purge_page_size_supported(page_size)) {
         page_size = ia64_region_page_size(env->rr[ia64_va_region(address)]);
     }
     return (IA64TranslationEntry) {

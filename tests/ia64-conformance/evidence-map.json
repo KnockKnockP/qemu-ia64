@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 105
+    "row_closing_claims_expected": 109
   },
   "entries": [
     {
@@ -935,6 +935,25 @@
       "limitations": ["Metadata validation supports but does not replace the E2 protection-key and PAL runtime results."]
     },
     {
+      "id": "meson:test-ia64-region-register-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-region-register-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-region-register-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/region-register-tranche.json"}
+      ],
+      "invocation": "meson test qemu:test-ia64-region-register-tranche-static",
+      "scope": "Static integrity, citation equality, stable identity, implementation mapping, executable probe-set, and independent-oracle validation for four atomic RR selector, field, RID-context, and PAL page-size contracts.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Metadata validation supports but does not replace the E2 RR and PAL runtime results."]
+    },
+    {
       "id": "meson:test-ia64-register-tcg",
       "kind": "bare-metal",
       "lane": "bare-metal-batch",
@@ -1108,14 +1127,15 @@
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/performance-monitor-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/processor-identification-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/protection-key-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/region-register-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-system-tcg",
-      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including exact CPUID, PMC/PMD, IBR/DBR/PKR selector domains, PKR field/uniqueness/access behavior, and exact PAL performance/debug/VM discovery success and invalid-argument calls.",
+      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including exact CPUID, PMC/PMD, IBR/DBR/PKR/RR selector domains, RR field and RID-context behavior, PKR field/uniqueness/access behavior, and exact PAL performance/debug/VM discovery success and invalid-argument calls.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["MMU-012-PROTECTION-KEY-ACCESS", "PAL-008-VM-SUMMARY-PROFILE", "PAL-012-DEBUG-REGISTER-DISCOVERY", "PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-003-CPUID-FIXED-SELECTOR-DOMAIN", "REG-006-DBR-INDEX-SPACE", "REG-006-IBR-INDEX-SPACE", "REG-006-PKR-INDEX-SPACE", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE", "REG-007-DBR-FIELD-SEMANTICS", "REG-007-IBR-FIELD-SEMANTICS", "REG-007-PKR-FIELD-SEMANTICS", "REG-007-PKR-KEY-UNIQUENESS"],
-      "limitations": ["The fourteen cited CPUID, PMU, debug-register, PKR, and PAL rows have atomic contracts; legacy system programs outside those rows still lack per-case metadata, while RSE key access, exhaustive debug-match/IA-32 behavior, and PMU event counting remain unclaimed."]
+      "closes_normative_rows": ["MMU-012-PROTECTION-KEY-ACCESS", "MMU-017-RID-CONTEXT-SELECTION", "PAL-008-VM-SUMMARY-PROFILE", "PAL-008-VM-SUPPORTED-PAGE-SIZES", "PAL-012-DEBUG-REGISTER-DISCOVERY", "PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-003-CPUID-FIXED-SELECTOR-DOMAIN", "REG-006-DBR-INDEX-SPACE", "REG-006-IBR-INDEX-SPACE", "REG-006-PKR-INDEX-SPACE", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE", "REG-006-RR-INDEX-SPACE", "REG-007-DBR-FIELD-SEMANTICS", "REG-007-IBR-FIELD-SEMANTICS", "REG-007-PKR-FIELD-SEMANTICS", "REG-007-PKR-KEY-UNIQUENESS", "REG-007-RR-FIELD-SEMANTICS"],
+      "limitations": ["The eighteen cited CPUID, PMU, debug-register, PKR, RR, and PAL rows have atomic contracts; legacy system programs outside those rows still lack per-case metadata, while RR migration closure, RSE key access, exhaustive debug-match/IA-32 behavior, and PMU event counting remain unclaimed."]
     },
     {
       "id": "meson:test-ia64-system-tcg-static",
@@ -1165,11 +1185,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-vmstate.c"}
       ],
       "invocation": "meson test qemu:test-ia64-vmstate",
-      "scope": "Host VMState round trips, validation, and malformed input rejection.",
+      "scope": "Host VMState round trips, validation, and malformed input rejection, including exact RR profile preservation and reserved/RID/page-size rejection.",
       "oracle_independence": "implementation-coupled",
       "conformance_role": "supporting",
       "closes_normative_rows": [],
-      "limitations": ["In-process VMState checks do not replace fresh-process migration evidence."]
+      "limitations": ["In-process VMState checks do not replace fresh-process migration evidence; RR migration remains supporting rather than row-closing until an E2 boundary is attributed."]
     },
     {
       "id": "standalone:efi-bit",

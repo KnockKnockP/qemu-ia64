@@ -90,6 +90,11 @@ ISR_PRIVILEGED_REGISTER = 0x20
 ISR_RESERVED_REGISTER_FIELD = 0x30
 ISR_DISABLED_ISA_TRANSITION = 0x40
 PKR_MASK = 0x00000000FFFFFF0F
+RR_RID_MASK = (1 << 18) - 1
+RR_IMPLEMENTED_MASK = (RR_RID_MASK << 8) | (0x3F << 2) | 1
+INSERTABLE_PAGE_SIZES = (12, 13, 14, 16, 18, 20, 22, 24, 26, 28)
+INSERTABLE_PAGE_SIZE_MASK = sum(1 << size for size in INSERTABLE_PAGE_SIZES)
+PURGEABLE_PAGE_SIZE_MASK = INSERTABLE_PAGE_SIZE_MASK | (1 << 32)
 
 # Intel SDM Vol. 3, itr/itc operation pseudocode: PSR.ic == 1 takes
 # Illegal Operation before privilege, operand-NaT, and reserved-field checks.
@@ -726,6 +731,227 @@ def test_debug_register_selector_domains(harness: ModuleType,
     return ("all 16 IBRs and DBRs are distinct with exact control masks; high "
             "selector bits are ignored and all 480 reserved read/write forms "
             "fault and resume per bank")
+
+
+def region_register_value(rid: int, page_size: int,
+                          vhpt_enabled: bool = False) -> int:
+    return ((rid & RR_RID_MASK) << 8) | (page_size << 2) | vhpt_enabled
+
+
+def region_register_selector_domain_program(harness: ModuleType):
+    initial_values = tuple(
+        region_register_value(
+            RR_RID_MASK if region == 7 else 0x100 + region,
+            INSERTABLE_PAGE_SIZES[region], bool(region & 1),
+        )
+        for region in range(8)
+    )
+    sentinel = region_register_value(RR_RID_MASK, 28, True)
+    invalid_values = (
+        tuple((12 << 2) | (1 << bit)
+              for bit in (1, *range(26, 64)))
+        + tuple(page_size << 2 for page_size in range(64)
+                if page_size not in INSERTABLE_PAGE_SIZES)
+    )
+    bundles: List[object] = [
+        raw_bundle(harness, 0x10, "M", m_mask(6, PSR_IC)),
+        raw_bundle(harness, 0x20, "M", m_serial(0x31)),
+        harness.Bundle(0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 0, 0), harness.adds(9, 0, 0)),
+        harness.Bundle(0x40, 0x01, harness.nop_m(),
+                       harness.adds(20, 0, 0), harness.nop_i()),
+    ]
+    address = 0x50
+
+    def emit_movl(reg: int, value: int) -> None:
+        nonlocal address
+        bundles.append(movl_bundle(harness, address, reg, value))
+        address += 0x10
+
+    def emit_system(raw: int) -> None:
+        nonlocal address
+        bundles.append(raw_bundle(harness, address, "M", raw))
+        address += 0x10
+
+    def selector(region: int, poison: int) -> int:
+        return (region << 61) | (poison & ((1 << 61) - 1))
+
+    def check_readback(region: int, expected: int, poison: int) -> None:
+        nonlocal address
+        emit_movl(3, selector(region, poison))
+        emit_system(m_system(0x10, r1=4, r3=3))
+        emit_movl(5, expected)
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.cmp_rr(1, 2, 4, 5, "eq"), harness.nop_i()
+        ))
+        address += 0x10
+        bundles.append(harness.Bundle(
+            address, 0x01, harness.nop_m(),
+            harness.adds(20, 1, 20, qp=2), harness.nop_i()
+        ))
+        address += 0x10
+
+    # Every selector is the virtual-region field; all other GR bits are noise.
+    for region, value in enumerate(initial_values):
+        emit_movl(2, value)
+        emit_movl(3, selector(region, U64_MASK - region))
+        emit_system(m_system(0x00, r2=2, r3=3))
+    emit_system(m_serial(0x30))
+    emit_system(m_serial(0x31))
+    for region, value in enumerate(initial_values):
+        check_readback(region, value, 0x123456789ABCDEF ^ region)
+
+    # Exercise VE, every one of the advertised 18 RID bits, and every
+    # architected insertable preferred-page-size encoding.
+    for value in (
+        region_register_value(RR_RID_MASK, 12, True),
+        *(region_register_value(0x15555, page_size, bool(page_size & 1))
+          for page_size in INSERTABLE_PAGE_SIZES),
+    ):
+        emit_movl(2, value)
+        emit_movl(3, selector(0, 0x1FFFFFFFFFFFFFFF))
+        emit_system(m_system(0x00, r2=2, r3=3))
+        check_readback(0, value, 0x0FEDCBA987654321)
+
+    emit_movl(2, sentinel)
+    emit_movl(3, selector(7, 0x1234))
+    emit_system(m_system(0x00, r2=2, r3=3))
+    emit_system(m_serial(0x30))
+    emit_system(m_serial(0x31))
+
+    # A false qualifier suppresses even an otherwise reserved-field write.
+    emit_movl(2, (12 << 2) | (1 << 63))
+    emit_system(m_system(0x00, r2=2, r3=3) | 3)
+
+    # Bit 1 and bits 63:26 are reserved for this 18-bit-RID profile.  Every
+    # other six-bit ps encoding is unimplemented and must fault as well.
+    for value in invalid_values:
+        emit_movl(2, value)
+        emit_system(m_system(0x00, r2=2, r3=3))
+
+    check_readback(7, sentinel, U64_MASK)
+    terminal_ip = address
+    require(terminal_ip < GENERAL_VECTOR,
+            "RR selector program overlaps General vector")
+    bundles.extend((
+        harness.spin_bundle(terminal_ip),
+        raw_bundle(harness, GENERAL_VECTOR, "M",
+                   harness.mov_crgr(10, 17)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x10, "I",
+                   harness.extr(12, 10, 0, 16)),
+        harness.Bundle(GENERAL_VECTOR + 0x20, 0x01, harness.nop_m(),
+                       harness.cmp_imm(1, 2, ISR_RESERVED_REGISTER_FIELD,
+                                       12, "eq"), harness.nop_i()),
+        harness.Bundle(GENERAL_VECTOR + 0x30, 0x01, harness.nop_m(),
+                       harness.adds(8, 1, 8, qp=2),
+                       harness.adds(9, 1, 9)),
+        raw_bundle(harness, GENERAL_VECTOR + 0x40, "M",
+                   harness.mov_crgr(11, CR_IIP)),
+        harness.Bundle(GENERAL_VECTOR + 0x50, 0x01, harness.nop_m(),
+                       harness.adds(11, 16, 11), harness.nop_i()),
+        raw_bundle(harness, GENERAL_VECTOR + 0x60, "M",
+                   harness.mov_grcr(CR_IIP, 11)),
+        harness.Bundle(GENERAL_VECTOR + 0x70, 0x11, harness.nop_m(),
+                       harness.nop_i(), harness.rfi()),
+    ))
+    return harness.Program(
+        name="RR complete selector and field domain",
+        bundles=tuple(bundles), terminal_ip=terminal_ip,
+    ), len(invalid_values)
+
+
+def region_register_rid_context_program(harness: ModuleType):
+    virtual = 0x8000
+    first_physical = 0x2000
+    second_physical = 0x3000
+    first_value = 0x1122334455667788
+    second_value = 0x8877665544332211
+    first_rr = region_register_value(0x15555, 12)
+    second_rr = region_register_value(0x2AAAA, 12, True)
+    bundles: List[object] = []
+    address = 0x10
+
+    def emit_movl(reg: int, value: int) -> None:
+        nonlocal address
+        bundles.append(movl_bundle(harness, address, reg, value))
+        address += 0x10
+
+    def emit_system(raw: int) -> None:
+        nonlocal address
+        bundles.append(raw_bundle(harness, address, "M", raw))
+        address += 0x10
+
+    def write_rr(value: int) -> None:
+        emit_movl(2, value)
+        emit_movl(3, 0x123456789ABCDEF)
+        emit_system(m_system(0x00, r2=2, r3=3))
+        emit_system(m_serial(0x30))
+
+    emit_movl(7, virtual)
+    emit_movl(4, 12 << 2)
+    emit_system(m_system(0x2C, r2=7, r3=CR_IFA))
+    emit_system(m_system(0x2C, r2=4, r3=CR_ITIR))
+    write_rr(first_rr)
+    emit_movl(2, first_physical | 0x661)
+    bundles.append(opcode_bundle(
+        harness, address, SPEC_BY_OPCODE["IA64_OP_ITC_D"],
+        m_system(0x2E, r2=2)
+    ))
+    address += 0x10
+    write_rr(second_rr)
+    emit_movl(2, second_physical | 0x661)
+    bundles.append(opcode_bundle(
+        harness, address, SPEC_BY_OPCODE["IA64_OP_ITC_D"],
+        m_system(0x2E, r2=2)
+    ))
+    address += 0x10
+    emit_system(m_mask(6, PSR_DT | PSR_IC))
+    emit_system(m_serial(0x31))
+    write_rr(first_rr)
+    bundles.append(harness.Bundle(address, 0x01, harness.ld8(20, 7),
+                                  harness.nop_i(), harness.nop_i()))
+    address += 0x10
+    write_rr(second_rr)
+    bundles.append(harness.Bundle(address, 0x01, harness.ld8(21, 7),
+                                  harness.nop_i(), harness.nop_i()))
+    address += 0x10
+    bundles.append(harness.spin_bundle(address))
+    return harness.Program(
+        name="RR RID-tagged translation context",
+        bundles=tuple(bundles), terminal_ip=address,
+        data=(
+            harness.DataWord(first_physical, first_value, 8),
+            harness.DataWord(second_physical, second_value, 8),
+        ),
+    ), (first_value, second_value)
+
+
+def test_region_register_file(harness: ModuleType, qemu: Path) -> str:
+    domain, expected_faults = region_register_selector_domain_program(harness)
+    snapshot = harness.run_program(qemu, domain, compact_loader=True)
+    require(snapshot.ip == domain.terminal_ip,
+            "RR selector traversal stopped at 0x{:x}".format(snapshot.ip))
+    require(snapshot.exception_pending and
+            snapshot.exception_kind == "general-exception" and
+            snapshot.exception_vector == GENERAL_VECTOR,
+            "RR traversal did not retain its final field fault")
+    require(snapshot.gr[9] == expected_faults,
+            "RR traversal raised {} faults, expected {}".format(
+                snapshot.gr[9], expected_faults))
+    require(snapshot.gr[8] == 0 and snapshot.gr[20] == 0,
+            "RR traversal found {} ISR and {} value mismatches".format(
+                snapshot.gr[8], snapshot.gr[20]))
+
+    context, expected = region_register_rid_context_program(harness)
+    result = harness.run_program(qemu, context)
+    require(not result.exception_pending and result.gr[20:22] == expected,
+            "RR RID context selected values {} instead of {}".format(
+                result.gr[20:22], expected))
+    return ("all eight RRs are distinct; selector noise is ignored; all 18 "
+            "RID bits, VE, and ten page sizes round-trip; {} reserved or "
+            "unsupported values fault; RID switches select independent "
+            "translations".format(expected_faults))
 
 
 def protection_key_selector_domain_program(harness: ModuleType):
@@ -1365,6 +1591,50 @@ def test_pal_virtual_memory_summary(harness: ModuleType,
     return ("PAL_VM_SUMMARY reports max indices 15/7/7 for the implemented "
             "PKR/DTR/ITR banks, the exact VM profile, and rejects every "
             "nonzero reserved argument with -2")
+
+
+def pal_vm_page_size_program(harness: ModuleType, arg0: int, arg1: int,
+                             arg2: int):
+    return harness.Program(
+        name="PAL_VM_PAGE_SIZE args {:x}/{:x}/{:x}".format(
+            arg0, arg1, arg2),
+        bundles=(
+            movl_bundle(harness, 0x10, 28, 34),
+            movl_bundle(harness, 0x20, 29, arg0),
+            movl_bundle(harness, 0x30, 30, arg1),
+            movl_bundle(harness, 0x40, 31, arg2),
+            harness.Bundle(0x50, 0x11, harness.nop_m(), harness.nop_i(),
+                           harness.br_call(0x50, 0x8F000, 0)),
+            harness.spin_bundle(0x60),
+        ), terminal_ip=0x60,
+    )
+
+
+def test_pal_virtual_memory_page_sizes(harness: ModuleType,
+                                       qemu: Path) -> str:
+    valid = harness.run_program(
+        qemu, pal_vm_page_size_program(harness, 0, 0, 0)
+    )
+    require(not valid.exception_pending and valid.gr[8] == 0,
+            "valid PAL_VM_PAGE_SIZE call failed")
+    require((valid.gr[9], valid.gr[10], valid.gr[11]) ==
+            (INSERTABLE_PAGE_SIZE_MASK, PURGEABLE_PAGE_SIZE_MASK, 0),
+            "PAL_VM_PAGE_SIZE returned an inconsistent page-size profile")
+
+    invalid_status = U64_MASK - 1
+    for arguments in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+        result = harness.run_program(
+            qemu, pal_vm_page_size_program(harness, *arguments)
+        )
+        require(not result.exception_pending and
+                result.gr[8] == invalid_status,
+                "PAL_VM_PAGE_SIZE accepted reserved arguments {}".format(
+                    arguments))
+        require((result.gr[9], result.gr[10], result.gr[11]) == (0, 0, 0),
+                "invalid PAL_VM_PAGE_SIZE call returned payload data")
+    return ("PAL_VM_PAGE_SIZE advertises exactly the ten RR/insertion sizes "
+            "and the additional 4 GiB purge size, and rejects every nonzero "
+            "reserved argument with -2")
 
 
 def nat_operands(spec: SystemOpcodeSpec) -> Tuple[str, ...]:
@@ -2901,6 +3171,7 @@ def main() -> int:
          test_cpuid_selector_domain),
         ("debug register selector domains",
          test_debug_register_selector_domains),
+        ("region register file", test_region_register_file),
         ("protection key register file",
          test_protection_key_register_file),
         ("protection key permissions", test_protection_key_permissions),
@@ -2908,6 +3179,8 @@ def main() -> int:
          test_pal_performance_monitor_info),
         ("PAL debug-register discovery", test_pal_debug_info),
         ("PAL virtual-memory summary", test_pal_virtual_memory_summary),
+        ("PAL virtual-memory page sizes",
+         test_pal_virtual_memory_page_sizes),
         ("generated NaT matrix", test_nat_matrix),
         ("generated privilege matrix", test_privilege_matrix),
         ("reserved and predicate priority", test_reserved_matrix),

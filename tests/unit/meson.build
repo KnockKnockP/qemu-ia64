@@ -372,6 +372,12 @@ test('test-ia64-protection-key-tranche-static', python,
      timeout: 30,
      suite: ['unit'])
 
+test('test-ia64-region-register-tranche-static', python,
+     args: [meson.project_source_root() / 'scripts/ia64-validate-region-register-tranche.py',
+            '--root', meson.project_source_root()],
+     timeout: 30,
+     suite: ['unit'])
+
 test('test-ia64-runner-protocol', python,
      args: [meson.project_source_root() / 'scripts/ia64-validate-conformance-runner.py',
             '--check',

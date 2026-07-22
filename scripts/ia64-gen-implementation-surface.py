@@ -138,6 +138,13 @@ ARCHITECTURAL_SURFACES = (
         "static IA64FirmwareResult pal_vm_summary(",
     ),
     (
+        "platform.firmware.pal-vm-page-size",
+        "platform.firmware",
+        "PAL insertable and purgeable virtual-memory page-size profile",
+        "hw/ia64/firmware.c",
+        "static IA64FirmwareResult pal_vm_page_size(",
+    ),
+    (
         "cpu.bundle.format",
         "cpu.bundle",
         "128-bit bundle field extraction",

@@ -21,7 +21,6 @@
 #include "system-plane.h"
 #include "exec/helper-proto.h"
 
-#define IA64_RR_IMPLEMENTED_MASK UINT64_C(0x00000000fffffffd)
 #define IA64_PSR_LOWER_WRITABLE_MASK UINT64_C(0x000000000fffe03e)
 #define IA64_PSR_MC_BIT UINT64_C(0x0000000800000000)
 #define IA64_PSR_IS_BIT UINT64_C(0x0000000400000000)
@@ -720,7 +719,7 @@ static void ia64_system_purge_translation(CPUIA64State *env,
         return;
     }
     ps = (size_value >> 2) & 0x3f;
-    if (!ia64_page_size_supported(ps)) {
+    if (!ia64_purge_page_size_supported(ps)) {
         ia64_system_raise_general(env, 0x30);
     }
     switch (opcode) {
@@ -1046,14 +1045,12 @@ uint64_t HELPER(system_plane)(CPUIA64State *env, uint32_t opcode_value,
         return env->rr[(arg0 >> 61) & 7] & IA64_RR_IMPLEMENTED_MASK;
     case IA64_OP_MOV_GRRR:
     {
-        uint8_t ps = (arg0 >> 2) & 0x3f;
         unsigned region = (arg1 >> 61) & 7;
 
-        if ((arg0 & ~IA64_RR_IMPLEMENTED_MASK) ||
-            !ia64_page_size_supported(ps)) {
+        if (!ia64_region_register_value_valid(arg0)) {
             ia64_system_raise_general(env, 0x30);
         }
-        env->rr[region] = arg0 & IA64_RR_IMPLEMENTED_MASK;
+        env->rr[region] = arg0;
         tlb_flush(env_cpu(env));
         return 0;
     }

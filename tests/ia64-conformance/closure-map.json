@@ -22,6 +22,7 @@
     "test-ia64-performance-monitor-tranche-static",
     "test-ia64-predicate-branch-tranche-static",
     "test-ia64-protection-key-tranche-static",
+    "test-ia64-region-register-tranche-static",
     "test-ia64-register-tcg-static",
     "test-ia64-runner-protocol",
     "test-ia64-scalar-integer-tranche-static"
@@ -506,9 +507,23 @@
       "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
+      "normative_row": "MMU-017-RID-CONTEXT-SELECTION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.rr.0"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "PAL-008-VM-SUMMARY-PROFILE",
       "surface_disposition": "implemented",
       "implementation_rows": ["platform.firmware.pal-vm-summary"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "PAL-008-VM-SUPPORTED-PAGE-SIZES",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["platform.firmware.pal-vm-page-size"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-system-tcg"]
     },
@@ -797,6 +812,13 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-006-RR-INDEX-SPACE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_mov_grrr", "cpu.opcode.ia64_op_mov_rrgr", "cpu.register.rr.0", "cpu.register.rr.1", "cpu.register.rr.2", "cpu.register.rr.3", "cpu.register.rr.4", "cpu.register.rr.5", "cpu.register.rr.6", "cpu.register.rr.7"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
       "normative_row": "REG-007-AR-ACCESS-CLASSES",
       "surface_disposition": "implemented",
       "implementation_rows": [],
@@ -879,6 +901,13 @@
         "coverage_group": "cpu.register.pkr.all-indices",
         "exclude_rows": []
       },
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "REG-007-RR-FIELD-SEMANTICS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.rr.0", "cpu.register.rr.1", "cpu.register.rr.2", "cpu.register.rr.3", "cpu.register.rr.4", "cpu.register.rr.5", "cpu.register.rr.6", "cpu.register.rr.7"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-system-tcg"]
     },

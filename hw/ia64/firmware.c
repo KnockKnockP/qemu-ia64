@@ -306,12 +306,7 @@ static const char *sal_procedure_name(uint64_t function_id)
 
 static uint64_t pal_supported_page_size_mask(void)
 {
-    return (UINT64_C(1) << 12) |
-           (UINT64_C(1) << 14) |
-           (UINT64_C(1) << 16) |
-           (UINT64_C(1) << 21) |
-           (UINT64_C(1) << 24) |
-           (UINT64_C(1) << 28);
+    return IA64_INSERTABLE_PAGE_SIZE_MASK;
 }
 
 static uint64_t pal_cache_info1(void)
@@ -368,9 +363,8 @@ static uint64_t pal_vm_summary1(void)
 static uint64_t pal_vm_summary2(void)
 {
     const uint64_t implemented_va_msb = 50;
-    const uint64_t region_identifier_size = 18;
 
-    return implemented_va_msb | (region_identifier_size << 8);
+    return implemented_va_msb | (IA64_RID_BITS << 8);
 }
 
 static IA64FirmwareResult pal_vm_summary(uint64_t arg0, uint64_t arg1,
@@ -380,6 +374,16 @@ static IA64FirmwareResult pal_vm_summary(uint64_t arg0, uint64_t arg1,
         return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
     }
     return firmware_success(pal_vm_summary1(), pal_vm_summary2(), 0);
+}
+
+static IA64FirmwareResult pal_vm_page_size(uint64_t arg0, uint64_t arg1,
+                                           uint64_t arg2)
+{
+    if (arg0 != 0 || arg1 != 0 || arg2 != 0) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    return firmware_success(IA64_INSERTABLE_PAGE_SIZE_MASK,
+                            IA64_PURGEABLE_PAGE_SIZE_MASK, 0);
 }
 
 static uint64_t pal_single_processor_logical_overview(void)
@@ -501,8 +505,7 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_VIRTUAL_MEMORY_INFO:
         return firmware_success(pal_supported_page_size_mask(), 61, 0);
     case IA64_PAL_VIRTUAL_MEMORY_PAGE_SIZE:
-        return firmware_success(pal_supported_page_size_mask(),
-                                pal_supported_page_size_mask(), 0);
+        return pal_vm_page_size(arg0, arg1, arg2);
     case IA64_PAL_PTCE_INFO:
         return firmware_success(IA64_FIRMWARE_PAL_PTCE_BASE,
                                 IA64_FIRMWARE_PAL_PTCE_COUNTS,
