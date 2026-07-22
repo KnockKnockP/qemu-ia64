@@ -160,6 +160,18 @@ AR_PLAIN_FIELD_IMPLEMENTATION_ROWS = (
 )
 AR_FPSR_FIELD_IMPLEMENTATION_ROWS = ("cpu.register.ar.40",)
 AR_PFS_FIELD_IMPLEMENTATION_ROWS = ("cpu.register.ar.64",)
+AR_CCV_EFFECT_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_cmpxchg1",
+    "cpu.opcode.ia64_op_cmpxchg2",
+    "cpu.opcode.ia64_op_cmpxchg4",
+    "cpu.opcode.ia64_op_cmpxchg8",
+    "cpu.register.ar.32",
+)
+AR_UNAT_EFFECT_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_ld8fill",
+    "cpu.opcode.ia64_op_st8spill",
+    "cpu.register.ar.36",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -212,12 +224,18 @@ def validate_contract(root: Path) -> str:
         "REG-008-PLAIN-AR-FIELDS": list(
             AR_PLAIN_FIELD_IMPLEMENTATION_ROWS
         ),
+        "REG-008-CCV-CMPXCHG-EFFECT": list(
+            AR_CCV_EFFECT_IMPLEMENTATION_ROWS
+        ),
+        "REG-008-UNAT-SPILL-FILL-EFFECT": list(
+            AR_UNAT_EFFECT_IMPLEMENTATION_ROWS
+        ),
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 20:
-        raise AssertionError("register tranche must contain twenty cases")
+    if not isinstance(cases, list) or len(cases) != 22:
+        raise AssertionError("register tranche must contain twenty-two cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -289,6 +307,12 @@ def validate_contract(root: Path) -> str:
         raise AssertionError("FPSR literal and encoded reserved sets overlap")
     if len(AR_PLAIN_FIELD_IMPLEMENTATION_ROWS) != 4:
         raise AssertionError("plain named-AR field group drifted")
+    if (len(application_register_ccv_effect_cases()) != 20 or
+            {case[0] for case in application_register_ccv_effect_cases()} !=
+            {1, 2, 4, 8}):
+        raise AssertionError("CCV/cmpxchg effect matrix drifted")
+    if application_register_unat_expected_image() != 0x5555555555555555:
+        raise AssertionError("UNAT selector effect matrix drifted")
     if GR_ROTATING_SIZES != tuple(range(8, 97, 8)):
         raise AssertionError("GR rotating-size matrix drift")
     rotating_signatures = {
@@ -301,7 +325,8 @@ def validate_contract(root: Path) -> str:
         "complete GR/FR/PR/BR indices, 12 GR rotating sizes, 96 FR bases, "
         "48 PR bases, all 128 AR selectors in both units, all 128 CR "
         "selectors, interruption-access states, complete nine-register AR "
-        "and named CR field partitions, and "
+        "and named CR field partitions, CCV effects across twenty cmpxchg "
+        "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
     )
 
@@ -1308,6 +1333,213 @@ def test_control_register_fields(h: ModuleType, system: ModuleType,
     )
 
 
+def application_register_ccv_effect_cases() -> tuple[
+        tuple[int, bool, bool, bool], ...]:
+    return (
+        tuple(
+            (width, release, match, True)
+            for width in (1, 2, 4, 8)
+            for release in (False, True)
+            for match in (False, True)
+        )
+        + tuple((width, False, True, False) for width in (1, 2, 4, 8))
+    )
+
+
+def application_register_ccv_effect_program(h: ModuleType,
+                                            system: ModuleType,
+                                            data_plane: ModuleType):
+    bundles: list[object] = []
+    data: list[object] = []
+    expectations: list[tuple[int, int, int, int, str]] = []
+    address = 0x10000
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    emit(0x01, h.alloc(31, 96, 96, 0), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.nop_i(),
+         h.cmp_rr(1, 2, 0, 0, "lt"))
+    for index, (width, release, match, qualified) in enumerate(
+            application_register_ccv_effect_cases()):
+        memory_address = 0x1800 + index * 8
+        mask = (1 << (width * 8)) - 1
+        initial = (0x8877665544332210 + index) & U64_MASK
+        old = initial & mask
+        replacement = 0x70 + index
+        compare = old if match else old ^ 1
+        result_register = 20 + index * 2
+        memory_register = result_register + 1
+        predicate = 0 if qualified else 1
+        sentinel = 0x5a
+
+        data.append(h.DataWord(memory_address, initial, 8))
+        emit_movl(12, compare)
+        emit(0x01, h.nop_m(), h.adds(10, memory_address, 0),
+             h.adds(11, replacement, 0))
+        emit(0x01, h.mov_m_grar(32, 12),
+             h.adds(result_register, sentinel, 0), h.nop_i())
+        emit(0x01, data_plane.atomic(
+            f"IA64_OP_CMPXCHG{width}", r1=result_register,
+            r2=11, r3=10, qp=predicate, release=release,
+        ), h.nop_i(), h.nop_i())
+        emit(0x01, h.ld8(memory_register, 10), h.nop_i(), h.nop_i())
+
+        expected_result = old if qualified else sentinel
+        expected_memory = initial
+        if qualified and match:
+            expected_memory = (initial & ~mask) | (replacement & mask)
+        expectations.append((
+            result_register, memory_register, expected_result,
+            expected_memory,
+            f"cmpxchg{width}.{'rel' if release else 'acq'} "
+            f"{'match' if match else 'mismatch'} "
+            f"{'enabled' if qualified else 'false-qualified'}",
+        ))
+
+    bundles.append(h.spin_bundle(address))
+    return (
+        h.Program(
+            "complete CCV compare-exchange effect matrix",
+            tuple(bundles), address, tuple(data), entry=0x10000,
+        ),
+        tuple(expectations),
+    )
+
+
+def test_application_register_ccv_effect(h: ModuleType,
+                                         system: ModuleType,
+                                         data_plane: ModuleType,
+                                         qemu: Path) -> str:
+    program, expectations = application_register_ccv_effect_program(
+        h, system, data_plane
+    )
+    snapshot = h.run_program(qemu, program, compact_loader=True)
+    if snapshot.ip != program.terminal_ip or snapshot.exception_pending:
+        raise AssertionError(
+            "CCV effect matrix did not terminate cleanly: "
+            f"ip=0x{snapshot.ip:x} exception={snapshot.exception_kind}"
+        )
+    failures = []
+    for result, memory, expected_result, expected_memory, label in expectations:
+        if (snapshot.gr[result], snapshot.gr[memory]) != (
+                expected_result, expected_memory):
+            failures.append(
+                f"{label}: result=0x{snapshot.gr[result]:x}/"
+                f"0x{expected_result:x} memory=0x{snapshot.gr[memory]:x}/"
+                f"0x{expected_memory:x}"
+            )
+    if failures:
+        raise AssertionError("CCV effect mismatch: " + "; ".join(failures[:4]))
+    return (
+        "twenty literal CCV cases cover cmpxchg1/2/4/8 acquire and release "
+        "match/mismatch outcomes plus false qualification at every width"
+    )
+
+
+def application_register_unat_expected_image() -> int:
+    return sum(1 << selector for selector in range(0, 64, 2))
+
+
+def application_register_unat_effect_program(h: ModuleType,
+                                             data_plane: ModuleType):
+    failure = 0x70000
+    terminal = 0x70030
+    address = 0x10000
+    bundles: list[object] = []
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    # Construct one NaT source and one ordinary source, then clear UNAT so the
+    # spill pairs alone construct the complete expected 64-bit collection.
+    emit(0x01, h.nop_m(), h.adds(8, 1, 0), h.adds(9, 0x1c00, 0))
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.ld8_fill(20, 9), h.adds(21, 0x66, 0), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(8, 0, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+
+    # Each no-stop MMI pair sets an even selector from NaT(r20) and clears the
+    # adjacent odd selector from ordinary r21.  The address bits 8:3 enumerate
+    # every UNAT bit exactly once.
+    for selector in range(0, 64, 2):
+        even_address = 0x1800 + selector * 8
+        odd_address = even_address + 8
+        emit(0x01, h.nop_m(), h.adds(10, even_address, 0),
+             h.adds(11, odd_address, 0))
+        emit(0x09,
+             data_plane.integer_spill(8, r2=20, r3=10),
+             data_plane.integer_spill(8, r2=21, r3=11),
+             h.nop_i())
+
+    # A false spill cannot alter either the selected UNAT bit or memory; a
+    # false fill cannot alter its destination value or NaT.
+    emit(0x01, h.nop_m(), h.adds(10, 0x1808, 0),
+         h.cmp_rr(1, 2, 0, 0, "lt"))
+    emit(0x01, data_plane.integer_spill(8, r2=20, r3=10, qp=1),
+         h.adds(24, 0x77, 0), h.nop_i())
+    emit(0x01, h.ld8_fill(24, 10, qp=1), h.nop_i(), h.nop_i())
+    address = append_gr_check(h, bundles, address, 24, 0x77, failure)
+    address = append_tnat_check(h, bundles, address, 24, False, failure)
+
+    # Load every pair back through architectural fill behavior and check both
+    # the stored payload and the NaT bit before reusing the destinations.
+    for selector in range(0, 64, 2):
+        even_address = 0x1800 + selector * 8
+        odd_address = even_address + 8
+        emit(0x01, h.nop_m(), h.adds(10, even_address, 0),
+             h.adds(11, odd_address, 0))
+        emit(0x09, h.ld8_fill(22, 10), h.ld8_fill(23, 11), h.nop_i())
+        address = append_gr_check(h, bundles, address, 22, 0x55, failure)
+        address = append_tnat_check(h, bundles, address, 22, True, failure)
+        address = append_gr_check(h, bundles, address, 23, 0x66, failure)
+        address = append_tnat_check(h, bundles, address, 23, False, failure)
+
+    emit(0x01, h.mov_m_argr(30, 36), h.nop_i(), h.nop_i())
+    expected = application_register_unat_expected_image()
+    # Compare the full image in the host as well as every selector's guest
+    # fill result; a MOVL is unnecessary in this already-large guest program.
+    return (
+        finish_checked_program(
+            h, "complete UNAT spill/fill selector matrix", bundles, address,
+            failure=failure, terminal=terminal,
+            data=(h.DataWord(0x1c00, 0x55, 8),), entry=0x10000,
+        ),
+        expected,
+    )
+
+
+def test_application_register_unat_effect(h: ModuleType,
+                                          data_plane: ModuleType,
+                                          qemu: Path) -> str:
+    program, expected = application_register_unat_effect_program(h, data_plane)
+    snapshot = h.run_program(qemu, program, compact_loader=True)
+    if snapshot.gr[14] != 1 or snapshot.ip != program.terminal_ip:
+        raise AssertionError(
+            "UNAT effect matrix failed: "
+            f"ip=0x{snapshot.ip:x} marker={snapshot.gr[14]}"
+        )
+    if snapshot.unat != expected or snapshot.gr[30] != expected:
+        raise AssertionError(
+            f"UNAT effect image expected 0x{expected:x}, got "
+            f"state=0x{snapshot.unat:x} read=0x{snapshot.gr[30]:x}"
+        )
+    return (
+        "all 64 address selectors pass paired same-group spill set/clear, "
+        "payload and NaT fill recovery, false qualification, and exact UNAT "
+        "readback"
+    )
+
+
 def application_register_field_fault_cases() -> tuple[
         tuple[int, int, str], ...]:
     cases: list[tuple[int, int, str]] = []
@@ -2054,6 +2286,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         root / "tests/unit/test-ia64-system-tcg.py",
         "_ia64_register_tcg_system",
     )
+    data_plane = load_module(
+        root / "tests/unit/ia64_data_plane_tcg_spec.py",
+        "_ia64_register_tcg_data_plane_spec",
+    )
     tests: tuple[tuple[str, Callable[[], str]], ...] = (
         ("complete GR index space", lambda: test_general_register_indices(harness, args.qemu.resolve())),
         ("complete FR index space", lambda: test_floating_register_indices(harness, floating, args.qemu.resolve())),
@@ -2065,6 +2301,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("interruption and RFI GR banks", lambda: test_interruption_bank_switch(harness, system, args.qemu.resolve())),
         ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
+        ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
+        ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),
         ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),
         ("complete named CR field semantics", lambda: test_control_register_fields(harness, system, args.qemu.resolve())),
     )

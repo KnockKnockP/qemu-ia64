@@ -344,6 +344,40 @@
       "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_fields", "test_application_register_selectors"], "result_observations": ["all 256 singleton readbacks", "false-qualified selector outcomes", "NaT vector"]},
       "oracle": {"independence": "independent", "derivation": "The generator enumerates every bit directly from the four Volume 1 register formats"},
       "limitations": ["cmpxchg consumption, spill/fill UNAT selection, counted-loop transitions, and reset values are separate instruction/REG rows"]
+    },
+    {
+      "id": "REG-008-CCV-CMPXCHG-EFFECT-EXACT", "case_id": 21, "normative_token": 72,
+      "normative_row": "REG-008-CCV-CMPXCHG-EFFECT",
+      "implementation_rows": ["cpu.opcode.ia64_op_cmpxchg1", "cpu.opcode.ia64_op_cmpxchg2", "cpu.opcode.ia64_op_cmpxchg4", "cpu.opcode.ia64_op_cmpxchg8", "cpu.register.ar.32"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "4.4.3", "printed_pages": ["1:59", "1:60"], "anchor": "The cmpxchg target is loaded with the zero-extended contents"},
+      "preconditions": ["Each address is naturally aligned, cacheable, mapped, and writable", "The CCV write is stopped before the compare-exchange", "Each memory word is initialized independently"],
+      "inputs": ["cmpxchg1, cmpxchg2, cmpxchg4, and cmpxchg8", "Acquire and release forms", "Matching and mismatching CCV values", "A false-qualified matching case at every width"],
+      "expected_results": ["The target receives the zero-extended old value", "A matching CCV stores exactly the low-width replacement", "A mismatching CCV leaves memory unchanged", "False qualification preserves the target and memory"],
+      "allowed_results": ["Exactly 20 literal width/semaphore/compare/qualification outcomes"],
+      "permitted_state_changes": ["Declared result GR", "Selected low memory bytes on a qualified match"],
+      "required_unchanged_state": ["CCV", "Memory on mismatch or false qualification", "Bytes above the selected width", "Unrelated GR and NaT state"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "The stopped CCV value selects one atomic compare outcome and the result/memory effects commit together",
+      "restart_action": "Not exercised for valid mapped operands", "applicable_variants": ["1, 2, 4, and 8-byte widths", "acquire", "release", "match", "mismatch", "false qualification"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_ccv_effect"], "result_observations": ["zero-extended old value", "complete containing memory word", "destination preservation", "interruption state"]},
+      "oracle": {"independence": "independent", "derivation": "Literal initial words, masks, compare values, and replacements are calculated in the test without importing production atomic helpers"},
+      "limitations": ["Address, translation, access-right, NaT, memory-attribute, alignment, and atomic-ordering fault matrices remain separate MEM/MMU/EXC rows", "cmp8xchg16 and AR.CSD are separate feature rows"]
+    },
+    {
+      "id": "REG-008-UNAT-SPILL-FILL-EFFECT-EXACT", "case_id": 22, "normative_token": 73,
+      "normative_row": "REG-008-UNAT-SPILL-FILL-EFFECT",
+      "implementation_rows": ["cpu.opcode.ia64_op_ld8fill", "cpu.opcode.ia64_op_st8spill", "cpu.register.ar.36"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.4.1", "printed_pages": ["1:42", "1:43"], "anchor": "The ld8.fill and st8.spill instructions implicitly access"},
+      "preconditions": ["All 64 naturally aligned addresses are mapped and writable", "Address bits 8:3 enumerate each UNAT selector once", "Each no-stop spill pair writes two distinct UNAT bits"],
+      "inputs": ["A NaT-tagged 0x55 source for every even selector", "An ordinary 0x66 source for every odd selector", "Thirty-two legal no-stop spill pairs", "Sixty-four fill reads", "False-qualified spill and fill controls"],
+      "expected_results": ["Every even UNAT bit is set and every odd bit is clear", "Every fill recovers its exact payload and source NaT", "False qualification changes neither UNAT, memory, destination value, nor destination NaT"],
+      "allowed_results": ["UNAT and mov-from-UNAT both equal 0x5555555555555555 with all 64 payload/NaT checks passing"],
+      "permitted_state_changes": ["The selected UNAT bits", "The 64 declared spill words", "Declared fill destination value/NaT pairs"],
+      "required_unchanged_state": ["Distinct UNAT bits while a same-group neighbor is updated", "False-qualified memory and destination state", "Unrelated GR, predicate, and AR state"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Each legal spill pair commits both distinct bit updates in program order; each fill observes the completed UNAT image",
+      "restart_action": "Not exercised for valid mapped operands", "applicable_variants": ["all address selectors 0 through 63", "set and clear", "same-group distinct-bit WAW", "fill recovery", "false qualification"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_unat_effect"], "result_observations": ["complete UNAT image", "mov-from-UNAT image", "64 payloads", "64 destination NaT bits", "false-qualified destination"]},
+      "oracle": {"independence": "independent", "derivation": "The alternating 64-bit image is constructed from address bits 8:3 and literal source NaTs; payload and predicate expectations do not use translator state"},
+      "limitations": ["Spill/fill memory faults, base-update forms, overlapping same-bit dependency violations, and migration remain separate MEM/MMU/EXC/SYS rows"]
     }
   ]
 }

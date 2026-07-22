@@ -281,6 +281,11 @@ def main() -> int:
         "    IA64TrDecodedBranchArm *arm)\n{",
         "static bool ia64_tr_emit_decoded_branch_split",
     )
+    loop_preflight = section(
+        source,
+        "static bool ia64_tr_preflight_branch_cfg",
+        "static IA64TrSystemTbEnd ia64_tr_first_system_tb_end",
+    )
     call_resource_assert = section(
         source,
         "static void ia64_tr_assert_call_branch_resources",
@@ -2064,6 +2069,27 @@ def main() -> int:
             "typed loop classifier is not exactly the five architectural "
             f"forms: got={sorted(classified_loop_opcodes)}"
         )
+    require(call_admission, (
+        "bool precise_placement_fault",
+        "insn->status == IA64_DECODE_ILLEGAL_PLACEMENT",
+        "insn->placement_illegal && insn->requires_slot2",
+        "(legal_slot || precise_placement_fault)",
+    ), "typed loop illegal-slot admission")
+    require(rewrite_plan, (
+        "Loop placement is checked irrespective of its branch condition.",
+        "plan->unconditional_noreturn = true",
+    ), "typed loop illegal-slot terminal planning")
+    require(loop_preflight, (
+        "A loop form outside slot 2 faults before reading or updating",
+        "*last_slot = slot",
+        "ia64_tr_preflight_decoded_bundle_through(decoded",
+    ), "typed loop illegal-slot terminal preflight")
+    require(typed_bundle, (
+        "Slot legality is unconditional and precedes all loop state.",
+        "ia64_tr_emit_decoded_illegal_operation(ctx, insn)",
+        "ia64_tr_group_finish_instruction_success(ctx, insn)",
+        "ia64_tr_group_close(ctx)",
+    ), "typed loop illegal-slot precise fault lowering")
     require(rewrite_plan, (
         "ia64_tr_decoded_is_loop_branch(insn->opcode)",
         "insn->opcode != IA64_OP_BR_CLOOP",

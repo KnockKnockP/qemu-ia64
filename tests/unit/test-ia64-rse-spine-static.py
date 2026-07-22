@@ -82,11 +82,13 @@ def main() -> None:
         "static bool ia64_tr_try_decoded_bundle",
         "static bool ia64_tr_emit_decoded_return_split",
     )
-    ordered(dispatch,
-            "ia64_tr_split_state_cache_at_typed_branch(ctx)",
-            "ia64_tr_group_begin_instruction(ctx, insn)",
-            "ia64_tr_emit_decoded_rse_spine(ctx, insn)",
-            "ia64_tr_group_finish_instruction_success(ctx, insn)")
+    split = dispatch.index("ia64_tr_split_state_cache_at_typed_branch(ctx)")
+    begin = dispatch.index("ia64_tr_group_begin_instruction(ctx, insn)", split)
+    emit = dispatch.index("ia64_tr_emit_decoded_rse_spine(ctx, insn)", begin)
+    finish = dispatch.index(
+        "ia64_tr_group_finish_instruction_success(ctx, insn)", emit
+    )
+    assert split < begin < emit < finish, "RSE dispatch ordering drifted"
 
     helper = region(arch_helpers, "uint64_t HELPER(rse_alloc)",
                     "void HELPER(rse_cover)")

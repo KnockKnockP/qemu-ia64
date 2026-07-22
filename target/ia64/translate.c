@@ -7970,11 +7970,17 @@ static bool ia64_tr_decoded_instruction_supported(
     } else if (ia64_tr_decoded_is_loop_branch(insn->opcode)) {
         bool while_form = insn->opcode == IA64_OP_BR_WTOP ||
                           insn->opcode == IA64_OP_BR_WEXIT;
+        bool legal_slot = insn->status == IA64_DECODE_OK &&
+                          insn->slot == IA64_SLOT_COUNT - 1;
+        bool precise_placement_fault =
+            insn->status == IA64_DECODE_ILLEGAL_PLACEMENT &&
+            insn->placement_illegal && insn->requires_slot2 &&
+            insn->slot != IA64_SLOT_COUNT - 1;
 
         branch_shape = insn->unit == IA64_INSN_UNIT_B &&
-                       insn->slot == IA64_SLOT_COUNT - 1 &&
                        insn->slot_span == 1 && (insn->imm & 0xf) == 0 &&
-                       (while_form || insn->qp == 0);
+                       (while_form || insn->qp == 0) &&
+                       (legal_slot || precise_placement_fault);
     } else if (ia64_tr_decoded_is_rse_spine(insn->opcode)) {
         switch (insn->opcode) {
         case IA64_OP_ALLOC:
@@ -8008,7 +8014,11 @@ static bool ia64_tr_decoded_instruction_supported(
                          insn->unit == IA64_INSN_UNIT_I) :
                         insn->unit == IA64_INSN_UNIT_M);
     }
-    return insn->valid && insn->status == IA64_DECODE_OK &&
+    return insn->valid &&
+           (insn->status == IA64_DECODE_OK ||
+            (ia64_tr_decoded_is_loop_branch(insn->opcode) &&
+             insn->status == IA64_DECODE_ILLEGAL_PLACEMENT &&
+             insn->placement_illegal && insn->requires_slot2)) &&
            ia64_tr_decoded_opcode_supported(insn->opcode) &&
            branch_shape &&
            (rotating_dest == 0 ||
@@ -8386,6 +8396,14 @@ static void ia64_tr_rewrite_plan_append(
         } else {
             plan->unconditional_noreturn = true;
         }
+        return;
+    }
+
+    if (ia64_tr_decoded_is_loop_branch(insn->opcode) &&
+        insn->status == IA64_DECODE_ILLEGAL_PLACEMENT &&
+        insn->placement_illegal && insn->requires_slot2) {
+        /* Loop placement is checked irrespective of its branch condition. */
+        plan->unconditional_noreturn = true;
         return;
     }
 
@@ -9439,6 +9457,18 @@ static bool ia64_tr_preflight_branch_cfg(
             continue;
         }
         insn = &decoded->instruction[slot];
+        if (ia64_tr_decoded_is_loop_branch(insn->opcode) &&
+            insn->status == IA64_DECODE_ILLEGAL_PLACEMENT &&
+            insn->placement_illegal && insn->requires_slot2) {
+            /*
+             * A loop form outside slot 2 faults before reading or updating
+             * LC, EC, predicates, or rotating state.  It is the exact
+             * terminal prefix even after a prior conditional branch.
+             */
+            *last_slot = slot;
+            return ia64_tr_preflight_decoded_bundle_through(decoded,
+                                                             *last_slot);
+        }
         if (!ia64_tr_decoded_is_conditional_branch(insn->opcode) &&
             !ia64_tr_decoded_is_rfi(insn->opcode)) {
             continue;
@@ -14446,6 +14476,17 @@ static bool ia64_tr_try_decoded_bundle(DisasContext *ctx,
             ia64_tr_split_state_cache_at_typed_branch(ctx);
         }
         ia64_tr_group_begin_instruction(ctx, insn);
+        if (ia64_tr_decoded_is_loop_branch(insn->opcode) &&
+            insn->status == IA64_DECODE_ILLEGAL_PLACEMENT &&
+            insn->placement_illegal && insn->requires_slot2) {
+            /* Slot legality is unconditional and precedes all loop state. */
+            ia64_tr_prime_decoded_instruction_state(ctx, insn);
+            ia64_tr_emit_decoded_illegal_operation(ctx, insn);
+            ia64_tr_group_finish_instruction_success(ctx, insn);
+            ia64_tr_group_close(ctx);
+            unconditional_branch = true;
+            break;
+        }
         if (ia64_tr_decoded_is_rse_spine(insn->opcode)) {
             bool terminal = ia64_tr_emit_decoded_rse_spine(ctx, insn);
 
@@ -14563,6 +14604,13 @@ static bool ia64_tr_try_decoded_bundle(DisasContext *ctx,
             ctx, branch_arm, branch_count, has_fallthrough,
             pc + IA64_BUNDLE_SIZE, fallthrough_group_start,
             fallthrough_typed_active, system_bundle_exit);
+        ctx->rewrite_control_flow_exit = true;
+        ctx->base.is_jmp = DISAS_NORETURN;
+        return true;
+    }
+
+    if (unconditional_branch) {
+        ctx->instruction_group_start = true;
         ctx->rewrite_control_flow_exit = true;
         ctx->base.is_jmp = DISAS_NORETURN;
         return true;

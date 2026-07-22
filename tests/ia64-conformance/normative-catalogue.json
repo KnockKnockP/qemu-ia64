@@ -350,7 +350,7 @@
     },
     {
       "id": "BR-006-LOOP-STATE",
-      "requirement_ids": ["BR-006"],
+      "requirement_ids": ["BR-006", "REG-008"],
       "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
       "interface_kind": "cpu.branch",
       "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "4.5.1", "printed_pages": ["1:75", "1:76", "1:77"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "Modulo-scheduled Loop Support"},
@@ -1786,6 +1786,26 @@
       "required_evidence": "E2"
     },
     {
+      "id": "REG-008-CCV-CMPXCHG-EFFECT",
+      "requirement_ids": ["REG-008"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Application Programming Model", "section": "4.4.3", "printed_pages": ["1:59", "1:60"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "The cmpxchg target is loaded with the zero-extended contents"},
+      "operation": {"kind": "ccv-compare-exchange-effect", "selector": "AR32 and cmpxchg1, cmpxchg2, cmpxchg4, cmpxchg8", "encoding": "acquire and release compare-exchange forms at every width"},
+      "legal_inputs": ["Naturally aligned mapped operands", "Matching and mismatching CCV values", "True and false qualification"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "CCV and compare-exchange are application-visible; the complete effect matrix executes at CPL0"},
+      "state_read": ["CCV", "selected low-width memory value", "replacement GR and qualifying predicate"],
+      "state_written": ["target GR", "selected low-width memory value only when qualified and equal"],
+      "predication": {"applies": true, "rule": "False qualification changes neither destination nor memory"},
+      "nat_behavior": "A qualified NaT operand is governed by the compare-exchange instruction's Register NaT Consumption rules; valid ordinary operands are selected here",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "A qualified comparison returns the old value and atomically commits either the selected-width replacement or no memory change",
+      "restart_rule": "No restart occurs for the selected valid mapped operands",
+      "permitted_results": ["The destination is the zero-extended old value; memory changes exactly when old value equals CCV; false qualification preserves both"],
+      "required_evidence": "E2"
+    },
+    {
       "id": "REG-008-PLAIN-AR-FIELDS",
       "requirement_ids": ["REG-008"],
       "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
@@ -1803,6 +1823,26 @@
       "committed_prefix": "Each explicit write and readback is isolated by a stop",
       "restart_rule": "No restart occurs for legal singleton inputs; the operation-wide NaT probe stops at its architected vector",
       "permitted_results": ["All bits of CCV, UNAT, and LC preserve; EC bits 5:0 preserve and bits 63:6 read zero"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "REG-008-UNAT-SPILL-FILL-EFFECT",
+      "requirement_ids": ["REG-008"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.register",
+      "specification": {"document_id": "intel-ia64-sdm-v1-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 1: Application Architecture", "revision": "2.3", "volume": 1, "part": "Part 1: Execution Environment", "section": "3.4.1", "printed_pages": ["1:42", "1:43"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-1-manual.pdf", "anchor": "The ld8.fill and st8.spill instructions implicitly access"},
+      "operation": {"kind": "unat-spill-fill-effect", "selector": "AR36 bit selected by spill/fill address bits 8:3", "encoding": "paired st8.spill and ld8.fill across all 64 selectors"},
+      "legal_inputs": ["All 64 naturally aligned mapped address selectors", "NaT and ordinary spill sources", "True and false qualification", "Distinct selected bits in one instruction group"],
+      "privilege": {"levels": [0, 1, 2, 3], "rule": "UNAT spill/fill behavior is application-visible; the complete effect matrix executes at CPL0"},
+      "state_read": ["source GR value and NaT", "selected UNAT bit", "spill memory payload"],
+      "state_written": ["selected UNAT bit and spill word", "fill destination GR value and NaT"],
+      "predication": {"applies": true, "rule": "False-qualified spill and fill preserve UNAT, memory, destination value, and destination NaT"},
+      "nat_behavior": "st8.spill records the source NaT in the address-selected UNAT bit; ld8.fill restores that bit into the destination NaT",
+      "possible_faults": [],
+      "fault_priority": [],
+      "committed_prefix": "Each legal distinct-bit spill update commits its payload and selected UNAT bit; each subsequent fill observes the completed image",
+      "restart_rule": "No restart occurs for the selected valid mapped operands",
+      "permitted_results": ["Address bits 8:3 select exactly one UNAT bit; all 64 payload and NaT values round-trip and false qualification is inert"],
       "required_evidence": "E2"
     },
     {

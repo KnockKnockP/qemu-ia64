@@ -145,7 +145,7 @@
     {
       "normative_row": "BR-006-LOOP-STATE",
       "surface_disposition": "implemented",
-      "implementation_rows": ["cpu.branch.loop-state"],
+      "implementation_rows": ["cpu.branch.loop-state", "cpu.register.ar.65", "cpu.register.ar.66"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-full-tcg", "test-ia64-predicate-branch-tranche"]
     },
@@ -611,9 +611,23 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-008-CCV-CMPXCHG-EFFECT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_cmpxchg1", "cpu.opcode.ia64_op_cmpxchg2", "cpu.opcode.ia64_op_cmpxchg4", "cpu.opcode.ia64_op_cmpxchg8", "cpu.register.ar.32"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
       "normative_row": "REG-008-PLAIN-AR-FIELDS",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.register.ar.32", "cpu.register.ar.36", "cpu.register.ar.65", "cpu.register.ar.66"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-008-UNAT-SPILL-FILL-EFFECT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_ld8fill", "cpu.opcode.ia64_op_st8spill", "cpu.register.ar.36"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
     },

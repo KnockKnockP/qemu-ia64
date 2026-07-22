@@ -61,6 +61,11 @@ EXPECTED = {
     "PRD-008-PREDICATE-TESTS": ("cpu.predicate.tests", [
         "test_predicate_test_conformance"]),
 }
+EXPECTED_IMPLEMENTATION_ROWS = {
+    "BR-006-LOOP-STATE": [
+        "cpu.branch.loop-state", "cpu.register.ar.65", "cpu.register.ar.66"
+    ],
+}
 
 
 class TrancheError(RuntimeError):
@@ -134,7 +139,10 @@ def validate(document: Any, catalogue: Any, root: Path) -> dict[str, int]:
             raise TrancheError(f"{label}: unknown or duplicate normative row")
         seen.add(row_id)
         implementation, probes = EXPECTED[row_id]
-        if case["implementation_rows"] != [implementation]:
+        expected_implementation_rows = EXPECTED_IMPLEMENTATION_ROWS.get(
+            row_id, [implementation]
+        )
+        if case["implementation_rows"] != expected_implementation_rows:
             raise TrancheError(f"{label}: implementation mapping changed")
         citation = case["citation"]
         exact_keys(citation, CITATION_KEYS, f"{label} citation")

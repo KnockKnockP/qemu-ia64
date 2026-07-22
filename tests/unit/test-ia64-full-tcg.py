@@ -2869,6 +2869,58 @@ def loop_matrix_program(kind: str) -> Tuple[
     )
 
 
+def loop_illegal_slot_restart_program(slot: int) -> Program:
+    """Resume an illegal loop branch at a legal slot-2 copy exactly once."""
+    if slot not in (0, 1):
+        raise ValueError("illegal loop slot must be zero or one")
+    fault_ip = 0x60
+    target = 0x70
+    false_branch = br_cond(fault_ip, 0x70000, qp=1)
+    legal_branch = br_loop("cloop", fault_ip, target)
+    slots = [false_branch, false_branch, legal_branch]
+    slots[slot] = br_loop("cloop", fault_ip, target)
+    return Program(
+        name="slot-{} illegal CLOOP repair and legal-slot restart".format(
+            slot
+        ),
+        bundles=(
+            Bundle(0x10, 0x01, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+            Bundle(0x20, 0x01, srlz_i(), nop_i(), nop_i()),
+            Bundle(0x30, 0x01, nop_m(), adds(8, 2, 0), adds(9, 3, 0)),
+            Bundle(0x40, 0x01, nop_m(), mov_i_grar(65, 8),
+                   mov_i_grar(66, 9)),
+            Bundle(0x50, 0x01, nop_m(), nop_i(),
+                   cmp_rr(1, 2, 0, 0, "lt")),
+            Bundle(fault_ip, 0x17, slots[0], slots[1], slots[2]),
+            Bundle(target, 0x01, nop_m(), mov_argr(25, 65),
+                   mov_argr(26, 66)),
+            spin_bundle(0x80),
+
+            # The handler captures unchanged LC/EC and exact collected state,
+            # then changes only IPSR.ri to 2.  RFI executes the legal slot-2
+            # copy in the same bundle, proving the illegal form committed no
+            # loop update before the one legal decrement.
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR, 0x01, nop_m(),
+                   mov_argr(20, 65), mov_argr(21, 66)),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x10, 0x01,
+                   mov_crgr(22, IA64_CR_IIP), nop_i(), nop_i()),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x20, 0x01,
+                   mov_crgr(23, IA64_CR_IPSR), nop_i(), nop_i()),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x30, 0x01,
+                   mov_crgr(24, IA64_CR_ISR), nop_i(), nop_i()),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x40, 0x01, nop_m(),
+                   adds(27, 0, 23), adds(11, 2, 0)),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x50, 0x01, nop_m(),
+                   dep(23, 11, 23, IA64_PSR_RI_SHIFT, 2), nop_i()),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x60, 0x01,
+                   mov_grcr(IA64_CR_IPSR, 23), nop_i(), nop_i()),
+            Bundle(IA64_GENERAL_EXCEPTION_VECTOR + 0x70, 0x11,
+                   nop_m(), nop_i(), rfi()),
+        ),
+        terminal_ip=0x80,
+    )
+
+
 def loop_rotation_wrap_program() -> Tuple[
         Program, Tuple[Tuple[int, int, bool], ...]]:
     """Rotate 49 times to cross PR/FR wrap and move a dirty NaT pair."""
@@ -9099,11 +9151,41 @@ def test_typed_loop_branches(qemu: Path) -> str:
 
     _require(loop_encodings == 86,
              "loop branch corpus drifted from its exact 86 encodings")
+
+    for slot in (0, 1):
+        restart_program = loop_illegal_slot_restart_program(slot)
+        restarted = run_program(
+            qemu, restart_program, preserve_fault_slot=True,
+            typed_rfi_traces=((IA64_GENERAL_EXCEPTION_VECTOR + 0x70),),
+            one_bundle_per_tb=True,
+        )
+        expected_isr = slot << IA64_ISR_EI_SHIFT
+        _require(
+            restarted.ip == restart_program.terminal_ip and
+            restarted.gr[20:22] == (2, 3) and
+            restarted.gr[25:27] == (1, 3),
+            "slot-{} illegal CLOOP changed LC/EC before legal restart: "
+            "handler={}/{} final={}/{} IP=0x{:x}".format(
+                slot, restarted.gr[20], restarted.gr[21],
+                restarted.gr[25], restarted.gr[26], restarted.ip
+            ),
+        )
+        _require(
+            restarted.gr[22] == 0x60 and
+            ((restarted.gr[27] >> IA64_PSR_RI_SHIFT) & 3) == slot and
+            restarted.gr[24] == expected_isr,
+            "slot-{} illegal CLOOP expected IIP=0x60 RI={} ISR=0x{:x}, "
+            "got IIP=0x{:x} IPSR=0x{:x} ISR=0x{:x}".format(
+                slot, slot, expected_isr, restarted.gr[22],
+                restarted.gr[27], restarted.gr[24]
+            ),
+        )
     return (
         "35 exhaustive CLOOP/CTOP/CEXIT/WTOP/WEXIT truth-table rows, a "
         "49-rotation RRB/PR/SOR+NaT wrap, one false/no-stop rotating-overlay "
-        "case, and one first-taken suppression case provide 38 semantic "
-        "subtests and 86 typed loop encodings across eight programs"
+        "case, one first-taken suppression case, and two exact illegal-slot "
+        "RFI restarts provide 40 semantic subtests and 90 loop encodings "
+        "across ten programs"
     )
 
 

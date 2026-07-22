@@ -503,6 +503,9 @@ def check_vhpt_backing_debug_abort(root: Path) -> None:
 def check_application_register_plane(root: Path) -> None:
     """Lock target legality and legality/NaT/value/privilege ordering."""
     translate = (root / "target/ia64/translate.c").read_text(encoding="utf-8")
+    data_plane = (root / "target/ia64/data-plane.c").read_text(
+        encoding="utf-8"
+    )
     system = (root / "target/ia64/system-plane.c").read_text(encoding="utf-8")
     insn = (root / "target/ia64/insn.c").read_text(encoding="utf-8")
     ar_legality = section(
@@ -668,6 +671,62 @@ def check_application_register_plane(root: Path) -> None:
                   "env->nat.unat = value", "value & UINT64_C(0x3f)"):
         require(token in ar_writer,
                 "named AR ignored/preserve contract lost " + token)
+    atomic = section(
+        translate,
+        "static void ia64_tr_emit_decoded_data_plane_atomic(",
+        "static void ia64_tr_emit_decoded_data_plane_wide(",
+    )
+    require(
+        atomic.index("ia64_tr_group_load_ordinary_ar(") <
+        atomic.index("IA64_AR_CCV") <
+        atomic.index("gen_helper_data_plane_cmpxchg(") <
+        atomic.index("ia64_tr_group_stage_gr_known("),
+        "cmpxchg no longer consumes CCV before publishing the old value",
+    )
+    cmpxchg = section(
+        data_plane,
+        "uint64_t HELPER(data_plane_cmpxchg)(",
+        "static MemOpIdx ia64_data_plane_wide_oi(",
+    )
+    for token in (
+        "(compare & mask) == compare",
+        "ia64_data_plane_load_scalar(env, address, width, big_endian)",
+        "cpu_atomic_cmpxchgb_mmu",
+        "cpu_atomic_cmpxchgw_le_mmu",
+        "cpu_atomic_cmpxchgl_le_mmu",
+        "cpu_atomic_cmpxchgq_le_mmu",
+        "if (old == compare)",
+    ):
+        require(token in cmpxchg,
+                "CCV/cmpxchg width contract lost " + token)
+    fill = section(
+        translate,
+        "static void ia64_tr_emit_decoded_data_plane_integer_load(",
+        "static void ia64_tr_emit_decoded_data_plane_integer_spill(",
+    )
+    for token in (
+        "descriptor->memory_class == 6",
+        "ia64_tr_group_load_ordinary_ar(ctx, unat, IA64_AR_UNAT)",
+        "tcg_gen_shri_i64(bitpos, base, 3)",
+        "tcg_gen_andi_i64(bitpos, bitpos, 0x3f)",
+        "tcg_gen_shr_i64(result_nat, unat, bitpos)",
+    ):
+        require(token in fill, "ld8.fill UNAT selector contract lost " + token)
+    spill = section(
+        translate,
+        "static void ia64_tr_emit_decoded_data_plane_integer_spill(",
+        "static void ia64_tr_emit_decoded_data_plane_atomic(",
+    )
+    for token in (
+        "ia64_tr_group_prepare_ordered_ar_effect(",
+        "ia64_tr_group_load_ordered_ar_effect(ctx, unat, IA64_AR_UNAT)",
+        "tcg_gen_shri_i64(bitpos, base, 3)",
+        "tcg_gen_andi_i64(bitpos, bitpos, 0x3f)",
+        "tcg_gen_movcond_i64(TCG_COND_NE, next, value_nat",
+        "ia64_tr_group_stage_ordered_ar_effect(ctx, unat_write, next)",
+    ):
+        require(token in spill,
+                "st8.spill ordered UNAT selector contract lost " + token)
     preserve = section(
         system,
         "static void ia64_system_preserve_ar_write_sources(",
