@@ -199,6 +199,24 @@ RSE_FLUSHRS_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.18",
     "cpu.register.ar.19",
 )
+RSE_COVER_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_cover",
+    "cpu.register.ar.17",
+    "cpu.register.cr.23",
+    "cpu.register.scalar.cfm",
+)
+RSE_CLRRRB_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_clrrrb",
+    "cpu.opcode.ia64_op_clrrrb_pr",
+    "cpu.register.scalar.cfm",
+)
+RSE_LOADRS_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_loadrs",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -272,6 +290,18 @@ def validate_contract(root: Path) -> str:
         "RSE-006-FLUSHRS-DIRTY-EFFECT": list(
             RSE_FLUSHRS_IMPLEMENTATION_ROWS
         ),
+        "RSE-006-COVER-FRAME-EFFECT": list(
+            RSE_COVER_IMPLEMENTATION_ROWS
+        ),
+        "RSE-006-CLRRRB-RENAME-EFFECT": list(
+            RSE_CLRRRB_IMPLEMENTATION_ROWS
+        ),
+        "RSE-006-LOADRS-RESTORE-EFFECT": list(
+            RSE_LOADRS_IMPLEMENTATION_ROWS
+        ),
+        "RSE-006-LOADRS-LEGALITY": list(
+            RSE_LOADRS_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -285,12 +315,16 @@ def validate_contract(root: Path) -> str:
         "RSE-006-FLUSHRS-DIRTY-EFFECT": [
             "test_application_register_bspstore_rebase"
         ],
+        "RSE-006-COVER-FRAME-EFFECT": ["test_rse_control_effects"],
+        "RSE-006-CLRRRB-RENAME-EFFECT": ["test_rse_control_effects"],
+        "RSE-006-LOADRS-RESTORE-EFFECT": ["test_rse_control_effects"],
+        "RSE-006-LOADRS-LEGALITY": ["test_rse_control_effects"],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 27:
-        raise AssertionError("register tranche must contain twenty-seven cases")
+    if not isinstance(cases, list) or len(cases) != 31:
+        raise AssertionError("register tranche must contain thirty-one cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -390,7 +424,7 @@ def validate_contract(root: Path) -> str:
         "48 PR bases, all 128 AR selectors in both units, all 128 CR "
         "selectors, interruption-access states, complete nine-register AR "
         "and named CR field partitions, 6,208 dirty/RNAT BSPSTORE rebases "
-        "plus an exact 96-register FLUSHRS backing image, "
+        "plus exact COVER, CLRRRB, LOADRS, and 96-register FLUSHRS effects, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -1888,6 +1922,416 @@ def application_register_bspstore_dirty_matrix_program(
     )
 
 
+def rse_expected_cfm(sof: int, sol: int, sor: int,
+                     rrb_gr: int = 0, rrb_fr: int = 0,
+                     rrb_pr: int = 0) -> int:
+    return (
+        sof | (sol << 7) | ((sor // 8) << 14) |
+        (rrb_gr << 18) | (rrb_fr << 25) | (rrb_pr << 32)
+    )
+
+
+def rse_cover_effect_program(h: ModuleType, system: ModuleType,
+                             collection_enabled: bool):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    address = entry
+    bundles: list[object] = []
+    expected_cfm = rse_expected_cfm(8, 3, 8, 7, 95, 47)
+    preserved_ifs = (1 << 63) | rse_expected_cfm(2, 1, 0)
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    emit(0x01, h.rsm(h.IA64_PSR_IC), h.nop_i(), h.nop_i())
+    emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+    emit_movl(8, preserved_ifs)
+    emit(0x01, h.mov_grcr(23, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(29, 0x1800, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+    emit(0x01, h.alloc(31, 8, 3, 1), h.nop_i(), h.nop_i())
+    for offset in range(8):
+        emit(0x01, h.nop_m(), h.adds(32 + offset, offset + 1, 0),
+             h.nop_i())
+    emit(0x03, h.nop_m(), h.cmp_rr(6, 7, 0, 0, "eq"), h.nop_i())
+    branch_ip = address
+    emit(0x11, h.nop_m(), h.nop_i(),
+         h.br_loop("wtop", branch_ip, branch_ip + 0x10, qp=6))
+    if collection_enabled:
+        emit(0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i())
+        emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+
+    # B8 COVER is unpredicated and last in its group.  It must preserve all
+    # eight current-frame values as dirty while publishing a zero-sized CFM.
+    emit(0x11, h.nop_m(), h.nop_i(), 0x10000000)
+    if collection_enabled:
+        emit(0x01, h.rsm(h.IA64_PSR_IC), h.nop_i(), h.nop_i())
+        emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+    emit(0x01, h.mov_crgr(20, 23), h.nop_i(), h.nop_i())
+    emit_movl(
+        28,
+        preserved_ifs if collection_enabled else (1 << 63) | expected_cfm,
+    )
+    address = append_gr_pair_check(h, bundles, address, 20, 28, failure)
+
+    # A following FLUSHRS makes COVER's local-and-output preservation visible
+    # in memory without accessing names outside the new zero-sized frame.
+    emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+    for offset in range(8):
+        emit(0x01, h.nop_m(), h.adds(10, 0x1800 + offset * 8, 0),
+             h.nop_i())
+        emit(0x01, h.ld8(21, 10), h.nop_i(), h.nop_i())
+        address = append_gr_check(
+            h, bundles, address, 21, offset + 1, failure
+        )
+
+    return finish_checked_program(
+        h,
+        "COVER effect with PSR.ic={}".format(int(collection_enabled)),
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        entry=entry,
+    )
+
+
+def rse_clrrrb_effect_program(h: ModuleType, predicate_only: bool):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    address = entry
+    bundles: list[object] = []
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    emit(0x01, h.alloc(31, 8, 8, 1), h.nop_i(), h.nop_i())
+    for offset in range(8):
+        emit(0x01, h.nop_m(), h.adds(32 + offset, offset + 1, 0),
+             h.nop_i())
+    emit(0x03, h.nop_m(), h.cmp_rr(6, 7, 0, 0, "eq"), h.nop_i())
+    branch_ip = address
+    emit(0x11, h.nop_m(), h.nop_i(),
+         h.br_loop("wtop", branch_ip, branch_ip + 0x10, qp=6))
+    emit(0x11, h.nop_m(), h.nop_i(),
+         0x28000000 if predicate_only else 0x20000000)
+
+    if predicate_only:
+        address = append_gr_check(h, bundles, address, 32, 8, failure)
+        address = append_gr_check(h, bundles, address, 33, 1, failure)
+    else:
+        address = append_gr_check(h, bundles, address, 32, 1, failure)
+        address = append_gr_check(h, bundles, address, 33, 2, failure)
+
+    return finish_checked_program(
+        h,
+        "CLRRRB{} exact rename effect".format(
+            ".PR" if predicate_only else ""
+        ),
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        entry=entry,
+    )
+
+
+def rse_backing_register_addresses(bspstore: int,
+                                   registers: int) -> tuple[int, ...]:
+    addresses: list[int] = []
+    address = bspstore
+    while len(addresses) < registers:
+        if ((address >> 3) & 0x3f) == 0x3f:
+            address += 8
+        addresses.append(address)
+        address += 8
+    return tuple(addresses)
+
+
+def rse_loadrs_restore_program(h: ModuleType, system: ModuleType):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    address = entry
+    bundles: list[object] = []
+    base = 0x19f8
+    register_addresses = rse_backing_register_addresses(base, 96)
+    final_bsp = register_addresses[-1] + 8
+    load_span = final_bsp - base
+    completed_rnat_address = 0x1bf8
+    completed_rnat = 0x2aaaaaaaaaaaaaaa
+    partial_rnat = 0x55555555
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    emit_movl(8, 0x5555555555555555)
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(29, base, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+
+    # Build 96 dirty values through real one-local caller frames, then spill
+    # them once so LOADRS has a complete clean partition to invalidate.
+    for dirty in range(1, 97):
+        emit(0x01, h.alloc(31, 1, 1, 0), h.nop_i(), h.nop_i())
+        data_address = 0x1000 + (dirty - 1) * 8
+        emit(0x01, h.nop_m(), h.adds(9, data_address, 0), h.nop_i())
+        emit(0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i())
+        call_ip = address
+        emit(0x11, h.nop_m(), h.nop_i(),
+             h.br_call(call_ip, call_ip + 0x10, 0))
+    emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+
+    # Zero-distance LOADRS invalidates every stacked register outside the
+    # current empty frame.  The following replacement backing image must
+    # therefore be fetched, not satisfied by the old clean physical values.
+    emit(0x01, h.nop_m(), h.adds(8, 0, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i())
+    emit(0x01, 0x0a << 27, h.nop_i(), h.nop_i())
+
+    for value, backing_address in enumerate(register_addresses, 1):
+        emit(0x01, h.nop_m(), h.adds(10, backing_address, 0),
+             h.adds(20, 0x100 + value, 0))
+        emit(0x01, h.st8(20, 10), h.nop_i(), h.nop_i())
+    emit_movl(20, completed_rnat)
+    emit(0x01, h.nop_m(), h.adds(10, completed_rnat_address, 0),
+         h.nop_i())
+    emit(0x01, h.st8(20, 10), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(10, base, 0), h.nop_i())
+    emit(0x01, h.st8(0, 10), h.nop_i(), h.nop_i())
+
+    # RSC.loadrs{2:0} are deliberately nonzero and must be ignored by LOADRS.
+    emit_movl(8, (load_span | 7) << 16)
+    emit(0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i())
+    emit_movl(25, partial_rnat)
+    emit(0x01, h.mov_m_grar(19, 25), h.nop_i(), h.nop_i())
+    emit(0x01, 0x0a << 27, h.nop_i(), h.nop_i())
+
+    emit(0x09, h.mov_m_argr(22, 18), h.mov_m_argr(23, 17), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(28, base, 0), h.nop_i())
+    address = append_gr_pair_check(h, bundles, address, 22, 28, failure)
+    emit(0x01, h.nop_m(), h.adds(28, final_bsp, 0), h.nop_i())
+    address = append_gr_pair_check(h, bundles, address, 23, 28, failure)
+
+    # Destroy the source image after LOADRS, then flush the loaded dirty
+    # physical state.  Exact reconstruction proves both payload and NaT loads.
+    for backing_address in register_addresses:
+        emit(0x01, h.nop_m(), h.adds(10, backing_address, 0), h.nop_i())
+        emit(0x01, h.st8(0, 10), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(10, completed_rnat_address, 0),
+         h.nop_i())
+    emit(0x01, h.st8(0, 10), h.nop_i(), h.nop_i())
+    emit(0x01, h.mov_m_grar(19, 0), h.nop_i(), h.nop_i())
+    emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+
+    for value, backing_address in enumerate(register_addresses, 1):
+        emit(0x01, h.nop_m(), h.adds(10, backing_address, 0), h.nop_i())
+        emit(0x01, h.ld8(20, 10), h.nop_i(), h.nop_i())
+        emit(0x01, h.nop_m(), h.adds(28, 0x100 + value, 0), h.nop_i())
+        address = append_gr_pair_check(
+            h, bundles, address, 20, 28, failure
+        )
+    emit(0x01, h.nop_m(), h.adds(10, completed_rnat_address, 0),
+         h.nop_i())
+    emit(0x01, h.ld8(20, 10), h.nop_i(), h.nop_i())
+    emit_movl(28, completed_rnat)
+    address = append_gr_pair_check(h, bundles, address, 20, 28, failure)
+    emit(0x01, h.mov_m_argr(24, 19), h.nop_i(), h.nop_i())
+    emit_movl(28, partial_rnat)
+    address = append_gr_pair_check(h, bundles, address, 24, 28, failure)
+
+    return (
+        finish_checked_program(
+            h,
+            "LOADRS zero-invalidate and exact 96-register reload",
+            bundles,
+            address,
+            failure=failure,
+            terminal=terminal,
+            data=tuple(
+                h.DataWord(0x1000 + (value - 1) * 8, value, 8)
+                for value in range(1, 97)
+            ),
+            entry=entry,
+        ),
+        base,
+        final_bsp,
+        partial_rnat,
+    )
+
+
+def rse_span_for_registers_below(bsp: int, registers: int) -> int:
+    address = bsp
+    remaining = registers
+    while remaining:
+        address -= 8
+        if ((address >> 3) & 0x3f) != 0x3f:
+            remaining -= 1
+    return bsp - address
+
+
+def rse_loadrs_illegal_program(h: ModuleType, system: ModuleType,
+                               kind: str):
+    loadrs_raw = 0x0a << 27
+    bundles: list[object] = []
+    if kind == "mode":
+        bundles.extend((
+            h.Bundle(0x10, 0x01, h.nop_m(), h.adds(8, 1, 0), h.nop_i()),
+            h.Bundle(0x20, 0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i()),
+            h.Bundle(0x30, 0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i()),
+            h.Bundle(0x40, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()),
+            h.Bundle(0x50, 0x01, loadrs_raw, h.nop_i(), h.nop_i()),
+        ))
+        fault_ip = 0x50
+        expected_cfm = 0
+        expected_pointer = 0
+    elif kind == "sof":
+        bundles.extend((
+            system.movl_bundle(h, 0x10, 8, 8 << 16),
+            h.Bundle(0x20, 0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i()),
+            h.Bundle(0x30, 0x01, h.alloc(31, 1, 1, 0), h.nop_i(), h.nop_i()),
+            h.Bundle(0x40, 0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i()),
+            h.Bundle(0x50, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()),
+            h.Bundle(0x60, 0x01, loadrs_raw, h.nop_i(), h.nop_i()),
+        ))
+        fault_ip = 0x60
+        expected_cfm = rse_expected_cfm(1, 1, 0)
+        expected_pointer = 0
+    elif kind == "capacity":
+        span = rse_span_for_registers_below(0x4000, 97)
+        bundles.extend((
+            system.movl_bundle(h, 0x10, 8, 0x4000),
+            h.Bundle(0x20, 0x01, h.mov_m_grar(18, 8), h.nop_i(), h.nop_i()),
+            system.movl_bundle(h, 0x30, 8, span << 16),
+            h.Bundle(0x40, 0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i()),
+            h.Bundle(0x50, 0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i()),
+            h.Bundle(0x60, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()),
+            h.Bundle(0x70, 0x01, loadrs_raw, h.nop_i(), h.nop_i()),
+        ))
+        fault_ip = 0x70
+        expected_cfm = 0
+        expected_pointer = 0x4000
+    else:
+        raise AssertionError(f"unknown LOADRS illegal case {kind}")
+    bundles.append(h.spin_bundle(h.IA64_GENERAL_EXCEPTION_VECTOR))
+    return (
+        h.Program(
+            f"LOADRS Illegal Operation: {kind}",
+            tuple(bundles),
+            h.IA64_GENERAL_EXCEPTION_VECTOR,
+        ),
+        fault_ip,
+        expected_cfm,
+        expected_pointer,
+    )
+
+
+def test_rse_control_effects(h: ModuleType, system: ModuleType,
+                             qemu: Path) -> str:
+    cover_expected_cfm = rse_expected_cfm(8, 3, 8, 7, 95, 47)
+    for collection_enabled in (False, True):
+        program = rse_cover_effect_program(h, system, collection_enabled)
+        snapshot = h.run_program(qemu, program, compact_loader=True)
+        expected_ifs = (
+            ((1 << 63) | rse_expected_cfm(2, 1, 0))
+            if collection_enabled else (1 << 63) | cover_expected_cfm
+        )
+        if (snapshot.gr[14] != 1 or snapshot.gr[20] != expected_ifs or
+                snapshot.cfm != 0 or snapshot.rse_bsp != 0x1840 or
+                snapshot.rse_bspstore != 0x1840):
+            raise AssertionError(
+                "COVER effect failed for PSR.ic={}: marker={} IFS=0x{:x} "
+                "CFM=0x{:x} BSP/BSPSTORE=0x{:x}/0x{:x}".format(
+                    int(collection_enabled), snapshot.gr[14],
+                    snapshot.gr[20], snapshot.cfm, snapshot.rse_bsp,
+                    snapshot.rse_bspstore,
+                )
+            )
+
+    for predicate_only in (True, False):
+        program = rse_clrrrb_effect_program(h, predicate_only)
+        snapshot = h.run_program(qemu, program, compact_loader=True)
+        expected_cfm = rse_expected_cfm(
+            8, 8, 8, 7 if predicate_only else 0,
+            95 if predicate_only else 0, 0,
+        )
+        expected_gr = (8, 1) if predicate_only else (1, 2)
+        if (snapshot.gr[14] != 1 or snapshot.cfm != expected_cfm or
+                (snapshot.gr[32], snapshot.gr[33]) != expected_gr):
+            raise AssertionError(
+                "CLRRRB{} effect failed: marker={} CFM=0x{:x} "
+                "r32/r33={}/{}".format(
+                    ".PR" if predicate_only else "", snapshot.gr[14],
+                    snapshot.cfm, snapshot.gr[32], snapshot.gr[33],
+                )
+            )
+
+    load_program, base, final_bsp, partial_rnat = \
+        rse_loadrs_restore_program(h, system)
+    loaded = h.run_program(qemu, load_program, compact_loader=True)
+    if (loaded.gr[14] != 1 or loaded.cfm != 0 or
+            loaded.rse_bsp != final_bsp or
+            loaded.rse_bspstore != final_bsp or
+            loaded.rse_bspload not in {base, final_bsp} or
+            loaded.rse_rnat != partial_rnat):
+        raise AssertionError(
+            "LOADRS reconstruction failed: marker={} CFM=0x{:x} "
+            "BSP/BSPSTORE/BSPLOAD=0x{:x}/0x{:x}/0x{:x} RNAT=0x{:x}".format(
+                loaded.gr[14], loaded.cfm, loaded.rse_bsp,
+                loaded.rse_bspstore, loaded.rse_bspload, loaded.rse_rnat,
+            )
+        )
+
+    for kind in ("mode", "sof", "capacity"):
+        program, fault_ip, expected_cfm, expected_pointer = \
+            rse_loadrs_illegal_program(h, system, kind)
+        faulted = h.run_program(
+            qemu, program, compact_loader=True, preserve_fault_slot=True
+        )
+        if (faulted.ip != h.IA64_GENERAL_EXCEPTION_VECTOR or
+                faulted.exception_kind != "illegal-operation" or
+                faulted.cr_iip != fault_ip or faulted.cr_isr != 0 or
+                faulted.cfm != expected_cfm or
+                faulted.rse_bsp != expected_pointer or
+                faulted.rse_bspstore != expected_pointer or
+                faulted.rse_bspload != expected_pointer):
+            raise AssertionError(
+                "LOADRS {} preflight fault mismatch: ip=0x{:x} kind={} "
+                "IIP/ISR=0x{:x}/0x{:x} CFM=0x{:x} "
+                "BSP/BSPSTORE/BSPLOAD=0x{:x}/0x{:x}/0x{:x}".format(
+                    kind, faulted.ip, faulted.exception_kind,
+                    faulted.cr_iip, faulted.cr_isr, faulted.cfm,
+                    faulted.rse_bsp, faulted.rse_bspstore,
+                    faulted.rse_bspload,
+                )
+            )
+
+    return (
+        "COVER preserves eight local/output values and exact IFS policy; "
+        "CLRRRB.PR/all clear only their defined rename bases and logical "
+        "views; LOADRS zero-invalidates then reloads 96 replaced values and "
+        "two NaT classes, with three exact preflight Illegal Operations"
+    )
+
+
 def application_register_field_fault_cases() -> tuple[
         tuple[int, int, str], ...]:
     cases: list[tuple[int, int, str]] = []
@@ -2650,6 +3094,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
         ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
+        ("RSE control effects", lambda: test_rse_control_effects(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),
         ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),
