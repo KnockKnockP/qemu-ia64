@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 6,
+  "catalogue_revision": 7,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2135,6 +2135,26 @@
       "committed_prefix": "A zero-distance LOADRS invalidates registers outside the current frame; a successful nonzero LOADRS makes the tear-point-to-BSP range present and dirty",
       "restart_rule": "No restart occurs for the selected legal request and mapped readable backing image",
       "permitted_results": ["All 96 replacement payloads and their completed/partial RNAT NaTs are loaded; after source destruction a FLUSHRS exactly reconstructs that image; BSP is unchanged and BSPSTORE/BspLoad identify the tear point after LOADRS and BSP after the final flush as permitted by the RSE state relation"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-007-MANDATORY-DTC-RETRY",
+      "requirement_ids": ["RSE-007", "RSE-004", "RSE-005", "RSE-009"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "6.6", "printed_pages": ["2:144", "2:145", "2:146"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Mandatory RSE stores occur in the context of alloc and flushrs instructions only. Any faults raised by these instructions are delivered on the issuing instruction. Faults raised by mandatory RSE loads caused by a loadrs are delivered on the issuing instruction."},
+      "operation": {"kind": "mandatory-rse-dtc-fault-retry", "selector": "ALLOC and FLUSHRS mandatory stores plus a LOADRS mandatory load, each crossing one 4 KiB RSE translation boundary after a committed prefix", "encoding": "legal first-in-group ALLOC, FLUSHRS, or LOADRS followed by an Alternate Data TLB handler that installs the missing identity DTC entry and executes RFI"},
+      "legal_inputs": ["PSR.ic and PSR.rt enabled and serialized", "The first backing-store page mapped with a legal 4 KiB DTC entry", "The following page absent from the DTC", "Complete frames and legal RSE instruction fields"],
+      "privilege": {"levels": [0], "rule": "The translated RSE references and physical interruption handler execute at CPL0 using RSC.pl zero"},
+      "state_read": ["dirty stacked-register values and NaTs", "LOADRS backing image", "RSE DTC entries", "BSP and BSPSTORE"],
+      "state_written": ["committed backing-store prefix", "BSPSTORE and RSE.BspLoad", "precise IIP, IFA, ISR, and IFS interruption state", "repaired DTC entry", "remaining mandatory backing-store suffix", "ALLOC CFM and destination or LOADRS physical values"],
+      "predication": {"applies": false, "rule": "The selected ALLOC uses p0; FLUSHRS and LOADRS are unpredicated"},
+      "nat_behavior": "The ALLOC and FLUSHRS store prefixes cross an RNAT collection word; the LOADRS prefix consists of two register words before the faulting RNAT address. Poisoning committed words in the handler distinguishes prefix replay from exact continuation.",
+      "possible_faults": ["Alternate Data TLB fault with ISR.rs one and ISR.w or ISR.r matching the mandatory reference"],
+      "fault_priority": ["instruction legality and complete-frame preconditions", "RSE address translation", "backing-store memory access", "instruction completion"],
+      "committed_prefix": "Each successful mandatory register or RNAT word advances BSPSTORE before the next word. The faulting word and instruction-final state do not commit: ALLOC retains its old frame until retry, while FLUSHRS and LOADRS retain only the completed backing-store prefix.",
+      "restart_rule": "The handler observes IFS.v zero, the issuing instruction in IIP, the faulting address in IFA, exact ISR.rs/access bits, and BSPSTORE at the fault word boundary; after installing the missing DTC entry, RFI retries the issuing instruction from that architectural prefix without replaying earlier words.",
+      "permitted_results": ["ALLOC, FLUSHRS, and LOADRS each raise exactly one Alternate Data TLB fault at the selected page boundary, preserve the handler-poisoned committed prefix, complete the untouched suffix once, and finish with exact frame, pointer, payload, and RSE-translation state"],
       "required_evidence": "E2"
     }
   ]

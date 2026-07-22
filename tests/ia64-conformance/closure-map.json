@@ -742,6 +742,13 @@
       "implementation_rows": ["cpu.opcode.ia64_op_loadrs", "cpu.register.ar.16", "cpu.register.ar.17", "cpu.register.ar.18", "cpu.register.ar.19"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "RSE-007-MANDATORY-DTC-RETRY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_alloc", "cpu.opcode.ia64_op_flushrs", "cpu.opcode.ia64_op_loadrs", "cpu.register.ar.16", "cpu.register.ar.17", "cpu.register.ar.18", "cpu.register.ar.19"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
     }
   ]
 }

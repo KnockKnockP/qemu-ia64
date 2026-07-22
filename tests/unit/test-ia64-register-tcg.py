@@ -220,6 +220,15 @@ RSE_LOADRS_IMPLEMENTATION_ROWS = (
 RSE_ALLOC_IMPLEMENTATION_ROWS = (
     "cpu.opcode.ia64_op_alloc",
 )
+RSE_MANDATORY_DTC_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_alloc",
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.opcode.ia64_op_loadrs",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -314,6 +323,9 @@ def validate_contract(root: Path) -> str:
         "RSE-006-ALLOC-MANDATORY-SPILL": list(
             RSE_ALLOC_IMPLEMENTATION_ROWS
         ),
+        "RSE-007-MANDATORY-DTC-RETRY": list(
+            RSE_MANDATORY_DTC_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -334,12 +346,15 @@ def validate_contract(root: Path) -> str:
         "RSE-006-ALLOC-FRAME-EFFECT": ["test_alloc_effects"],
         "RSE-006-ALLOC-LEGALITY": ["test_alloc_effects"],
         "RSE-006-ALLOC-MANDATORY-SPILL": ["test_alloc_effects"],
+        "RSE-007-MANDATORY-DTC-RETRY": [
+            "test_rse_mandatory_fault_retry"
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 34:
-        raise AssertionError("register tranche must contain thirty-four cases")
+    if not isinstance(cases, list) or len(cases) != 35:
+        raise AssertionError("register tranche must contain thirty-five cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -448,7 +463,7 @@ def validate_contract(root: Path) -> str:
         "selectors, interruption-access states, complete nine-register AR "
         "and named CR field partitions, 6,208 dirty/RNAT BSPSTORE rebases "
         "plus exact ALLOC, COVER, CLRRRB, LOADRS, and 96-register FLUSHRS "
-        "effects, "
+        "effects and ALLOC/FLUSHRS/LOADRS DTC fault/RFI retry, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -2212,6 +2227,331 @@ def rse_span_for_registers_below(bsp: int, registers: int) -> int:
     return bsp - address
 
 
+def append_rse_identity_dtc_mapping(
+        h: ModuleType, system: ModuleType, bundles: list[object],
+        address: int, page: int) -> int:
+    """Install one 4 KiB identity DTC entry while RSE translation is off."""
+    bundles.append(system.movl_bundle(h, address, 8, page))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_grcr(h.IA64_CR_IFA, 8), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.nop_m(), h.adds(9, 12 << 2, 0), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_grcr(h.IA64_CR_ITIR, 9), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 10, page | 0x661))
+    address += 0x10
+    # ITC.D must terminate its instruction group.
+    bundles.append(h.Bundle(
+        address, 0x0b, h.itc_d(10), h.nop_m(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
+    ))
+    return address + 0x10
+
+
+def append_rse_fault_handler(
+        h: ModuleType, system: ModuleType, bundles: list[object],
+        mapped_page: int,
+        poison: tuple[tuple[int, int], ...]) -> int:
+    """Repair one RSE DTC miss, poison its committed prefix, and RFI."""
+    address = h.IA64_ALTERNATE_DATA_TLB_VECTOR
+    for register, control in (
+            (20, h.IA64_CR_IIP), (21, h.IA64_CR_IFA),
+            (22, h.IA64_CR_ISR), (23, h.IA64_CR_IFS)):
+        bundles.append(h.Bundle(
+            address, 0x01, h.mov_crgr(register, control),
+            h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_m_argr(24, 18), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(system.movl_bundle(
+        h, address, 10, mapped_page | 0x661
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x0b, h.itc_d(10), h.nop_m(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for backing_address, value in poison:
+        bundles.append(system.movl_bundle(h, address, 8, backing_address))
+        address += 0x10
+        bundles.append(system.movl_bundle(h, address, 9, value))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.st8(9, 8), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(), h.rfi()
+    ))
+    return address
+
+
+def append_rse_enable_translated_faults(
+        h: ModuleType, system: ModuleType, bundles: list[object],
+        address: int) -> int:
+    bundles.append(system.movl_bundle(
+        h, address, 8, h.IA64_PSR_IC | h.IA64_PSR_RT
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_gr_to_psr_l(8), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()
+    ))
+    return address + 0x10
+
+
+def rse_flushrs_fault_retry_program(h: ModuleType, system: ModuleType):
+    entry = 0x10000
+    terminal = 0x70000
+    address = entry
+    bundles: list[object] = []
+    base = 0x7fe8
+    poison = (
+        (0x7fe8, 0x1111111111111111),
+        (0x7ff0, 0x2222222222222222),
+        (0x7ff8, 0x3333333333333333),
+    )
+
+    bundles.append(system.movl_bundle(h, address, 29, base))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for value in range(1, 5):
+        bundles.append(h.Bundle(
+            address, 0x01, h.alloc(31, 1, 1, 0), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.nop_m(),
+            h.adds(9, 0x1800 + (value - 1) * 8, 0), h.nop_i()
+        ))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        call_ip = address
+        bundles.append(h.Bundle(
+            address, 0x11, h.nop_m(), h.nop_i(),
+            h.br_call(call_ip, call_ip + 0x10, 0)
+        ))
+        address += 0x10
+
+    address = append_rse_identity_dtc_mapping(
+        h, system, bundles, address, 0x7000
+    )
+    address = append_rse_enable_translated_faults(
+        h, system, bundles, address
+    )
+    fault_ip = address
+    bundles.append(h.Bundle(
+        address, 0x01, 0x0c << 27, h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for register, backing_address in enumerate(
+            (0x7fe8, 0x7ff0, 0x7ff8, 0x8000, 0x8008), 8):
+        bundles.append(system.movl_bundle(h, address, 30, backing_address))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.ld8(register, 30), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(), h.br_cond(address, terminal)
+    ))
+    bundles.append(h.spin_bundle(terminal))
+    handler_rfi = append_rse_fault_handler(
+        h, system, bundles, 0x8000, poison
+    )
+    return (
+        h.Program(
+            "FLUSHRS mandatory-store DTC fault/RFI retry",
+            tuple(bundles), terminal,
+            tuple(h.DataWord(0x1800 + (value - 1) * 8, value, 8)
+                  for value in range(1, 5)),
+            entry=entry,
+        ),
+        fault_ip,
+        handler_rfi,
+        poison,
+    )
+
+
+def rse_loadrs_fault_retry_program(h: ModuleType, system: ModuleType):
+    entry = 0x10000
+    terminal = 0x70000
+    address = entry
+    bundles: list[object] = []
+    base = 0x7fe8
+    bsp = 0x8010
+    original = (0x41, 0x42, 0, 0x43, 0x44)
+    poison = ((0x8000, 0xaaaaaaaaaaaaaaaa),
+              (0x8008, 0xbbbbbbbbbbbbbbbb))
+
+    bundles.append(system.movl_bundle(h, address, 29, bsp))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 8, (bsp - base) << 16))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_m_grar(16, 8), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    address = append_rse_identity_dtc_mapping(
+        h, system, bundles, address, 0x8000
+    )
+    address = append_rse_enable_translated_faults(
+        h, system, bundles, address
+    )
+    fault_ip = address
+    bundles.append(h.Bundle(
+        address, 0x01, 0x0a << 27, h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+
+    # Erase the source, then spill the loaded physical state back to the same
+    # span.  The high-page words must retain their pre-fault values even
+    # though the handler poisoned memory after their loads committed.
+    for backing_address in (0x7fe8, 0x7ff0, 0x7ff8, 0x8000, 0x8008):
+        bundles.append(system.movl_bundle(h, address, 8, backing_address))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.st8(0, 8), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, 0x0c << 27, h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for register, backing_address in enumerate(
+            (0x7fe8, 0x7ff0, 0x7ff8, 0x8000, 0x8008), 8):
+        bundles.append(system.movl_bundle(h, address, 30, backing_address))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.ld8(register, 30), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(), h.br_cond(address, terminal)
+    ))
+    bundles.append(h.spin_bundle(terminal))
+    handler_rfi = append_rse_fault_handler(
+        h, system, bundles, 0x7000, poison
+    )
+    return (
+        h.Program(
+            "LOADRS mandatory-load DTC fault/RFI retry",
+            tuple(bundles), terminal,
+            tuple(h.DataWord(base + index * 8, value, 8)
+                  for index, value in enumerate(original)),
+            entry=entry,
+        ),
+        fault_ip,
+        handler_rfi,
+        original,
+    )
+
+
+def rse_alloc_fault_retry_program(h: ModuleType, system: ModuleType):
+    entry = 0x10000
+    terminal = 0x70000
+    address = entry
+    bundles: list[object] = []
+    base = 0x7ff0
+    poison = ((0x7ff0, 0x5151515151515151),
+              (0x7ff8, 0x6262626262626262))
+
+    bundles.append(system.movl_bundle(h, address, 29, base))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for value in range(1, 91):
+        bundles.append(h.Bundle(
+            address, 0x01, h.alloc(31, 1, 1, 0), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.nop_m(),
+            h.adds(9, 0x1800 + (value - 1) * 8, 0), h.nop_i()
+        ))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+        call_ip = address
+        bundles.append(h.Bundle(
+            address, 0x11, h.nop_m(), h.nop_i(),
+            h.br_call(call_ip, call_ip + 0x10, 0)
+        ))
+        address += 0x10
+
+    address = append_rse_identity_dtc_mapping(
+        h, system, bundles, address, 0x7000
+    )
+    address = append_rse_enable_translated_faults(
+        h, system, bundles, address
+    )
+    fault_ip = address
+    bundles.append(h.Bundle(
+        address, 0x01, h.alloc(31, 8, 0, 0), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    for register, backing_address in enumerate((0x7ff0, 0x7ff8, 0x8000), 8):
+        bundles.append(system.movl_bundle(h, address, 30, backing_address))
+        address += 0x10
+        bundles.append(h.Bundle(
+            address, 0x01, h.ld8(register, 30), h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(), h.br_cond(address, terminal)
+    ))
+    bundles.append(h.spin_bundle(terminal))
+    handler_rfi = append_rse_fault_handler(
+        h, system, bundles, 0x8000, poison
+    )
+    return (
+        h.Program(
+            "ALLOC mandatory-store DTC fault/RFI retry",
+            tuple(bundles), terminal,
+            tuple(h.DataWord(0x1800 + (value - 1) * 8, value, 8)
+                  for value in range(1, 91)),
+            entry=entry,
+        ),
+        fault_ip,
+        handler_rfi,
+        poison,
+    )
+
+
 def rse_loadrs_illegal_program(h: ModuleType, system: ModuleType,
                                kind: str):
     loadrs_raw = 0x0a << 27
@@ -2353,6 +2693,127 @@ def test_rse_control_effects(h: ModuleType, system: ModuleType,
         "CLRRRB.PR/all clear only their defined rename bases and logical "
         "views; LOADRS zero-invalidates then reloads 96 replaced values and "
         "two NaT classes, with three exact preflight Illegal Operations"
+    )
+
+
+def test_rse_mandatory_fault_retry(h: ModuleType, system: ModuleType,
+                                   qemu: Path) -> str:
+    write_isr = (1 << 33) | h.IA64_ISR_RS
+    read_isr = h.IA64_ISR_R | h.IA64_ISR_RS
+
+    flush_program, flush_ip, flush_rfi, flush_poison = \
+        rse_flushrs_fault_retry_program(h, system)
+    flushed = h.run_program(
+        qemu, flush_program, compact_loader=True,
+        preserve_fault_slot=True,
+        typed_direct_trace_ips=(flush_ip,),
+        typed_rfi_traces=(flush_rfi,),
+    )
+    if (flushed.ip != flush_program.terminal_ip or
+            flushed.exception_kind != "alternate-data-tlb-miss" or
+            flushed.exception_vector != h.IA64_ALTERNATE_DATA_TLB_VECTOR or
+            flushed.exception_source != flush_ip or
+            flushed.exception_address != 0x8000 or
+            flushed.gr[20] != flush_ip or flushed.gr[21] != 0x8000 or
+            flushed.gr[22] != write_isr or flushed.gr[23] != 0 or
+            flushed.gr[24] != 0x8000 or
+            flushed.gr[8:13] != (
+                flush_poison[0][1], flush_poison[1][1],
+                flush_poison[2][1], 3, 4,
+            ) or
+            flushed.rse_bsp != 0x8010 or
+            flushed.rse_bspstore != 0x8010 or
+            (flushed.psr & (h.IA64_PSR_IC | h.IA64_PSR_RT)) !=
+            (h.IA64_PSR_IC | h.IA64_PSR_RT)):
+        raise AssertionError(
+            "FLUSHRS fault/retry mismatch: ip=0x{:x} exc={}/0x{:x} "
+            "CR.IIP/ISR=0x{:x}/0x{:x} CFM=0x{:x} "
+            "IIP/IFA/ISR/IFS=0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+            "prefix/suffix={} BSP=0x{:x}/0x{:x} PSR=0x{:x}".format(
+                flushed.ip, flushed.exception_kind,
+                flushed.exception_address, flushed.cr_iip, flushed.cr_isr,
+                flushed.cfm, flushed.gr[20], flushed.gr[21],
+                flushed.gr[22], flushed.gr[23],
+                tuple(hex(value) for value in flushed.gr[8:13]),
+                flushed.rse_bsp, flushed.rse_bspstore, flushed.psr,
+            )
+        )
+
+    load_program, load_ip, load_rfi, load_original = \
+        rse_loadrs_fault_retry_program(h, system)
+    loaded = h.run_program(
+        qemu, load_program, compact_loader=True,
+        preserve_fault_slot=True,
+        typed_direct_trace_ips=(load_ip,),
+        typed_rfi_traces=(load_rfi,),
+    )
+    if (loaded.ip != load_program.terminal_ip or
+            loaded.exception_kind != "alternate-data-tlb-miss" or
+            loaded.exception_vector != h.IA64_ALTERNATE_DATA_TLB_VECTOR or
+            loaded.exception_source != load_ip or
+            loaded.exception_address != 0x7ff8 or
+            loaded.gr[20] != load_ip or loaded.gr[21] != 0x7ff8 or
+            loaded.gr[22] != read_isr or loaded.gr[23] != 0 or
+            loaded.gr[24] != 0x8000 or
+            loaded.gr[8:13] != load_original or
+            loaded.rse_bsp != 0x8010 or
+            loaded.rse_bspstore != 0x8010 or
+            (loaded.psr & (h.IA64_PSR_IC | h.IA64_PSR_RT)) !=
+            (h.IA64_PSR_IC | h.IA64_PSR_RT)):
+        raise AssertionError(
+            "LOADRS fault/retry mismatch: ip=0x{:x} exc={}/0x{:x} "
+            "IIP/IFA/ISR/IFS=0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+            "reflushed={} BSP=0x{:x}/0x{:x} PSR=0x{:x}".format(
+                loaded.ip, loaded.exception_kind,
+                loaded.exception_address, loaded.gr[20], loaded.gr[21],
+                loaded.gr[22], loaded.gr[23],
+                tuple(hex(value) for value in loaded.gr[8:13]),
+                loaded.rse_bsp, loaded.rse_bspstore, loaded.psr,
+            )
+        )
+
+    alloc_program, alloc_ip, alloc_rfi, alloc_poison = \
+        rse_alloc_fault_retry_program(h, system)
+    allocated = h.run_program(
+        qemu, alloc_program, compact_loader=True,
+        preserve_fault_slot=True,
+        typed_direct_trace_ips=(alloc_ip,),
+        typed_rfi_traces=(alloc_rfi,),
+    )
+    if (allocated.ip != alloc_program.terminal_ip or
+            allocated.exception_kind != "alternate-data-tlb-miss" or
+            allocated.exception_vector != h.IA64_ALTERNATE_DATA_TLB_VECTOR or
+            allocated.exception_source != alloc_ip or
+            allocated.exception_address != 0x8000 or
+            allocated.gr[20] != alloc_ip or allocated.gr[21] != 0x8000 or
+            allocated.gr[22] != write_isr or allocated.gr[23] != 0 or
+            allocated.gr[24] != 0x8000 or
+            allocated.gr[8:11] != (
+                alloc_poison[0][1], alloc_poison[1][1], 2,
+            ) or
+            allocated.cfm != 8 or allocated.gr[31] != 0x81 or
+            allocated.rse_bspstore != 0x8008 or
+            (allocated.psr & (h.IA64_PSR_IC | h.IA64_PSR_RT)) !=
+            (h.IA64_PSR_IC | h.IA64_PSR_RT)):
+        raise AssertionError(
+            "ALLOC fault/retry mismatch: ip=0x{:x} exc={}/0x{:x} "
+            "IIP/IFA/ISR/IFS=0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+            "prefix/suffix={} CFM=0x{:x} PFS=0x{:x} "
+            "BSPSTORE=0x{:x} PSR=0x{:x}".format(
+                allocated.ip, allocated.exception_kind,
+                allocated.exception_address, allocated.gr[20],
+                allocated.gr[21], allocated.gr[22], allocated.gr[23],
+                tuple(hex(value) for value in allocated.gr[8:11]),
+                allocated.cfm, allocated.gr[31],
+                allocated.rse_bspstore, allocated.psr,
+            )
+        )
+
+    return (
+        "ALLOC, FLUSHRS, and LOADRS each cross a 4 KiB RSE translation "
+        "boundary, expose exact IIP/IFA/ISR.rs and committed BSPSTORE "
+        "prefix state, install the missing DTC entry in the physical "
+        "handler, and RFI-retry without replaying poisoned committed words"
     )
 
 
@@ -3510,6 +3971,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
         ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
         ("RSE control effects", lambda: test_rse_control_effects(harness, system, args.qemu.resolve())),
+        ("RSE mandatory fault/retry", lambda: test_rse_mandatory_fault_retry(harness, system, args.qemu.resolve())),
         ("ALLOC frame and spill effects", lambda: test_alloc_effects(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),
