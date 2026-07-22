@@ -117,6 +117,35 @@ INTEGER_SPECULATION_SUCCESS_IMPLEMENTATION_ROWS = tuple(sorted((
       for suffix in ("a", "c_clr", "c_nc", "s", "sa")),
 )))
 
+ALAT_IDENTITY_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_bsw0",
+    "cpu.opcode.ia64_op_bsw1",
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_ldfs",
+    "cpu.register.scalar.psr",
+    *("cpu.opcode.ia64_op_ld{}{}".format(width, suffix)
+      for width in (1, 2, 4, 8) for suffix in ("a", "c_clr")),
+)))
+
+ALAT_INVALIDATION_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_invala",
+    "cpu.opcode.ia64_op_invalat",
+    "cpu.opcode.ia64_op_ldfs",
+    *("cpu.opcode.ia64_op_ld{}a".format(width)
+      for width in (1, 2, 4, 8)),
+    *("cpu.opcode.ia64_op_st{}".format(width)
+      for width in (1, 2, 4, 8)),
+    *("cpu.opcode.ia64_op_xchg{}".format(width)
+      for width in (1, 2, 4, 8)),
+)))
+
+ALAT_FALSE_PREDICATE_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_chk_a",
+    *("cpu.opcode.ia64_op_ld{}{}".format(width, suffix)
+      for width in (1, 2, 4, 8) for suffix in ("a", "sa")),
+)))
+
 
 def validate_contract(root: Path) -> str:
     path = root / "tests/ia64-conformance/speculation-semantic-tranche.json"
@@ -126,8 +155,9 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 9:
-        raise AssertionError("speculation tranche must contain nine atomic cases")
+    if not isinstance(cases, list) or len(cases) != 12:
+        raise AssertionError(
+            "speculation tranche must contain twelve atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC",
@@ -138,7 +168,10 @@ def validate_contract(root: Path) -> str:
             "ALT-002-INTEGER-NO-RECOVERY-VHPT",
             "ALT-001-INTEGER-RECOVERY-DCR-DM",
             "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG",
-            "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES"}:
+            "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES",
+            "ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY",
+            "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION",
+            "ALT-006-INTEGER-FALSE-PREDICATE"}:
         raise AssertionError("speculation tranche normative rows drifted")
     deferred = by_row["ALT-001-INTEGER-NATPAGE-DEFERRAL"]
     if deferred.get("implementation_rows") != list(
@@ -170,6 +203,34 @@ def validate_contract(root: Path) -> str:
             "successful_integer_speculative_load_case",
             "successful_integer_check_load_case"]:
         raise AssertionError("successful speculation execution probes drifted")
+    identity = by_row["ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY"]
+    if identity.get("implementation_rows") != list(
+            ALAT_IDENTITY_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT identity implementation rows drifted")
+    if identity.get("execution", {}).get("probes") != [
+            "integer_alat_target_identity_case",
+            "alat_target_type_identity_case",
+            "integer_mismatched_clear_case",
+            "banked_gr_alat_identity_case"]:
+        raise AssertionError("ALAT identity execution probes drifted")
+    invalidation = by_row[
+        "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION"]
+    if invalidation.get("implementation_rows") != list(
+            ALAT_INVALIDATION_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT invalidation implementation rows drifted")
+    if invalidation.get("execution", {}).get("probes") != [
+            "integer_store_alat_invalidation_case",
+            "integer_atomic_alat_invalidation_case",
+            "invala_all_entries_case",
+            "invala_selected_entries_case"]:
+        raise AssertionError("ALAT invalidation execution probes drifted")
+    false_predicate = by_row["ALT-006-INTEGER-FALSE-PREDICATE"]
+    if false_predicate.get("implementation_rows") != list(
+            ALAT_FALSE_PREDICATE_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT false-predicate implementation rows drifted")
+    if false_predicate.get("execution", {}).get("probes") != [
+            "predicated_integer_advanced_load_case"]:
+        raise AssertionError("ALAT false-predicate execution probe drifted")
     immediate = by_row["ALT-002-INTEGER-NO-RECOVERY-FAULTS"]
     if immediate.get("implementation_rows") != list(
             INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS):
@@ -222,6 +283,10 @@ def validate_contract(root: Path) -> str:
     recovery_variants = set(recovery.get("applicable_variants", []))
     recovery_other_variants = set(
         recovery_other.get("applicable_variants", []))
+    identity_variants = set(identity.get("applicable_variants", []))
+    invalidation_variants = set(invalidation.get("applicable_variants", []))
+    false_predicate_variants = set(
+        false_predicate.get("applicable_variants", []))
     for width in (1, 2, 4, 8):
         if "ld{}.s".format(width) not in variants or \
                 "ld{}.sa".format(width) not in variants:
@@ -243,7 +308,25 @@ def validate_contract(root: Path) -> str:
                 raise AssertionError(
                     "successful speculation row misses ld{}.{}".format(
                         width, suffix)
+                    )
+        for suffix in ("a", "c.clr"):
+            if "ld{}.{}".format(width, suffix) not in identity_variants:
+                raise AssertionError(
+                    "ALAT identity row misses ld{}.{}".format(width, suffix)
                 )
+        for suffix in ("a", "sa"):
+            if "ld{}.{}".format(width, suffix) not in \
+                    false_predicate_variants:
+                raise AssertionError(
+                    "false-predicate row misses ld{}.{}".format(
+                        width, suffix)
+                )
+        for prefix in ("ld", "st", "xchg"):
+            variant = "{}{}{}".format(
+                prefix, width, ".a" if prefix == "ld" else "")
+            if variant not in invalidation_variants:
+                raise AssertionError(
+                    "ALAT invalidation row misses " + variant)
         if "ld{}.s".format(width) not in immediate_variants or \
                 "ld{}.sa".format(width) not in immediate_variants:
             raise AssertionError(
@@ -270,7 +353,9 @@ def validate_contract(root: Path) -> str:
                 "DCR protection/debug row misses width {} variants".format(
                     width)
             )
-    return ("nine exact ALT rows cover non-faulting speculation attributes, "
+    return ("twelve exact ALT rows cover ALAT identity, local/explicit "
+            "invalidation, false predication, non-faulting speculation "
+            "attributes, "
             "PSR.ed software deferral, PSR.ic=0 always-defer, deferred "
             "NaTPage, and no-recovery "
             "translation, alignment, protection, debug, VHPT-translation, "
@@ -339,6 +424,12 @@ def ordinary_load(width: int, r1: int, r3: int, *, qp: int = 0) -> int:
     code = {1: 0, 2: 1, 4: 2, 8: 3}[width]
     return (H.op(4) | H.bitfield(code, 30, 6) | H.bitfield(r3, 20, 7)
             | H.bitfield(r1, 6, 7) | qp)
+
+
+def ordinary_store(width: int, r2: int, r3: int, *, qp: int = 0) -> int:
+    code = {1: 0, 2: 1, 4: 2, 8: 3}[width]
+    return (H.op(4) | H.bitfield(0x30 + code, 30, 6)
+            | H.bitfield(r3, 20, 7) | H.bitfield(r2, 13, 7) | qp)
 
 
 def _append_i(bundles: List[object], address: int,
@@ -439,6 +530,21 @@ def _marker_bundle(address: int, reg: int, value: int,
                    target: int) -> object:
     return H.Bundle(address, 0x11, H.nop_m(), H.adds(reg, value, 0),
                     H.br_cond(address, target))
+
+
+def _append_alat_miss_probe(bundles: List[object], address: int, *,
+                            reg: int, marker_reg: int,
+                            fp: bool = False) -> Tuple[int, int]:
+    recovery = address + 0x20
+    successor = address + 0x30
+    bundles.extend((
+        H.Bundle(address, 0x01,
+                 _chk_a_branch(address, recovery, reg=reg, fp=fp),
+                 H.nop_i(), H.nop_i()),
+        _marker_bundle(address + 0x10, marker_reg, 0xBAD, successor),
+        _marker_bundle(recovery, marker_reg, 1, successor),
+    ))
+    return successor, address
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2723,6 +2829,432 @@ def successful_integer_check_load_case(
     )
 
 
+def predicated_integer_advanced_load_case(
+        width: int, memory_class: str, enabled: bool) -> RuntimeCase:
+    """Exercise a nonzero true or false predicate on LD.A/LD.SA."""
+    if memory_class not in ("a", "sa"):
+        raise ValueError("predicated advanced load requires .a or .sa")
+    load_address, physical, address, bundles = \
+        _successful_speculation_fixture(width, "speculative")
+    if not enabled:
+        load_address = 1 << 50
+        bundles.append(_movl_bundle(address, 7, load_address))
+        address += 0x10
+    bundles.append(H.Bundle(
+        address, 0x03, H.nop_m(), H.cmp_rr(1, 2, 0, 0, "eq"),
+        H.nop_i()))
+    address += 0x10
+    load_ip = address
+    address = _append_m(
+        bundles, address,
+        integer_load(width, memory_class, r1=20, r3=7,
+                     qp=1 if enabled else 2, update="imm", imm=width),
+        [],
+    )
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "LD{}.{} p{} {}".format(
+        width, memory_class.upper(), 1 if enabled else 2,
+        "true" if enabled else "false")
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal, label + " missed terminal")
+        if enabled:
+            mask = ((1 << (width * 8)) - 1
+                    if width != 8 else (1 << 64) - 1)
+            H._require(snapshot.gr[20] ==
+                       (0x8877665544332211 & mask) and
+                       not (snapshot.nat_low & (1 << 20)) and
+                       snapshot.gr[7] == load_address + width,
+                       label + " did not execute with exact value/update")
+            H._require(snapshot.gr[30] in (1, 0xBAD),
+                       label + " produced an impossible ALAT edge")
+        else:
+            H._require(snapshot.gr[20] ==
+                       (0x6A00000000000000 | width) and
+                       not (snapshot.nat_low & (1 << 20)) and
+                       snapshot.gr[7] == load_address,
+                       label + " changed destination, NaT, or base")
+            H._require(snapshot.gr[30] == 1,
+                       label + " created an ALAT entry")
+        return (label + " obeyed nonzero predicate qualification with "
+                "exact register/update/ALAT effects")
+
+    return RuntimeCase(
+        label, program, (load_ip, check_ip), verify,
+        ("IA64_OP_LD{}{}".format(width, memory_class.upper()),
+         "IA64_OP_CHK_A"),
+    )
+
+
+def integer_alat_target_identity_case(width: int) -> RuntimeCase:
+    """A GR-target tag must not satisfy a check for another GR."""
+    _, physical, address, bundles = \
+        _successful_speculation_fixture(width, "speculative")
+    advanced_ip = address
+    address = _append_m(
+        bundles, address, integer_load(width, "a", r1=20, r3=7), [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=21, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "LD{}.A r20 versus CHK.A r21 target identity".format(width)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[30] == 1,
+                   label + " produced a false target-tag hit")
+        return label + " took mandatory recovery for the distinct GR tag"
+
+    return RuntimeCase(
+        label, program, (advanced_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(width), "IA64_OP_CHK_A"),
+    )
+
+
+def alat_target_type_identity_case(source_type: str) -> RuntimeCase:
+    """GR and FR tags with the same numeric register remain distinct."""
+    virtual = 0x8000
+    physical = 0x2000
+    bundles: List[object] = [
+        _movl_bundle(0x10000, 7, virtual),
+        _movl_bundle(0x10010, 2, _mapped_pte(physical, 0)),
+    ]
+    address = _append_dtc_install(bundles, 0x10020)
+    if source_type == "gr":
+        advanced_raw = integer_load(8, "a", r1=20, r3=7)
+        checked_fp = True
+        advanced_opcode = "IA64_OP_LD8A"
+    elif source_type == "fr":
+        advanced_raw = floating_load(
+            "IA64_OP_LDFS", attr="a", f1=20, r3=7)
+        checked_fp = False
+        advanced_opcode = "IA64_OP_LDFS"
+    else:
+        raise ValueError("ALAT source type must be gr or fr")
+    advanced_ip = address
+    address = _append_m(bundles, address, advanced_raw, [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30, fp=checked_fp)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    checked_type = "FR" if checked_fp else "GR"
+    label = "{}20 ALAT tag versus {}20 check".format(
+        source_type.upper(), checked_type)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x3FC00000, 4),), entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[30] == 1,
+                   label + " produced a false cross-type ALAT hit")
+        return label + " took mandatory recovery for the distinct type tag"
+
+    return RuntimeCase(
+        label, program, (advanced_ip, check_ip), verify,
+        (advanced_opcode, "IA64_OP_CHK_A"),
+    )
+
+
+def integer_mismatched_clear_case(width: int, mismatch: str) -> RuntimeCase:
+    """LD.C.CLR clears its target tag despite address/size mismatch."""
+    if mismatch not in ("address", "size"):
+        raise ValueError("check-load mismatch must be address or size")
+    virtual, physical, address, bundles = \
+        _successful_speculation_fixture(width, "speculative")
+    check_width = ({1: 2, 2: 4, 4: 8, 8: 1}[width]
+                   if mismatch == "size" else width)
+    if mismatch == "address":
+        bundles.append(_movl_bundle(address, 8, virtual + 0x20))
+        address += 0x10
+    advanced_ip = address
+    address = _append_m(
+        bundles, address, integer_load(width, "a", r1=20, r3=7), [])
+    clear_ip = address
+    address = _append_m(
+        bundles, address,
+        integer_load(check_width, "c.clr", r1=20, r3=8), [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "LD{}.A/LD{}.C.CLR {} mismatch".format(
+        width, check_width, mismatch)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),
+              H.DataWord(physical + 0x20, 0x1122334455667788, 8)),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[30] == 1,
+                   label + " left the matching register tag visible")
+        return (label + " accepted its undefined data result but enforced "
+                "the mandatory target-tag clear")
+
+    return RuntimeCase(
+        label, program, (advanced_ip, clear_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(width),
+         "IA64_OP_LD{}C_CLR".format(check_width), "IA64_OP_CHK_A"),
+    )
+
+
+def integer_store_alat_invalidation_case(width: int) -> RuntimeCase:
+    """An overlapping ordinary store invalidates the advanced-load tag."""
+    virtual, physical, address, bundles = \
+        _successful_speculation_fixture(width, "speculative")
+    new_value = 0xA1B2C3D4E5F60718
+    bundles.append(_movl_bundle(address, 21, new_value))
+    address += 0x10
+    advanced_ip = address
+    address = _append_m(
+        bundles, address, integer_load(width, "a", r1=20, r3=7), [])
+    store_ip = address
+    address = _append_m(
+        bundles, address, ordinary_store(width, 21, 7), [])
+    reload_ip = address
+    address = _append_m(
+        bundles, address, ordinary_load(width, 22, 7), [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "ST{} overlapping LD{}.A invalidation".format(width, width)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        mask = ((1 << (width * 8)) - 1
+                if width != 8 else (1 << 64) - 1)
+        H._require(snapshot.ip == terminal and
+                   snapshot.gr[22] == (new_value & mask),
+                   label + " did not commit the exact store value")
+        H._require(snapshot.gr[30] == 1,
+                   label + " left the overlapped ALAT entry visible")
+        return label + " committed once and forced the following CHK.A miss"
+
+    return RuntimeCase(
+        label, program, (advanced_ip, store_ip, reload_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(width), "IA64_OP_ST{}".format(width),
+         "IA64_OP_CHK_A"),
+    )
+
+
+def integer_atomic_alat_invalidation_case(width: int) -> RuntimeCase:
+    """A successful overlapping XCHG invalidates the advanced-load tag."""
+    _, physical, address, bundles = \
+        _successful_speculation_fixture(width, "speculative")
+    new_value = 0xA1B2C3D4E5F60718
+    bundles.append(_movl_bundle(address, 21, new_value))
+    address += 0x10
+    advanced_ip = address
+    address = _append_m(
+        bundles, address, integer_load(width, "a", r1=20, r3=7), [])
+    atomic_ip = address
+    address = _append_m(
+        bundles, address,
+        atomic("IA64_OP_XCHG{}".format(width), r1=22, r2=21, r3=7), [])
+    reload_ip = address
+    address = _append_m(
+        bundles, address, ordinary_load(width, 23, 7), [])
+    address, check_ip = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "XCHG{} overlapping LD{}.A invalidation".format(width, width)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        mask = ((1 << (width * 8)) - 1
+                if width != 8 else (1 << 64) - 1)
+        H._require(snapshot.ip == terminal and
+                   snapshot.gr[22] == (0x8877665544332211 & mask) and
+                   snapshot.gr[23] == (new_value & mask),
+                   label + " returned or stored the wrong atomic value")
+        H._require(snapshot.gr[30] == 1,
+                   label + " left the overlapped ALAT entry visible")
+        return label + " exchanged once and forced the following CHK.A miss"
+
+    return RuntimeCase(
+        label, program, (advanced_ip, atomic_ip, reload_ip, check_ip), verify,
+        ("IA64_OP_LD{}A".format(width), "IA64_OP_XCHG{}".format(width),
+         "IA64_OP_CHK_A"),
+    )
+
+
+def invala_all_entries_case() -> RuntimeCase:
+    """INVALA removes every currently represented GR entry."""
+    virtual, physical, address, bundles = \
+        _successful_speculation_fixture(8, "speculative")
+    bundles.append(_movl_bundle(address, 8, virtual + 0x20))
+    address += 0x10
+    traced: List[int] = []
+    address = _append_m(
+        bundles, address, integer_load(8, "a", r1=20, r3=7), traced)
+    address = _append_m(
+        bundles, address, integer_load(8, "a", r1=21, r3=8), traced)
+    address = _append_m(
+        bundles, address, cache_control("IA64_OP_INVALA"), traced)
+    address, check20 = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30)
+    address, check21 = _append_alat_miss_probe(
+        bundles, address, reg=21, marker_reg=31)
+    traced.extend((check20, check21))
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    program = H.Program(
+        name="INVALA all-entry invalidation", bundles=tuple(bundles),
+        terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x1122334455667788, 8),
+              H.DataWord(physical + 0x20, 0x8877665544332211, 8)),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, "INVALA all-entry invalidation")
+        H._require(snapshot.ip == terminal and
+                   (snapshot.gr[30], snapshot.gr[31]) == (1, 1),
+                   "INVALA left one of two represented GR entries visible")
+        return "INVALA forced mandatory misses for both represented GR tags"
+
+    return RuntimeCase(
+        "INVALA all-entry invalidation", program, tuple(traced), verify,
+        ("IA64_OP_LD8A", "IA64_OP_INVALA", "IA64_OP_CHK_A"),
+    )
+
+
+def invala_selected_entries_case(target_type: str) -> RuntimeCase:
+    """INVALA.E removes each selected GR or FR register tag."""
+    virtual = 0x8000
+    physical = 0x2000
+    bundles: List[object] = [
+        _movl_bundle(0x10000, 7, virtual),
+        _movl_bundle(0x10010, 8, virtual + 0x20),
+        _movl_bundle(0x10020, 2, _mapped_pte(physical, 0)),
+    ]
+    address = _append_dtc_install(bundles, 0x10030)
+    traced: List[int] = []
+    if target_type == "gr":
+        loads = (
+            integer_load(8, "a", r1=20, r3=7),
+            integer_load(8, "a", r1=21, r3=8),
+        )
+        fp = False
+        load_opcode = "IA64_OP_LD8A"
+    elif target_type == "fr":
+        loads = (
+            floating_load("IA64_OP_LDFS", attr="a", f1=20, r3=7),
+            floating_load("IA64_OP_LDFS", attr="a", f1=21, r3=8),
+        )
+        fp = True
+        load_opcode = "IA64_OP_LDFS"
+    else:
+        raise ValueError("INVALA.E target type must be gr or fr")
+    for raw in loads:
+        address = _append_m(bundles, address, raw, traced)
+    address = _append_m(
+        bundles, address,
+        cache_control("IA64_OP_INVALAT", reg=20, fp=fp), traced)
+    address, check20 = _append_alat_miss_probe(
+        bundles, address, reg=20, marker_reg=30, fp=fp)
+    address = _append_m(
+        bundles, address,
+        cache_control("IA64_OP_INVALAT", reg=21, fp=fp), traced)
+    address, check21 = _append_alat_miss_probe(
+        bundles, address, reg=21, marker_reg=31, fp=fp)
+    traced.extend((check20, check21))
+    terminal = address
+    bundles.append(H.spin_bundle(terminal))
+    label = "INVALA.E {} selected-entry invalidation".format(
+        target_type.upper())
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x3FC00000, 4),
+              H.DataWord(physical + 0x20, 0x40000000, 4)),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and
+                   (snapshot.gr[30], snapshot.gr[31]) == (1, 1),
+                   label + " left a selected entry visible")
+        return label + " forced mandatory misses for both selected tags"
+
+    return RuntimeCase(
+        label, program, tuple(traced), verify,
+        (load_opcode, "IA64_OP_INVALAT", "IA64_OP_CHK_A"),
+    )
+
+
+def banked_gr_alat_identity_case() -> RuntimeCase:
+    """A bank-0 advanced-load tag must not match bank-1 GR16."""
+    bundles: List[object] = [
+        _movl_bundle(0x10, 10, 0x1800),
+        H.Bundle(0x20, 0x01,
+                 integer_load(8, "a", r1=16, r3=10),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x30, 0x11, H.nop_m(), H.nop_i(),
+                 H.bitfield(0x0D, 27, 6)),  # bsw.1
+        H.Bundle(0x40, 0x01,
+                 _chk_a_branch(0x40, 0x60, reg=16),
+                 H.nop_i(), H.nop_i()),
+        _marker_bundle(0x50, 40, 0xBAD, 0x80),
+        _marker_bundle(0x60, 40, 1, 0x80),
+        H.Bundle(0x80, 0x11, H.nop_m(), H.nop_i(),
+                 H.bitfield(0x0C, 27, 6)),  # bsw.0
+        H.spin_bundle(0x90),
+    ]
+    program = H.Program(
+        name="banked GR physical-target ALAT identity",
+        bundles=tuple(bundles), terminal_ip=0x90,
+        data=(H.DataWord(0x1800, 0x1122334455667788, 8),),
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, "banked GR ALAT identity")
+        H._require(snapshot.ip == 0x90 and snapshot.gr[40] == 1,
+                   "bank-0 r16 ALAT entry falsely matched bank-1 r16")
+        H._require(snapshot.gr[16] == 0x1122334455667788,
+                   "bsw.0 did not restore the advanced-loaded bank-0 r16")
+        H._require(not (snapshot.psr & (1 << 44)),
+                   "terminal state did not return to bank 0")
+        return ("bank-0 r16 retained its value while bank-1 CHK.A took "
+                "recovery for the distinct physical register tag")
+
+    return RuntimeCase(
+        "banked GR physical-target ALAT identity", program, (0x20, 0x40),
+        verify, ("IA64_OP_LD8A", "IA64_OP_CHK_A", "IA64_OP_BSW1",
+                 "IA64_OP_BSW0"),
+    )
+
+
 def integer_speculative_protection_fault_case(
         width: int, memory_class: str, condition: str) -> RuntimeCase:
     if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
@@ -3617,6 +4149,31 @@ def checked_branch_disabled_fr_case() -> RuntimeCase:
     )
 
 
+def checkpoint_28_cases() -> Tuple[RuntimeCase, ...]:
+    return (
+        *(predicated_integer_advanced_load_case(
+              width, memory_class, enabled)
+          for enabled in (True, False)
+          for width in (1, 2, 4, 8)
+          for memory_class in ("a", "sa")),
+        *(integer_alat_target_identity_case(width)
+          for width in (1, 2, 4, 8)),
+        *(alat_target_type_identity_case(source_type)
+          for source_type in ("gr", "fr")),
+        *(integer_mismatched_clear_case(width, mismatch)
+          for mismatch in ("address", "size")
+          for width in (1, 2, 4, 8)),
+        *(integer_store_alat_invalidation_case(width)
+          for width in (1, 2, 4, 8)),
+        *(integer_atomic_alat_invalidation_case(width)
+          for width in (1, 2, 4, 8)),
+        invala_all_entries_case(),
+        *(invala_selected_entries_case(target_type)
+          for target_type in ("gr", "fr")),
+        banked_gr_alat_identity_case(),
+    )
+
+
 def runtime_cases() -> Tuple[RuntimeCase, ...]:
     return (
         primary_admission_case(), alias_admission_case(), atomic_case(),
@@ -3712,6 +4269,7 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
         fc_nonaccess_accessed_case(), fc_nonaccess_rights_case(),
         checked_branch_gr_case(),
         checked_branch_fr_case(), checked_branch_disabled_fr_case(),
+        *checkpoint_28_cases(),
     )
 
 
@@ -3749,6 +4307,8 @@ def self_check(cases: Sequence[RuntimeCase]) -> str:
                 "decoder-reserved-width"]
     H._require(len(reserved) == 6,
                "expected six decoder-reserved spill/fill widths")
+    H._require(len(checkpoint_28_cases()) == 42,
+               "checkpoint 28 ALAT shard is not 42 programs")
     return ("{}; {} programs; 63 primary bundles (57 decoder-live); {} live "
             "alias/completer bundles; 12 shadowed split-load encodings; "
             "6 reserved-width rows"
@@ -3776,12 +4336,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="path to rewritten qemu-system-ia64")
     parser.add_argument("--self-check", action="store_true",
                         help="construct and validate programs without QEMU")
+    parser.add_argument(
+        "--group", choices=("all", "base", "checkpoint-28"), default="all",
+        help="run the complete inventory or one Meson-sized shard",
+    )
     args = parser.parse_args(argv)
-    cases = runtime_cases()
-    detail = self_check(cases)
+    all_cases = runtime_cases()
+    detail = self_check(all_cases)
     if args.self_check or args.qemu is None:
         print("data-plane runtime self-check: " + detail)
         return 0
+
+    checkpoint_count = len(checkpoint_28_cases())
+    if args.group == "base":
+        cases = all_cases[:-checkpoint_count]
+    elif args.group == "checkpoint-28":
+        cases = all_cases[-checkpoint_count:]
+    else:
+        cases = all_cases
 
     qemu = args.qemu.expanduser().resolve()
     print("TAP version 13")

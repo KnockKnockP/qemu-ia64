@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 50
+dependencies installed, configure, build, fetch the public manuals, run all 51
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first nine exact speculation contracts live in
+The first twelve exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -78,17 +78,34 @@ miss class. Exact values, advanced-load zero, NaT, post-increments, mandatory
 entry absence, and the architecture-permitted pessimistic ALAT-check outcomes
 are checked without assuming that a conforming implementation must report a
 hit.
+The tenth adds 15 ALAT-identity programs: distinct GR targets across all four
+widths, same-number GR/FR type separation in both directions, address- and
+size-mismatched clear checks across all widths, and banked GR16 physical-tag
+identity. The bank case caught and now guards the former false hit in which a
+bank-0 advanced load could satisfy a bank-1 `chk.a`; PSR.bn transitions now
+perform an architecturally permitted conservative eviction of GR16--GR31
+entries. Undefined mismatch destination data is deliberately not an oracle.
+The eleventh adds 11 invalidation programs. Matching-width `st1/2/4/8` and
+successful `xchg1/2/4/8` commit exact values and force an overlapping-entry
+miss, while `invala` and the GR/FR forms of `invala.e` force mandatory misses
+for all or selected represented tags. The twelfth adds 16 nonzero-predicate
+programs: every integer `.a` and `.sa` width executes through true p1, while
+false p2 points at an otherwise faulting unimplemented address and must leave
+destination, NaT, base, memory-access, and ALAT state unchanged.
 Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 serialized public gate after the
-non-faulting speculation-attribute checkpoint, `test-ia64-system-tcg` took
-47.05 seconds, `test-ia64-full-tcg` 48.39 seconds, and
-`test-ia64-register-tcg` 45.56 seconds. The expanded data-plane registration
-passed 637 subtests in 172.87 seconds, and all 50 selected tests passed in
-423.4 seconds. The serialized lane avoids the fixed five-second HMP-startup
+matrices execute. On the 2026-07-22 serialized public gate after the ALAT
+identity/invalidation/predication checkpoint, `test-ia64-system-tcg` took
+46.98 seconds, `test-ia64-full-tcg` 48.11 seconds, and
+`test-ia64-register-tcg` 45.55 seconds. The established data-plane shard
+passed 637 subtests in 171.76 seconds and the new ALAT shard passed 42 in
+11.52 seconds; all 51 selected tests passed in 425.265 seconds. The former
+single 180-second registration limit was an infrastructure timeout once the
+combined inventory reached 679 programs, not a semantic hang. The serialized
+lane avoids the fixed five-second HMP-startup
 contention seen under unrestricted host parallelism without weakening any
 per-test timeout. The
 RSE suites include five fresh-process

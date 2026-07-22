@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 74
+    "row_closing_claims_expected": 77
   },
   "entries": [
     {
@@ -155,11 +155,30 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-data-plane-tcg",
-      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks, including exact integer NaTPage deferral, 20-program no-recovery miss/alignment, 62-program no-recovery page/key/rights/access-bit/debug matrices, 16-program short-VHPT fault selection, the 72-program recovery-model ITLB.ed/DCR.dm conjunction across Alternate Data TLB, VHPT Data, and Data TLB, the 144-program condition-specific ITLB.ed/DCR.dp/dk/dx/dr/da/dd conjunction matrix, the complete 78-program PSR.ic=0 always-defer matrix, the complete 110-program first-restart PSR.ed software-deferral matrix, and the complete 96-program non-faulting integer speculation-attribute matrix with exact value/zero/NaT, update, exact-match/clean-miss check-load, and permitted ALAT outcomes.",
+      "scope": "Guest-executed 637-program IA-64 data-plane base shard, including exact integer NaTPage deferral, no-recovery miss/alignment/protection/debug/VHPT matrices, recovery-model DCR conjunction matrices, PSR.ic=0 always-defer, first-restart PSR.ed software deferral, and the complete 96-program non-faulting integer speculation-attribute matrix.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
       "closes_normative_rows": ["ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC", "ALT-001-INTEGER-NATPAGE-DEFERRAL", "ALT-001-INTEGER-RECOVERY-DCR-DM", "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG", "ALT-001-INTEGER-SOFTWARE-DEFER-PSR-ED", "ALT-002-INTEGER-NO-RECOVERY-FAULTS", "ALT-002-INTEGER-NO-RECOVERY-PROTECTION", "ALT-002-INTEGER-NO-RECOVERY-VHPT", "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES"],
-      "limitations": ["Only the explicitly claimed integer PSR.ic=0, PSR.ed, non-faulting speculation-attribute, NaTPage, no-recovery, and recovery-model DCR rows have complete normative contracts and independent exact matrices; spontaneous deferral, unconditional always-defer conditions outside the PSR.ed matrix, other simultaneous conditions, long-format VHPT, and legacy cases remain candidates and do not close their broader opcode, floating-point, memory, speculation, cache, atomic, or fault domains."]
+      "limitations": ["Only the explicitly claimed integer PSR.ic=0, PSR.ed, non-faulting speculation-attribute, NaTPage, no-recovery, and recovery-model DCR rows have complete normative contracts and independent exact matrices; broader speculation domains remain candidates."]
+    },
+    {
+      "id": "meson:test-ia64-data-plane-tcg-checkpoint-28",
+      "kind": "bare-metal",
+      "lane": "bare-metal-batch",
+      "primary_evidence_level": "E2",
+      "evidence_levels": ["E2"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-alat-tcg",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/speculation-semantic-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-alat-tcg",
+      "scope": "Guest-executed 42-program ALAT shard: target/type/bank/address/size identity, local store/atomic and explicit invalidation, and true/false nonzero-predicate integer advanced loads.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY", "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION", "ALT-006-INTEGER-FALSE-PREDICATE"],
+      "limitations": ["Physical memory aliases, stacked/rotating aliases, partial overlaps, failed atomics, RSE/context/interruption/remote invalidation, and broader floating predication remain separate work."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-static",

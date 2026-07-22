@@ -1008,13 +1008,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.check:
         counts = report["summary"]["by_state"]
+        if test_result_summary is None:
+            execution = "execution-results=not-supplied"
+        else:
+            execution_counts = test_result_summary["by_state"]
+            execution = (
+                f"execution-results={test_result_summary['focused_results']}; "
+                f"test-passed={execution_counts['test-passed']}; "
+                f"test-failed={execution_counts['test-failed']}; "
+                "test-infrastructure-failure="
+                f"{execution_counts['test-infrastructure-failure']}"
+            )
         print(
             "IA-64 conformance closure verified: "
             f"{report['summary']['join_rows']} rows; "
             f"implemented-untested={counts['implemented-untested']}; "
             f"advertised-untested={counts['advertised-untested']}; "
             f"known-unimplemented={counts['known-unimplemented']}; "
-            "execution-results=not-supplied; "
+            f"{execution}; "
             f"blocking={report['summary']['blocking_rows']}"
         )
         return 0

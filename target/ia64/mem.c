@@ -27,6 +27,7 @@
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_ED_BIT UINT64_C(0x0000080000000000)
 #define IA64_PSR_AC_BIT UINT64_C(0x0000000000000008)
+#define IA64_PSR_BN_BIT UINT64_C(0x0000100000000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_INSERTION_PPN_MASK UINT64_C(0x0003fffffffff000)
 
@@ -136,6 +137,18 @@ void ia64_psr_mmu_state_changed(CPUIA64State *env,
 
     if (env && ((old_psr ^ new_psr) & cached_policy)) {
         ia64_cpu_tlb_flush(env);
+    }
+    if (env && ((old_psr ^ new_psr) & IA64_PSR_BN_BIT)) {
+        /*
+         * GR16..GR31 name distinct physical registers in the two banks, so
+         * an ALAT tag created in one bank must never satisfy a check in the
+         * other.  Conservatively evict both banks' architectural names on a
+         * transition; arbitrary pessimistic ALAT eviction is architectural,
+         * while carrying a false hit across PSR.bn is not.
+         */
+        for (unsigned reg = 16; reg < 32; reg++) {
+            ia64_alat_invalidate_gr(env, reg);
+        }
     }
 }
 

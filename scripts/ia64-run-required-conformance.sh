@@ -70,6 +70,7 @@ set +e
     qemu:test-ia64-memory-tcg \
     qemu:test-ia64-system-tcg \
     qemu:test-ia64-data-plane-tcg \
+    qemu:test-ia64-alat-tcg \
     qemu:test-ia64-full-tcg \
     qemu:test-ia64-tcp-migration \
     qemu:test-ia64-packed-tcg \
