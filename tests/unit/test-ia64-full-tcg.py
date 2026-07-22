@@ -139,6 +139,14 @@ class MigrationResult:
 
 
 @dataclasses.dataclass(frozen=True)
+class ResetResult:
+    checkpoint: Snapshot
+    reset: Snapshot
+    final: Snapshot
+    trace: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Program:
     name: str
     bundles: Tuple[Bundle, ...]
@@ -3779,6 +3787,55 @@ def alat_migration_debug_safety_program() -> Program:
     )
 
 
+def alat_system_reset_safety_program() -> Program:
+    """Seed live GR/FR tags, reset, and reject both stale entries."""
+    return Program(
+        name="ALAT system-reset stale-entry safety",
+        bundles=(
+            Bundle(0x10, 0x01, nop_m(), adds(10, 0x1900, 0),
+                   adds(31, 1, 0)),
+            Bundle(0x20, 0x01, ld8(30, 10), adds(11, 0x1800, 0),
+                   adds(12, 0x1820, 0)),
+            Bundle(0x30, 0x01, nop_m(), cmp_rr(6, 7, 0, 30, "eq"),
+                   nop_i()),
+            Bundle(0x40, 0x11, nop_m(), nop_i(),
+                   br_cond(0x40, 0xA0, qp=7)),
+
+            # First boot only: establish the two typed tags, persist a RAM
+            # phase marker that no loader device rewrites, then wait for HMP
+            # system_reset at 0x90.
+            Bundle(0x50, 0x01, ld8_advanced(20, 11), nop_i(), nop_i()),
+            Bundle(0x60, 0x01, ldfs_advanced(21, 12), nop_i(), nop_i()),
+            Bundle(0x70, 0x11, st8(31, 10), nop_i(),
+                   br_cond(0x70, 0x90)),
+            spin_bundle(0x80),
+            spin_bundle(0x90),
+
+            # Second boot only.  Reset must leave no stale GR20 or FR21 tag;
+            # a fall-through is an explicit failure and recovery is success.
+            Bundle(0xA0, 0x01, chk_a(20, 0xA0, 0xC0),
+                   nop_i(), nop_i()),
+            Bundle(0xB0, 0x11, nop_m(), adds(24, 0xBAD, 0),
+                   br_cond(0xB0, 0xD0)),
+            Bundle(0xC0, 0x11, nop_m(), adds(24, 1, 0),
+                   br_cond(0xC0, 0xD0)),
+            Bundle(0xD0, 0x01,
+                   chk_a(21, 0xD0, 0xF0, floating=True),
+                   nop_i(), nop_i()),
+            Bundle(0xE0, 0x11, nop_m(), adds(25, 0xBAD, 0),
+                   br_cond(0xE0, 0x100)),
+            Bundle(0xF0, 0x11, nop_m(), adds(25, 1, 0),
+                   br_cond(0xF0, 0x100)),
+            spin_bundle(0x100),
+        ),
+        terminal_ip=0x100,
+        data=(
+            DataWord(0x1800, 0x1122334455667788, 8),
+            DataWord(0x1820, 0x3FC00000, 4),
+        ),
+    )
+
+
 def typed_branch_forward_migration_program() -> Program:
     return Program(
         name="typed compare-to-branch forwarding save/load resume",
@@ -6226,6 +6283,154 @@ def run_program(qemu: Path, program: Program,
         raise HarnessError(detail) from failure
     assert snapshot is not None
     return snapshot
+
+
+def _continue_hmp_to_ip(monitor: socket.socket, target_ip: int,
+                        label: str) -> Snapshot:
+    deadline = time.monotonic() + PROGRAM_TIMEOUT
+    delay = 0.01
+    last_ip: Optional[int] = None
+
+    while time.monotonic() < deadline:
+        _hmp_command(monitor, "cont")
+        time.sleep(delay)
+        _hmp_command(monitor, "stop")
+        candidate = parse_snapshot(_hmp_command(monitor, "info registers"))
+        last_ip = candidate.ip
+        if candidate.ip == target_ip:
+            return candidate
+        delay = min(delay * 2, 0.1)
+
+    raise HarnessError(
+        "{} did not reach IP 0x{:x}; last IP was {}".format(
+            label, target_ip,
+            "unavailable" if last_ip is None else "0x{:x}".format(last_ip),
+        )
+    )
+
+
+def run_system_reset(qemu: Path, program: Program,
+                     checkpoint_ip: int) -> ResetResult:
+    """Run to a guest checkpoint, issue HMP system_reset, and resume."""
+    monitor_port = _free_tcp_port()
+    trace_directory = tempfile.TemporaryDirectory(
+        prefix="ia64-alat-reset-trace-"
+    )
+    trace_path = Path(trace_directory.name) / "tcg-op.log"
+    arguments = [
+        str(qemu),
+        "-L", str(FIRMWARE_DIR),
+        "-machine", "vibtanium",
+        "-m", "128M",
+        "-smp", "1",
+        "-S",
+        "-display", "none",
+        "-serial", "none",
+        "-monitor",
+        "tcp:127.0.0.1:{},server=on,wait=off,nodelay=on".format(
+            monitor_port
+        ),
+        "-d", "op",
+        "-D", str(trace_path),
+    ]
+    arguments.extend(_loader_arguments(program))
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    process: Optional[subprocess.Popen] = None
+    monitor: Optional[socket.socket] = None
+    checkpoint: Optional[Snapshot] = None
+    reset: Optional[Snapshot] = None
+    final: Optional[Snapshot] = None
+    failure: Optional[Exception] = None
+    process_output = ""
+    try:
+        process = subprocess.Popen(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_child_environment(),
+            creationflags=creationflags,
+        )
+        monitor = _connect_monitor(process, monitor_port)
+        _recv_hmp_prompt(monitor)
+        checkpoint = _continue_hmp_to_ip(
+            monitor, checkpoint_ip, "ALAT pre-reset seed"
+        )
+
+        reset_reply = _hmp_command(monitor, "system_reset")
+        if re.search(r"(?im)^error:", reset_reply):
+            raise HarnessError("HMP system_reset failed:\n" + reset_reply)
+
+        deadline = time.monotonic() + MONITOR_CONNECT_TIMEOUT
+        while time.monotonic() < deadline:
+            candidate = parse_snapshot(
+                _hmp_command(monitor, "info registers")
+            )
+            if candidate.ip == program.entry:
+                reset = candidate
+                break
+            time.sleep(0.01)
+        if reset is None:
+            raise HarnessError("system_reset did not restore the entry IP")
+
+        final = _continue_hmp_to_ip(
+            monitor, program.terminal_ip, "ALAT post-reset continuation"
+        )
+    except Exception as exc:  # Preserve diagnostics while always cleaning up.
+        failure = exc
+    finally:
+        if monitor is not None:
+            try:
+                if process is not None and process.poll() is None:
+                    monitor.sendall(b"quit\n")
+            except OSError:
+                pass
+        if process is not None:
+            try:
+                try:
+                    process_output, _ = process.communicate(
+                        timeout=PROCESS_EXIT_TIMEOUT
+                    )
+                except subprocess.TimeoutExpired:
+                    process_output = _terminate_child(process)
+            except Exception as cleanup_exc:
+                if failure is None:
+                    failure = cleanup_exc
+        if monitor is not None:
+            try:
+                monitor.close()
+            except OSError:
+                pass
+
+    trace = ""
+    if failure is None:
+        try:
+            trace = trace_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            failure = exc
+    trace_directory.cleanup()
+
+    if failure is not None:
+        detail = str(failure)
+        if process is not None and process.returncode is not None:
+            detail += "\nQEMU status: {}".format(process.returncode)
+        if process_output.strip():
+            detail += "\nQEMU output:\n" + process_output.strip()
+        raise HarnessError(detail) from failure
+    assert checkpoint is not None and reset is not None and final is not None
+    return ResetResult(
+        checkpoint=checkpoint,
+        reset=reset,
+        final=final,
+        trace=trace,
+    )
 
 
 def run_ri_restart(qemu: Path, program: Program, start_slot: int, *,
@@ -8879,6 +9084,89 @@ def test_alat_migration_debug_safety(qemu: Path) -> str:
         "original tag may hit or pessimistically miss as Intel permits, "
         "while FR20 and GR21 always recover and prove no stale or cross-type "
         "false hit"
+    )
+
+
+def test_alat_system_reset_safety(qemu: Path) -> str:
+    program = alat_system_reset_safety_program()
+    result = run_system_reset(qemu, program, checkpoint_ip=0x90)
+
+    _require(not result.checkpoint.exception_pending,
+             "ALAT pre-reset seed raised an exception")
+    _require(
+        result.checkpoint.ip == 0x90 and
+        result.checkpoint.gr[20] == 0x1122334455667788 and
+        result.checkpoint.gr[30] == 0 and result.checkpoint.gr[31] == 1,
+        "pre-reset phase did not establish the declared GR tag and marker",
+    )
+    _require(
+        result.reset.ip == program.entry and result.reset.psr == 0 and
+        result.reset.pr == 1 and result.reset.cfm == 0 and
+        all(value == 0 for value in result.reset.gr),
+        "system_reset did not publish the exact empty CPU restart image",
+    )
+    _require(not result.final.exception_pending,
+             "ALAT post-reset continuation raised an exception")
+    _require(
+        result.final.ip == program.terminal_ip and
+        result.final.gr[24] == 1 and result.final.gr[25] == 1 and
+        result.final.gr[30] == 1,
+        "system_reset retained a stale GR20/FR21 tag or lost the RAM phase",
+    )
+    for ip in (0x50, 0x60, 0xA0, 0xD0):
+        _require_typed_direct_trace(result.trace, ip)
+
+    return (
+        "live physical GR20 and FR21 tags precede a real HMP system_reset; "
+        "the exact empty CPU reset image is observed, a loader-independent "
+        "RAM phase marker survives, and both unseeded post-reset checks take "
+        "mandatory recovery"
+    )
+
+
+def test_alat_deterministic_replay(qemu: Path) -> str:
+    program = alat_migration_debug_safety_program()
+    with tempfile.TemporaryDirectory(prefix="ia64-alat-replay-") as temp:
+        rrfile = Path(temp) / "alat.rr"
+        record_args = (
+            "-icount", "shift=auto,rr=record,rrfile={}".format(rrfile),
+        )
+        replay_args = (
+            "-icount", "shift=auto,rr=replay,rrfile={}".format(rrfile),
+        )
+        recorded = run_program(
+            qemu, program, extra_args=record_args, graceful_quit=True
+        )
+        _require_alat_migration_safety(recorded, "ALAT recording")
+        _require(rrfile.is_file() and rrfile.stat().st_size > 12,
+                 "ALAT record mode did not produce a replay event stream")
+
+        replayed = []
+        for ordinal in (1, 2):
+            snapshot = run_program(
+                qemu, program, extra_args=replay_args, graceful_quit=True
+            )
+            _require_alat_migration_safety(
+                snapshot, "ALAT replay {}".format(ordinal)
+            )
+            replayed.append(snapshot)
+
+        for label, snapshot in (
+            ("first replay", replayed[0]),
+            ("second replay", replayed[1]),
+        ):
+            differences = successful_snapshot_differences(recorded, snapshot)
+            _require(
+                not differences,
+                "{} diverged from the ALAT recording:\n  {}".format(
+                    label, "\n  ".join(differences)
+                ),
+            )
+
+    return (
+        "one ALAT recording and two independent replays produce the exact "
+        "same architectural result: same-type hit-or-miss choices repeat, "
+        "both cross-type checks recover, and the replay stream is nonempty"
     )
 
 
@@ -11588,7 +11876,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..36")
+    print("1..38")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -11626,6 +11914,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 34 - family-wide generated-code density")
         print("not ok 35 - exact helper contracts")
         print("not ok 36 - ALAT migration and debugger safety")
+        print("not ok 37 - ALAT system reset safety")
+        print("not ok 38 - ALAT deterministic replay")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -11684,6 +11974,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("exact helper contracts", test_exact_helper_contracts),
         ("ALAT migration and debugger safety",
          test_alat_migration_debug_safety),
+        ("ALAT system reset safety", test_alat_system_reset_safety),
+        ("ALAT deterministic replay", test_alat_deterministic_replay),
     )
     failures = 0
     for index, (name, test) in enumerate(tests, start=1):

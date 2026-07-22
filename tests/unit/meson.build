@@ -268,6 +268,16 @@ foreach test_name, extra: tests
          priority: slow_tests.get(test_name, 30),
          suite: ['unit'])
   endif
+  if test_name == 'test-ia64-insn'
+    test('test-ia64-alat-reset-state', exe,
+         depends: test_deps.get(test_name, []),
+         env: test_env,
+         args: ['--tap', '-p', '/ia64-arch-state/reset'],
+         protocol: 'tap',
+         timeout: slow_tests.get(test_name, 30),
+         priority: slow_tests.get(test_name, 30),
+         suite: ['unit'])
+  endif
 endforeach
 
 test('test-ia64-full-tcg-static', python,

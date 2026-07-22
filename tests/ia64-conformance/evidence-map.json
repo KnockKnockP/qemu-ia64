@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 88
+    "row_closing_claims_expected": 91
   },
   "entries": [
     {
@@ -61,7 +61,26 @@
       "oracle_independence": "implementation-coupled",
       "conformance_role": "supporting",
       "closes_normative_rows": [],
-      "limitations": ["Metadata validation supports but does not replace either executable ALAT result."]
+      "limitations": ["Metadata validation supports but does not replace any of the five executable ALAT results."]
+    },
+    {
+      "id": "meson:test-ia64-alat-reset-state",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-alat-reset-state",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/alat-lifecycle-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-insn.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-alat-reset-state",
+      "scope": "Focused independent empty-reset field image for all persistent ALAT entries, the replacement cursor, and every transient valid mask, GR mask, and GR reference count from a nonzero dirty preimage; compiler padding is excluded.",
+      "oracle_independence": "independent",
+      "conformance_role": "row-closing",
+      "closes_normative_rows": ["ALT-009-ALAT-RESET-STATE"],
+      "limitations": ["The isolated host image is paired with a separate E2 real-machine system-reset row."]
     },
     {
       "id": "meson:test-ia64-alat-vmstate",
@@ -498,11 +517,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-full-tcg",
-      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; BR.RET-origin and valid-IFS-RFI-origin current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots. A dedicated ALAT program carries live GR/FR tags through a GDB stop and fresh-process save/load, accepts Intel-permitted pessimistic misses, and requires both cross-type probes to recover.",
+      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; BR.RET-origin and valid-IFS-RFI-origin current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots. Dedicated ALAT programs carry live typed tags through GDB plus fresh-process save/load, execute a real HMP system reset with loader-independent RAM continuity and mandatory stale-tag recovery, and require one recording plus two fresh replays to produce exact terminal architectural equality.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["ALT-007-ALAT-MIGRATION-DEBUG-SAFETY", "REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION", "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
-      "limitations": ["Only the explicitly enumerated ALAT, PFS, and current-frame migration rows are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
+      "closes_normative_rows": ["ALT-007-ALAT-MIGRATION-DEBUG-SAFETY", "ALT-010-ALAT-SYSTEM-RESET-SAFETY", "ALT-011-ALAT-DETERMINISTIC-REPLAY", "REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION", "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
+      "limitations": ["Only the explicitly enumerated ALAT lifecycle, PFS, and current-frame migration rows are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
     },
     {
       "id": "meson:test-ia64-full-tcg-static",

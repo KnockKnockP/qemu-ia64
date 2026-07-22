@@ -33,6 +33,21 @@ static void test_reset_state(void)
     g_assert_cmphex(env.cr[IA64_CR_ITV], ==, UINT64_C(1) << 16);
     g_assert_cmphex(env.cpuid[0], ==, UINT64_C(0x49656e69756e6547));
     g_assert_cmphex(env.cpuid[1], ==, UINT64_C(0x000000006c65746e));
+    for (unsigned i = 0; i < IA64_ALAT_COUNT; i++) {
+        g_assert_false(env.alat.entries[i].valid);
+        g_assert_cmpuint(env.alat.entries[i].target, ==, 0);
+        g_assert_cmpuint(env.alat.entries[i].target_type, ==, 0);
+        g_assert_cmpuint(env.alat.entries[i].width, ==, 0);
+        g_assert_false(env.alat.entries[i].physical);
+        g_assert_cmphex(env.alat.entries[i].address, ==, 0);
+    }
+    g_assert_cmpuint(env.alat.next, ==, 0);
+    g_assert_cmphex(env.alat.valid_mask, ==, 0);
+    g_assert_cmphex(env.alat.gr_mask[0], ==, 0);
+    g_assert_cmphex(env.alat.gr_mask[1], ==, 0);
+    for (unsigned i = 0; i < IA64_GR_COUNT; i++) {
+        g_assert_cmpuint(env.alat.gr_refcount[i], ==, 0);
+    }
 }
 
 static void test_cfm_updates_decoded_frame(void)

@@ -96,11 +96,25 @@ class SurfaceError(RuntimeError):
 
 ARCHITECTURAL_SURFACES = (
     (
+        "cpu.alat.reset",
+        "cpu.speculation",
+        "ALAT persistent and transient reset state",
+        "target/ia64/insn.c",
+        "void ia64_cpu_reset_synthetic_itanium2(CPUIA64State *env)",
+    ),
+    (
         "cpu.alat.vmstate",
         "cpu.speculation",
         "ALAT migration persistence and incoming-state validation",
         "target/ia64/machine.c",
         "static const VMStateDescription vmstate_alat =",
+    ),
+    (
+        "platform.reset.vibtanium",
+        "platform.reset",
+        "Vibtanium machine reset dispatch and CPU/device restart",
+        "hw/ia64/vibtanium.c",
+        "static void vibtanium_reset(MachineState *machine, ResetType type)",
     ),
     (
         "cpu.bundle.format",

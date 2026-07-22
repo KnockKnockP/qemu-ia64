@@ -48,6 +48,35 @@ EXPECTED = {
         ],
         "required_evidence": "E1",
     },
+    "ALT-009-ALAT-RESET-STATE": {
+        "implementation_rows": ["cpu.alat.reset"],
+        "lane": "host-unit",
+        "probes": ["test_reset_state"],
+        "required_evidence": "E1",
+    },
+    "ALT-010-ALAT-SYSTEM-RESET-SAFETY": {
+        "implementation_rows": [
+            "cpu.alat.reset",
+            "cpu.opcode.ia64_op_chk_a",
+            "cpu.opcode.ia64_op_ld8a",
+            "cpu.opcode.ia64_op_ldfs",
+            "platform.reset.vibtanium",
+        ],
+        "lane": "bare-metal-batch",
+        "probes": ["test_alat_system_reset_safety"],
+        "required_evidence": "E2",
+    },
+    "ALT-011-ALAT-DETERMINISTIC-REPLAY": {
+        "implementation_rows": [
+            "cpu.alat.reset",
+            "cpu.opcode.ia64_op_chk_a",
+            "cpu.opcode.ia64_op_ld8a",
+            "cpu.opcode.ia64_op_ldfs",
+        ],
+        "lane": "bare-metal-batch",
+        "probes": ["test_alat_deterministic_replay"],
+        "required_evidence": "E2",
+    },
 }
 
 
@@ -122,12 +151,19 @@ def validate(document: Any, catalogue: Any, root: Path) -> dict[str, int]:
         "bare-metal-batch": python_functions(
             root / "tests/unit/test-ia64-full-tcg.py"
         ),
-        "host-unit": c_functions(root / "tests/unit/test-ia64-vmstate.c"),
+        "host-unit": (
+            c_functions(root / "tests/unit/test-ia64-vmstate.c")
+            | c_functions(root / "tests/unit/test-ia64-insn.c")
+        ),
     }
 
     cases = document["cases"]
     if not isinstance(cases, list) or len(cases) != len(EXPECTED):
-        raise TrancheError("ALAT lifecycle tranche must contain two cases")
+        raise TrancheError(
+            "ALAT lifecycle tranche must contain {} cases".format(
+                len(EXPECTED)
+            )
+        )
     identifiers = [case.get("id") for case in cases]
     if identifiers != sorted(identifiers) or len(set(identifiers)) != len(cases):
         raise TrancheError("case ids must be unique and sorted")

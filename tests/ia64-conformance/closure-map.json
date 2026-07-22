@@ -172,6 +172,27 @@
       "candidate_tests": ["test-ia64-alat-vmstate"]
     },
     {
+      "normative_row": "ALT-009-ALAT-RESET-STATE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.alat.reset"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-reset-state"]
+    },
+    {
+      "normative_row": "ALT-010-ALAT-SYSTEM-RESET-SAFETY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.alat.reset", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs", "platform.reset.vibtanium"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg"]
+    },
+    {
+      "normative_row": "ALT-011-ALAT-DETERMINISTIC-REPLAY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.alat.reset", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ldfs"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg"]
+    },
+    {
       "normative_row": "BND-001-BUNDLE-FORMAT",
       "surface_disposition": "implemented",
       "implementation_rows": [

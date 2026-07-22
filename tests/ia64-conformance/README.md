@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 56
+dependencies installed, configure, build, fetch the public manuals, run all 57
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -124,7 +124,7 @@ handler reuses both target names, executes `invala`, and returns by typed
 `rfi` to mandatory user misses. Remote stores, semaphores, and `ptc.ga` are
 multiprocessor coherence obligations and are not applicable to the enforced
 single-CPU `vibtanium-strict-up` and `vibtanium-default-up` profiles.
-A separate two-case `alat-lifecycle-tranche.json` now owns the lifecycle
+A separate five-case `alat-lifecycle-tranche.json` now owns the lifecycle
 boundary instead of overloading instruction-semantic rows. Its E2 program
 establishes physical GR20 and FR21 tags, stops on a real GDB breakpoint,
 saves in one QEMU, loads in a fresh QEMU, accepts the same-type hit or
@@ -134,7 +134,13 @@ classes at target and cursor boundaries, both address modes, and exact
 persistent fields, then rejects representative lower, gap, upper, version,
 and cursor members of every malformed semantic partition on both load and
 save. Inactive non-type payload remains explicitly ignored rather than being
-misclassified as malformed.
+misclassified as malformed. A second focused E1 registration requires every
+persistent and transient ALAT reset field to equal an independent zero literal
+after the CPU environment begins nonzero. Two further E2 probes issue a real
+HMP `system_reset` with loader-independent RAM continuity and run one icount
+recording through two fresh replays. Reset must reject both stale typed tags;
+each replay must exactly reproduce the recorded architectural result while
+retaining Intel's permitted same-type hit-or-miss result class.
 The register tranche also executes Intel Volume 2 sections 6.11.1 and 6.11.2
 as one interrupted-context oracle. Four BREAK handlers cover an empty frame,
 an immediate RNAT slot, one complete RNAT collection, and the maximum
@@ -165,10 +171,19 @@ lifecycle contract validator 0.37 seconds. The 117-row catalogue now has 88
 exact row-closing claims. Its 2,112-row executed join contains 88
 `implemented-tested`, 1,974 `implemented-untested`, 7
 `advertised-untested`, and 43 `known-unimplemented` rows, leaving 1,981
-blockers with no test or infrastructure failure. The former single 180-second
-registration limit was an infrastructure timeout once the
+blockers with no test or infrastructure failure.
+The reset/replay checkpoint raises the current gate to 57/57 in 206.529
+seconds: `test-ia64-full-tcg` passed 38 subtests in 55.10 seconds, the focused
+reset image passed in 0.04 seconds, `test-ia64-system-tcg` took 49.87 seconds,
+`test-ia64-register-tcg` 51.48 seconds, and the 637-case data-plane shard
+184.69 seconds. The 120-row catalogue has 91 exact row-closing claims. Its
+2,115-row executed join contains 91 `implemented-tested`, 1,974
+`implemented-untested`, 7 `advertised-untested`, and 43
+`known-unimplemented` rows, leaving 1,981 blockers with no test or
+infrastructure failure. The former single 180-second registration limit was
+an infrastructure timeout once the
 combined inventory reached 679 programs, not a semantic hang. The current
-985-program inventory remains deliberately split by evidence ownership. The
+986-program inventory remains deliberately split by evidence ownership. The
 gate defaults to four workers to avoid unrestricted host contention without
 weakening any per-test timeout. The
 RSE suites include five fresh-process

@@ -34,6 +34,7 @@ set +e
     qemu:test-ia64-memory-exceptions \
     qemu:test-ia64-rse-spine \
     qemu:test-ia64-vmstate \
+    qemu:test-ia64-alat-reset-state \
     qemu:test-ia64-alat-vmstate \
     qemu:test-ia64-full-tcg-static \
     qemu:test-ia64-platform-static \
