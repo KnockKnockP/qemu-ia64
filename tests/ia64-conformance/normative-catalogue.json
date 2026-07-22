@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 14,
+  "catalogue_revision": 15,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2235,6 +2235,26 @@
       "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE before the next word; either walker fault preserves that exact prefix.",
       "restart_rule": "The handler observes the issuing IIP, original mandatory-reference IFA, ISR.rs and access direction, exact short-format IHA and RR-derived ITIR, and IFS.v zero; after installing the missing entry or backing translation, RFI retries from the exact poisoned prefix.",
       "permitted_results": ["FLUSHRS and LOADRS each complete directly through one valid short-format VHPT hit", "FLUSHRS and LOADRS each raise and repair one Data TLB fault for an invalid short-format entry without replay", "FLUSHRS and LOADRS each raise and repair one VHPT Translation fault for missing VHPT-backing translation without replay"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-010-SYNCHRONOUS-BACKING-STORE-SWITCH",
+      "requirement_ids": ["RSE-010", "RSE-004", "RSE-005", "RSE-006", "RSE-011", "RSE-016"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "6.11.3", "printed_pages": ["2:148"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "A non-preemptive, synchronous backing store switch at any privilege level can be accomplished as follows"},
+      "operation": {"kind": "synchronous-rse-backing-store-switch", "selector": "two independent four-register contexts with disjoint backing stores, distinct completed and partial RNAT images, and an A-to-B-to-A-style cooperative round trip", "encoding": "save RSC/BSP/PFS, FLUSHRS, write enforced-lazy RSC, save RNAT, create and invalidate an ALAT marker, write incoming BSPSTORE/PFS/RNAT/RSC, and execute typed BR.RET; repeat for both outgoing contexts"},
+      "legal_inputs": ["Execution is non-preemptive at CPL0 with complete frames and RSC.mode zero", "Each incoming BSPSTORE was the context's BSP after its prior flush and names an aligned four-register span crossing one RNAT collection word", "Each incoming PFS selects a legal SOF4/SOL4 frame and each branch target is aligned", "The two backing spans and their completed and partial RNAT values are disjoint literal images", "Each outgoing current frame is made flushable with COVER before the cited synchronous-switch sequence"],
+      "privilege": {"levels": [0], "rule": "The cited sequence is legal at any privilege level; this exact oracle executes at CPL0 so all application-register moves are directly legal"},
+      "state_read": ["outgoing RSC, BSP, PFS, RNAT, CFM, stacked values, and stacked NaTs", "incoming BSPSTORE, PFS, RNAT, and RSC context records", "completed backing-store RNAT words and ordinary register words", "fresh advanced-load ALAT marker before each INVALA"],
+      "state_written": ["two disjoint flushed backing-store register/RNAT images", "saved outgoing RSC/BSP/PFS/RNAT records", "incoming RSE backing-store mapping and restored SOF4/SOL4 CFM", "restored stacked values and completed plus partial NaTs", "invalidated ALAT marker and CHK.A recovery control flow"],
+      "predication": {"applies": false, "rule": "FLUSHRS, COVER, INVALA, and the selected BR.RETs execute unpredicated; application-register moves use p0"},
+      "nat_behavior": "Each context carries one NaT below the RNAT word and one above it. FLUSHRS must place the lower NaT in the completed memory RNAT and retain the upper NaT in saved AR.RNAT; the incoming AR.RNAT plus memory RNAT must reconstruct both after BR.RET.",
+      "possible_faults": ["No fault is expected because code and both physical backing-store spans are aligned, resident, and accessible"],
+      "fault_priority": ["application-register access legality", "complete-frame and BR.RET frame legality", "mandatory RSE backing-store access", "typed return frame restoration", "target execution"],
+      "committed_prefix": "Each switch-out completes COVER and FLUSHRS before BSPSTORE changes. The outgoing context record and backing image are therefore complete and immutable while the other context runs; no word may be sourced from the other backing span.",
+      "restart_rule": "This is a non-faulting cooperative switch. Each incoming BR.RET restores exactly one saved frame, and the final B restoration must equal B's independently mutated image after A has been loaded, mutated, and flushed through the same sequence.",
+      "permitted_results": ["All three typed BR.RETs reach their declared context targets with exact CFM and RSE pointers", "Every fresh LD8.A marker followed by INVALA makes CHK.A take recovery", "Context A and B retain distinct mutated register payloads, completed memory RNAT bit 62, and saved partial AR.RNAT bit 2", "The terminal B frame contains only B values with r32 and r35 NaT while plain backing-store reads recover every A and B payload from disjoint addresses", "Final BSP, BSPSTORE, and BspLoad all name B's base and final AR.RNAT contains B's completed collection"],
       "required_evidence": "E2"
     },
     {

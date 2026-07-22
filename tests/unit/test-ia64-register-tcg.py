@@ -330,6 +330,20 @@ RSE_RFI_CURRENT_FRAME_FILL_MIGRATION_IMPLEMENTATION_ROWS = (
     "cpu.register.scalar.cfm",
     "cpu.register.scalar.psr",
 )
+RSE_SYNCHRONOUS_BACKING_STORE_SWITCH_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_br_ret",
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_cover",
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.opcode.ia64_op_invala",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+    "cpu.register.ar.64",
+    "cpu.register.scalar.cfm",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -448,6 +462,9 @@ def validate_contract(root: Path) -> str:
         "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION": list(
             RSE_RFI_CURRENT_FRAME_FILL_MIGRATION_IMPLEMENTATION_ROWS
         ),
+        "RSE-010-SYNCHRONOUS-BACKING-STORE-SWITCH": list(
+            RSE_SYNCHRONOUS_BACKING_STORE_SWITCH_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -493,12 +510,15 @@ def validate_contract(root: Path) -> str:
         "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION": [
             "test_rfi_current_frame_fill",
         ],
+        "RSE-010-SYNCHRONOUS-BACKING-STORE-SWITCH": [
+            "test_rse_synchronous_context_switch",
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 42:
-        raise AssertionError("register tranche must contain forty-two cases")
+    if not isinstance(cases, list) or len(cases) != 43:
+        raise AssertionError("register tranche must contain forty-three cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -529,6 +549,9 @@ def validate_contract(root: Path) -> str:
     ):
         if f"def {probe}(" not in full_source:
             raise AssertionError(f"missing full-TCG PFS effect probe: {probe}")
+    register_source = Path(__file__).read_text(encoding="utf-8")
+    if "def test_rse_synchronous_context_switch(" not in register_source:
+        raise AssertionError("missing synchronous backing-store switch probe")
     if len(set(GR_VALUES)) != 127 or GR_VALUES[-1] != 127:
         raise AssertionError("GR matrix does not cover r1-r127 exactly")
     if len(set(FR_INDICES)) != 126 or FR_INDICES[-1] != 127:
@@ -2250,6 +2273,339 @@ def rse_backing_register_addresses(bspstore: int,
         addresses.append(address)
         address += 8
     return tuple(addresses)
+
+
+def rse_synchronous_context_switch_program(
+        h: ModuleType, system: ModuleType, data_plane: ModuleType):
+    """Round-trip two independent RSE backing stores without interruption."""
+    entry = 0x10000
+    context_b_first = 0x20000
+    context_a = 0x30000
+    context_b_resume = 0x40000
+    failure = 0x50000
+    terminal = 0x50030
+    address = entry
+    bundles: list[object] = []
+    return_ips: list[int] = []
+    direct_trace_ips: list[int] = []
+
+    context_a_base = 0x7ff0
+    context_a_rnat = 0x7ff8
+    context_a_end = 0x8018
+    context_b_base = 0x8ff0
+    context_b_rnat = 0x8ff8
+    context_b_end = 0x9018
+    restored_cfm = rse_expected_cfm(4, 4, 0)
+    restored_pfs = restored_cfm
+    initial_a = (11, 22, 33, 44)
+    initial_b = (51, 62, 73, 84)
+    mutated_a = (31, 42, 53, 64)
+    mutated_b = (91, 102, 113, 124)
+    completed_rnat = 1 << 62
+    partial_a = 1 << 1
+    partial_b = 1 << 0
+    saved_partial = 1 << 2
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    def check(register: int, expected: int) -> None:
+        nonlocal address
+        address = append_gr_check(
+            h, bundles, address, register, expected, failure
+        )
+
+    def check_nat(register: int, expected: bool) -> None:
+        nonlocal address
+        address = append_tnat_check(
+            h, bundles, address, register, expected, failure
+        )
+
+    def emit_context_switch(
+            bspstore_register: int, pfs_register: int,
+            rnat_register: int, rsc_register: int,
+            target_register: int) -> None:
+        nonlocal address
+        emit(0x01, h.mov_m_grar(18, bspstore_register),
+             h.nop_i(), h.nop_i())
+        emit(0x01, h.nop_m(), h.mov_gr_to_pfs(pfs_register), h.nop_i())
+        emit(0x01, h.mov_m_grar(19, rnat_register),
+             h.nop_i(), h.nop_i())
+        emit(0x01, h.mov_m_grar(16, rsc_register),
+             h.nop_i(), h.nop_i())
+        emit(0x01, h.nop_m(), h.mov_grbr(6, target_register), h.nop_i())
+        return_ips.append(address)
+        emit(0x11, h.nop_m(), h.nop_i(), h.br_ret(6))
+        bundles.append(h.spin_bundle(address))
+        address += 0x10
+
+    def emit_alat_invalidation_probe() -> None:
+        nonlocal address
+        # Place a fresh advanced-load marker immediately before INVALA and
+        # require CHK.A to take its recovery target.  Typed traces bind all
+        # three instructions to their direct full-TCG lowering.
+        emit(0x01, h.nop_m(), h.adds(29, 0x1820, 0), h.nop_i())
+        direct_trace_ips.append(address)
+        emit(0x01, h.ld8_advanced(30, 29), h.nop_i(), h.nop_i())
+        direct_trace_ips.append(address)
+        emit(0x01, data_plane.cache_control("IA64_OP_INVALA"),
+             h.nop_i(), h.nop_i())
+        check_ip = address
+        recovery_ip = check_ip + 0x20
+        direct_trace_ips.append(check_ip)
+        emit(0x01, h.chk_a(30, check_ip, recovery_ip),
+             h.nop_i(), h.nop_i())
+        emit(0x11, h.nop_m(), h.nop_i(),
+             h.br_cond(address, failure))
+
+    def emit_switch_out(
+            saved_rsc: int, saved_bsp: int,
+            saved_pfs: int, saved_rnat: int) -> None:
+        nonlocal address
+        # Steps 1-5 of SDM 6.11.3: save RSC/BSP/PFS, flush, enter
+        # enforced-lazy mode, save the post-flush RNAT, and invalidate ALAT.
+        emit(0x09, h.mov_m_argr(saved_rsc, 16),
+             h.mov_m_argr(saved_bsp, 17), h.mov_pfs_to_gr(saved_pfs))
+        emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+        emit(0x01, h.mov_m_grar(16, 0), h.nop_i(), h.nop_i())
+        emit(0x01, h.mov_m_argr(saved_rnat, 19), h.nop_i(), h.nop_i())
+        emit_alat_invalidation_probe()
+
+    # Construct the first incoming B context and prove the initial empty RSE
+    # image before executing all eight synchronous-switch steps.
+    emit_movl(20, context_b_end)
+    emit_movl(21, restored_pfs)
+    emit_movl(22, context_b_first)
+    emit_movl(23, partial_b)
+    emit(0x09, h.mov_m_argr(8, 16),
+         h.mov_m_argr(9, 17), h.mov_pfs_to_gr(10))
+    check(8, 0)
+    check(9, 0)
+    check(10, 0)
+    emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+    emit(0x01, h.mov_m_grar(16, 0), h.nop_i(), h.nop_i())
+    emit(0x01, h.mov_m_argr(11, 19), h.nop_i(), h.nop_i())
+    check(11, 0)
+    emit_alat_invalidation_probe()
+    emit_context_switch(20, 21, 23, 0, 22)
+
+    # Context B was assembled from its backing-store RNAT word plus the
+    # incoming partial AR.RNAT.  Mutate two NaT-tagged registers and two
+    # ordinary registers, then COVER makes the whole frame flushable.
+    address = context_b_first
+    check_nat(32, True)
+    check_nat(33, True)
+    check_nat(34, False)
+    check_nat(35, False)
+    check(34, initial_b[2])
+    check(35, initial_b[3])
+    emit(0x01, h.nop_m(), h.adds(8, 3, 0),
+         h.adds(9, 0x1800, 0))
+    emit(0x01, h.nop_m(), h.adds(10, 0x1808, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i())
+    emit(0x01, h.ld8_fill(35, 10), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(33, mutated_b[1], 0),
+         h.adds(34, mutated_b[2], 0))
+    check_nat(32, True)
+    check_nat(33, False)
+    check_nat(34, False)
+    check_nat(35, True)
+    check(33, mutated_b[1])
+    check(34, mutated_b[2])
+    emit(0x11, h.nop_m(), h.nop_i(), 0x10000000)
+    emit_switch_out(16, 17, 18, 19)
+    check(16, 0)
+    emit_movl(28, context_b_end)
+    address = append_gr_pair_check(h, bundles, address, 17, 28, failure)
+    emit_movl(28, restored_pfs)
+    address = append_gr_pair_check(h, bundles, address, 18, 28, failure)
+    emit_movl(28, saved_partial)
+    address = append_gr_pair_check(h, bundles, address, 19, 28, failure)
+
+    # Steps 6-8 install A's independent BSPSTORE/PFS/RNAT/RSC image.
+    emit_movl(20, context_a_end)
+    emit_movl(21, restored_pfs)
+    emit_movl(22, context_a)
+    emit_movl(23, partial_a)
+    emit_context_switch(20, 21, 23, 0, 22)
+
+    # Context A has a different value/NaT image.  Mutate and save it with the
+    # same architectural sequence, retaining its context record separately.
+    address = context_a
+    check_nat(32, True)
+    check_nat(33, False)
+    check_nat(34, True)
+    check_nat(35, False)
+    check(33, initial_a[1])
+    check(35, initial_a[3])
+    emit(0x01, h.nop_m(), h.adds(8, 12, 0),
+         h.adds(9, 0x1810, 0))
+    emit(0x01, h.nop_m(), h.adds(10, 0x1818, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i())
+    emit(0x01, h.ld8_fill(35, 10), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(33, mutated_a[1], 0),
+         h.adds(34, mutated_a[2], 0))
+    emit(0x11, h.nop_m(), h.nop_i(), 0x10000000)
+    emit_switch_out(24, 25, 26, 27)
+    check(24, 0)
+    emit_movl(28, context_a_end)
+    address = append_gr_pair_check(h, bundles, address, 25, 28, failure)
+    emit_movl(28, restored_pfs)
+    address = append_gr_pair_check(h, bundles, address, 26, 28, failure)
+    emit_movl(28, saved_partial)
+    address = append_gr_pair_check(h, bundles, address, 27, 28, failure)
+
+    emit_movl(22, context_b_resume)
+    emit_context_switch(17, 18, 19, 16, 22)
+
+    # B must recover its mutated image and both NaT classes, while plain
+    # backing-store reads prove A and B were flushed to disjoint memory.
+    address = context_b_resume
+    check_nat(32, True)
+    check_nat(33, False)
+    check_nat(34, False)
+    check_nat(35, True)
+    check(33, mutated_b[1])
+    check(34, mutated_b[2])
+    for backing_address, expected in zip(
+            (context_a_base, 0x8000, 0x8008, 0x8010), mutated_a):
+        emit_movl(8, backing_address)
+        emit(0x01, h.ld8(12, 8), h.nop_i(), h.nop_i())
+        check(12, expected)
+    for backing_address, expected in zip(
+            (context_b_base, 0x9000, 0x9008, 0x9010), mutated_b):
+        emit_movl(8, backing_address)
+        emit(0x01, h.ld8(12, 8), h.nop_i(), h.nop_i())
+        check(12, expected)
+    for rnat_address in (context_a_rnat, context_b_rnat):
+        emit_movl(8, rnat_address)
+        emit(0x01, h.ld8(12, 8), h.nop_i(), h.nop_i())
+        emit_movl(28, completed_rnat)
+        address = append_gr_pair_check(
+            h, bundles, address, 12, 28, failure
+        )
+
+    # The generic debugger NaT bitmap does not describe logical stacked GRs.
+    # Publish two final TNAT predicate images into static GRs so the terminal
+    # host oracle independently sees p7=true/p6=false for both restored NaTs.
+    emit(0x01, h.nop_m(),
+         h.predicate_test(
+             "tnat", 6, 7, relation="z", update="normal", r3=32
+         ), h.nop_i())
+    emit(0x01, h.nop_m(), h.mov_prgr(15), h.nop_i())
+    emit(0x01, h.nop_m(),
+         h.predicate_test(
+             "tnat", 6, 7, relation="z", update="normal", r3=35
+         ), h.nop_i())
+    emit(0x01, h.nop_m(), h.mov_prgr(13), h.nop_i())
+
+    bundles.append(h.Bundle(
+        address, 0x01, h.nop_m(), h.adds(14, 1, 0), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(),
+        h.br_cond(address, terminal),
+    ))
+    bundles.append(h.Bundle(
+        failure, 0x01, h.nop_m(), h.adds(14, 0, 0), h.nop_i()
+    ))
+    bundles.append(h.Bundle(
+        failure + 0x10, 0x11, h.nop_m(), h.nop_i(),
+        h.br_cond(failure + 0x10, terminal),
+    ))
+    bundles.append(h.spin_bundle(terminal))
+
+    data = (
+        h.DataWord(context_a_base, initial_a[0], 8),
+        h.DataWord(context_a_rnat, completed_rnat, 8),
+        h.DataWord(0x8000, initial_a[1], 8),
+        h.DataWord(0x8008, initial_a[2], 8),
+        h.DataWord(0x8010, initial_a[3], 8),
+        h.DataWord(context_b_base, initial_b[0], 8),
+        h.DataWord(context_b_rnat, completed_rnat, 8),
+        h.DataWord(0x9000, initial_b[1], 8),
+        h.DataWord(0x9008, initial_b[2], 8),
+        h.DataWord(0x9010, initial_b[3], 8),
+        h.DataWord(0x1800, mutated_b[0], 8),
+        h.DataWord(0x1808, mutated_b[3], 8),
+        h.DataWord(0x1810, mutated_a[0], 8),
+        h.DataWord(0x1818, mutated_a[3], 8),
+        h.DataWord(0x1820, 0x77, 8),
+    )
+    return (
+        h.Program(
+            "synchronous independent RSE backing-store round trip",
+            tuple(bundles), terminal, data, entry=entry,
+        ),
+        tuple(return_ips),
+        tuple(direct_trace_ips),
+        restored_cfm,
+        context_b_base,
+        completed_rnat,
+        mutated_b,
+    )
+
+
+def test_rse_synchronous_context_switch(
+        h: ModuleType, system: ModuleType,
+        data_plane: ModuleType, qemu: Path) -> str:
+    (program, return_ips, direct_trace_ips, restored_cfm, context_b_base,
+     completed_rnat, mutated_b) = rse_synchronous_context_switch_program(
+         h, system, data_plane
+     )
+    snapshot = h.run_program(
+        qemu,
+        program,
+        compact_loader=True,
+        typed_return_traces=tuple((ip, 3) for ip in return_ips),
+        typed_direct_trace_ips=direct_trace_ips,
+        one_bundle_per_tb=True,
+    )
+    if snapshot.gr[14] != 1 or snapshot.ip != program.terminal_ip:
+        raise AssertionError(
+            "synchronous backing-store switch failed: "
+            f"ip=0x{snapshot.ip:x} marker={snapshot.gr[14]}"
+        )
+    if (snapshot.cfm != restored_cfm or
+            snapshot.rse_base != 92 or
+            snapshot.rse_bsp != context_b_base or
+            snapshot.rse_bspstore != context_b_base or
+            snapshot.rse_bspload != context_b_base or
+            snapshot.rse_rnat != completed_rnat):
+        raise AssertionError(
+            "final B context has wrong frame/RSE image: "
+            f"CFM=0x{snapshot.cfm:x} RSE={snapshot.rse_base}/"
+            f"0x{snapshot.rse_bsp:x}/0x{snapshot.rse_bspstore:x}/"
+            f"0x{snapshot.rse_bspload:x}/0x{snapshot.rse_rnat:x}"
+        )
+    if (snapshot.gr[33] != mutated_b[1] or
+            snapshot.gr[34] != mutated_b[2] or
+            snapshot.gr[15] != 0x81 or snapshot.gr[13] != 0x81):
+        raise AssertionError(
+            "final B context lost values or NaTs: "
+            f"r33/r34={snapshot.gr[33]}/{snapshot.gr[34]} "
+            f"TNAT-PR=0x{snapshot.gr[15]:x}/0x{snapshot.gr[13]:x}"
+        )
+    if len(return_ips) != 3:
+        raise AssertionError("context-switch return corpus drifted")
+    if len(direct_trace_ips) != 9:
+        raise AssertionError("context-switch ALAT trace corpus drifted")
+    return (
+        "three typed BR.RETs round-trip two disjoint backing stores through "
+        "the exact synchronous RSC/BSP/PFS/FLUSHRS/lazy/RNAT/INVALA switch "
+        "sequence, preserving distinct register payloads plus completed and "
+        "partial RNAT state without cross-context aliasing"
+    )
 
 
 def rse_loadrs_restore_program(h: ModuleType, system: ModuleType):
@@ -5299,6 +5655,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
         ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
         ("RSE control effects", lambda: test_rse_control_effects(harness, system, args.qemu.resolve())),
+        ("RSE synchronous backing-store switch", lambda: test_rse_synchronous_context_switch(harness, system, data_plane, args.qemu.resolve())),
         ("RSE mandatory fault/retry", lambda: test_rse_mandatory_fault_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory protection fault/retry", lambda: test_rse_mandatory_protection_fault_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory Data Debug priority/retry", lambda: test_rse_mandatory_data_debug_priority_retry(harness, system, args.qemu.resolve())),
