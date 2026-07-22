@@ -574,6 +574,15 @@ if 'ia64-softmmu' in target_dirs
        protocol: 'tap',
        timeout: 120,
        suite: ['unit'])
+  test('test-ia64-alat-rse-wrap-tcg', python,
+       depends: [ia64_full_tcg_emulator],
+       env: test_env,
+       args: [meson.current_source_dir() / 'test-ia64-data-plane-tcg.py',
+              '--qemu', ia64_full_tcg_emulator.full_path(),
+              '--group', 'checkpoint-30'],
+       protocol: 'tap',
+       timeout: 120,
+       suite: ['unit'])
   test('test-ia64-full-tcg', python,
        depends: [ia64_full_tcg_emulator],
        env: test_env,

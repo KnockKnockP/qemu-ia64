@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 28,
+  "catalogue_revision": 29,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -232,6 +232,26 @@
       "committed_prefix": "A register mapping transition commits its exact frame/rotation effects and cannot leave an old physical target observable as a hit under the remapped logical name",
       "restart_rule": "No interruption restart occurs; following CHK.A recovery proves mandatory absence.",
       "permitted_results": ["All twelve old r32 values rotate into logical r33 and CHK.A r32 recovers", "Rotating f32 and callee r32 checks recover", "Conservative eviction of additional ALAT entries is permitted"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-004-ALAT-RSE-PHYSICAL-STACK-WRAP",
+      "requirement_ids": ["ALT-004", "ALT-005", "RSE-001", "RSE-006", "RSE-011"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Register Stack Engine", "section": "6.9", "printed_pages": ["2:146", "2:147"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "uses physical register addresses to track advanced loads"},
+      "operation": {"kind": "alat-rse-physical-stack-wrap-identity", "selector": "every legal equal SOF/SOL size and every physical stacked-register slot across one complete wrap cycle", "encoding": "LD8.A seeds the highest main-frame register; BR.CALL and ALLOC wrap RSE.BOF; descendant CHK.A observes mandatory absence; BR.RET unwinds"},
+      "legal_inputs": ["SOF and SOL are equal and range from one through 96", "Every frame is complete and uses mapped writable backing memory", "Call depth is 96/gcd(96, SOF), returning RSE.BOF to the original physical phase", "The selected target is the highest register in each frame and has clear NaT"],
+      "privilege": {"levels": [0], "rule": "The application-level load, calls, allocations, checks, and returns execute at CPL0 to provide deterministic physical RSE backing traffic."},
+      "state_read": ["CFM SOF/SOL and RSE.BOF", "96-slot physical stacked-register mapping", "parent target's ALAT physical-register tag", "backing-store pointers and physical partition state"],
+      "state_written": ["nested CFM/PFS/call-link state", "mandatory backing-store register and RNAT words", "wrapped descendant physical-register mapping", "permitted conservative ALAT eviction and CHK.A marker"],
+      "predication": {"applies": true, "rule": "The selected load and check use p0; every call, allocation, and return is unpredicated."},
+      "nat_behavior": "The successful parent LD8.A target has clear NaT; mandatory spill/fill restores that clear NaT after the complete unwind.",
+      "possible_faults": ["No delivered fault"],
+      "fault_priority": ["legal complete frame", "mandatory spill before ALLOC growth", "physical stack mapping and wrap", "ALAT physical-instance identity", "CHK.A recovery", "mandatory return fills"],
+      "committed_prefix": "Every call and allocation commits its frame transition and required oldest-register spills; reuse of the same physical slot by a descendant cannot make the parent's tag observable as a hit",
+      "restart_rule": "No interruption restart occurs; deepest CHK.A recovery and the exact BR.RET chain complete normally.",
+      "permitted_results": ["All 96 deepest descendant checks recover", "The implementation may conservatively evict the parent entry before physical wrap", "All chains unwind to the original CFM, RSE.BOF, value, NaT, and backing pointers"],
       "required_evidence": "E2"
     },
     {
@@ -2344,6 +2364,26 @@
       "committed_prefix": "Mandatory RSE stores commit in backing-store order before SOF96 growth completes",
       "restart_rule": "No restart occurs for the selected mapped writable backing store; fault/retry behavior is separate",
       "permitted_results": ["All 96 payloads and alternating NaTs occupy their exact register/RNAT positions, BSPSTORE reaches BSP, CFM becomes SOF96/SOL96, and r31 receives old AR.PFS with NaT clear"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-006-ALLOC-PHYSICAL-STACK-WRAP-SPILL-FILL",
+      "requirement_ids": ["RSE-006", "RSE-001", "RSE-003", "RSE-004", "RSE-005"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Register Stack Engine", "section": "6.1", "printed_pages": ["2:133", "2:134"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "The register stack frames are mapped onto a set of physical registers which operate as a circular buffer"},
+      "operation": {"kind": "rse-physical-stack-wrap-spill-fill", "selector": "SOF=SOL 1 through 96 with the highest target register and one exact 96-slot physical wrap", "encoding": "nested BR.CALL plus ALLOC forces mandatory spills; literal-PFS BR.RET chains force the corresponding fills"},
+      "legal_inputs": ["RSC.mode is enforced lazy with aligned mapped BSPSTORE", "Every main and descendant frame is complete", "SOF and SOL are every equal nonzero legal size", "The selected target spans physical slots zero through 95 and the call depth is gcd-derived"],
+      "privilege": {"levels": [0], "rule": "The selected mandatory spill/fill traffic executes at CPL0 with identity-mapped writable backing memory."},
+      "state_read": ["CFM, PFS, RSE.BOF, and physical partition counters", "stacked-register value and NaT", "BSP, BSPSTORE, and RNAT collection positions"],
+      "state_written": ["physical stacked-register circular-buffer state", "backing-store register and RNAT words", "BSP/BSPSTORE/load pointer", "nested and restored frame state"],
+      "predication": {"applies": false, "rule": "The selected call, ALLOC, and BR.RET instructions are unpredicated; the paired advanced load/check uses p0."},
+      "nat_behavior": "Each target's clear NaT is collected at its address-selected RNAT position if crossed and is restored clear with the parent value.",
+      "possible_faults": ["No delivered fault"],
+      "fault_priority": ["complete frame and valid BSPSTORE", "mandatory spill capacity before frame growth", "physical circular-buffer reuse", "mandatory fill before returned target execution", "terminal pointer publication"],
+      "committed_prefix": "Oldest parent register and RNAT words commit in ascending backing-store order before physical reuse; each return restores only the required parent suffix",
+      "restart_rule": "No interruption restart occurs for mapped memory; every BR.RET completes required fills before executing its literal return target.",
+      "permitted_results": ["Every target value appears at the independently calculated backing address", "Every parent target and clear NaT round-trips through mandatory spill/fill", "Terminal CFM and RSE.BOF equal the initial frame while BSP, BSPSTORE, and the observed load pointer equal the initial backing base"],
       "required_evidence": "E2"
     },
     {

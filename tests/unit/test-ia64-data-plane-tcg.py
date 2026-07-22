@@ -19,6 +19,7 @@ import argparse
 import dataclasses
 import importlib.util
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -178,6 +179,27 @@ ALAT_REMAP_IMPLEMENTATION_ROWS = tuple(sorted((
     "cpu.register.scalar.cfm",
 )))
 
+ALAT_RSE_WRAP_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_alloc",
+    "cpu.opcode.ia64_op_br_call",
+    "cpu.opcode.ia64_op_br_ret",
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.register.scalar.cfm",
+)))
+
+RSE_PHYSICAL_WRAP_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_alloc",
+    "cpu.opcode.ia64_op_br_call",
+    "cpu.opcode.ia64_op_br_ret",
+    "cpu.opcode.ia64_op_ld8",
+    "cpu.opcode.ia64_op_ld8a",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.64",
+    "cpu.register.scalar.cfm",
+)))
+
 
 def validate_contract(root: Path) -> str:
     path = root / "tests/ia64-conformance/speculation-semantic-tranche.json"
@@ -187,9 +209,9 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 15:
+    if not isinstance(cases, list) or len(cases) != 17:
         raise AssertionError(
-            "speculation tranche must contain fifteen atomic cases")
+            "speculation tranche must contain seventeen atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC",
@@ -203,10 +225,12 @@ def validate_contract(root: Path) -> str:
             "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES",
             "ALT-004-ALAT-PHYSICAL-ALIAS-IDENTITY",
             "ALT-004-ALAT-REGISTER-REMAP-IDENTITY",
+            "ALT-004-ALAT-RSE-PHYSICAL-STACK-WRAP",
             "ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY",
             "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION",
             "ALT-005-ALAT-LOCAL-EXPLICIT-INVALIDATION",
-            "ALT-006-INTEGER-FALSE-PREDICATE"}:
+            "ALT-006-INTEGER-FALSE-PREDICATE",
+            "RSE-006-ALLOC-PHYSICAL-STACK-WRAP-SPILL-FILL"}:
         raise AssertionError("speculation tranche normative rows drifted")
     deferred = by_row["ALT-001-INTEGER-NATPAGE-DEFERRAL"]
     if deferred.get("implementation_rows") != list(
@@ -264,6 +288,21 @@ def validate_contract(root: Path) -> str:
             "rotating_fr_alat_remap_case",
             "stacked_call_alat_remap_case"]:
         raise AssertionError("ALAT register-remap execution probes drifted")
+    rse_wrap = by_row["ALT-004-ALAT-RSE-PHYSICAL-STACK-WRAP"]
+    if rse_wrap.get("implementation_rows") != list(
+            ALAT_RSE_WRAP_IMPLEMENTATION_ROWS):
+        raise AssertionError("ALAT RSE-wrap implementation rows drifted")
+    if rse_wrap.get("execution", {}).get("probes") != [
+            "rse_physical_stack_wrap_alat_case"]:
+        raise AssertionError("ALAT RSE-wrap execution probe drifted")
+    physical_wrap = by_row[
+        "RSE-006-ALLOC-PHYSICAL-STACK-WRAP-SPILL-FILL"]
+    if physical_wrap.get("implementation_rows") != list(
+            RSE_PHYSICAL_WRAP_IMPLEMENTATION_ROWS):
+        raise AssertionError("RSE physical-wrap implementation rows drifted")
+    if physical_wrap.get("execution", {}).get("probes") != [
+            "rse_physical_stack_wrap_alat_case"]:
+        raise AssertionError("RSE physical-wrap execution probe drifted")
     overlap = by_row[
         "ALT-005-ALAT-BYTE-OVERLAP-SEMAPHORE-INVALIDATION"]
     if overlap.get("implementation_rows") != list(
@@ -413,7 +452,8 @@ def validate_contract(root: Path) -> str:
                 "DCR protection/debug row misses width {} variants".format(
                     width)
             )
-    return ("fifteen exact ALT rows cover physical-alias, byte-overlap, "
+    return ("seventeen exact ALT/RSE rows cover physical-stack wrap/spill, "
+            "physical-alias, byte-overlap, "
             "semaphore, register-remap, target identity, local/explicit "
             "invalidation, false predication, non-faulting speculation "
             "attributes, "
@@ -632,6 +672,7 @@ class RuntimeCase:
     verify: Callable[[object], str]
     opcode_coverage: Tuple[str, ...]
     preserve_fault_slot: bool = False
+    compact_loader: bool = False
 
 
 def _no_exception(snapshot, label: str) -> None:
@@ -3683,6 +3724,135 @@ def stacked_call_alat_remap_case() -> RuntimeCase:
     )
 
 
+def _rse_register_address(base: int, index: int) -> int:
+    """Return one independently derived backing-store register address."""
+    if base & 7 or index < 0:
+        raise ValueError("RSE backing address must be aligned and nonnegative")
+    address = base
+    register = 0
+    while True:
+        if ((address >> 3) & 0x3f) == 0x3f:
+            address += 8
+            continue
+        if register == index:
+            return address
+        register += 1
+        address += 8
+
+
+def _append_synthetic_frame_return(bundles: List[object], address: int,
+                                   target: int, caller_cfm: int) -> int:
+    """Return through an exact literal PFS without borrowing guest state."""
+    bundles.extend((
+        _movl_bundle(address, 8, target),
+        _movl_bundle(address + 0x10, 9, caller_cfm),
+        H.Bundle(address + 0x20, 0x01, H.nop_m(),
+                 H.mov_grbr(1, 8), H.mov_gr_to_pfs(9)),
+        H.Bundle(address + 0x30, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_ret(1)),
+    ))
+    return address + 0x40
+
+
+def rse_physical_stack_wrap_alat_case(frame_size: int) -> RuntimeCase:
+    """Wrap one physical slot, force spill/fill, and reject its stale tag."""
+    if not 1 <= frame_size <= 96:
+        raise ValueError("RSE wrap frame size must be 1 through 96")
+    physical_count = 96
+    calls = physical_count // math.gcd(physical_count, frame_size)
+    target = 31 + frame_size
+    caller_cfm = frame_size | (frame_size << 7)
+    source = 0x1800
+    backing = 0x200000
+    spill_address = _rse_register_address(backing, frame_size - 1)
+    loaded = (0xA500000000000000 | (frame_size << 8) | target)
+    main_return = 0x10060
+    frame_bases = tuple(0x11000 + index * 0x100
+                        for index in range(calls))
+    bundles: List[object] = [
+        _movl_bundle(0x10000, 8, backing),
+        H.Bundle(0x10010, 0x01, H.mov_m_grar(18, 8),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10020, 0x01,
+                 H.alloc(31, frame_size, frame_size, 0),
+                 H.nop_i(), H.nop_i()),
+        _movl_bundle(0x10030, 7, source),
+        H.Bundle(0x10040, 0x01,
+                 integer_load(8, "a", r1=target, r3=7),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x10050, 0x11, H.nop_m(), H.nop_i(),
+                 H.br_call(0x10050, frame_bases[0], 0)),
+        _movl_bundle(main_return, 8, spill_address),
+        H.Bundle(main_return + 0x10, 0x01,
+                 ordinary_load(8, r1=21, r3=8),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(main_return + 0x20, 0x01, H.nop_m(),
+                 H.adds(20, 0, target), H.nop_i()),
+        H.spin_bundle(main_return + 0x30),
+    ]
+    check_ip = 0
+    for index, base in enumerate(frame_bases):
+        bundles.append(H.Bundle(
+            base, 0x01, H.alloc(31, frame_size, frame_size, 0),
+            H.nop_i(), H.nop_i(),
+        ))
+        parent_return = (main_return if index == 0 else
+                         frame_bases[index - 1] + 0x20)
+        if index + 1 < len(frame_bases):
+            bundles.append(H.Bundle(
+                base + 0x10, 0x11, H.nop_m(), H.nop_i(),
+                H.br_call(base + 0x10, frame_bases[index + 1], 0),
+            ))
+            _append_synthetic_frame_return(
+                bundles, base + 0x20, parent_return, caller_cfm)
+        else:
+            successor, check_ip = _append_alat_miss_probe(
+                bundles, base + 0x10, reg=target, marker_reg=30)
+            H._require(successor == base + 0x40,
+                       "deepest RSE-wrap check layout drifted")
+            _append_synthetic_frame_return(
+                bundles, successor, parent_return, caller_cfm)
+
+    terminal = main_return + 0x30
+    label = ("RSE physical-stack wrap SOF/SOL {} target r{} across {} calls"
+             .format(frame_size, target, calls))
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(source, loaded, 8),
+              H.DataWord(spill_address, 0xDEADDEADDEADDEAD, 8)),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and snapshot.gr[30] == 1,
+                   label + " exposed a stale ALAT hit after physical reuse")
+        H._require(snapshot.gr[20] == loaded,
+                   label + " did not restore the parent register value")
+        H._require(snapshot.gr[21] == loaded,
+                   label + " did not spill the target value to backing memory")
+        target_nat = ((snapshot.nat_low >> target) & 1
+                      if target < 64 else
+                      (snapshot.nat_high >> (target - 64)) & 1)
+        H._require(target_nat == 0,
+                   label + " did not restore the parent register NaT")
+        H._require(snapshot.cfm == caller_cfm and snapshot.rse_base == 0,
+                   label + " did not unwind to the exact parent frame")
+        H._require((snapshot.rse_bsp, snapshot.rse_bspstore,
+                    snapshot.rse_bspload) == (backing, backing, backing),
+                   label + " did not restore exact backing-store pointers")
+        return ("SOF/SOL {} wrapped slot {}, rejected its stale tag, and "
+                "round-tripped value/NaT through 0x{:x}"
+                .format(frame_size, target - 32, spill_address))
+
+    return RuntimeCase(
+        label, program, (0x10040, check_ip, main_return + 0x10), verify,
+        ("IA64_OP_ALLOC", "IA64_OP_BR_CALL", "IA64_OP_BR_RET",
+         "IA64_OP_CHK_A", "IA64_OP_LD8", "IA64_OP_LD8A"),
+        compact_loader=True,
+    )
+
+
 def integer_speculative_protection_fault_case(
         width: int, memory_class: str, condition: str) -> RuntimeCase:
     if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
@@ -4637,6 +4807,11 @@ def checkpoint_29_cases() -> Tuple[RuntimeCase, ...]:
     )
 
 
+def checkpoint_30_cases() -> Tuple[RuntimeCase, ...]:
+    return tuple(rse_physical_stack_wrap_alat_case(frame_size)
+                 for frame_size in range(1, 97))
+
+
 def runtime_cases() -> Tuple[RuntimeCase, ...]:
     return (
         primary_admission_case(), alias_admission_case(), atomic_case(),
@@ -4734,6 +4909,7 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
         checked_branch_fr_case(), checked_branch_disabled_fr_case(),
         *checkpoint_28_cases(),
         *checkpoint_29_cases(),
+        *checkpoint_30_cases(),
     )
 
 
@@ -4775,6 +4951,8 @@ def self_check(cases: Sequence[RuntimeCase]) -> str:
                "checkpoint 28 ALAT shard is not 42 programs")
     H._require(len(checkpoint_29_cases()) == 206,
                "checkpoint 29 ALAT shard is not 206 programs")
+    H._require(len(checkpoint_30_cases()) == 96,
+               "checkpoint 30 ALAT/RSE shard is not 96 programs")
     return ("{}; {} programs; 63 primary bundles (57 decoder-live); {} live "
             "alias/completer bundles; 12 shadowed split-load encodings; "
             "6 reserved-width rows"
@@ -4787,6 +4965,7 @@ def run_case(qemu: Path, case: RuntimeCase) -> str:
         preserve_fault_slot=case.preserve_fault_slot,
         typed_direct_trace_ips=case.trace_ips,
         one_bundle_per_tb=True,
+        compact_loader=case.compact_loader,
     )
     return case.verify(snapshot)
 
@@ -4804,7 +4983,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="construct and validate programs without QEMU")
     parser.add_argument(
         "--group",
-        choices=("all", "base", "checkpoint-28", "checkpoint-29"),
+        choices=("all", "base", "checkpoint-28", "checkpoint-29",
+                 "checkpoint-30"),
         default="all",
         help="run the complete inventory or one Meson-sized shard",
     )
@@ -4817,13 +4997,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     checkpoint_28_count = len(checkpoint_28_cases())
     checkpoint_29_count = len(checkpoint_29_cases())
+    checkpoint_30_count = len(checkpoint_30_cases())
     if args.group == "base":
-        cases = all_cases[:-(checkpoint_28_count + checkpoint_29_count)]
+        cases = all_cases[:-(checkpoint_28_count + checkpoint_29_count +
+                             checkpoint_30_count)]
     elif args.group == "checkpoint-28":
-        cases = all_cases[-(checkpoint_28_count + checkpoint_29_count):
-                          -checkpoint_29_count]
+        cases = all_cases[-(checkpoint_28_count + checkpoint_29_count +
+                            checkpoint_30_count):
+                          -(checkpoint_29_count + checkpoint_30_count)]
     elif args.group == "checkpoint-29":
-        cases = all_cases[-checkpoint_29_count:]
+        cases = all_cases[-(checkpoint_29_count + checkpoint_30_count):
+                          -checkpoint_30_count]
+    elif args.group == "checkpoint-30":
+        cases = all_cases[-checkpoint_30_count:]
     else:
         cases = all_cases
 

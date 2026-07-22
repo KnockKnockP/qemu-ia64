@@ -101,6 +101,13 @@
       "candidate_tests": ["test-ia64-alat-alias-tcg"]
     },
     {
+      "normative_row": "ALT-004-ALAT-RSE-PHYSICAL-STACK-WRAP",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_alloc", "cpu.opcode.ia64_op_br_call", "cpu.opcode.ia64_op_br_ret", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld8a", "cpu.register.scalar.cfm"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-rse-wrap-tcg"]
+    },
+    {
       "normative_row": "ALT-004-ALAT-TARGET-ADDRESS-SIZE-IDENTITY",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.opcode.ia64_op_bsw0", "cpu.opcode.ia64_op_bsw1", "cpu.opcode.ia64_op_chk_a", "cpu.opcode.ia64_op_ld1a", "cpu.opcode.ia64_op_ld1c_clr", "cpu.opcode.ia64_op_ld2a", "cpu.opcode.ia64_op_ld2c_clr", "cpu.opcode.ia64_op_ld4a", "cpu.opcode.ia64_op_ld4c_clr", "cpu.opcode.ia64_op_ld8a", "cpu.opcode.ia64_op_ld8c_clr", "cpu.opcode.ia64_op_ldfs", "cpu.register.scalar.psr"],
@@ -812,6 +819,13 @@
       "implementation_rows": ["cpu.opcode.ia64_op_alloc"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "RSE-006-ALLOC-PHYSICAL-STACK-WRAP-SPILL-FILL",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_alloc", "cpu.opcode.ia64_op_br_call", "cpu.opcode.ia64_op_br_ret", "cpu.opcode.ia64_op_ld8", "cpu.opcode.ia64_op_ld8a", "cpu.register.ar.17", "cpu.register.ar.18", "cpu.register.ar.64", "cpu.register.scalar.cfm"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-alat-rse-wrap-tcg"]
     },
     {
       "normative_row": "RSE-006-CLRRRB-RENAME-EFFECT",

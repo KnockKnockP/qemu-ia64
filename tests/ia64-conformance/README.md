@@ -4,7 +4,7 @@ The required IA-64 gate is self-contained in this QEMU repository. It has no
 filesystem or runtime dependency on the private Vibtanium suitcase repository.
 
 In an MSYS2 MINGW64 shell with `curl`, `pdftotext`, and the normal QEMU build
-dependencies installed, configure, build, fetch the public manuals, run all 52
+dependencies installed, configure, build, fetch the public manuals, run all 53
 required registrations, and generate sanitized closure reports with:
 
 ```sh
@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first fifteen exact speculation contracts live in
+The first seventeen exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -105,24 +105,32 @@ Intel's explicit pessimistic-eviction allowance. The fifteenth adds every
 legal nonzero GR rotating-region size, one rotating-FR case, and one stacked
 call-frame transition. Each prevents an ALAT tag for the former physical
 target from creating a false hit under the remapped logical r32 or f32 name.
+The sixteenth and seventeenth jointly add 96 physical-register-stack programs,
+one for every legal SOF=SOL size. They target every one of QEMU's 96 physical
+stacked-register slots and use the complete `96 / gcd(96, SOF)` call cycle to
+return to the same physical phase. Deep calls force real RSE backing-store
+spills, including RNAT collection-slot crossings; the unwind verifies the
+exact spilled word, restored value and NaT, terminal CFM, BOF, BSP, BSPSTORE,
+and backing-store load pointer. A descendant CHK.A must recover rather than
+falsely hit the parent tag after physical-stack wrap, while Intel's permitted
+earlier pessimistic eviction remains valid.
 Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 serialized public gate after the physical-
-alias/overlap/remap checkpoint, `test-ia64-system-tcg` took 47.29 seconds,
-`test-ia64-full-tcg` 48.36 seconds, and `test-ia64-register-tcg` 45.51
-seconds. The established data-plane shard passed 637 subtests in 172.24
-seconds, checkpoint 28 passed 42 in 11.64 seconds, and the new 206-program
-ALAT alias shard passed in 55.75 seconds; all 52 selected tests passed in
-482.333 seconds. The former
+matrices execute. On the 2026-07-22 default four-worker public gate after the
+physical-stack/RSE checkpoint, `test-ia64-system-tcg` took 47.41 seconds,
+`test-ia64-full-tcg` 49.09 seconds, and `test-ia64-register-tcg` 45.49
+seconds. The established data-plane shard passed 637 subtests in 173.36
+seconds, checkpoint 28 passed 42 in 11.99 seconds, checkpoint 29 passed 206
+in 56.06 seconds, and checkpoint 30 passed 96 in 36.01 seconds; all 53
+selected tests passed in 193.328 seconds of report wall time. The former
 single 180-second registration limit was an infrastructure timeout once the
 combined inventory reached 679 programs, not a semantic hang. The current
-885-program inventory remains deliberately split by evidence ownership. The
-serialized lane avoids the fixed five-second HMP-startup
-contention seen under unrestricted host parallelism without weakening any
-per-test timeout. The
+981-program inventory remains deliberately split by evidence ownership. The
+gate defaults to four workers to avoid unrestricted host contention without
+weakening any per-test timeout. The
 RSE suites include five fresh-process
 save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the
