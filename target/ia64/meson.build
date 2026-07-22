@@ -10,6 +10,7 @@ ia64_ss.add(files(
   'firmware-hook.c',
   'insn.c',
   'machine.c',
+  'machine-check.c',
   'mem.c',
   'opcode-traits.c',
   'perf.c',

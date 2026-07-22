@@ -16,6 +16,7 @@
     "test-ia64-evidence-map",
     "test-ia64-first-architectural-tranche-static",
     "test-ia64-implementation-surface",
+    "test-ia64-machine-check",
     "test-ia64-memory-boundary-tranche-static",
     "test-ia64-normative-catalogue",
     "test-ia64-packed-integer-tranche-static",

@@ -597,6 +597,24 @@
       "limitations": ["Host helper behavior alone does not prove normal guest execution."]
     },
     {
+      "id": "meson:test-ia64-machine-check",
+      "kind": "host-unit",
+      "lane": "host-unit",
+      "primary_evidence_level": "E1",
+      "evidence_levels": ["E1"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-machine-check",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-machine-check.c"}
+      ],
+      "invocation": "meson test qemu:test-ia64-machine-check",
+      "scope": "Independent host checks for the architectural Machine Check min-state layout, pending and active lifecycle, PAL resume restoration, CMC interrupt request, and migration canonicality.",
+      "oracle_independence": "independent",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Host state checks do not close the translation-overlap rows until an E2 guest observes PALE_CHECK save, PSR.mc timing, and the SAL/OS_MCA handoff."]
+    },
+    {
       "id": "meson:test-ia64-memory-boundary-tranche",
       "kind": "bare-metal",
       "lane": "bare-metal-batch",

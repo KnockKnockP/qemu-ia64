@@ -349,3 +349,23 @@ registered region-register and translation-register static validators. The
 gate now derives a checked invariant from the closure infrastructure list and
 passes the intended 63/63 in 203.8 seconds. The complete configured suite has
 219 registrations and passes 217 with two expected skips in 214.9 seconds.
+
+The next non-closing foundation checkpoint implements the architectural
+Machine Check state needed behind those overlap preflights. It captures the
+exact 1 KiB min-state layout for both static-register banks and their NaT
+bits, preserves the two-level interruption resources when `PSR.ic=0`, tracks
+pending and active events across migration, and implements the argument and
+status contracts for `PAL_MC_REGISTER_MEM` and `PAL_MC_RESUME`. Resume restores
+the caller-supplied context, including a legitimately invalid second-level
+`cr.ifs`, and optionally queues the CMC interrupt through `cr.cmcv`.
+
+The independent host binary has five passing cases, the VMState binary has 59,
+and the full-TCG PAL binary has 30. It is explicitly classified as supporting
+E1 evidence: no new catalogue row or row-closing claim is added. The public
+required gate passes 64/64 in 208.8 seconds; the complete configured suite has
+220 registrations and passes 218 with two expected skips in 262.2 seconds.
+The closure remains 142 normative rows, 113 closing claims, and 1,384 blockers.
+Actual translation-overlap capture, the PALE_CHECK memory write, `PSR.mc`
+delivery timing, and the SAL/OS_MCA handoff remain the next E2 checkpoint.
+Everything required to build and run this foundation is contained in the
+public qemu-ia64 repository.

@@ -4,12 +4,14 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/getpc.h"
+#include "system/address-spaces.h"
 #include "hw/ia64/efi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
 #include "qemu/main-loop.h"
 #include "target/ia64/firmware.h"
 #include "target/ia64/insn.h"
+#include "target/ia64/machine-check.h"
 #include "target/ia64/perf.h"
 #include "target/ia64/pmu.h"
 #include "trace-target_ia64.h"
@@ -18,6 +20,7 @@
 #define IA64_FIRMWARE_STATUS_SUCCESS UINT64_C(0)
 #define IA64_FIRMWARE_STATUS_UNIMPLEMENTED UINT64_C(0xffffffffffffffff)
 #define IA64_FIRMWARE_STATUS_INVALID_ARGUMENT UINT64_C(0xfffffffffffffffe)
+#define IA64_FIRMWARE_STATUS_ERROR UINT64_C(0xfffffffffffffffd)
 #define IA64_FIRMWARE_STATUS_NO_INFORMATION UINT64_C(0xfffffffffffffffb)
 #define IA64_FIRMWARE_STATUS_REQUIRES_MEMORY UINT64_C(0xfffffffffffffff7)
 /*
@@ -71,6 +74,7 @@ typedef enum IA64PalProcedureId {
     IA64_PAL_MACHINE_CHECK_DRAIN = 22,
     IA64_PAL_MACHINE_CHECK_EXPECTED = 23,
     IA64_PAL_MACHINE_CHECK_DYNAMIC_STATE = 24,
+    IA64_PAL_MACHINE_CHECK_RESUME = 26,
     IA64_PAL_MACHINE_CHECK_REGISTER_MEMORY = 27,
     IA64_PAL_HALT = 28,
     IA64_PAL_HALT_LIGHT = 29,
@@ -114,6 +118,7 @@ typedef struct IA64FirmwareResult {
     uint64_t ret0;
     uint64_t ret1;
     uint64_t ret2;
+    bool resumed;
 } IA64FirmwareResult;
 
 #define IA64_KERNEL_PAGE_OFFSET UINT64_C(0xe000000000000000)
@@ -167,6 +172,8 @@ static const char *firmware_status_name(uint64_t status)
         return "unimplemented";
     case IA64_FIRMWARE_STATUS_INVALID_ARGUMENT:
         return "invalid-argument";
+    case IA64_FIRMWARE_STATUS_ERROR:
+        return "error";
     case IA64_FIRMWARE_STATUS_NO_INFORMATION:
         return "no-information";
     case IA64_FIRMWARE_STATUS_REQUIRES_MEMORY:
@@ -227,6 +234,8 @@ static const char *pal_procedure_name(uint64_t function_id)
         return "PAL_MC_EXPECTED";
     case IA64_PAL_MACHINE_CHECK_DYNAMIC_STATE:
         return "PAL_MC_DYNAMIC_STATE";
+    case IA64_PAL_MACHINE_CHECK_RESUME:
+        return "PAL_MC_RESUME";
     case IA64_PAL_MACHINE_CHECK_REGISTER_MEMORY:
         return "PAL_MC_REGISTER_MEM";
     case IA64_PAL_HALT:
@@ -360,6 +369,15 @@ static uint64_t pal_vm_summary1(void)
            (translation_cache_levels << 56);
 }
 
+static IA64FirmwareResult firmware_status_ret0(uint64_t status,
+                                               uint64_t ret0)
+{
+    IA64FirmwareResult result = firmware_status(status);
+
+    result.ret0 = ret0;
+    return result;
+}
+
 static uint64_t pal_vm_summary2(void)
 {
     const uint64_t implemented_va_msb = 50;
@@ -460,6 +478,64 @@ static IA64FirmwareResult pal_debug_info(uint64_t arg0, uint64_t arg1,
     return firmware_success(IA64_IBR_COUNT / 2, IA64_DBR_COUNT / 2, 0);
 }
 
+static IA64FirmwareResult pal_machine_check_register_memory(
+    CPUIA64State *env, uint64_t address, uint64_t size_kb,
+    uint64_t reserved)
+{
+    const uint64_t required_kb = IA64_MIN_STATE_SIZE / 1024;
+
+    if (reserved != 0 ||
+        (address & (IA64_MIN_STATE_ALIGNMENT - 1)) != 0) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    if (size_kb != 0 && size_kb != required_kb) {
+        return firmware_status_ret0(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT,
+                                    required_kb);
+    }
+    if (!ia64_machine_check_register_min_state(env, address, size_kb)) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    return firmware_success(0, 0, 0);
+}
+
+static IA64FirmwareResult pal_machine_check_resume(CPUIA64State *env,
+                                                    uint64_t set_cmci,
+                                                    uint64_t save_ptr,
+                                                    uint64_t new_context)
+{
+    uint64_t image[IA64_MIN_STATE_WORDS];
+
+    if (set_cmci > 1 || new_context > 1 ||
+        (save_ptr & (IA64_MIN_STATE_ALIGNMENT - 1)) != 0 ||
+        save_ptr > UINT64_MAX - IA64_MIN_STATE_ARCHITECTURAL_SIZE) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    if (!env->machine_check.active) {
+        return firmware_status(IA64_FIRMWARE_STATUS_ERROR);
+    }
+    for (unsigned i = 0; i < IA64_MIN_STATE_WORDS; i++) {
+        MemTxResult tx_result = MEMTX_OK;
+
+        image[i] = address_space_ldq_le(
+            &address_space_memory, save_ptr + i * sizeof(uint64_t),
+            MEMTXATTRS_UNSPECIFIED, &tx_result);
+        if (tx_result != MEMTX_OK) {
+            return firmware_status(IA64_FIRMWARE_STATUS_ERROR);
+        }
+    }
+    if (!ia64_machine_check_resume(env, image, new_context != 0,
+                                   set_cmci != 0)) {
+        return firmware_status(IA64_FIRMWARE_STATUS_INVALID_ARGUMENT);
+    }
+    if (set_cmci != 0) {
+        ia64_refresh_interrupt_delivery(env);
+    }
+    return (IA64FirmwareResult) {
+        .status = IA64_FIRMWARE_STATUS_SUCCESS,
+        .resumed = true,
+    };
+}
+
 static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
                                        uint64_t function_id,
                                        uint64_t arg0, uint64_t arg1,
@@ -477,7 +553,6 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
     case IA64_PAL_MACHINE_CHECK_DRAIN:
     case IA64_PAL_MACHINE_CHECK_EXPECTED:
     case IA64_PAL_MACHINE_CHECK_DYNAMIC_STATE:
-    case IA64_PAL_MACHINE_CHECK_REGISTER_MEMORY:
     case IA64_PAL_HALT:
     case IA64_PAL_HALT_LIGHT:
     case IA64_PAL_FIXED_ADDRESS:
@@ -500,6 +575,10 @@ static IA64FirmwareResult dispatch_pal(CPUIA64State *env,
                                 IA64_PAL_UNIQUE_CACHES, 0);
     case IA64_PAL_MEMORY_ATTRIBUTES:
         return firmware_success(0, 0, 0);
+    case IA64_PAL_MACHINE_CHECK_RESUME:
+        return pal_machine_check_resume(env, arg0, arg1, arg2);
+    case IA64_PAL_MACHINE_CHECK_REGISTER_MEMORY:
+        return pal_machine_check_register_memory(env, arg0, arg1, arg2);
     case IA64_PAL_VIRTUAL_MEMORY_SUMMARY:
         return pal_vm_summary(arg0, arg1, arg2);
     case IA64_PAL_VIRTUAL_MEMORY_INFO:
@@ -979,6 +1058,9 @@ bool vibtanium_firmware_dispatch_gate(CPUIA64State *env, uint64_t gate_ip)
         result = dispatch_pal(env, function_id, arg0, arg1, arg2);
         firmware_trace_call(env, "pal", pal_procedure_name(function_id),
                             function_id, arg0, arg1, arg2, result);
+        if (result.resumed) {
+            return true;
+        }
         firmware_write_result(env, result, !static_call);
         if ((function_id == IA64_PAL_HALT ||
              function_id == IA64_PAL_HALT_LIGHT) &&

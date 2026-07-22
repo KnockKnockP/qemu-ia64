@@ -1544,6 +1544,91 @@ def test_pal_debug_info(harness: ModuleType, qemu: Path) -> str:
             "pairs and rejects each nonzero reserved argument with -2")
 
 
+def pal_mc_register_mem_program(harness: ModuleType, address: int,
+                                size_kb: int, reserved: int):
+    return harness.Program(
+        name="PAL_MC_REGISTER_MEM args {:x}/{:x}/{:x}".format(
+            address, size_kb, reserved),
+        bundles=(
+            movl_bundle(harness, 0x10, 28, 27),
+            movl_bundle(harness, 0x20, 29, address),
+            movl_bundle(harness, 0x30, 30, size_kb),
+            movl_bundle(harness, 0x40, 31, reserved),
+            harness.Bundle(0x50, 0x11, harness.nop_m(), harness.nop_i(),
+                           harness.br_call(0x50, 0x8F000, 0)),
+            harness.spin_bundle(0x60),
+        ), terminal_ip=0x60,
+    )
+
+
+def test_pal_mc_register_mem(harness: ModuleType, qemu: Path) -> str:
+    for size_kb in (0, 4):
+        result = harness.run_program(
+            qemu, pal_mc_register_mem_program(harness, 0x1800, size_kb, 0)
+        )
+        require(not result.exception_pending and result.gr[8] == 0,
+                "PAL_MC_REGISTER_MEM rejected valid 4 KiB registration")
+        require((result.gr[9], result.gr[10], result.gr[11]) == (0, 0, 0),
+                "valid min-state registration returned payload data")
+
+    invalid_status = U64_MASK - 1
+    for arguments, required_size in (
+        ((0x1808, 0, 0), 0),
+        ((0x1800, 8, 0), 4),
+        ((0x1800, 0, 1), 0),
+    ):
+        result = harness.run_program(
+            qemu, pal_mc_register_mem_program(harness, *arguments)
+        )
+        require(not result.exception_pending and
+                result.gr[8] == invalid_status,
+                "PAL_MC_REGISTER_MEM accepted invalid args {}".format(
+                    arguments))
+        require(result.gr[9] == required_size and result.gr[10] == 0 and
+                result.gr[11] == 0,
+                "invalid registration returned the wrong required size")
+    return ("PAL_MC_REGISTER_MEM accepts the architectural 4 KiB default "
+            "forms, enforces 512-byte alignment and reserved zero, and "
+            "reports the required size on mismatch")
+
+
+def pal_mc_resume_program(harness: ModuleType, set_cmci: int, save_ptr: int,
+                          new_context: int):
+    return harness.Program(
+        name="PAL_MC_RESUME args {:x}/{:x}/{:x}".format(
+            set_cmci, save_ptr, new_context),
+        bundles=(
+            movl_bundle(harness, 0x10, 28, 26),
+            movl_bundle(harness, 0x20, 29, set_cmci),
+            movl_bundle(harness, 0x30, 30, save_ptr),
+            movl_bundle(harness, 0x40, 31, new_context),
+            harness.Bundle(0x50, 0x11, harness.nop_m(), harness.nop_i(),
+                           harness.br_call(0x50, 0x8F000, 0)),
+            harness.spin_bundle(0x60),
+        ), terminal_ip=0x60,
+    )
+
+
+def test_pal_mc_resume_error_contract(harness: ModuleType, qemu: Path) -> str:
+    no_active_event = harness.run_program(
+        qemu, pal_mc_resume_program(harness, 0, 0x1800, 0)
+    )
+    require(not no_active_event.exception_pending and
+            no_active_event.gr[8] == U64_MASK - 2,
+            "PAL_MC_RESUME did not report -3 without an active event")
+
+    invalid_status = U64_MASK - 1
+    for arguments in ((2, 0x1800, 0), (0, 0x1808, 0), (0, 0x1800, 2)):
+        result = harness.run_program(
+            qemu, pal_mc_resume_program(harness, *arguments)
+        )
+        require(not result.exception_pending and
+                result.gr[8] == invalid_status,
+                "PAL_MC_RESUME accepted invalid args {}".format(arguments))
+    return ("PAL_MC_RESUME validates both flags and pointer alignment and "
+            "reports -3 when no machine-check context is active")
+
+
 def pal_vm_summary_program(harness: ModuleType, arg0: int, arg1: int,
                            arg2: int):
     return harness.Program(
@@ -3481,6 +3566,10 @@ def main() -> int:
         ("PAL performance monitor discovery",
          test_pal_performance_monitor_info),
         ("PAL debug-register discovery", test_pal_debug_info),
+        ("PAL machine-check min-state registration",
+         test_pal_mc_register_mem),
+        ("PAL machine-check resume errors",
+         test_pal_mc_resume_error_contract),
         ("PAL virtual-memory summary", test_pal_virtual_memory_summary),
         ("PAL virtual-memory page sizes",
          test_pal_virtual_memory_page_sizes),

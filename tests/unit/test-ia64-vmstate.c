@@ -282,6 +282,7 @@ static const VMStateDescription vmstate_collection_test_root = {
     .name = "cpu",
     .version_id = 6,
     .minimum_version_id = 6,
+    .pre_load = ia64_cpu_pre_load,
     .post_load = ia64_cpu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_VSTRUCT_TEST(env, IA64CPU, ia64_cpu_uses_env_v8, 0,
@@ -291,6 +292,7 @@ static const VMStateDescription vmstate_collection_test_root = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ia64_collection_state,
+        &vmstate_ia64_machine_check_state,
         NULL
     },
 };
@@ -1783,6 +1785,70 @@ static void test_typed_only_version_boundary(void)
     g_assert_cmpint(ia64_rse_vmstate_post_load(&rse, 4), ==, -EINVAL);
 }
 
+static void test_machine_check_state_subsection_round_trip(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+
+    init_cpu_stream(&source, 0, false);
+    source.env.machine_check.min_state_address = UINT64_C(0x4000);
+    source.env.machine_check.processor_state_parameter =
+        UINT64_C(0x10000000e0f061e0);
+    source.env.machine_check.min_state[0] = UINT64_C(0x1234);
+    source.env.machine_check.min_state[IA64_MIN_STATE_WORDS - 1] =
+        UINT64_C(0xabcdef);
+    source.env.machine_check.cause =
+        IA64_MACHINE_CHECK_TRANSLATION_OVERLAP;
+    source.env.machine_check.registered = true;
+    source.env.machine_check.pending = true;
+    g_assert_true(ia64_machine_check_state_needed(&source));
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_collection_test_root), ==, 0);
+
+    init_cpu_stream(&destination, 0, false);
+    memset(&destination.env.machine_check, 0xa5,
+           sizeof(destination.env.machine_check));
+    g_assert_cmpint(load_cpu_with_current_root(&destination), ==, 0);
+    g_assert_cmpmem(&destination.env.machine_check,
+                    sizeof(destination.env.machine_check),
+                    &source.env.machine_check,
+                    sizeof(source.env.machine_check));
+}
+
+static void test_machine_check_absent_subsection_resets_state(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+    IA64MachineCheckState zero = { 0 };
+
+    init_cpu_stream(&source, 0, false);
+    g_assert_false(ia64_machine_check_state_needed(&source));
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_collection_test_root), ==, 0);
+
+    init_cpu_stream(&destination, 0, false);
+    memset(&destination.env.machine_check, 0xa5,
+           sizeof(destination.env.machine_check));
+    g_assert_cmpint(load_cpu_with_current_root(&destination), ==, 0);
+    g_assert_cmpmem(&destination.env.machine_check,
+                    sizeof(destination.env.machine_check),
+                    &zero, sizeof(zero));
+}
+
+static void test_machine_check_malformed_state_rejected(void)
+{
+    IA64CPU source;
+    IA64CPU destination;
+
+    init_cpu_stream(&source, 0, false);
+    source.env.machine_check.registered = true;
+    source.env.machine_check.min_state_address = UINT64_C(0x4100);
+    g_assert_cmpint(save_cpu_with_vmsd(
+                        &source, &vmstate_collection_test_root), ==, 0);
+    init_cpu_stream(&destination, 0, false);
+    g_assert_cmpint(load_cpu_with_current_root(&destination), ==, -EINVAL);
+}
+
 static void test_region_register_vmstate_profile(void)
 {
     static const uint8_t page_sizes[IA64_RR_COUNT] = {
@@ -2153,6 +2219,12 @@ int main(int argc, char **argv)
                     test_alat_vmstate_rejects_invalid_entries);
     g_test_add_func("/ia64/vmstate/collection-state/subsection-round-trip",
                     test_collection_state_subsection_round_trip);
+    g_test_add_func("/ia64/vmstate/machine-check/subsection-round-trip",
+                    test_machine_check_state_subsection_round_trip);
+    g_test_add_func("/ia64/vmstate/machine-check/absent-resets-state",
+                    test_machine_check_absent_subsection_resets_state);
+    g_test_add_func("/ia64/vmstate/machine-check/reject-malformed",
+                    test_machine_check_malformed_state_rejected);
     g_test_add_func("/ia64/vmstate/typed-only-version-boundary",
                     test_typed_only_version_boundary);
     g_test_add_func("/ia64/vmstate/region-register/profile-round-trip-reject",

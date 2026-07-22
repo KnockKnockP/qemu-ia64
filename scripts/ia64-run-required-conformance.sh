@@ -31,6 +31,7 @@ set +e
     qemu:test-ia64-decode \
     qemu:test-ia64-opcode-traits \
     qemu:test-ia64-insn \
+    qemu:test-ia64-machine-check \
     qemu:test-ia64-memory-exceptions \
     qemu:test-ia64-rse-spine \
     qemu:test-ia64-vmstate \

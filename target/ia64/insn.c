@@ -13,6 +13,7 @@
 #include "flight-recorder.h"
 #include "fpu/softfloat.h"
 #include "insn.h"
+#include "machine-check.h"
 #include "mem.h"
 #include "perf.h"
 #include "qemu/error-report.h"
@@ -49,7 +50,6 @@
 #define IA64_TPR_MIC_MASK UINT64_C(0xf0)
 #define IA64_TPR_MMI_BIT UINT64_C(0x0000000000010000)
 #define IA64_PSR_LOWER_MASK UINT64_C(0x00000000ffffffff)
-#define IA64_PSR_MC_BIT UINT64_C(0x0000000800000000)
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 
 static void ia64_alat_invalidate_rotating_frs(CPUIA64State *env);
@@ -2758,6 +2758,9 @@ void ia64_write_control_register(CPUIA64State *env, uint32_t reg,
             }
         }
         ia64_itc_timer_update(env);
+        break;
+    case IA64_CR_CMCV:
+        ia64_machine_check_refresh_cmci(env);
         break;
     case IA64_CR_IRR0:
     case IA64_CR_IRR1:

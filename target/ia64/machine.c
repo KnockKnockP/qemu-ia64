@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "machine-check.h"
 #include "exec/cputlb.h"
 #include "insn.h"
 #include "mem.h"
@@ -951,6 +952,67 @@ static const VMStateDescription vmstate_env = {
     },
 };
 
+static int ia64_cpu_pre_load(void *opaque)
+{
+    IA64CPU *cpu = opaque;
+
+    /* An absent optional subsection is the architectural reset state. */
+    memset(&cpu->env.machine_check, 0, sizeof(cpu->env.machine_check));
+    return 0;
+}
+
+static bool ia64_machine_check_state_needed(void *opaque)
+{
+    IA64CPU *cpu = opaque;
+    const IA64MachineCheckState *state = &cpu->env.machine_check;
+
+    if (state->min_state_address != 0 ||
+        state->processor_state_parameter != 0 || state->cause != 0 ||
+        state->registered || state->pending || state->active ||
+        state->cmci_pending) {
+        return true;
+    }
+    for (unsigned i = 0; i < IA64_MIN_STATE_WORDS; i++) {
+        if (state->min_state[i] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int ia64_machine_check_state_post_load(void *opaque, int version_id)
+{
+    IA64CPU *cpu = opaque;
+
+    if (version_id != 1 ||
+        !ia64_machine_check_state_is_canonical(&cpu->env.machine_check)) {
+        error_report("IA-64 migration stream has invalid Machine Check "
+                     "state");
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_ia64_machine_check_state = {
+    .name = "cpu/ia64-machine-check-state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ia64_machine_check_state_needed,
+    .post_load = ia64_machine_check_state_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(env.machine_check.min_state_address, IA64CPU),
+        VMSTATE_UINT64(env.machine_check.processor_state_parameter, IA64CPU),
+        VMSTATE_UINT64_ARRAY(env.machine_check.min_state, IA64CPU,
+                             IA64_MIN_STATE_WORDS),
+        VMSTATE_UINT8(env.machine_check.cause, IA64CPU),
+        VMSTATE_BOOL(env.machine_check.registered, IA64CPU),
+        VMSTATE_BOOL(env.machine_check.pending, IA64CPU),
+        VMSTATE_BOOL(env.machine_check.active, IA64CPU),
+        VMSTATE_BOOL(env.machine_check.cmci_pending, IA64CPU),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static int ia64_cpu_post_load(void *opaque, int version_id)
 {
     IA64CPU *cpu = opaque;
@@ -1004,6 +1066,7 @@ const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
     .version_id = 6,
     .minimum_version_id = 6,
+    .pre_load = ia64_cpu_pre_load,
     .post_load = ia64_cpu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(parent_obj, IA64CPU, 0, vmstate_cpu_common, CPUState),
@@ -1015,6 +1078,7 @@ const VMStateDescription vmstate_ia64_cpu = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ia64_collection_state,
+        &vmstate_ia64_machine_check_state,
         NULL
     },
 };

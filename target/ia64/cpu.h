@@ -77,6 +77,7 @@
 #define IA64_PSR_RT_BIT UINT64_C(0x0000000008000000)
 #define IA64_PSR_CPL_SHIFT 32
 #define IA64_PSR_CPL_MASK UINT64_C(0x0000000300000000)
+#define IA64_PSR_MC_BIT UINT64_C(0x0000000800000000)
 #define IA64_PSR_IT_BIT UINT64_C(0x0000001000000000)
 #define IA64_PSR_ID_BIT UINT64_C(0x0000002000000000)
 #define IA64_PSR_DA_BIT UINT64_C(0x0000004000000000)
@@ -413,6 +414,29 @@ typedef struct IA64NaTState {
     uint64_t rnat;
 } IA64NaTState;
 
+#define IA64_MIN_STATE_SIZE UINT64_C(4096)
+#define IA64_MIN_STATE_ALIGNMENT UINT64_C(512)
+#define IA64_MIN_STATE_ARCHITECTURAL_SIZE UINT64_C(1024)
+#define IA64_MIN_STATE_WORDS \
+    (IA64_MIN_STATE_ARCHITECTURAL_SIZE / sizeof(uint64_t))
+
+typedef enum IA64MachineCheckCause {
+    IA64_MACHINE_CHECK_NONE = 0,
+    IA64_MACHINE_CHECK_TRANSLATION_OVERLAP = 1,
+} IA64MachineCheckCause;
+
+typedef struct IA64MachineCheckState {
+    /* PAL_MC_REGISTER_MEM owns this physical, uncacheable buffer contract. */
+    uint64_t min_state_address;
+    uint64_t processor_state_parameter;
+    uint64_t min_state[IA64_MIN_STATE_WORDS];
+    uint8_t cause;
+    bool registered;
+    bool pending;
+    bool active;
+    bool cmci_pending;
+} IA64MachineCheckState;
+
 typedef struct IA64InterruptState {
     /*
      * Local-SAPIC state.  CR.IRR* supplies the per-vector pending bits while
@@ -689,6 +713,7 @@ typedef struct CPUArchState {
     IA64MemorySkeletonState memory;
     IA64ExceptionRecord exception;
     IA64AlatState alat;
+    IA64MachineCheckState machine_check;
 
     /*
      * Transient interpreter breadcrumb for data faults.  It lets interruption
