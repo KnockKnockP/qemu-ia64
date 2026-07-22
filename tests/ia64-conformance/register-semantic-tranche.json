@@ -378,6 +378,57 @@
       "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_unat_effect"], "result_observations": ["complete UNAT image", "mov-from-UNAT image", "64 payloads", "64 destination NaT bits", "false-qualified destination"]},
       "oracle": {"independence": "independent", "derivation": "The alternating 64-bit image is constructed from address bits 8:3 and literal source NaTs; payload and predicate expectations do not use translator state"},
       "limitations": ["Spill/fill memory faults, base-update forms, overlapping same-bit dependency violations, and migration remain separate MEM/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "REG-008-BSPSTORE-BSP-REBASE-EFFECT-EXACT", "case_id": 23, "normative_token": 74,
+      "normative_row": "REG-008-BSPSTORE-BSP-REBASE-EFFECT",
+      "implementation_rows": ["cpu.register.ar.17", "cpu.register.ar.18"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "6.5.3", "printed_pages": ["2:140", "2:141", "2:142"], "anchor": "Writing BSPSTORE (mov to BSPSTORE application register) has side-effects on all three"},
+      "preconditions": ["RSC.mode is zero", "The current frame and dirty partition are empty and complete", "Every presented address is implemented and mapped only as architectural state; no RSE memory access is required"],
+      "inputs": ["All 64 values of BSPSTORE address bits 8:3", "Every ignored low-bit pattern 2:0 repeated across the selector matrix", "A false-qualified offset-63 rebase", "A no-stop rebase followed by BSP and BSPSTORE reads in the same issue group"],
+      "expected_results": ["BSPSTORE and RSE.BspLoad equal the presented address with bits 2:0 cleared", "With an empty dirty partition BSP equals BSPSTORE except that offset 63 skips the intervening RNAT collection word", "False qualification preserves all three pointers", "Same-group reads observe the old BSP and BSPSTORE images while the next group observes the rebase"],
+      "allowed_results": ["Exactly the 64 independently derived pointer triples plus the false-qualification and issue-group visibility controls"],
+      "permitted_state_changes": ["BSPSTORE", "BSP", "RSE.BspLoad", "Architecturally undefined RNAT contents after a qualified write", "Declared GR and predicate observation state"],
+      "required_unchanged_state": ["The zero-sized dirty partition", "All RSE pointers after the false-qualified write", "The group-entry BSP and BSPSTORE source images until the stop"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Each qualified write commits one atomic pointer rebase at its group stop; the no-stop reads select the entry image",
+      "restart_action": "No restart occurs for complete-frame, implemented-address inputs", "applicable_variants": ["all address selectors 0 through 63", "all low-bit patterns", "RNAT-slot boundary", "false qualification", "same-group source overlay"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_application_register_bspstore_rebase"], "result_observations": ["64 exact BSPSTORE/BSP pairs", "final internal BSPLOAD", "false-qualified pointer triple", "same-group old images", "post-stop new images"]},
+      "oracle": {"independence": "independent", "derivation": "The expected BSP is the aligned presented address plus zero dirty words and the one architecturally fixed RNAT collection word only when address bits 8:3 equal 63; no production RSE helper is imported"},
+      "limitations": ["Nonempty dirty-partition sizes, clean-partition invalidation, undefined post-write RNAT data, mandatory backing-store traffic, faults, and migration are separate RSE/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "REG-008-PFS-CALL-EFFECT-EXACT", "case_id": 24, "normative_token": 75,
+      "normative_row": "REG-008-PFS-CALL-EFFECT",
+      "implementation_rows": ["cpu.opcode.ia64_op_br_call", "cpu.opcode.ia64_op_br_call_indirect", "cpu.opcode.ia64_op_brl_call", "cpu.register.ar.64", "cpu.register.ar.66", "cpu.register.scalar.cfm"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.1.8.12", "printed_pages": ["1:32"], "anchor": "When a br.call or brl.call is executed, the CFM, EC, and PSR.cpl are copied to the PFS"},
+      "preconditions": ["Every caller frame is complete", "Direct and indirect targets are bundle aligned", "The architectural call-frame case starts with literal CFM SOF6/SOL4, EC42, CPL3, two dirty outputs, and one output NaT"],
+      "inputs": ["B3 direct call, X4 long call, and B5 indirect call", "Forward, backward, far, equal-fallthrough, forwarded, and aliased targets", "p0, same-group true, stopped false, nullified, and first-taken-suppressed calls", "One-bundle-per-TB and combined execution"],
+      "expected_results": ["A taken call overwrites PFS with the exact old CFM, EC, and CPL image", "The link receives bundle address plus 16", "CFM becomes the callee frame with output value/NaT and RSE mappings preserved", "Live EC and CPL are unchanged", "A false or suppressed call preserves PFS, link, CFM, and RSE state", "Split and combined execution are identical"],
+      "allowed_results": ["Exactly twelve literal call-program outcomes and one focused typed call helper site per encoded call"],
+      "permitted_state_changes": ["PFS", "Call link BR", "CFM and RSE frame mapping", "ALAT state associated with the caller frame", "Control-flow IP"],
+      "required_unchanged_state": ["Live EC and PSR.cpl on a taken call", "PFS, link, CFM, RSE, and caller state for every false or suppressed call", "Dirty output value and NaT identity across the frame remap"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "A selected call publishes link, PFS, CFM, and RSE effects as one typed control-flow transition; an earlier taken branch suppresses them all",
+      "restart_action": "No restart occurs for complete-frame, aligned-target call inputs", "applicable_variants": ["br.call immediate", "brl.call", "br.call indirect", "taken", "false", "nullified", "suppressed", "split and combined TB execution"],
+      "execution": {"lane": "bare-metal-batch", "probes": ["test_typed_call_branches"], "result_observations": ["exact packed PFS", "link BR", "CFM", "EC and CPL", "RSE BSP/BSPSTORE/BSPLOAD/base", "dirty output values and NaTs", "ALAT marker", "typed helper trace"]},
+      "oracle": {"independence": "independent", "derivation": "Expected PFS fields, link address, callee frame, and output remapping are calculated from literal caller state and the published call rules; split-versus-combined equality is an additional execution-shape invariant"},
+      "limitations": ["Incomplete-frame call behavior is architecturally undefined", "Taken-branch traps and call-target translation faults remain separate BR/EXC/MMU rows"]
+    },
+    {
+      "id": "REG-008-PFS-RETURN-EFFECT-EXACT", "case_id": 25, "normative_token": 76,
+      "normative_row": "REG-008-PFS-RETURN-EFFECT",
+      "implementation_rows": ["cpu.opcode.ia64_op_br_ret", "cpu.register.ar.64", "cpu.register.ar.66", "cpu.register.scalar.cfm"],
+      "citation": {"document_id": "intel-ia64-sdm-v1-r2.3", "section": "3.1.8.12", "printed_pages": ["1:32"], "anchor": "When a br.ret is executed, the PFS is copied to the CFM and EC"},
+      "preconditions": ["Each PFS image defines a valid caller frame", "The dynamic branch target is bundle aligned", "Clean-frame and four-word incomplete SOL4 backing-store images are constructed independently"],
+      "inputs": ["p0, true, and false-qualified returns", "Same-group forwarded BR and PFS values versus ordinary group-entry reads", "Clean and incomplete frames spanning an RNAT slot", "Taken-branch and lower-privilege post-target traps", "First-register and RNAT SoftMMU fill faults with RFI retry", "Fresh-process save/load at the handler RFI"],
+      "expected_results": ["A taken return restores exact CFM and EC from the selected PFS and aligns the dynamic target", "False qualification preserves frame and EC", "Same-group reads retain ordinary entry images while the return consumes forwarded BR/PFS", "Mandatory fills restore exact values and NaTs across the RNAT slot", "Post-target traps collect restored state and lower privilege has priority", "Fill faults expose exact IIP/IIPA/IFA/ISR and retry idempotently through IFS.v=0 RFI", "Fresh-process continuation equals direct execution"],
+      "allowed_results": ["Exactly ten literal return-program outcomes, including clean, trap, mandatory-fill, fill-fault/retry, and migration paths"],
+      "permitted_state_changes": ["CFM", "EC", "PSR.cpl when the PFS does not request a prohibited privilege increase", "RSE frame mapping and mandatory-fill state", "Control-flow and interruption state"],
+      "required_unchanged_state": ["PFS contents", "Frame, EC, and RSE state for a false-qualified return", "Backing-store words except the deliberate fault-handler replacement", "Already committed fill prefix across retry"],
+      "expected_faults": ["Alternate Data TLB fault", "Lower-Privilege Transfer trap", "Taken Branch trap"], "fault_priority": ["Predicate qualification", "Return frame and privilege restoration", "Mandatory RSE fill", "Lower-Privilege Transfer before Taken Branch", "Post-target trap delivery"], "committed_prefix": "A taken return restores PFS state before target traps; mandatory fills commit an exact prefix and fault-word retry does not duplicate it",
+      "restart_action": "The handler clears saved translation state and RFI resumes with IFS.v=0, retrying the faulting word; one checkpoint repeats this in a fresh QEMU process", "applicable_variants": ["p0", "true", "false", "clean frame", "incomplete SOL4 frame", "RNAT boundary", "post-target traps", "register-fill fault", "RNAT-fill fault", "migration continuation"],
+      "execution": {"lane": "bare-metal-batch", "probes": ["test_typed_return_branches"], "result_observations": ["exact CFM/EC/PFS", "aligned target and BR source", "RSE partitions and pointers", "filled values and NaTs", "IIP/IIPA/IFA/ISR/IPSR", "fault-prefix memory", "fresh-process checkpoint and final state", "typed return/RFI traces"]},
+      "oracle": {"independence": "independent", "derivation": "Expected frame fields, privilege/trap order, RSE addresses, RNAT placement, fill prefix, and retry results are computed from literal PFS/backing images and the published return/RSE rules without importing production helpers"},
+      "limitations": ["Reserved or oversized bad-PFS return faults, arbitrary fill lengths, access rights, memory attributes, nested interruptions, and MP ordering remain separate REG/RSE/MMU/EXC/SYS rows"]
     }
   ]
 }

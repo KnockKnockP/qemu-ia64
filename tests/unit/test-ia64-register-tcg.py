@@ -154,6 +154,9 @@ AR_RSC_FIELD_IMPLEMENTATION_ROWS = ("cpu.register.ar.16",)
 AR_BSPSTORE_RNAT_FIELD_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.18", "cpu.register.ar.19",
 )
+AR_BSPSTORE_REBASE_IMPLEMENTATION_ROWS = (
+    "cpu.register.ar.17", "cpu.register.ar.18",
+)
 AR_PLAIN_FIELD_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.32", "cpu.register.ar.36",
     "cpu.register.ar.65", "cpu.register.ar.66",
@@ -171,6 +174,20 @@ AR_UNAT_EFFECT_IMPLEMENTATION_ROWS = (
     "cpu.opcode.ia64_op_ld8fill",
     "cpu.opcode.ia64_op_st8spill",
     "cpu.register.ar.36",
+)
+AR_PFS_CALL_EFFECT_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_br_call",
+    "cpu.opcode.ia64_op_br_call_indirect",
+    "cpu.opcode.ia64_op_brl_call",
+    "cpu.register.ar.64",
+    "cpu.register.ar.66",
+    "cpu.register.scalar.cfm",
+)
+AR_PFS_RETURN_EFFECT_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_br_ret",
+    "cpu.register.ar.64",
+    "cpu.register.ar.66",
+    "cpu.register.scalar.cfm",
 )
 
 
@@ -221,6 +238,9 @@ def validate_contract(root: Path) -> str:
         "REG-008-BSPSTORE-RNAT-FIELDS": list(
             AR_BSPSTORE_RNAT_FIELD_IMPLEMENTATION_ROWS
         ),
+        "REG-008-BSPSTORE-BSP-REBASE-EFFECT": list(
+            AR_BSPSTORE_REBASE_IMPLEMENTATION_ROWS
+        ),
         "REG-008-PLAIN-AR-FIELDS": list(
             AR_PLAIN_FIELD_IMPLEMENTATION_ROWS
         ),
@@ -230,12 +250,25 @@ def validate_contract(root: Path) -> str:
         "REG-008-UNAT-SPILL-FILL-EFFECT": list(
             AR_UNAT_EFFECT_IMPLEMENTATION_ROWS
         ),
+        "REG-008-PFS-CALL-EFFECT": list(
+            AR_PFS_CALL_EFFECT_IMPLEMENTATION_ROWS
+        ),
+        "REG-008-PFS-RETURN-EFFECT": list(
+            AR_PFS_RETURN_EFFECT_IMPLEMENTATION_ROWS
+        ),
+    }
+    expected_effect_probes = {
+        "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
+            "test_application_register_bspstore_rebase"
+        ],
+        "REG-008-PFS-CALL-EFFECT": ["test_typed_call_branches"],
+        "REG-008-PFS-RETURN-EFFECT": ["test_typed_return_branches"],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 22:
-        raise AssertionError("register tranche must contain twenty-two cases")
+    if not isinstance(cases, list) or len(cases) != 25:
+        raise AssertionError("register tranche must contain twenty-five cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -253,6 +286,15 @@ def validate_contract(root: Path) -> str:
             raise AssertionError(f"unexpected register tranche row: {row!r}")
         if case.get("oracle", {}).get("independence") != "independent":
             raise AssertionError(f"{row}: oracle is not independent")
+        if row in expected_effect_probes and case.get(
+                "execution", {}).get("probes") != expected_effect_probes[row]:
+            raise AssertionError(f"{row}: execution probe binding drift")
+    full_source = (
+        root / "tests/unit/test-ia64-full-tcg.py"
+    ).read_text(encoding="utf-8")
+    for probe in ("test_typed_call_branches", "test_typed_return_branches"):
+        if f"def {probe}(" not in full_source:
+            raise AssertionError(f"missing full-TCG PFS effect probe: {probe}")
     if len(set(GR_VALUES)) != 127 or GR_VALUES[-1] != 127:
         raise AssertionError("GR matrix does not cover r1-r127 exactly")
     if len(set(FR_INDICES)) != 126 or FR_INDICES[-1] != 127:
@@ -325,7 +367,8 @@ def validate_contract(root: Path) -> str:
         "complete GR/FR/PR/BR indices, 12 GR rotating sizes, 96 FR bases, "
         "48 PR bases, all 128 AR selectors in both units, all 128 CR "
         "selectors, interruption-access states, complete nine-register AR "
-        "and named CR field partitions, CCV effects across twenty cmpxchg "
+        "and named CR field partitions, all 64 BSPSTORE rebase offsets, "
+        "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
     )
@@ -1540,6 +1583,109 @@ def test_application_register_unat_effect(h: ModuleType,
     )
 
 
+def application_register_bspstore_rebase_program(h: ModuleType):
+    failure = 0x30000
+    terminal = 0x30030
+    address = 0x10000
+    bundles: list[object] = []
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_value(register: int, value: int) -> None:
+        # Every selected address is below the signed ADDs immediate ceiling.
+        emit(0x01, h.nop_m(), h.adds(register, value, 0), h.nop_i())
+
+    def check_pair(store: int, bsp: int) -> None:
+        nonlocal address
+        emit_value(28, store)
+        address = append_gr_pair_check(
+            h, bundles, address, 20, 28, failure
+        )
+        emit_value(28, bsp)
+        address = append_gr_pair_check(
+            h, bundles, address, 21, 28, failure
+        )
+
+    # With an empty dirty partition, all 64 possible address-bit {8:3}
+    # values independently select the next store/BSP relationship.  Low bits
+    # cycle through every ignored pattern without changing that selector.  A
+    # pointer at offset 63 names the RNAT collection word, so BSP skips it.
+    for selector in range(64):
+        aligned = 0x1800 + selector * 8
+        presented = aligned | (selector & 7)
+        expected_bsp = aligned + (8 if selector == 63 else 0)
+        emit_value(29, presented)
+        emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+        emit(0x09, h.mov_m_argr(20, 18), h.mov_m_argr(21, 17), h.nop_i())
+        check_pair(aligned, expected_bsp)
+
+    # A false-qualified rebase is completely inert after the final offset-63
+    # case, including its implicit BSP destination.
+    emit(0x03, h.nop_m(), h.cmp_rr(1, 2, 0, 0, "lt"), h.nop_i())
+    emit_value(29, 0x1a80)
+    emit(0x01, h.mov_m_grar(18, 29, qp=1), h.nop_i(), h.nop_i())
+    emit(0x09, h.mov_m_argr(20, 18), h.mov_m_argr(21, 17), h.nop_i())
+    check_pair(0x19f8, 0x1a00)
+
+    # The implicit BSP destination participates in the same issue-group
+    # source epoch as BSPSTORE itself.  Reads before the stop see the old
+    # image; reads in the following group see the fully rebased image.
+    emit_value(29, 0x1800)
+    emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+    emit_value(29, 0x19f8)
+    emit(0x08, h.mov_m_grar(18, 29), h.mov_m_argr(22, 17), h.nop_i())
+    emit(0x09, h.mov_m_argr(23, 18), h.nop_m(), h.nop_i())
+    emit_value(28, 0x1800)
+    address = append_gr_pair_check(
+        h, bundles, address, 22, 28, failure
+    )
+    address = append_gr_pair_check(
+        h, bundles, address, 23, 28, failure
+    )
+    emit(0x09, h.mov_m_argr(20, 18), h.mov_m_argr(21, 17), h.nop_i())
+    check_pair(0x19f8, 0x1a00)
+
+    return finish_checked_program(
+        h,
+        "complete BSPSTORE/BSP rebase selector matrix",
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        entry=0x10000,
+    )
+
+
+def test_application_register_bspstore_rebase(h: ModuleType,
+                                              qemu: Path) -> str:
+    program = application_register_bspstore_rebase_program(h)
+    snapshot = h.run_program(qemu, program, compact_loader=True)
+    if snapshot.gr[14] != 1 or snapshot.ip != program.terminal_ip:
+        raise AssertionError(
+            "BSPSTORE/BSP rebase matrix failed: "
+            f"ip=0x{snapshot.ip:x} marker={snapshot.gr[14]} "
+            f"BSPSTORE=0x{snapshot.rse_bspstore:x} "
+            f"BSP=0x{snapshot.rse_bsp:x}"
+        )
+    if (snapshot.rse_bspstore != 0x19f8 or
+            snapshot.rse_bspload != 0x19f8 or
+            snapshot.rse_bsp != 0x1a00):
+        raise AssertionError(
+            "final offset-63 rebase expected BSPSTORE/BSPLOAD/BSP "
+            "0x19f8/0x19f8/0x1a00, got "
+            f"0x{snapshot.rse_bspstore:x}/"
+            f"0x{snapshot.rse_bspload:x}/0x{snapshot.rse_bsp:x}"
+        )
+    return (
+        "all 64 BSPSTORE address offsets and all ignored low-bit patterns "
+        "pass exact BSP rebasing, offset-63 RNAT-slot skipping, false "
+        "qualification, same-group old-image visibility, and BSPLOAD state"
+    )
+
+
 def application_register_field_fault_cases() -> tuple[
         tuple[int, int, str], ...]:
     cases: list[tuple[int, int, str]] = []
@@ -2301,6 +2447,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("interruption and RFI GR banks", lambda: test_interruption_bank_switch(harness, system, args.qemu.resolve())),
         ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
+        ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),
         ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),

@@ -604,6 +604,13 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-008-BSPSTORE-BSP-REBASE-EFFECT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.ar.17", "cpu.register.ar.18"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
       "normative_row": "REG-008-BSPSTORE-RNAT-FIELDS",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.register.ar.18", "cpu.register.ar.19"],
@@ -616,6 +623,20 @@
       "implementation_rows": ["cpu.opcode.ia64_op_cmpxchg1", "cpu.opcode.ia64_op_cmpxchg2", "cpu.opcode.ia64_op_cmpxchg4", "cpu.opcode.ia64_op_cmpxchg8", "cpu.register.ar.32"],
       "inventory_gap": null,
       "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-008-PFS-CALL-EFFECT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_br_call", "cpu.opcode.ia64_op_br_call_indirect", "cpu.opcode.ia64_op_brl_call", "cpu.register.ar.64", "cpu.register.ar.66", "cpu.register.scalar.cfm"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg"]
+    },
+    {
+      "normative_row": "REG-008-PFS-RETURN-EFFECT",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_br_ret", "cpu.register.ar.64", "cpu.register.ar.66", "cpu.register.scalar.cfm"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg"]
     },
     {
       "normative_row": "REG-008-PLAIN-AR-FIELDS",
