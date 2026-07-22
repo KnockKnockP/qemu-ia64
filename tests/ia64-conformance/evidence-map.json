@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 67
+    "row_closing_claims_expected": 68
   },
   "entries": [
     {
@@ -155,11 +155,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-data-plane-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-data-plane-tcg",
-      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks, including an exact four-width integer NaTPage deferral matrix and a 20-program no-recovery matrix proving immediate LD.S/LD.SA translated-miss and physical or concurrent-NaTPage alignment faults with exact interruption state and no destination, NaT, or base-update retirement.",
+      "scope": "Guest-executed IA-64 data-plane instruction programs and state checks, including exact integer NaTPage deferral, 20-program no-recovery miss/alignment, and 62-program no-recovery page/key/rights/access-bit/debug matrices with exact interruption state and no destination, NaT, or base-update retirement.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["ALT-001-INTEGER-NATPAGE-DEFERRAL", "ALT-002-INTEGER-NO-RECOVERY-FAULTS"],
-      "limitations": ["Only the explicitly claimed integer NaTPage and no-recovery translated-miss/alignment rows have complete normative contracts and independent exact matrices; other fault controls/classes, simultaneous conditions, and legacy cases remain candidates and do not close their broader opcode, floating-point, memory, speculation, cache, atomic, or fault domains."]
+      "closes_normative_rows": ["ALT-001-INTEGER-NATPAGE-DEFERRAL", "ALT-002-INTEGER-NO-RECOVERY-FAULTS", "ALT-002-INTEGER-NO-RECOVERY-PROTECTION"],
+      "limitations": ["Only the explicitly claimed integer NaTPage and no-recovery miss/alignment/protection/debug rows have complete normative contracts and independent exact matrices; VHPT/Data-TLB, recovery/always-defer, other simultaneous conditions, and legacy cases remain candidates and do not close their broader opcode, floating-point, memory, speculation, cache, atomic, or fault domains."]
     },
     {
       "id": "meson:test-ia64-data-plane-tcg-static",

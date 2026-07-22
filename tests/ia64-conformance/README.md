@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first two exact speculation contracts live in
+The first three exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -37,15 +37,18 @@ implementation-specific data portion of a NaT'ed GR. A second 20-program
 matrix proves that `.s` and `.sa` translated misses and alignment conditions
 remain immediate in the no-recovery model. Its alignment half runs both alone
 and below an always-deferred NaTPage condition, so deferral cannot incorrectly
-hide a lower non-deferred fault. Other data-plane cases remain candidate
-evidence until they receive equally atomic contracts and complete variant
-matrices.
+hide a lower non-deferred fault. The third contract adds 62 complete
+width/class probes for Page Not Present, Key Miss, Key Permission, Access
+Rights, Access Bit, and Data Debug. Debug runs aligned, with a concurrent
+non-deferred Unaligned condition, and below an always-deferred NaTPage to lock
+both priority directions. Other data-plane cases remain candidate evidence
+until they receive equally atomic contracts and complete variant matrices.
 
 The three long-running tests are intentionally quiet while their internal TAP
 matrices execute. On the 2026-07-22 two-way public gate after the no-recovery
-fault checkpoint, `test-ia64-system-tcg` took 47.06 seconds,
-`test-ia64-full-tcg` 48.80 seconds, and `test-ia64-register-tcg` 45.53
-seconds. The expanded data-plane registration passed 59 subtests in 16.09
+protection checkpoint, `test-ia64-system-tcg` took 46.95 seconds,
+`test-ia64-full-tcg` 48.55 seconds, and `test-ia64-register-tcg` 45.55
+seconds. The expanded data-plane registration passed 121 subtests in 32.65
 seconds. The RSE suites include five fresh-process
 save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the

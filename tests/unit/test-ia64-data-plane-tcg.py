@@ -61,12 +61,19 @@ from ia64_data_plane_tcg_spec import (  # noqa: E402
 IA64_PSR_ED = 1 << 43
 IA64_PSR_DFL = 1 << 18
 IA64_PSR_AC = 1 << 3
+IA64_PSR_PK = 1 << 15
+IA64_PSR_DB = 1 << 24
 IA64_ISR_NA = 1 << 35
 IA64_ISR_SP = 1 << 36
 IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION = 0x20
 IA64_DISABLED_FP_VECTOR = 0x5500
+IA64_DATA_KEY_MISS_VECTOR = 0x1C00
+IA64_DATA_ACCESS_BIT_VECTOR = 0x2800
+IA64_PAGE_FAULT_VECTOR = 0x5000
+IA64_KEY_PERMISSION_VECTOR = 0x5100
 IA64_DATA_ACCESS_RIGHTS_VECTOR = 0x5300
 IA64_DATA_NAT_PAGE_VECTOR = 0x5600
+IA64_DATA_DEBUG_VECTOR = 0x5900
 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR = 0x5B00
 IA64_UNALIGNED_DATA_REFERENCE_VECTOR = 0x5A00
 IA64_ILLEGAL_OPERATION_VECTOR = 0x5400
@@ -98,12 +105,13 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 2:
-        raise AssertionError("speculation tranche must contain two atomic cases")
+    if not isinstance(cases, list) or len(cases) != 3:
+        raise AssertionError("speculation tranche must contain three atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-NATPAGE-DEFERRAL",
-            "ALT-002-INTEGER-NO-RECOVERY-FAULTS"}:
+            "ALT-002-INTEGER-NO-RECOVERY-FAULTS",
+            "ALT-002-INTEGER-NO-RECOVERY-PROTECTION"}:
         raise AssertionError("speculation tranche normative rows drifted")
     deferred = by_row["ALT-001-INTEGER-NATPAGE-DEFERRAL"]
     if deferred.get("implementation_rows") != list(
@@ -120,11 +128,20 @@ def validate_contract(root: Path) -> str:
             "integer_speculative_translation_miss_case",
             "integer_speculative_unaligned_case"]:
         raise AssertionError("no-recovery execution probes drifted")
+    protection = by_row["ALT-002-INTEGER-NO-RECOVERY-PROTECTION"]
+    if protection.get("implementation_rows") != list(
+            INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS):
+        raise AssertionError("protection implementation rows drifted")
+    if protection.get("execution", {}).get("probes") != [
+            "integer_speculative_protection_fault_case",
+            "integer_speculative_data_debug_case"]:
+        raise AssertionError("protection execution probes drifted")
     if any(case.get("oracle", {}).get("independence") != "independent"
            for case in cases):
         raise AssertionError("speculation tranche oracle is not independent")
     variants = set(deferred.get("applicable_variants", []))
     immediate_variants = set(immediate.get("applicable_variants", []))
+    protection_variants = set(protection.get("applicable_variants", []))
     for width in (1, 2, 4, 8):
         if "ld{}.s".format(width) not in variants or \
                 "ld{}.sa".format(width) not in variants:
@@ -136,8 +153,14 @@ def validate_contract(root: Path) -> str:
             raise AssertionError(
                 "no-recovery row misses width {} variants".format(width)
             )
-    return ("two exact ALT rows cover deferred NaTPage and no-recovery "
-            "miss/alignment behavior for every applicable integer width")
+        if "ld{}.s".format(width) not in protection_variants or \
+                "ld{}.sa".format(width) not in protection_variants:
+            raise AssertionError(
+                "protection row misses width {} variants".format(width)
+            )
+    return ("three exact ALT rows cover deferred NaTPage plus no-recovery "
+            "translation, alignment, protection, and debug behavior for "
+            "every applicable integer width")
 
 
 def _movl_bundle(address: int, reg: int, value: int) -> object:
@@ -238,10 +261,11 @@ def _mapped_pte(physical: int, memory_attribute: int, *,
 
 def _append_dtc_install(bundles: List[object], address: int, *,
                         pte_reg: int = 2, virtual_reg: int = 7,
-                        itir_reg: int = 4) -> int:
-    address = _append_i(
-        bundles, address, (H.adds(itir_reg, 12 << 2, 0),),
-    )
+                        itir_reg: int = 4,
+                        itir: int = 12 << 2,
+                        enable_translation: bool = True) -> int:
+    bundles.append(_movl_bundle(address, itir_reg, itir))
+    address += 0x10
     for raw in (
         H.mov_grcr(H.IA64_CR_IFA, virtual_reg),
         H.mov_grcr(H.IA64_CR_ITIR, itir_reg),
@@ -256,11 +280,13 @@ def _append_dtc_install(bundles: List[object], address: int, *,
         H.nop_m(), H.nop_i(),
     ))
     address += 0x10
-    for raw in (
-        H.srlz_d(),
-        H.ssm(H.IA64_PSR_IC | H.IA64_PSR_DT),
-        H.srlz_i(),
-    ):
+    controls = [H.srlz_d()]
+    if enable_translation:
+        controls.extend((
+            H.ssm(H.IA64_PSR_IC | H.IA64_PSR_DT),
+            H.srlz_i(),
+        ))
+    for raw in controls:
         bundles.append(H.Bundle(address, 0x01, raw,
                                 H.nop_i(), H.nop_i()))
         address += 0x10
@@ -1449,6 +1475,196 @@ def integer_speculative_unaligned_case(
     )
 
 
+def _append_indexed_system_write(
+        bundles: List[object], address: int, *, x6: int,
+        index: int, value: int) -> int:
+    bundles.extend((
+        _movl_bundle(address, 8, index),
+        _movl_bundle(address + 0x10, 9, value),
+        H.Bundle(address + 0x20, 0x01, _m_system(x6, r2=9, r3=8),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(address + 0x30, 0x01, H.srlz_d(),
+                 H.nop_i(), H.nop_i()),
+    ))
+    return address + 0x40
+
+
+def _append_rfi_state(
+        bundles: List[object], address: int, psr: int) -> int:
+    resume = address + 0x50
+    bundles.extend((
+        _movl_bundle(address, 5, psr),
+        _movl_bundle(address + 0x10, 6, resume),
+        H.Bundle(address + 0x20, 0x01,
+                 H.mov_grcr(H.IA64_CR_IPSR, 5), H.nop_i(), H.nop_i()),
+        H.Bundle(address + 0x30, 0x01,
+                 H.mov_grcr(H.IA64_CR_IIP, 6), H.nop_i(), H.nop_i()),
+        H.Bundle(address + 0x40, 0x11,
+                 H.nop_m(), H.nop_i(), H.rfi()),
+    ))
+    return resume
+
+
+def integer_speculative_protection_fault_case(
+        width: int, memory_class: str, condition: str) -> RuntimeCase:
+    if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
+        raise ValueError("protection case requires ld1/2/4/8.s or .sa")
+    virtual = 0x8000
+    physical = 0x2000
+    normal_pte = _mapped_pte(physical, 0)
+    key = 0x123
+    itir = 12 << 2
+    psr = H.IA64_PSR_IC | H.IA64_PSR_DT
+    pkrs: Tuple[Tuple[int, int], ...] = ()
+    if condition == "page-not-present":
+        pte = physical
+        kind = "page-fault"
+        vector = IA64_PAGE_FAULT_VECTOR
+    elif condition == "key-miss":
+        pte = normal_pte
+        itir |= key << 8
+        psr |= IA64_PSR_PK
+        pkrs = ((0, 1),)
+        kind = "data-key-miss"
+        vector = IA64_DATA_KEY_MISS_VECTOR
+    elif condition == "key-permission":
+        pte = normal_pte
+        itir |= key << 8
+        psr |= IA64_PSR_PK
+        valid_key = (key << 8) | 1
+        pkrs = ((0, 1), (1, valid_key | (1 << 2)))
+        kind = "key-permission"
+        vector = IA64_KEY_PERMISSION_VECTOR
+    elif condition == "access-rights":
+        pte = normal_pte
+        psr |= 3 << 32
+        kind = "data-access-rights"
+        vector = IA64_DATA_ACCESS_RIGHTS_VECTOR
+    elif condition == "access-bit":
+        pte = normal_pte & ~(1 << 5)
+        kind = "data-access-bit"
+        vector = IA64_DATA_ACCESS_BIT_VECTOR
+    else:
+        raise ValueError("unknown protection condition " + condition)
+
+    old_target = (0x5300000000000000 | (width << 4) |
+                  int(memory_class == "sa"))
+    bundles: List[object] = [
+        _movl_bundle(0x10, 2, pte),
+        _movl_bundle(0x20, 7, virtual),
+        _movl_bundle(0x30, 20, old_target),
+    ]
+    next_ip = _append_dtc_install(
+        bundles, 0x40, itir=itir, enable_translation=False)
+    for index, value in pkrs:
+        next_ip = _append_indexed_system_write(
+            bundles, next_ip, x6=0x03, index=index, value=value,
+        )
+    fault_ip = _append_rfi_state(bundles, next_ip, psr)
+    fault_raw = integer_load(
+        width, memory_class, r1=20, r3=7,
+        update="imm", imm=width,
+    )
+    _append_m(bundles, fault_ip, fault_raw, [], trace=False)
+    bundles.append(H._exception_vector_spin(vector))
+    label = "LD{}.{} {}".format(
+        width, memory_class.upper(), condition)
+    program = H.Program(
+        name=label + " no-recovery fault",
+        bundles=tuple(bundles), terminal_ip=vector,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+    )
+
+    def verify(snapshot) -> str:
+        _require_speculative_immediate_fault(
+            snapshot, label=label, fault_ip=fault_ip, fault_raw=fault_raw,
+            address=virtual, kind=kind, vector=vector,
+            old_target=old_target,
+        )
+        H._require((snapshot.cr_ipsr & psr) == psr,
+                   label + " did not collect its exact active PSR controls")
+        return (label + " raised exact R|SP immediate fault and suppressed "
+                "destination/update retirement")
+
+    return RuntimeCase(
+        label + " immediate fault", program, (fault_ip,), verify,
+        ("IA64_OP_LD{}{}".format(width, memory_class.upper()),), True,
+    )
+
+
+def integer_speculative_data_debug_case(
+        width: int, memory_class: str, condition: str) -> RuntimeCase:
+    if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
+        raise ValueError("Data Debug case requires ld1/2/4/8.s or .sa")
+    if condition == "unaligned" and width == 1:
+        raise ValueError("one-byte load cannot be unaligned")
+    if condition not in ("aligned", "unaligned", "deferred-nat-page"):
+        raise ValueError("unknown Data Debug condition " + condition)
+    physical = 0x4000
+    translated = condition == "deferred-nat-page"
+    address = 0x8000 if translated else physical
+    if condition == "unaligned":
+        address += 1
+    old_target = (0x5400000000000000 | (width << 4) |
+                  int(memory_class == "sa"))
+    if translated:
+        bundles: List[object] = [
+            _movl_bundle(0x10, 2, _mapped_pte(physical, 7)),
+            _movl_bundle(0x20, 7, address),
+            _movl_bundle(0x30, 20, old_target),
+        ]
+        next_ip = _append_dtc_install(
+            bundles, 0x40, enable_translation=False)
+    else:
+        bundles = [
+            _movl_bundle(0x10, 7, address),
+            _movl_bundle(0x20, 20, old_target),
+        ]
+        next_ip = 0x30
+    debug_control = ((1 << 63) | (1 << 56) |
+                     0x00FFFFFFFFFFFFFF)
+    next_ip = _append_indexed_system_write(
+        bundles, next_ip, x6=0x01, index=0, value=address,
+    )
+    next_ip = _append_indexed_system_write(
+        bundles, next_ip, x6=0x01, index=1, value=debug_control,
+    )
+    psr = H.IA64_PSR_IC | IA64_PSR_DB
+    if translated:
+        psr |= H.IA64_PSR_DT
+    if condition == "unaligned":
+        psr |= IA64_PSR_AC
+    fault_ip = _append_rfi_state(bundles, next_ip, psr)
+    fault_raw = integer_load(
+        width, memory_class, r1=20, r3=7,
+        update="imm", imm=width,
+    )
+    _append_m(bundles, fault_ip, fault_raw, [], trace=False)
+    bundles.append(H._exception_vector_spin(IA64_DATA_DEBUG_VECTOR))
+    label = "LD{}.{} Data Debug ({})".format(
+        width, memory_class.upper(), condition)
+    program = H.Program(
+        name=label + " no-recovery fault",
+        bundles=tuple(bundles), terminal_ip=IA64_DATA_DEBUG_VECTOR,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+    )
+
+    def verify(snapshot) -> str:
+        _require_speculative_immediate_fault(
+            snapshot, label=label, fault_ip=fault_ip, fault_raw=fault_raw,
+            address=address, kind="data-debug",
+            vector=IA64_DATA_DEBUG_VECTOR, old_target=old_target,
+        )
+        H._require((snapshot.cr_ipsr & psr) == psr,
+                   label + " did not collect its exact active PSR controls")
+        return (label + " raised exact R|SP before access/update retirement")
+
+    return RuntimeCase(
+        label + " immediate fault", program, (fault_ip,), verify,
+        ("IA64_OP_LD{}{}".format(width, memory_class.upper()),), True,
+    )
+
+
 def fp_speculative_nat_page_defer_case() -> RuntimeCase:
     virtual = 0x8000
     physical = 0x2000
@@ -2202,6 +2418,18 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
               width, memory_class, deferred_nat_page=deferred_nat_page)
           for deferred_nat_page in (False, True)
           for width in (2, 4, 8) for memory_class in ("s", "sa")),
+        *(integer_speculative_protection_fault_case(
+              width, memory_class, condition)
+          for condition in (
+              "page-not-present", "key-miss", "key-permission",
+              "access-rights", "access-bit",
+          )
+          for width in (1, 2, 4, 8) for memory_class in ("s", "sa")),
+        *(integer_speculative_data_debug_case(
+              width, memory_class, condition)
+          for condition in ("aligned", "unaligned", "deferred-nat-page")
+          for width in (1, 2, 4, 8) if condition != "unaligned" or width != 1
+          for memory_class in ("s", "sa")),
         fp_speculative_nat_page_defer_case(),
         *(reserved_width_illegal_case(opcode) for opcode in (
             "IA64_OP_LD1FILL", "IA64_OP_LD2FILL", "IA64_OP_LD4FILL",

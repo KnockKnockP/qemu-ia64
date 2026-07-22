@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 17,
+  "catalogue_revision": 18,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -52,6 +52,26 @@
       "committed_prefix": "Only earlier instructions commit; the faulting load commits no destination, NaT, base update, ALAT, or memory effect",
       "restart_rule": "CR.IIP and IPSR.ri identify the faulting M slot so a handler may resolve the condition and retry it.",
       "permitted_results": ["Every width/class translated miss reaches vector 0x1000 with exact R|SP state and no load effects", "Every applicable width/class physical or concurrent-NaTPage misalignment reaches vector 0x5a00 with exact R|SP state and no load effects"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-002-INTEGER-NO-RECOVERY-PROTECTION",
+      "requirement_ids": ["ALT-002", "MEM-003", "MEM-005", "MEM-012", "MEM-014", "MMU-012", "MMU-013", "MMU-014"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Addressing, Interruptions, and Debugging", "section": "5.5.5", "printed_pages": ["2:54", "2:56", "2:105", "2:106", "2:107", "2:152"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Qualified Exception Deferral"},
+      "operation": {"kind": "integer-control-speculative-no-recovery-protection", "selector": "ld1.s/sa, ld2.s/sa, ld4.s/sa, and ld8.s/sa across page, key, rights, access-bit, and debug conditions", "encoding": "M10 immediate-update integer speculative and speculative-advanced loads"},
+      "legal_inputs": ["CPL0 with serialized PSR.ic=1, PSR.it=0, and PSR.ed=0, except the declared CPL3 rights probes", "One deliberately failing present/key/rights/access-bit translation or an exact enabled read DBR", "Legal distinct destination and base registers with a representable width-sized immediate update", "Aligned, unaligned, and NaTPage-concurrent Data Debug addresses as applicable"],
+      "privilege": {"levels": [0, 3], "rule": "The loads are application-level; CPL0 configures translations, PKRs, DBRs, and interruption state, while CPL3 is used only to select the declared page-rights failure"},
+      "state_read": ["PSR.ic, PSR.it, PSR.ed, PSR.pk, PSR.db, PSR.ac, PSR.dt, and PSR.cpl", "DTC P/A/PL/AR/key fields", "PKR validity and read-disable state", "DBR address, mask, access, and privilege controls", "load base and destination state"],
+      "state_written": ["precise interruption-collection state only"],
+      "predication": {"applies": true, "rule": "All selected operations use p0; false qualification remains a separate ALT-006 row"},
+      "nat_behavior": "A non-deferred protection or debug fault writes neither destination data nor NaT and retires no base update.",
+      "possible_faults": ["Data Page Not Present", "Data Key Miss", "Key Permission", "Data Access Rights", "Data Access Bit", "Data Debug", "Concurrent Data NaT Page and Unaligned conditions used only for priority discrimination"],
+      "fault_priority": ["predicate and operand legality", "translation and protection qualification", "no-recovery deferral", "Data Debug before non-deferred Unaligned", "deferred NaTPage removed before lower Data Debug prioritization", "precise interruption collection"],
+      "committed_prefix": "Only earlier instructions commit; the faulting load commits no destination, NaT, base update, ALAT, or memory effect",
+      "restart_rule": "CR.IIP and IPSR.ri identify the exact faulting M slot for handler repair and retry.",
+      "permitted_results": ["All 40 width/class protection probes raise the declared vector with exact R|SP state and no load effects", "All 22 aligned, unaligned, or deferred-NaTPage Data Debug probes raise vector 0x5900 with exact R|SP state and no load effects"],
       "required_evidence": "E2"
     },
     {
