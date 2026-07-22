@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 9,
+  "catalogue_revision": 10,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2195,6 +2195,26 @@
       "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE before the next word. The faulting word and instruction-final state do not commit; repair must continue from the exact prefix.",
       "restart_rule": "The handler observes IFS.v zero, the issuing instruction in IIP, the faulting address in IFA, exact ISR.rs/access/code bits, and BSPSTORE at the fault boundary; after replacing the PTE or PKR, RFI retries with saved PSR.rt and PSR.pk intact without replaying poisoned prefix words.",
       "permitted_results": ["All thirteen store/load variants raise exactly one selected protection fault, retain poisoned committed words, complete the untouched suffix once, and finish with exact pointer, payload, interruption, and translated-protection state"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-007-MANDATORY-VHPT-RETRY",
+      "requirement_ids": ["RSE-007", "RSE-004", "RSE-005", "RSE-009", "MMU-007", "MMU-016"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "4.1.8", "printed_pages": ["2:67", "2:68", "2:144", "2:145", "2:146", "2:173", "2:174", "2:175", "2:176"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "If the VHPT walker does not find the required translation in the VHPT or the search is aborted, an Instruction/Data TLB Miss fault is raised"},
+      "operation": {"kind": "mandatory-rse-short-vhpt-translation-retry", "selector": "FLUSHRS mandatory stores and LOADRS mandatory loads resolved by a short-format VHPT hit, an invalid VHPT entry, or a missing VHPT-backing translation", "encoding": "legal first-in-group FLUSHRS or LOADRS with PSR.dt, PSR.rt, PTA.ve, and RR.ve enabled, followed where applicable by a Data TLB or VHPT Translation handler and RFI"},
+      "legal_inputs": ["PSR.ic, PSR.dt, and PSR.rt enabled and serialized", "PTA selects short format with a 32 KiB VHPT and RR0 enables walking with 4 KiB pages", "A legal complete FLUSHRS or LOADRS frame", "The selected IHA contains a valid short-format PTE, an invalid present entry, or resides on an untranslated VHPT-backing page"],
+      "privilege": {"levels": [0], "rule": "The mandatory reference, VHPT walk, and physical interruption handler execute at CPL0; the RSE reference uses RSC.pl zero"},
+      "state_read": ["dirty stacked-register values and NaTs", "LOADRS backing image", "PTA, RR0, PSR.dt, and PSR.rt", "short-format VHPT entry or VHPT-backing translation", "BSP and BSPSTORE"],
+      "state_written": ["installed DTC entry after a short-format hit", "committed backing-store prefix", "BSPSTORE and RSE.BspLoad", "precise Data TLB or VHPT Translation IIP, IFA, ISR, IHA, ITIR, IFS, and IPSR state", "repaired short-format entry or VHPT-backing translation", "remaining mandatory backing-store suffix"],
+      "predication": {"applies": false, "rule": "FLUSHRS and LOADRS are unpredicated"},
+      "nat_behavior": "Store and load cases cross an RNAT collection position; handler poisoning of committed words distinguishes exact continuation from prefix replay.",
+      "possible_faults": ["Data TLB fault when the short-format entry is invalid", "VHPT Translation fault when the IHA backing page has no translation"],
+      "fault_priority": ["instruction legality and complete-frame preconditions", "mandatory RSE translation lookup", "short-format VHPT backing translation", "short-format entry validity", "translated protection checks", "mandatory backing-store access", "instruction completion"],
+      "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE before the next word; either walker fault preserves that exact prefix.",
+      "restart_rule": "The handler observes the issuing IIP, original mandatory-reference IFA, ISR.rs and access direction, exact short-format IHA and RR-derived ITIR, and IFS.v zero; after installing the missing entry or backing translation, RFI retries from the exact poisoned prefix.",
+      "permitted_results": ["FLUSHRS and LOADRS each complete directly through one valid short-format VHPT hit", "FLUSHRS and LOADRS each raise and repair one Data TLB fault for an invalid short-format entry without replay", "FLUSHRS and LOADRS each raise and repair one VHPT Translation fault for missing VHPT-backing translation without replay"],
       "required_evidence": "E2"
     }
   ]

@@ -500,6 +500,26 @@ def check_vhpt_backing_debug_abort(root: Path) -> None:
                 "VHPT backing DBR abort lost " + token)
 
 
+def check_vhpt_advertised_default(root: Path) -> None:
+    cpu = (root / "target/ia64/cpu.c").read_text(encoding="utf-8")
+    memory = (root / "target/ia64/mem.c").read_text(encoding="utf-8")
+    header = (root / "target/ia64/mem.h").read_text(encoding="utf-8")
+    firmware = (root / "hw/ia64/firmware.c").read_text(encoding="utf-8")
+
+    require("const uint64_t hardware_walker = 1;" in firmware,
+            "PAL_VM_SUMMARY no longer advertises the VHPT walker")
+    require("VIBTANIUM_VHPT_WALK" not in cpu + memory + header,
+            "advertised VHPT walking still depends on a private host knob")
+    miss_path = section(
+        cpu,
+        "if (!translated &&",
+        "if (result.status == IA64_TRANSLATE_OK &&",
+    )
+    require("ia64_try_rse_vhpt_walk(" in miss_path and
+            "ia64_try_vhpt_walk(" in miss_path,
+            "TLB misses no longer reach the advertised VHPT walker")
+
+
 def check_application_register_plane(root: Path) -> None:
     """Lock target legality and legality/NaT/value/privilege ordering."""
     translate = (root / "target/ia64/translate.c").read_text(encoding="utf-8")
@@ -845,6 +865,7 @@ def main() -> int:
     check_translate(root)
     check_translation_insert_ic_legality(root)
     check_vhpt_backing_debug_abort(root)
+    check_vhpt_advertised_default(root)
     check_application_register_plane(root)
     print("IA-64 system/control direct-TCG gate passed: 57/57 rows")
     return 0

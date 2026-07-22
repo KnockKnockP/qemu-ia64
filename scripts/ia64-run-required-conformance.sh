@@ -6,7 +6,7 @@ qemu_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 build_dir=${QEMU_IA64_BUILD_DIR:-$qemu_root/build-ia64-debug}
 output_dir=${QEMU_IA64_CONFORMANCE_OUTPUT_DIR:-$qemu_root/conformance-results}
 profile=${QEMU_IA64_CONFORMANCE_PROFILE:-vibtanium-strict-up}
-meson="$build_dir/pyvenv/bin/meson"
+meson="$build_dir/pyvenv/bin/meson.exe"
 python="$build_dir/pyvenv/bin/python.exe"
 binary=${QEMU_IA64_BIN:-$build_dir/qemu-system-ia64.exe}
 

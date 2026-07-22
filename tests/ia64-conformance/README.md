@@ -29,9 +29,10 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The two long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 public
-QEMU-default gate, `test-ia64-system-tcg` took 47.31 seconds and
-`test-ia64-full-tcg` 45.60 seconds. With parallel execution Meson commonly
-may print `48/50` and then remain quiet until these two processes complete; the
-per-test timeouts still detect a genuine hang.
+The three long-running tests are intentionally quiet while their internal TAP
+matrices execute. On the 2026-07-22 public gate after the short-VHPT RSE
+checkpoint, `test-ia64-system-tcg` took 47.46 seconds,
+`test-ia64-full-tcg` 46.13 seconds, and `test-ia64-register-tcg` 41.90
+seconds. With parallel execution Meson may pause near the end of the progress
+display until these processes complete; the per-test timeouts still detect a
+genuine hang.

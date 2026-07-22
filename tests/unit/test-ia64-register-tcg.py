@@ -22,6 +22,8 @@ PSR_DD = 1 << 39
 U64_MASK = (1 << 64) - 1
 
 RSE_DATA_KEY_MISS_VECTOR = 0x1C00
+RSE_VHPT_TRANSLATION_VECTOR = 0x0000
+RSE_DATA_TLB_VECTOR = 0x0800
 RSE_DIRTY_BIT_VECTOR = 0x2000
 RSE_DATA_ACCESS_BIT_VECTOR = 0x2800
 RSE_PAGE_FAULT_VECTOR = 0x5000
@@ -29,6 +31,8 @@ RSE_KEY_PERMISSION_VECTOR = 0x5100
 RSE_DATA_ACCESS_RIGHTS_VECTOR = 0x5300
 RSE_DATA_NAT_PAGE_VECTOR = 0x5600
 RSE_DEBUG_VECTOR = 0x5900
+RSE_CR_PTA = 8
+RSE_CR_IHA = 25
 
 
 def bit_mask(*bits_or_ranges: int | range) -> int:
@@ -260,6 +264,17 @@ RSE_MANDATORY_DATA_DEBUG_IMPLEMENTATION_ROWS = (
     "cpu.register.dbr.1",
     "cpu.register.scalar.psr",
 )
+RSE_MANDATORY_VHPT_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.opcode.ia64_op_loadrs",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+    "cpu.register.cr.8",
+    "cpu.register.rr.0",
+    "cpu.register.scalar.psr",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -363,6 +378,9 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-DATA-DEBUG-RETRY": list(
             RSE_MANDATORY_DATA_DEBUG_IMPLEMENTATION_ROWS
         ),
+        "RSE-007-MANDATORY-VHPT-RETRY": list(
+            RSE_MANDATORY_VHPT_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -393,12 +411,15 @@ def validate_contract(root: Path) -> str:
             "test_rse_mandatory_data_debug_priority_retry",
             "test_rse_mandatory_psr_dd_one_shot",
         ],
+        "RSE-007-MANDATORY-VHPT-RETRY": [
+            "test_rse_mandatory_vhpt_translation_paths",
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 37:
-        raise AssertionError("register tranche must contain thirty-seven cases")
+    if not isinstance(cases, list) or len(cases) != 38:
+        raise AssertionError("register tranche must contain thirty-eight cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -509,7 +530,8 @@ def validate_contract(root: Path) -> str:
         "plus exact ALLOC, COVER, CLRRRB, LOADRS, and 96-register FLUSHRS "
         "effects and ALLOC/FLUSHRS/LOADRS DTC plus thirteen mandatory "
         "RSE protection fault/RFI retries, thirteen protection-to-Data-Debug "
-        "priority chains, and two PSR.dd one-reference suppression retries, "
+        "priority chains, two PSR.dd one-reference suppression retries, and "
+        "six short-VHPT hit/Data-TLB/VHPT-fault paths, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -2305,6 +2327,39 @@ def append_rse_identity_dtc_mapping(
     return address + 0x10
 
 
+def append_rse_short_vhpt_configuration(
+        h: ModuleType, system: ModuleType, bundles: list[object],
+        address: int) -> int:
+    """Enable the minimum 32 KiB short-format VHPT for region zero."""
+    rr = 1 | (12 << 2)
+    pta = 1 | (15 << 2)
+    bundles.append(system.movl_bundle(h, address, 8, 0))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 9, rr))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, system.m_system(0x00, r2=9, r3=8),
+        h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(system.movl_bundle(h, address, 9, pta))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.mov_grcr(RSE_CR_PTA, 9), h.nop_i(), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x01, h.srlz_d(), h.nop_i(), h.nop_i()
+    ))
+    return address + 0x10
+
+
+def rse_short_vhpt_iha(address: int) -> int:
+    """Derive a short-format IHA for literal PTA.size=15 and RR.ps=12."""
+    hpn = (address & 0x0007FFFFFFFFFFFF) >> 12
+    return (hpn << 3) & ((1 << 15) - 1)
+
+
 def append_rse_fault_handler(
         h: ModuleType, system: ModuleType, bundles: list[object],
         mapped_page: int, poison: tuple[tuple[int, int], ...], *,
@@ -2314,6 +2369,8 @@ def append_rse_fault_handler(
         repaired_dbr: tuple[int, int] | None = None,
         capture_register: int = 20,
         capture_ipsr_register: int | None = None,
+        capture_iha_register: int | None = None,
+        capture_itir_register: int | None = None,
         counter_register: int | None = None) -> int:
     """Repair one RSE data fault, poison its committed prefix, and RFI."""
     address = (h.IA64_ALTERNATE_DATA_TLB_VECTOR
@@ -2335,6 +2392,20 @@ def append_rse_fault_handler(
         bundles.append(h.Bundle(
             address, 0x01,
             h.mov_crgr(capture_ipsr_register, h.IA64_CR_IPSR),
+            h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    if capture_iha_register is not None:
+        bundles.append(h.Bundle(
+            address, 0x01,
+            h.mov_crgr(capture_iha_register, RSE_CR_IHA),
+            h.nop_i(), h.nop_i()
+        ))
+        address += 0x10
+    if capture_itir_register is not None:
+        bundles.append(h.Bundle(
+            address, 0x01,
+            h.mov_crgr(capture_itir_register, h.IA64_CR_ITIR),
             h.nop_i(), h.nop_i()
         ))
         address += 0x10
@@ -2491,8 +2562,12 @@ def rse_flushrs_fault_retry_program(
         repaired_dbr: tuple[int, int] | None = None,
         handler_poison: tuple[tuple[int, int], ...] | None = None,
         capture_ipsr_register: int | None = None,
+        capture_iha_register: int | None = None,
+        capture_itir_register: int | None = None,
         counter_register: int | None = None,
-        secondary_debug_handler: bool = False):
+        secondary_debug_handler: bool = False,
+        enable_vhpt: bool = False,
+        vhpt_entry: tuple[int, int] | None = None):
     entry = 0x10000
     terminal = 0x70000
     address = entry
@@ -2540,6 +2615,14 @@ def rse_flushrs_fault_retry_program(
             h, system, bundles, address, 0x8000,
             pte=fault_pte, itir=fault_itir,
         )
+    if vhpt_entry is not None:
+        address = append_rse_identity_dtc_mapping(
+            h, system, bundles, address, 0x0000,
+        )
+    if enable_vhpt:
+        address = append_rse_short_vhpt_configuration(
+            h, system, bundles, address
+        )
     for index, value in initial_pkrs:
         address = append_rse_pkr_write(
             h, system, bundles, address, index, value
@@ -2575,6 +2658,8 @@ def rse_flushrs_fault_retry_program(
         repaired_pkr=repaired_pkr,
         repaired_dbr=repaired_dbr,
         capture_ipsr_register=capture_ipsr_register,
+        capture_iha_register=capture_iha_register,
+        capture_itir_register=capture_itir_register,
         counter_register=counter_register,
     )
     debug_rfi = None
@@ -2589,7 +2674,9 @@ def rse_flushrs_fault_retry_program(
             f"FLUSHRS mandatory-store {label} fault/RFI retry",
             tuple(bundles), terminal,
             tuple(h.DataWord(0x1800 + (value - 1) * 8, value, 8)
-                  for value in range(1, 5)),
+                  for value in range(1, 5)) + (() if vhpt_entry is None else (
+                      h.DataWord(vhpt_entry[0], vhpt_entry[1], 8),
+                  )),
             entry=entry,
         ),
         fault_ip,
@@ -2615,8 +2702,12 @@ def rse_loadrs_fault_retry_program(
         repaired_dbr: tuple[int, int] | None = None,
         handler_poison: tuple[tuple[int, int], ...] | None = None,
         capture_ipsr_register: int | None = None,
+        capture_iha_register: int | None = None,
+        capture_itir_register: int | None = None,
         counter_register: int | None = None,
-        secondary_debug_handler: bool = False):
+        secondary_debug_handler: bool = False,
+        enable_vhpt: bool = False,
+        vhpt_entry: tuple[int, int] | None = None):
     entry = 0x10000
     terminal = 0x70000
     address = entry
@@ -2649,6 +2740,14 @@ def rse_loadrs_fault_retry_program(
         address = append_rse_identity_dtc_mapping(
             h, system, bundles, address, 0x7000,
             pte=fault_pte, itir=fault_itir,
+        )
+    if vhpt_entry is not None:
+        address = append_rse_identity_dtc_mapping(
+            h, system, bundles, address, 0x0000,
+        )
+    if enable_vhpt:
+        address = append_rse_short_vhpt_configuration(
+            h, system, bundles, address
         )
     for index, value in initial_pkrs:
         address = append_rse_pkr_write(
@@ -2700,6 +2799,8 @@ def rse_loadrs_fault_retry_program(
         repaired_pkr=repaired_pkr,
         repaired_dbr=repaired_dbr,
         capture_ipsr_register=capture_ipsr_register,
+        capture_iha_register=capture_iha_register,
+        capture_itir_register=capture_itir_register,
         counter_register=counter_register,
     )
     debug_rfi = None
@@ -2714,7 +2815,11 @@ def rse_loadrs_fault_retry_program(
             f"LOADRS mandatory-load {label} fault/RFI retry",
             tuple(bundles), terminal,
             tuple(h.DataWord(base + index * 8, value, 8)
-                  for index, value in enumerate(original)),
+                  for index, value in enumerate(original)) + (
+                      () if vhpt_entry is None else (
+                          h.DataWord(vhpt_entry[0], vhpt_entry[1], 8),
+                      )
+                  ),
             entry=entry,
         ),
         fault_ip,
@@ -3422,6 +3527,113 @@ def test_rse_mandatory_psr_dd_one_shot(
         "LOADRS load, cleared after that successful mandatory reference, "
         "and exposed one exact poison-sensitive Data Debug retry for each: "
         + ", ".join(completed)
+    )
+
+
+def test_rse_mandatory_vhpt_translation_paths(
+        h: ModuleType, system: ModuleType, qemu: Path) -> str:
+    """Exercise mandatory RSE short-VHPT hit, miss, and backing fault."""
+    completed: list[str] = []
+    for access in ("store", "load"):
+        fault_address = 0x8000 if access == "store" else 0x7FF8
+        iha = rse_short_vhpt_iha(fault_address)
+        mapped_page = 0x8000 if access == "store" else 0x7000
+        modes = (
+            ("short-hit", mapped_page | 0x661, None, None),
+            ("invalid-entry-data-tlb", 0x3,
+             "data-tlb-miss", RSE_DATA_TLB_VECTOR),
+            ("missing-backing-vhpt", None,
+             "vhpt-translation", RSE_VHPT_TRANSLATION_VECTOR),
+        )
+        for label, entry, exception_kind, vector in modes:
+            kwargs = {
+                "label": label,
+                "vector": RSE_DATA_TLB_VECTOR if vector is None else vector,
+                "extra_psr": h.IA64_PSR_DT,
+                "enable_vhpt": True,
+                "vhpt_entry": None if entry is None else (iha, entry),
+                "capture_iha_register": 25,
+                "capture_itir_register": 26,
+            }
+            if access == "store":
+                program, fault_ip, handler_rfi, poison = \
+                    rse_flushrs_fault_retry_program(h, system, **kwargs)
+                expected_words = ((1, 2, 0, 3, 4)
+                                  if exception_kind is None else
+                                  (poison[0][1], poison[1][1],
+                                   poison[2][1], 3, 4))
+                expected_isr = (1 << 33) | h.IA64_ISR_RS
+            else:
+                program, fault_ip, handler_rfi, original = \
+                    rse_loadrs_fault_retry_program(h, system, **kwargs)
+                expected_words = original
+                expected_isr = h.IA64_ISR_R | h.IA64_ISR_RS
+
+            run_kwargs = {
+                "compact_loader": True,
+                "preserve_fault_slot": True,
+                "typed_direct_trace_ips": (fault_ip,),
+            }
+            if exception_kind is not None:
+                run_kwargs["typed_rfi_traces"] = (handler_rfi,)
+            snapshot = h.run_program(qemu, program, **run_kwargs)
+            expected_psr = (h.IA64_PSR_IC | h.IA64_PSR_RT |
+                            h.IA64_PSR_DT)
+
+            if exception_kind is None:
+                if (snapshot.ip != program.terminal_ip or
+                        snapshot.exception_pending or
+                        snapshot.gr[8:13] != expected_words or
+                        snapshot.rse_bsp != 0x8010 or
+                        snapshot.rse_bspstore != 0x8010 or
+                        (snapshot.psr & expected_psr) != expected_psr):
+                    raise AssertionError(
+                        "RSE {} VHPT hit mismatch: ip=0x{:x} exc={}/0x{:x} "
+                        "words={} BSP=0x{:x}/0x{:x} PSR=0x{:x}".format(
+                            access, snapshot.ip, snapshot.exception_kind,
+                            snapshot.exception_vector,
+                            tuple(hex(value) for value in snapshot.gr[8:13]),
+                            snapshot.rse_bsp, snapshot.rse_bspstore,
+                            snapshot.psr,
+                        )
+                    )
+            elif (snapshot.ip != program.terminal_ip or
+                    snapshot.exception_kind != exception_kind or
+                    snapshot.exception_vector != vector or
+                    snapshot.exception_source != fault_ip or
+                    snapshot.exception_address != fault_address or
+                    snapshot.gr[20:25] != (
+                        fault_ip, fault_address, expected_isr, 0, 0x8000,
+                    ) or
+                    snapshot.gr[25] != iha or
+                    snapshot.gr[26] != 12 << 2 or
+                    snapshot.gr[8:13] != expected_words or
+                    snapshot.rse_bsp != 0x8010 or
+                    snapshot.rse_bspstore != 0x8010 or
+                    (snapshot.psr & expected_psr) != expected_psr):
+                raise AssertionError(
+                    "RSE {} {} retry mismatch: ip=0x{:x} exc={}/0x{:x} "
+                    "source/address=0x{:x}/0x{:x} capture={} "
+                    "IHA/ITIR=0x{:x}/0x{:x} words={} BSP=0x{:x}/0x{:x} "
+                    "PSR=0x{:x}".format(
+                        access, label, snapshot.ip,
+                        snapshot.exception_kind, snapshot.exception_vector,
+                        snapshot.exception_source,
+                        snapshot.exception_address,
+                        tuple(hex(value) for value in snapshot.gr[20:25]),
+                        snapshot.gr[25], snapshot.gr[26],
+                        tuple(hex(value) for value in snapshot.gr[8:13]),
+                        snapshot.rse_bsp, snapshot.rse_bspstore,
+                        snapshot.psr,
+                    )
+                )
+            completed.append(f"{access}:{label}")
+
+    return (
+        "mandatory FLUSHRS stores and LOADRS loads each completed through a "
+        "short-format VHPT hit, repaired an invalid-entry Data TLB fault, "
+        "and repaired a missing-backing VHPT Translation fault without "
+        "committed-prefix replay: " + ", ".join(completed)
     )
 
 
@@ -4583,6 +4795,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("RSE mandatory protection fault/retry", lambda: test_rse_mandatory_protection_fault_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory Data Debug priority/retry", lambda: test_rse_mandatory_data_debug_priority_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory PSR.dd one-shot", lambda: test_rse_mandatory_psr_dd_one_shot(harness, system, args.qemu.resolve())),
+        ("RSE mandatory VHPT translation paths", lambda: test_rse_mandatory_vhpt_translation_paths(harness, system, args.qemu.resolve())),
         ("ALLOC frame and spill effects", lambda: test_alloc_effects(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),

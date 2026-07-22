@@ -364,16 +364,6 @@ static bool ia64_mmu_trace_enabled(void)
     return enabled != 0;
 }
 
-bool ia64_vhpt_walk_runtime_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        enabled = g_getenv("VIBTANIUM_VHPT_WALK") != NULL;
-    }
-    return enabled != 0;
-}
-
 void ia64_firmware_identity_tlb_set(CPUIA64State *env, bool enabled)
 {
     if (env) {

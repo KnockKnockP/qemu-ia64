@@ -83,7 +83,6 @@ uint8_t ia64_region_page_size(uint64_t rr);
 uint64_t ia64_default_itir(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_hash_address(CPUIA64State *env, vaddr address);
 uint64_t ia64_vhpt_tag(CPUIA64State *env, vaddr address);
-bool ia64_vhpt_walk_runtime_enabled(void);
 bool ia64_vhpt_is_enabled(uint64_t pta, uint64_t rr, uint64_t psr,
                           MMUAccessType access_type);
 bool ia64_vhpt_backing_miss_reports_original_tlb(bool psr_ic_inflight,

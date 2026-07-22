@@ -356,7 +356,7 @@ bool ia64_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                         &cpu->env, address, access_type, mmu_idx, false,
                         &result);
                 }
-            } else if (ia64_vhpt_walk_runtime_enabled()) {
+            } else {
                 vhpt_status = rse_access ?
                     ia64_try_rse_vhpt_walk(&cpu->env, cs->as, address,
                                            access_type) :
