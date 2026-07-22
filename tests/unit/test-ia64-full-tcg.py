@@ -9915,12 +9915,37 @@ def test_typed_return_branches(qemu: Path) -> str:
         fault_migration.checkpoint.ip ==
         IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60 and
         fault_migration.checkpoint.gr[5] == 0 and
-        fault_migration.checkpoint.cr_ipsr == IA64_PSR_IC,
+        fault_migration.checkpoint.gr[6] == fill_fault_isr and
+        fault_migration.checkpoint.gr[12] ==
+        (IA64_PSR_IC | IA64_PSR_RT) and
+        fault_migration.checkpoint.cr_iip == 0x100 and
+        fault_migration.checkpoint.cr_ifa == 0x8018 and
+        fault_migration.checkpoint.cr_isr == fill_fault_isr and
+        fault_migration.checkpoint.cr_iipa == 0xa0 and
+        fault_migration.checkpoint.cr_ipsr == IA64_PSR_IC and
+        fault_migration.checkpoint.cfm == (4 | (4 << 7)) and
+        fault_migration.checkpoint.rse_base == 92 and
+        fault_migration.checkpoint.rse_bsp == 0x8000 and
+        fault_migration.checkpoint.rse_bspstore == 0x8020 and
+        fault_migration.checkpoint.rse_bspload == 0x8020,
         "RFI migration checkpoint did not expose IFS.v=0 continuation: "
-        "IP=0x{:x} saved-IFS=0x{:x} IPSR=0x{:x}".format(
+        "IP=0x{:x} saved-IFS/ISR/IPSR=0x{:x}/0x{:x}/0x{:x} "
+        "IIP/IFA/ISR/IIPA/IPSR=0x{:x}/0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+        "CFM=0x{:x} RSE={}/0x{:x}/0x{:x}/0x{:x}".format(
             fault_migration.checkpoint.ip,
             fault_migration.checkpoint.gr[5],
+            fault_migration.checkpoint.gr[6],
+            fault_migration.checkpoint.gr[12],
+            fault_migration.checkpoint.cr_iip,
+            fault_migration.checkpoint.cr_ifa,
+            fault_migration.checkpoint.cr_isr,
+            fault_migration.checkpoint.cr_iipa,
             fault_migration.checkpoint.cr_ipsr,
+            fault_migration.checkpoint.cfm,
+            fault_migration.checkpoint.rse_base,
+            fault_migration.checkpoint.rse_bsp,
+            fault_migration.checkpoint.rse_bspstore,
+            fault_migration.checkpoint.rse_bspload,
         ),
     )
     _require_typed_rfi_trace(
@@ -9950,6 +9975,15 @@ def test_typed_return_branches(qemu: Path) -> str:
             migrated_fault.rse_bsp, migrated_fault.rse_bspstore,
             migrated_fault.rse_bspload,
         ),
+    )
+    fault_final_differences = successful_snapshot_differences(
+        faulted, migrated_fault
+    )
+    _require(
+        not fault_final_differences,
+        "first-register migrated result diverged from its exact "
+        "non-migrated result:\n  " +
+        "\n  ".join(fault_final_differences[:16]),
     )
     program_count += 1
     return_encodings += 1
@@ -10047,20 +10081,97 @@ def test_typed_return_branches(qemu: Path) -> str:
         .format(tuple("0x{:x}".format(value)
                       for value in rnat_faulted.gr[25:29])),
     )
+
+    # Repeat the other physically reachable SoftMMU boundary in a fresh
+    # process.  Unlike the first-register case, this checkpoint carries three
+    # already filled registers, a negative dirty-word relation, a pending RNAT
+    # load, and handler-poisoned backing words.  Exact restore and terminal
+    # comparison therefore exercise the migrated incomplete-frame prefix, not
+    # just the common interruption resources.
+    rnat_migration = run_savevm_migration(
+        qemu,
+        rnat_program,
+        checkpoint_ip=IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90,
+        preserve_fault_slot=True,
+    )
+    rnat_checkpoint_differences = successful_snapshot_differences(
+        rnat_migration.checkpoint, rnat_migration.restored
+    )
+    _require(
+        not rnat_checkpoint_differences,
+        "fresh-process RNAT RFI load changed its architectural "
+        "checkpoint:\n  " +
+        "\n  ".join(rnat_checkpoint_differences[:16]),
+    )
+    _require(
+        rnat_migration.checkpoint.ip ==
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90 and
+        rnat_migration.checkpoint.gr[10] == 0 and
+        rnat_migration.checkpoint.gr[11] == fill_fault_isr and
+        rnat_migration.checkpoint.gr[12] ==
+        (IA64_PSR_IC | IA64_PSR_RT) and
+        rnat_migration.checkpoint.cr_iip == 0x200 and
+        rnat_migration.checkpoint.cr_ifa == 0x7ff8 and
+        rnat_migration.checkpoint.cr_isr == fill_fault_isr and
+        rnat_migration.checkpoint.cr_iipa == 0x120 and
+        rnat_migration.checkpoint.cr_ipsr == IA64_PSR_IC and
+        rnat_migration.checkpoint.cfm == (4 | (4 << 7)) and
+        rnat_migration.checkpoint.rse_base == 92 and
+        rnat_migration.checkpoint.rse_bsp == 0x7ff0 and
+        rnat_migration.checkpoint.rse_bspstore == 0x8000 and
+        rnat_migration.checkpoint.rse_bspload == 0x8000 and
+        rnat_migration.checkpoint.rse_rnat == 0,
+        "RNAT migration checkpoint lost its IFS.v=0 fill prefix: "
+        "IP=0x{:x} IFS=0x{:x} ISR=0x{:x} saved-IPSR=0x{:x} "
+        "IIP/IFA/ISR/IIPA/IPSR=0x{:x}/0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+        "CFM=0x{:x} RSE={}/0x{:x}/0x{:x}/0x{:x}/0x{:x}".format(
+            rnat_migration.checkpoint.ip,
+            rnat_migration.checkpoint.gr[10],
+            rnat_migration.checkpoint.gr[11],
+            rnat_migration.checkpoint.gr[12],
+            rnat_migration.checkpoint.cr_iip,
+            rnat_migration.checkpoint.cr_ifa,
+            rnat_migration.checkpoint.cr_isr,
+            rnat_migration.checkpoint.cr_iipa,
+            rnat_migration.checkpoint.cr_ipsr,
+            rnat_migration.checkpoint.cfm,
+            rnat_migration.checkpoint.rse_base,
+            rnat_migration.checkpoint.rse_bsp,
+            rnat_migration.checkpoint.rse_bspstore,
+            rnat_migration.checkpoint.rse_bspload,
+            rnat_migration.checkpoint.rse_rnat,
+        ),
+    )
+    _require_typed_rfi_trace(
+        rnat_migration.destination_trace,
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90,
+    )
+    rnat_final_differences = successful_snapshot_differences(
+        rnat_faulted, rnat_migration.final
+    )
+    _require(
+        not rnat_final_differences,
+        "RNAT migrated result diverged from its exact non-migrated "
+        "result:\n  " + "\n  ".join(rnat_final_differences[:16]),
+    )
     program_count += 1
     return_encodings += 1
 
-    _require(program_count == 10 and return_encodings == 10,
-             "typed return corpus drifted from ten programs/returns")
+    program_count += 1
+    return_encodings += 1
+
+    _require(program_count == 11 and return_encodings == 11,
+             "typed return corpus drifted from eleven programs/returns")
     return (
-        "ten forced-one-bundle-TB BR_RET programs cover p0/true/false, "
+        "eleven forced-one-bundle-TB BR_RET programs cover p0/true/false, "
         "aligned dynamic targets, same-group BR and AR.PFS forwarding versus "
         "ordinary overlay reads, clean and four-word incomplete SOL4 frame "
         "restoration across an RNAT slot, post-target trap state, pre-fill "
         "IR1/RS0 evidence, lower-privilege-over-taken-branch priority, and "
         "real SoftMMU first-register/RNAT R/RS/IR faults resumed by IFS.v=0 "
         "RFI with fault-word retry and committed-prefix idempotence, including "
-        "a fresh-process save/load at the handler RFI; every return and RFI "
+        "fresh-process save/load at both physically reachable handler-RFI "
+        "boundaries; every return and RFI "
         "has direct typed ownership and one ordered focused-helper chain"
     )
 

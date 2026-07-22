@@ -30,10 +30,10 @@ tests can close complete architectural index spaces without creating one test
 executable per register.
 
 The three long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 public gate after the deferred-RSE-fault
-migration checkpoint, `test-ia64-system-tcg` took 47.16 seconds,
-`test-ia64-full-tcg` 45.77 seconds, and `test-ia64-register-tcg` 45.19
-seconds. The register suite now includes three fresh-process save/load/RFI
-continuations. With parallel execution Meson may pause near the end of the
-progress display until these processes complete; the per-test timeouts still
-detect a genuine hang.
+matrices execute. On the 2026-07-22 public gate after the current-frame
+fill-fault migration checkpoint, `test-ia64-system-tcg` took 47.51 seconds,
+`test-ia64-full-tcg` 47.01 seconds, and `test-ia64-register-tcg` 45.67
+seconds. The two RSE suites now include five fresh-process save/load/RFI
+continuations across mandatory-instruction and current-frame fill faults. With
+parallel execution Meson may pause near the end of the progress display until
+these processes complete; the per-test timeouts still detect a genuine hang.

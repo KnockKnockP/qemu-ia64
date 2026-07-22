@@ -779,6 +779,13 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_br_ret", "cpu.opcode.ia64_op_rfi", "cpu.register.ar.17", "cpu.register.ar.18", "cpu.register.ar.19", "cpu.register.ar.64", "cpu.register.ar.66", "cpu.register.cr.16", "cpu.register.cr.17", "cpu.register.cr.19", "cpu.register.cr.20", "cpu.register.cr.23", "cpu.register.scalar.cfm", "cpu.register.scalar.psr"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-full-tcg"]
+    },
+    {
       "normative_row": "RSE-013-DEFERRED-DTC-FAULT-MIGRATION",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.opcode.ia64_op_alloc", "cpu.opcode.ia64_op_flushrs", "cpu.opcode.ia64_op_loadrs", "cpu.register.ar.16", "cpu.register.ar.17", "cpu.register.ar.18", "cpu.register.ar.19"],

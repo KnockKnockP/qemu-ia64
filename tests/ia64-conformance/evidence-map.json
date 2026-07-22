@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 62
+    "row_closing_claims_expected": 63
   },
   "entries": [
     {
@@ -381,11 +381,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-full-tcg",
-      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths.",
+      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT"],
-      "limitations": ["Only the two explicitly enumerated PFS rows are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
+      "closes_normative_rows": ["REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
+      "limitations": ["Only the two explicitly enumerated PFS rows and current-frame fill-fault migration row are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
     },
     {
       "id": "meson:test-ia64-full-tcg-static",
@@ -756,7 +756,7 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-register-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-register-tcg-static",
-      "scope": "Register tranche schema, coverage-group selectors, exact index counts, complete AR selector/unit/form partitions, exact nine-register named-AR field partitions with 81 fault, 512 legal, and per-register NaT cases, the 6,208-case dirty BSPSTORE/RNAT matrix and exact 96-register flushrs image, mandatory RSE DTC/protection/debug/VHPT/Data-Nested retry and deferred-DTC-fault migration metadata, the exact twenty-case CCV/cmpxchg and 64-selector UNAT spill/fill matrices, complete CR selector/read-only/PSR.ic partitions, exact 23-row named-CR field partitions with 211 fault and 1,290 legal cases, CPUID/RUC feature consistency metadata, anti-alias vector completeness, all legal GR SOR sizes, complete FR/PR rotating-base counts, and interruption/RFI transition metadata.",
+      "scope": "Register tranche schema, coverage-group selectors, exact index counts, complete AR selector/unit/form partitions, exact nine-register named-AR field partitions with 81 fault, 512 legal, and per-register NaT cases, the 6,208-case dirty BSPSTORE/RNAT matrix and exact 96-register flushrs image, mandatory RSE DTC/protection/debug/VHPT/Data-Nested retry plus deferred-DTC and current-frame-fill fault migration metadata, the exact twenty-case CCV/cmpxchg and 64-selector UNAT spill/fill matrices, complete CR selector/read-only/PSR.ic partitions, exact 23-row named-CR field partitions with 211 fault and 1,290 legal cases, CPUID/RUC feature consistency metadata, anti-alias vector completeness, all legal GR SOR sizes, complete FR/PR rotating-base counts, and interruption/RFI transition metadata.",
       "oracle_independence": "independent",
       "conformance_role": "supporting",
       "closes_normative_rows": [],
