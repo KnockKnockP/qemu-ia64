@@ -30,6 +30,8 @@ typedef enum IA64ControlSpeculativeLoadAction {
     IA64_CONTROL_SPECULATIVE_LOAD_DEFER,
     /* A lower-priority condition deferred, but the matching DBR did not. */
     IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG,
+    /* Higher-priority conditions deferred, but Unaligned did not. */
+    IA64_CONTROL_SPECULATIVE_LOAD_UNALIGNED,
 } IA64ControlSpeculativeLoadAction;
 
 /*

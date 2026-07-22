@@ -188,6 +188,10 @@ uint32_t HELPER(data_plane_integer_load_prepare)(CPUIA64State *env,
             ia64_raise_data_plane_exception(
                 env, IA64_EXCEPTION_DATA_DEBUG, address, MMU_DATA_LOAD);
         }
+        if (action == IA64_CONTROL_SPECULATIVE_LOAD_UNALIGNED) {
+            ia64_raise_arch_unaligned_data_reference(
+                env, address, MMU_DATA_LOAD);
+        }
         if (action == IA64_CONTROL_SPECULATIVE_LOAD_DEFER) {
             ia64_alat_invalidate_gr(env, target);
             return IA64_DATA_PLANE_LOAD_DEFER;
@@ -730,6 +734,10 @@ uint32_t HELPER(data_plane_fp_load_prepare)(CPUIA64State *env,
         if (action == IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG) {
             ia64_raise_data_plane_exception(
                 env, IA64_EXCEPTION_DATA_DEBUG, address, MMU_DATA_LOAD);
+        }
+        if (action == IA64_CONTROL_SPECULATIVE_LOAD_UNALIGNED) {
+            ia64_raise_arch_unaligned_data_reference(
+                env, address, MMU_DATA_LOAD);
         }
         if (action == IA64_CONTROL_SPECULATIVE_LOAD_DEFER) {
             ia64_data_plane_fp_write_natval_targets(env, targets);

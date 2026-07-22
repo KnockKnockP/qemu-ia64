@@ -60,12 +60,15 @@ from ia64_data_plane_tcg_spec import (  # noqa: E402
 
 IA64_PSR_ED = 1 << 43
 IA64_PSR_DFL = 1 << 18
+IA64_PSR_AC = 1 << 3
 IA64_ISR_NA = 1 << 35
+IA64_ISR_SP = 1 << 36
 IA64_ISR_CODE_DATA_NAT_PAGE_CONSUMPTION = 0x20
 IA64_DISABLED_FP_VECTOR = 0x5500
 IA64_DATA_ACCESS_RIGHTS_VECTOR = 0x5300
 IA64_DATA_NAT_PAGE_VECTOR = 0x5600
 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR = 0x5B00
+IA64_UNALIGNED_DATA_REFERENCE_VECTOR = 0x5A00
 IA64_ILLEGAL_OPERATION_VECTOR = 0x5400
 
 INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS = (
@@ -81,6 +84,11 @@ INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS = (
     "cpu.opcode.ia64_op_ld8sa",
 )
 
+INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS = tuple(
+    row for row in INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS
+    if "_ld" in row
+)
+
 
 def validate_contract(root: Path) -> str:
     path = root / "tests/ia64-conformance/speculation-semantic-tranche.json"
@@ -90,27 +98,46 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 1:
-        raise AssertionError("speculation tranche must contain one atomic case")
-    case = cases[0]
-    if case.get("normative_row") != "ALT-001-INTEGER-NATPAGE-DEFERRAL":
-        raise AssertionError("speculation tranche normative row drift")
-    if case.get("implementation_rows") != list(
+    if not isinstance(cases, list) or len(cases) != 2:
+        raise AssertionError("speculation tranche must contain two atomic cases")
+    by_row = {case.get("normative_row"): case for case in cases}
+    if set(by_row) != {
+            "ALT-001-INTEGER-NATPAGE-DEFERRAL",
+            "ALT-002-INTEGER-NO-RECOVERY-FAULTS"}:
+        raise AssertionError("speculation tranche normative rows drifted")
+    deferred = by_row["ALT-001-INTEGER-NATPAGE-DEFERRAL"]
+    if deferred.get("implementation_rows") != list(
             INTEGER_SPECULATIVE_NATPAGE_IMPLEMENTATION_ROWS):
-        raise AssertionError("speculation tranche implementation row drift")
-    if case.get("execution", {}).get("probes") != [
+        raise AssertionError("NaTPage implementation rows drifted")
+    if deferred.get("execution", {}).get("probes") != [
             "integer_speculative_nat_page_defer_case"]:
-        raise AssertionError("speculation tranche execution probe drift")
-    if case.get("oracle", {}).get("independence") != "independent":
+        raise AssertionError("NaTPage execution probe drifted")
+    immediate = by_row["ALT-002-INTEGER-NO-RECOVERY-FAULTS"]
+    if immediate.get("implementation_rows") != list(
+            INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS):
+        raise AssertionError("no-recovery implementation rows drifted")
+    if immediate.get("execution", {}).get("probes") != [
+            "integer_speculative_translation_miss_case",
+            "integer_speculative_unaligned_case"]:
+        raise AssertionError("no-recovery execution probes drifted")
+    if any(case.get("oracle", {}).get("independence") != "independent"
+           for case in cases):
         raise AssertionError("speculation tranche oracle is not independent")
-    variants = set(case.get("applicable_variants", []))
+    variants = set(deferred.get("applicable_variants", []))
+    immediate_variants = set(immediate.get("applicable_variants", []))
     for width in (1, 2, 4, 8):
         if "ld{}.s".format(width) not in variants or \
                 "ld{}.sa".format(width) not in variants:
             raise AssertionError(
-                "speculation tranche misses width {} variants".format(width)
+                "NaTPage row misses width {} variants".format(width)
             )
-    return "one exact ALT row covers all four integer .s/.sa widths"
+        if "ld{}.s".format(width) not in immediate_variants or \
+                "ld{}.sa".format(width) not in immediate_variants:
+            raise AssertionError(
+                "no-recovery row misses width {} variants".format(width)
+            )
+    return ("two exact ALT rows cover deferred NaTPage and no-recovery "
+            "miss/alignment behavior for every applicable integer width")
 
 
 def _movl_bundle(address: int, reg: int, value: int) -> object:
@@ -1268,6 +1295,160 @@ def integer_speculative_nat_page_defer_case(width: int) -> RuntimeCase:
     )
 
 
+def _require_speculative_immediate_fault(
+        snapshot, *, label: str, fault_ip: int, fault_raw: int,
+        address: int, kind: str, vector: int, old_target: int) -> None:
+    expected_isr = H.IA64_ISR_R | IA64_ISR_SP
+    H._require(
+        snapshot.ip == vector and snapshot.exception_pending and
+        snapshot.exception_kind == kind and
+        snapshot.exception_vector == vector,
+        "{} did not reach vector 0x{:x}".format(label, vector),
+    )
+    H._require(
+        snapshot.exception_source == fault_ip and
+        snapshot.exception_address == address and
+        snapshot.cr_iip == fault_ip and snapshot.cr_ifa == address and
+        snapshot.cr_isr == expected_isr,
+        "{} expected source/address/IIP/IFA/ISR "
+        "0x{:x}/0x{:x}/0x{:x}/0x{:x}/0x{:x}, got "
+        "0x{:x}/0x{:x}/0x{:x}/0x{:x}/0x{:x}".format(
+            label, fault_ip, address, fault_ip, address, expected_isr,
+            snapshot.exception_source, snapshot.exception_address,
+            snapshot.cr_iip, snapshot.cr_ifa, snapshot.cr_isr,
+        ),
+    )
+    H._require(
+        snapshot.slot_valid and snapshot.slot_ip == fault_ip and
+        snapshot.slot_ri == 0 and
+        snapshot.slot_type == H.IA64_SLOT_TYPE_M and
+        snapshot.slot_raw == (fault_raw & H.SLOT_MASK),
+        label + " lost exact fault-slot publication",
+    )
+    H._require(
+        snapshot.gr[7] == address and snapshot.gr[20] == old_target and
+        not (snapshot.nat_low & (1 << 20)),
+        label + " retired its base update or destination state",
+    )
+
+
+def integer_speculative_translation_miss_case(
+        width: int, memory_class: str) -> RuntimeCase:
+    if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
+        raise ValueError("translation-miss case requires ld1/2/4/8.s or .sa")
+    virtual = 0x8000
+    old_target = 0x5100000000000000 | (width << 4) | (memory_class == "sa")
+    bundles: List[object] = list(H._interruption_collection_setup())
+    bundles.extend((
+        _movl_bundle(0x30, 7, virtual),
+        _movl_bundle(0x40, 20, old_target),
+        H.Bundle(0x50, 0x01, H.ssm(H.IA64_PSR_DT),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(0x60, 0x01, H.srlz_d(), H.nop_i(), H.nop_i()),
+    ))
+    fault_ip = 0x70
+    fault_raw = integer_load(
+        width, memory_class, r1=20, r3=7,
+        update="imm", imm=width,
+    )
+    _append_m(bundles, fault_ip, fault_raw, [], trace=False)
+    bundles.append(H._exception_vector_spin(H.IA64_ALTERNATE_DATA_TLB_VECTOR))
+    program = H.Program(
+        name="LD{}.{} no-recovery translated miss".format(
+            width, memory_class.upper()),
+        bundles=tuple(bundles),
+        terminal_ip=H.IA64_ALTERNATE_DATA_TLB_VECTOR,
+    )
+
+    def verify(snapshot) -> str:
+        label = "LD{}.{} translated miss".format(width, memory_class.upper())
+        _require_speculative_immediate_fault(
+            snapshot, label=label, fault_ip=fault_ip, fault_raw=fault_raw,
+            address=virtual, kind="alternate-data-tlb-miss",
+            vector=H.IA64_ALTERNATE_DATA_TLB_VECTOR,
+            old_target=old_target,
+        )
+        return (label + " raised exact R|SP Alternate Data TLB and "
+                "suppressed destination/update retirement")
+
+    return RuntimeCase(
+        "LD{}.{} immediate translated miss".format(
+            width, memory_class.upper()),
+        program, (fault_ip,), verify,
+        ("IA64_OP_LD{}{}".format(width, memory_class.upper()),), True,
+    )
+
+
+def integer_speculative_unaligned_case(
+        width: int, memory_class: str, *, deferred_nat_page: bool) -> RuntimeCase:
+    if width not in (2, 4, 8) or memory_class not in ("s", "sa"):
+        raise ValueError("unaligned case requires ld2/4/8.s or .sa")
+    physical = 0x2000
+    address = 0x8001 if deferred_nat_page else physical + 1
+    old_target = 0x5200000000000000 | (width << 4) | (memory_class == "sa")
+    if deferred_nat_page:
+        bundles = [
+            _movl_bundle(0x10, 2, _mapped_pte(physical, 7)),
+            _movl_bundle(0x20, 7, address),
+            _movl_bundle(0x30, 20, old_target),
+        ]
+        next_ip = _append_dtc_install(bundles, 0x40)
+    else:
+        bundles = list(H._interruption_collection_setup())
+        bundles.extend((
+            _movl_bundle(0x30, 7, address),
+            _movl_bundle(0x40, 20, old_target),
+        ))
+        next_ip = 0x50
+    bundles.extend((
+        H.Bundle(next_ip, 0x01, H.ssm(IA64_PSR_AC),
+                 H.nop_i(), H.nop_i()),
+        H.Bundle(next_ip + 0x10, 0x01, H.srlz_d(),
+                 H.nop_i(), H.nop_i()),
+    ))
+    fault_ip = next_ip + 0x20
+    fault_raw = integer_load(
+        width, memory_class, r1=20, r3=7,
+        update="imm", imm=width,
+    )
+    _append_m(bundles, fault_ip, fault_raw, [], trace=False)
+    bundles.append(H._exception_vector_spin(
+        IA64_UNALIGNED_DATA_REFERENCE_VECTOR
+    ))
+    condition = "deferred NaTPage plus " if deferred_nat_page else ""
+    program = H.Program(
+        name="LD{}.{} no-recovery {}unaligned reference".format(
+            width, memory_class.upper(), condition),
+        bundles=tuple(bundles),
+        terminal_ip=IA64_UNALIGNED_DATA_REFERENCE_VECTOR,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+    )
+
+    def verify(snapshot) -> str:
+        label = "LD{}.{} {}unaligned".format(
+            width, memory_class.upper(), condition)
+        _require_speculative_immediate_fault(
+            snapshot, label=label, fault_ip=fault_ip, fault_raw=fault_raw,
+            address=address, kind="unaligned-data-reference",
+            vector=IA64_UNALIGNED_DATA_REFERENCE_VECTOR,
+            old_target=old_target,
+        )
+        H._require(snapshot.cr_ipsr & IA64_PSR_AC,
+                   label + " did not collect active PSR.ac")
+        if deferred_nat_page:
+            H._require(snapshot.cr_ipsr & H.IA64_PSR_DT,
+                       label + " did not collect active PSR.dt")
+        return (label + " raised exact R|SP Unaligned Data Reference and "
+                "suppressed destination/update retirement")
+
+    return RuntimeCase(
+        "LD{}.{} immediate {}Unaligned".format(
+            width, memory_class.upper(), condition),
+        program, (fault_ip,), verify,
+        ("IA64_OP_LD{}{}".format(width, memory_class.upper()),), True,
+    )
+
+
 def fp_speculative_nat_page_defer_case() -> RuntimeCase:
     virtual = 0x8000
     physical = 0x2000
@@ -2015,6 +2196,12 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
         *(fp_advanced_unsupported_case(ma) for ma in (4, 5, 6)),
         *(integer_speculative_nat_page_defer_case(width)
           for width in (1, 2, 4, 8)),
+        *(integer_speculative_translation_miss_case(width, memory_class)
+          for width in (1, 2, 4, 8) for memory_class in ("s", "sa")),
+        *(integer_speculative_unaligned_case(
+              width, memory_class, deferred_nat_page=deferred_nat_page)
+          for deferred_nat_page in (False, True)
+          for width in (2, 4, 8) for memory_class in ("s", "sa")),
         fp_speculative_nat_page_defer_case(),
         *(reserved_width_illegal_case(opcode) for opcode in (
             "IA64_OP_LD1FILL", "IA64_OP_LD2FILL", "IA64_OP_LD4FILL",

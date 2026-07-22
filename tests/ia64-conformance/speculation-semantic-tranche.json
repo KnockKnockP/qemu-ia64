@@ -26,6 +26,28 @@
       "execution": {"lane": "bare-metal-batch", "probes": ["integer_speculative_nat_page_defer_case"], "result_observations": ["destination payloads and NaTs", "updated bases", "CHK.S recovery marker", "CHK.A recovery marker", "interruption state", "direct typed traces for all loads and checks"]},
       "oracle": {"independence": "independent", "derivation": "All widths, addresses, update values, NaT masks, recovery targets, and terminal markers are test-owned literals or direct arithmetic derived from the cited load/check rules; destination data portions are deliberately not compared because Intel defines them as implementation-specific after deferral, and no production translation, ALAT, or exception helper supplies expected values"},
       "limitations": ["This atomic row covers only integer NaTPage deferral at CPL0; other deferrable and non-deferrable fault classes, successful values, FP forms, false predicates, ALAT-hit optionality, and migration remain separate ALT/MEM/MMU rows"]
+    },
+    {
+      "id": "ALT-002-INTEGER-NO-RECOVERY-FAULTS-EXACT",
+      "case_id": 2,
+      "normative_token": 96,
+      "normative_row": "ALT-002-INTEGER-NO-RECOVERY-FAULTS",
+      "implementation_rows": ["cpu.opcode.ia64_op_ld1s", "cpu.opcode.ia64_op_ld1sa", "cpu.opcode.ia64_op_ld2s", "cpu.opcode.ia64_op_ld2sa", "cpu.opcode.ia64_op_ld4s", "cpu.opcode.ia64_op_ld4sa", "cpu.opcode.ia64_op_ld8s", "cpu.opcode.ia64_op_ld8sa"],
+      "citation": {"document_id": "intel-ia64-sdm-v2-r2.3", "section": "5.5.5", "printed_pages": ["2:105", "2:106", "2:107"], "anchor": "Qualified Exception Deferral"},
+      "preconditions": ["PSR.ic is enabled and serialized", "PSR.it is clear, selecting the no-recovery model regardless of ITLB.ed", "PSR.ed is clear and no DCR-based deferral is active", "Translated-miss probes enable PSR.dt without installing a matching DTC entry", "Alignment probes enable PSR.ac and use either mapped physical RAM or a translated NaTPage whose higher-priority condition always defers"],
+      "inputs": ["One ldN.s and one ldN.sa translated-miss probe for widths 1, 2, 4, and 8", "One physical and one concurrent-NaTPage ldN.s/ldN.sa misalignment probe for widths 2, 4, and 8", "Each destination contains a distinct clear-NaT literal", "Each base uses an immediate update equal to its datum width"],
+      "expected_results": ["Each qualified Alternate Data TLB condition raises immediately in the no-recovery model", "Each qualified Unaligned Data Reference condition raises immediately in the no-recovery model", "A higher-priority but always-deferred Data NaT Page condition does not hide the lower non-deferred Unaligned condition", "ISR.r and ISR.sp are set while ISR.ed and ISR.ni remain clear", "CR.IIP, CR.IFA, the exception record, and the published M slot identify the exact faulting load", "No destination, destination NaT, base update, or later instruction effect retires"],
+      "allowed_results": ["Exactly the declared Alternate Data TLB or Unaligned Data Reference interruption and unchanged declared destination/base state"],
+      "permitted_state_changes": ["Architected interruption-collection state", "Internal failed translation lookup state"],
+      "required_unchanged_state": ["The destination data and NaT", "The update base", "The backing RAM used by alignment probes", "Unrelated GR, NaT, predicate, ALAT, and memory state"],
+      "expected_faults": ["Alternate Data TLB at vector 0x1000 for every translated-miss probe", "Unaligned Data Reference at vector 0x5a00 for every alignment probe"],
+      "fault_priority": ["Enabled predicate and legal operands", "Qualified translation conditions", "Deferral removes a qualified NaTPage condition from prioritization", "Qualified non-deferred alignment remains and raises", "Precise interruption collection before any load or update effect"],
+      "committed_prefix": "Only instructions before the faulting load commit; the faulting load commits no destination, NaT, update, ALAT, or memory effect",
+      "restart_action": "CR.IIP and IPSR.ri identify the faulting M slot for handler retry after software resolves the condition",
+      "applicable_variants": ["ld1.s", "ld1.sa", "ld2.s", "ld2.sa", "ld4.s", "ld4.sa", "ld8.s", "ld8.sa", "immediate base update", "no-recovery model", "Alternate Data TLB", "Unaligned Data Reference"],
+      "execution": {"lane": "bare-metal-batch", "probes": ["integer_speculative_translation_miss_case", "integer_speculative_unaligned_case"], "result_observations": ["exception kind, vector, source, and address", "CR.IIP, CR.IFA, CR.ISR, and CR.IPSR", "exact fault-slot publication", "destination data and NaT", "unchanged update base", "direct typed trace for every faulting load"]},
+      "oracle": {"independence": "independent", "derivation": "The no-recovery control state, width matrix, unmapped virtual address, misaligned physical and NaTPage addresses, initial registers, immediate updates, vectors, ISR bits, and non-retirement rules are direct test-owned literals or arithmetic derived from Intel SDM Volume 2 Section 5.5.5 and the interruption definitions; no production translation or speculative-load helper supplies expected values"},
+      "limitations": ["This atomic row closes translated misses and PSR.ac alignment conditions, including concurrent always-deferred NaTPage priority, only; page-not-present, key, access-right, access-bit, data-debug, recovery-model, always-defer, FP, other simultaneous-condition, retry, and migration matrices remain separate ALT/MEM/MMU work"]
     }
   ]
 }

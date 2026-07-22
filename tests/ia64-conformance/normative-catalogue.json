@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 16,
+  "catalogue_revision": 17,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -32,6 +32,26 @@
       "committed_prefix": "Each deferred load commits its destination NaT, an implementation-specific destination data portion, and its exact immediate base update; it commits no ALAT entry",
       "restart_rule": "There is no interruption retry. CHK.S or CHK.A transfers control to compiler-style recovery code when it observes the deferred token or absent entry.",
       "permitted_results": ["For widths 1, 2, 4, and 8, both loads complete without interruption with arbitrary destination data portions, set both NaTs, retire updates of one and two widths, and take their declared CHK.S and CHK.A recovery targets"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-002-INTEGER-NO-RECOVERY-FAULTS",
+      "requirement_ids": ["ALT-002", "MEM-003", "MEM-005", "MEM-007", "MEM-012", "MMU-011"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Interruptions", "section": "5.5.5", "printed_pages": ["2:105", "2:106", "2:107"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Qualified Exception Deferral"},
+      "operation": {"kind": "integer-control-speculative-no-recovery-faults", "selector": "ld1.s/sa, ld2.s/sa, ld4.s/sa, and ld8.s/sa translated misses plus aligned-width Unaligned conditions", "encoding": "M10 immediate-update integer speculative and speculative-advanced loads"},
+      "legal_inputs": ["CPL0 with serialized PSR.ic=1, PSR.it=0, and PSR.ed=0", "Translated-miss probes enable PSR.dt and leave the selected virtual address absent from the DTC", "Alignment probes enable PSR.ac and use either a mapped physical address or a translated NaTPage with a higher-priority always-deferred condition", "The destination differs from the base and each immediate update is representable"],
+      "privilege": {"levels": [0], "rule": "The selected loads are application-level instructions; this exact system guest uses CPL0 only to select translation and alignment-control state"},
+      "state_read": ["PSR.ic, PSR.it, PSR.ed, PSR.dt, and PSR.ac", "DTC lookup state", "load base and destination state"],
+      "state_written": ["precise interruption-collection state only"],
+      "predication": {"applies": true, "rule": "All selected operations use p0; false qualification remains a separate ALT-006 row"},
+      "nat_behavior": "A non-deferred fault writes neither the destination data nor its NaT and does not retire the base update.",
+      "possible_faults": ["Alternate Data TLB for an absent DTC translation", "Unaligned Data Reference for a width greater than one when PSR.ac is set", "A qualified Data NaT Page condition that is removed from prioritization because it always defers"],
+      "fault_priority": ["predicate and operand legality", "exception qualification", "deferral removes qualified conditions from prioritization", "highest-priority qualified non-deferred condition", "precise interruption collection"],
+      "committed_prefix": "Only earlier instructions commit; the faulting load commits no destination, NaT, base update, ALAT, or memory effect",
+      "restart_rule": "CR.IIP and IPSR.ri identify the faulting M slot so a handler may resolve the condition and retry it.",
+      "permitted_results": ["Every width/class translated miss reaches vector 0x1000 with exact R|SP state and no load effects", "Every applicable width/class physical or concurrent-NaTPage misalignment reaches vector 0x5a00 with exact R|SP state and no load effects"],
       "required_evidence": "E2"
     },
     {

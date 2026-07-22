@@ -1760,6 +1760,16 @@ static bool ia64_control_speculative_data_debug_deferred(CPUIA64State *env)
             (env->cr[IA64_CR_DCR] & IA64_DCR_DD_BIT) != 0);
 }
 
+static bool ia64_control_speculative_unaligned_deferred(CPUIA64State *env)
+{
+    uint64_t psr = ia64_env_psr(env);
+
+    /* SDM Vol. 2 Table 5-4: !PSR.ic || (PSR.it && ITLB.ed). */
+    return (psr & IA64_PSR_IC_BIT) == 0 ||
+           ((psr & IA64_PSR_IT_BIT) != 0 &&
+            ia64_current_itlb_exception_deferral(env));
+}
+
 IA64ControlSpeculativeLoadAction ia64_control_speculative_load_action(
     CPUIA64State *env, uint8_t memory_class, bool base_nat, vaddr address,
     uint8_t width, IA64TranslateResult *fault)
@@ -1768,6 +1778,7 @@ IA64ControlSpeculativeLoadAction ia64_control_speculative_load_action(
     vaddr current = address;
     uint32_t remaining = MAX(width, 1);
     bool defer = false;
+    bool unaligned = false;
 
     if (!env || !ia64_memory_class_is_control_speculative(memory_class)) {
         return IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE;
@@ -1832,13 +1843,18 @@ IA64ControlSpeculativeLoadAction ia64_control_speculative_load_action(
     }
 
     if (ia64_data_access_alignment_fault(env, address, width, false)) {
-        defer = true;
+        if (ia64_control_speculative_unaligned_deferred(env)) {
+            defer = true;
+        } else {
+            unaligned = true;
+        }
     }
 
     if (ia64_data_debug_match(env, address, width == 10 ? 16 : width,
                               IA64_DEBUG_ACCESS_READ)) {
         if (ia64_control_speculative_data_debug_deferred(env)) {
-            return IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
+            return unaligned ? IA64_CONTROL_SPECULATIVE_LOAD_UNALIGNED :
+                               IA64_CONTROL_SPECULATIVE_LOAD_DEFER;
         }
 
         /* The normal pre-access seam will raise a match on a real access. */
@@ -1848,6 +1864,13 @@ IA64ControlSpeculativeLoadAction ia64_control_speculative_load_action(
 
         /* No real access follows a deferred condition, so raise it directly. */
         return IA64_CONTROL_SPECULATIVE_LOAD_DATA_DEBUG;
+    }
+
+    if (unaligned) {
+        /* Let the normal alignment gate raise unless a deferred higher
+           condition suppressed the real access. */
+        return defer ? IA64_CONTROL_SPECULATIVE_LOAD_UNALIGNED :
+                       IA64_CONTROL_SPECULATIVE_LOAD_CONTINUE;
     }
 
     return defer ? IA64_CONTROL_SPECULATIVE_LOAD_DEFER :

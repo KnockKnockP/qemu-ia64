@@ -31,6 +31,13 @@
       "candidate_tests": ["test-ia64-data-plane-tcg"]
     },
     {
+      "normative_row": "ALT-002-INTEGER-NO-RECOVERY-FAULTS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.opcode.ia64_op_ld1s", "cpu.opcode.ia64_op_ld1sa", "cpu.opcode.ia64_op_ld2s", "cpu.opcode.ia64_op_ld2sa", "cpu.opcode.ia64_op_ld4s", "cpu.opcode.ia64_op_ld4sa", "cpu.opcode.ia64_op_ld8s", "cpu.opcode.ia64_op_ld8sa"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-data-plane-tcg"]
+    },
+    {
       "normative_row": "BND-001-BUNDLE-FORMAT",
       "surface_disposition": "implemented",
       "implementation_rows": [
