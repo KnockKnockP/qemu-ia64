@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 8,
+  "catalogue_revision": 9,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2135,6 +2135,26 @@
       "committed_prefix": "A zero-distance LOADRS invalidates registers outside the current frame; a successful nonzero LOADRS makes the tear-point-to-BSP range present and dirty",
       "restart_rule": "No restart occurs for the selected legal request and mapped readable backing image",
       "permitted_results": ["All 96 replacement payloads and their completed/partial RNAT NaTs are loaded; after source destruction a FLUSHRS exactly reconstructs that image; BSP is unchanged and BSPSTORE/BspLoad identify the tear point after LOADRS and BSP after the final flush as permitted by the RSE state relation"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-007-MANDATORY-DATA-DEBUG-RETRY",
+      "requirement_ids": ["RSE-007", "RSE-004", "RSE-005", "RSE-009"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "7.1", "printed_pages": ["2:16", "2:17", "2:144", "2:145", "2:146", "2:151", "2:152", "2:153"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "If PSR.dd is 1, Data Debug faults are disabled for one instruction or one mandatory RSE memory reference"},
+      "operation": {"kind": "mandatory-rse-data-debug-fault-retry", "selector": "FLUSHRS mandatory stores and LOADRS mandatory loads matched by DBR0/DBR1 after translation and protection checks, including PSR.dd suppression", "encoding": "legal first-in-group FLUSHRS or LOADRS, exact or broad data-breakpoint pair, Data Debug vector handler, and RFI"},
+      "legal_inputs": ["PSR.ic, PSR.rt, and PSR.db enabled and serialized", "DBR0 contains an even address and DBR1 contains a legal PLM/read-or-write/mask control image", "Complete frames and legal FLUSHRS or LOADRS fields", "The priority variants additionally select one applicable translated protection condition", "The suppression variants additionally enter with PSR.dd set"],
+      "privilege": {"levels": [0], "rule": "The guest and interruption handler execute at CPL0; DBR PLM includes RSC.pl zero and mandatory references use the RSE privilege level"},
+      "state_read": ["dirty stacked-register values and NaTs", "LOADRS backing image", "DBR0 address and DBR1 control", "PSR.db and PSR.dd", "RSE DTC entries, protection keys, BSP, and BSPSTORE"],
+      "state_written": ["committed backing-store prefix", "BSPSTORE and RSE.BspLoad", "precise Data Debug IIP, IFA, ISR, IFS, and IPSR state", "repaired DTC entry or PKR in priority variants", "cleared PSR.dd after one successful mandatory reference", "remaining mandatory backing-store suffix"],
+      "predication": {"applies": false, "rule": "FLUSHRS and LOADRS are unpredicated"},
+      "nat_behavior": "Store and load cases cross RNAT collection positions. Handler poisoning of already committed register/RNAT words distinguishes exact continuation from prefix replay across both protection and Data Debug retries.",
+      "possible_faults": ["Data Debug", "Data Page Not Present", "Data NaT Page Consumption", "Data Key Miss", "Key Permission", "Data Access Rights", "Data Access Bit", "Dirty Bit for mandatory stores"],
+      "fault_priority": ["instruction legality and complete-frame preconditions", "RSE address translation", "translated page, key, access, and dirty protection", "Data Debug matching when PSR.db is one and PSR.dd is zero", "mandatory backing-store access", "instruction completion"],
+      "committed_prefix": "A protection fault leaves the exact successful mandatory prefix committed. After repair, the same reference may take Data Debug before memory access; disabling the DBR and retrying continues without replaying either prefix.",
+      "restart_rule": "The first handler repairs only the denying PTE or PKR and executes RFI; the second observes the same issuing IIP and faulting IFA with ISR.rs one, disables the DBR, and executes RFI. With PSR.dd set, exactly the first successful matching mandatory reference is suppressed and clears saved PSR.dd before the next reference faults.",
+      "permitted_results": ["All thirteen protection variants raise the selected protection fault before one exact Data Debug fault on the same mandatory reference, with both retries preserving a poisoned committed prefix", "One FLUSHRS store and one LOADRS load variant suppress exactly their first matching mandatory reference through PSR.dd, then raise one Data Debug fault on the next reference and complete without replay"],
       "required_evidence": "E2"
     },
     {
