@@ -25,7 +25,8 @@
     "test-ia64-region-register-tranche-static",
     "test-ia64-register-tcg-static",
     "test-ia64-runner-protocol",
-    "test-ia64-scalar-integer-tranche-static"
+    "test-ia64-scalar-integer-tranche-static",
+    "test-ia64-translation-register-tranche-static"
   ],
   "mappings": [
     {
@@ -494,6 +495,34 @@
         "test-ia64-memory-boundary-tranche",
         "test-ia64-memory-tcg"
       ]
+    },
+    {
+      "normative_row": "MMU-005-DTR-SLOT-ASSOCIATIVITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.mmu.translation-install", "cpu.mmu.translation-lookup", "cpu.opcode.ia64_op_itr_d", "cpu.register.dtr.0", "cpu.register.dtr.1", "cpu.register.dtr.2", "cpu.register.dtr.3", "cpu.register.dtr.4", "cpu.register.dtr.5", "cpu.register.dtr.6", "cpu.register.dtr.7"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "MMU-005-ITR-SLOT-ASSOCIATIVITY",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.mmu.translation-install", "cpu.mmu.translation-lookup", "cpu.opcode.ia64_op_itr_i", "cpu.register.itr.0", "cpu.register.itr.1", "cpu.register.itr.2", "cpu.register.itr.3", "cpu.register.itr.4", "cpu.register.itr.5", "cpu.register.itr.6", "cpu.register.itr.7"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "MMU-005-NONOVERLAPPING-TR-SLOT-OVERWRITE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.mmu.translation-install", "cpu.mmu.translation-lookup", "cpu.opcode.ia64_op_itr_d", "cpu.opcode.ia64_op_itr_i", "cpu.register.dtr.0", "cpu.register.dtr.1", "cpu.register.dtr.2", "cpu.register.dtr.3", "cpu.register.dtr.4", "cpu.register.dtr.5", "cpu.register.dtr.6", "cpu.register.dtr.7", "cpu.register.itr.0", "cpu.register.itr.1", "cpu.register.itr.2", "cpu.register.itr.3", "cpu.register.itr.4", "cpu.register.itr.5", "cpu.register.itr.6", "cpu.register.itr.7"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
+    },
+    {
+      "normative_row": "MMU-006-PTR-STREAM-PURGE",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.mmu.translation-register-purge", "cpu.opcode.ia64_op_ptr_d", "cpu.opcode.ia64_op_ptr_i"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-system-tcg"]
     },
     {
       "normative_row": "MMU-012-PROTECTION-KEY-ACCESS",

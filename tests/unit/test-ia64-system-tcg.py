@@ -2115,6 +2115,7 @@ def test_tlb_lifecycle(harness: ModuleType, qemu: Path) -> str:
         ("IA64_OP_PTC_G", False),
         ("IA64_OP_PTC_GA", False),
         ("IA64_OP_PTC_E", False),
+        ("IA64_OP_PTR_D", False),
         ("IA64_OP_PTR_D", True),
     )
     for opcode, pinned in modes:
@@ -2140,7 +2141,8 @@ def test_tlb_lifecycle(harness: ModuleType, qemu: Path) -> str:
                 opcode + " TTAG did not return the reset-RR page tag")
         require(snapshot.ip == ALT_DTLB_VECTOR,
                 opcode + " purge remained usable after srlz.d")
-    return "ITC/ITR install, query, five purge modes and srlz.d visibility pass"
+    return ("ITC/ITR install, query, five purge forms including dynamic and "
+            "pinned PTR.D, and srlz.d visibility pass")
 
 
 def build_instruction_tlb_program(harness: ModuleType, *, pinned: bool,
@@ -2174,7 +2176,6 @@ def build_instruction_tlb_program(harness: ModuleType, *, pinned: bool,
                        harness.rfi()),
     ]
     if purge:
-        require(pinned, "PTR.I lifecycle requires a pinned ITR entry")
         bundles.extend((
             harness.Bundle(physical, 0x01,
                            m_system(0x0D, r2=4, r3=7),
@@ -2198,7 +2199,7 @@ def build_instruction_tlb_program(harness: ModuleType, *, pinned: bool,
         ))
         terminal = virtual + 0x10
     return harness.Program(
-        name=("ITR.I/PTR.I" if purge else
+        name=(("ITR.I/PTR.I" if pinned else "ITC.I/PTR.I") if purge else
               ("ITR.I" if pinned else "ITC.I")) + " fetch lifecycle",
         bundles=tuple(bundles), terminal_ip=terminal,
     ), marker
@@ -2218,20 +2219,322 @@ def test_instruction_tlb_lifecycle(harness: ModuleType, qemu: Path) -> str:
                 result.gr[21] == marker + 0x10,
                 program.name + " did not resume its suffix and fetch mapping")
 
-    purge_program, marker = build_instruction_tlb_program(
-        harness, pinned=True, purge=True)
-    purged = harness.run_program(
-        qemu, purge_program,
-        typed_direct_trace_ips=(0x40, 0x50, 0x60, 0x80, 0x90, 0x8000),
-        typed_rfi_traces=(0xA0,), one_bundle_per_tb=True,
-    )
-    require(purged.ip == ALT_ITLB_VECTOR and purged.gr[20] == marker,
-            "PTR.I did not invalidate the fetched pinned translation")
-    require(purged.exception_kind == "alternate-instruction-tlb-miss" and
-            purged.cr_iip == 0x8010,
-            "PTR.I invalidation did not produce the precise next-fetch miss")
+    for pinned in (False, True):
+        purge_program, marker = build_instruction_tlb_program(
+            harness, pinned=pinned, purge=True)
+        purged = harness.run_program(
+            qemu, purge_program,
+            typed_direct_trace_ips=(0x40, 0x50, 0x60, 0x80, 0x90, 0x8000),
+            typed_rfi_traces=(0xA0,), one_bundle_per_tb=True,
+        )
+        require(purged.ip == ALT_ITLB_VECTOR and purged.gr[20] == marker,
+                "PTR.I did not invalidate the {} translation".format(
+                    "pinned" if pinned else "dynamic"))
+        require(purged.exception_kind == "alternate-instruction-tlb-miss" and
+                purged.cr_iip == 0x8010,
+                "PTR.I invalidation did not produce the precise next-fetch miss")
     return ("ITC.I and ITR.I resume at the exact next slot and fetch mapped "
-            "code; PTR.I invalidates the pinned fetch mapping")
+            "code; PTR.I invalidates dynamic and pinned fetch mappings")
+
+
+def build_data_translation_register_slot_program(harness: ModuleType):
+    """Install, overwrite, and reverse-probe all eight architected DTR slots."""
+    page_size = 12
+    offset = 0x88
+    virtuals = [0x100000 + slot * 0x1000 for slot in range(8)]
+    physicals = [0x20000 + slot * 0x1000 for slot in range(8)]
+    replacement_virtual = 0x180000
+    replacement_physical = 0x30000
+    bundles: List[object] = []
+    data: List[object] = []
+    trace: List[int] = []
+    address = 0x10
+
+    bundles.append(movl_bundle(harness, address, 4, page_size << 2))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(0x2C, r2=4, r3=CR_ITIR)))
+    trace.append(address)
+    address += 0x10
+
+    def install(slot: int, virtual: int, physical: int) -> None:
+        nonlocal address
+        bundles.extend((
+            movl_bundle(harness, address, 2, physical | 0x661),
+            movl_bundle(harness, address + 0x10, 3, slot),
+            movl_bundle(harness, address + 0x20, 7, virtual),
+            raw_bundle(harness, address + 0x30, "M",
+                       m_system(0x2C, r2=7, r3=CR_IFA)),
+            opcode_bundle(harness, address + 0x40,
+                          SPEC_BY_OPCODE["IA64_OP_ITR_D"],
+                          m_system(0x0E, r2=2, r3=3)),
+        ))
+        trace.extend((address + 0x30, address + 0x40))
+        address += 0x50
+
+    for slot, (virtual, physical) in enumerate(zip(virtuals, physicals)):
+        install(slot, virtual, physical)
+    install(5, replacement_virtual, replacement_physical)
+
+    bundles.extend((
+        raw_bundle(harness, address, "M", m_serial(0x30)),
+        raw_bundle(harness, address + 0x10, "M",
+                   m_mask(6, PSR_DT | PSR_IC)),
+        raw_bundle(harness, address + 0x20, "M", m_serial(0x31)),
+    ))
+    trace.extend((address, address + 0x10, address + 0x20))
+    address += 0x30
+
+    final = [
+        (slot,
+         replacement_virtual if slot == 5 else virtuals[slot],
+         replacement_physical if slot == 5 else physicals[slot])
+        for slot in range(8)
+    ]
+    expected: Dict[int, int] = {}
+    for slot, virtual, physical in reversed(final):
+        value = 0xD700000000000000 | slot
+        destination = 20 + slot
+        bundles.extend((
+            movl_bundle(harness, address, 8, virtual + offset),
+            harness.Bundle(address + 0x10, 0x01,
+                           harness.ld8(destination, 8),
+                           harness.nop_i(), harness.nop_i()),
+        ))
+        data.append(harness.DataWord(physical + offset, value, 8))
+        expected[destination] = value
+        address += 0x20
+    bundles.append(harness.spin_bundle(address))
+    return (harness.Program(
+        name="eight DTR slots and nonoverlapping slot overwrite",
+        bundles=tuple(bundles), terminal_ip=address, data=tuple(data)),
+        expected, tuple(trace))
+
+
+def test_data_translation_register_slots(harness: ModuleType,
+                                         qemu: Path) -> str:
+    program, expected, trace = build_data_translation_register_slot_program(
+        harness)
+    result = harness.run_program(qemu, program,
+                                 typed_direct_trace_ips=trace)
+    require(result.ip == program.terminal_ip and not result.exception_pending,
+            "DTR slot traversal faulted or failed to reach its sentinel")
+    for reg, value in expected.items():
+        require(result.gr[reg] == value,
+                "DTR slot {} returned 0x{:x}, expected 0x{:x}".format(
+                    reg - 20, result.gr[reg], value))
+    return ("all eight DTR slots translate in reverse order and slot 5 accepts "
+            "a nonoverlapping replacement without disturbing other slots")
+
+
+def build_instruction_translation_register_slot_program(
+        harness: ModuleType):
+    """Chain fetches through all final ITR slots after one legal overwrite."""
+    page_size = 12
+    virtuals = [0x800] + [0x100000 + slot * 0x1000
+                          for slot in range(1, 8)]
+    physicals = [0x800] + [0x20000 + slot * 0x1000
+                           for slot in range(1, 8)]
+    replacement_virtual = 0x180000
+    replacement_physical = 0x30000
+    bundles: List[object] = []
+    trace: List[int] = []
+    address = 0x10
+
+    bundles.append(movl_bundle(harness, address, 4, page_size << 2))
+    address += 0x10
+    bundles.append(raw_bundle(
+        harness, address, "M", m_system(0x2C, r2=4, r3=CR_ITIR)))
+    trace.append(address)
+    address += 0x10
+
+    def install(slot: int, virtual: int, physical: int) -> None:
+        nonlocal address
+        bundles.extend((
+            movl_bundle(harness, address, 2, physical | 0x661),
+            movl_bundle(harness, address + 0x10, 3, slot),
+            movl_bundle(harness, address + 0x20, 7, virtual),
+            raw_bundle(harness, address + 0x30, "M",
+                       m_system(0x2C, r2=7, r3=CR_IFA)),
+            opcode_bundle(harness, address + 0x40,
+                          SPEC_BY_OPCODE["IA64_OP_ITR_I"],
+                          m_system(0x0F, r2=2, r3=3)),
+        ))
+        trace.extend((address + 0x30, address + 0x40))
+        address += 0x50
+
+    for slot, (virtual, physical) in enumerate(zip(virtuals, physicals)):
+        install(slot, virtual, physical)
+    install(3, replacement_virtual, replacement_physical)
+
+    final = [
+        (slot,
+         replacement_virtual if slot == 3 else virtuals[slot],
+         replacement_physical if slot == 3 else physicals[slot])
+        for slot in range(8)
+    ]
+    for index, (slot, virtual, physical) in enumerate(final):
+        next_virtual = (final[index + 1][1]
+                        if index + 1 < len(final) else virtual + 0x10)
+        marker = 0x90 + slot
+        bundles.extend((
+            harness.Bundle(physical, 0x01, harness.nop_m(),
+                           harness.adds(20 + slot, marker, 0),
+                           harness.nop_i()),
+            harness.Bundle(physical + 0x10, 0x11,
+                           harness.nop_m(), harness.nop_i(),
+                           harness.br_cond(virtual + 0x10,
+                                           next_virtual)),
+        ))
+    # Slot zero's identity page also makes any unexpected alternate ITLB miss
+    # observable without recursively faulting while fetching the IVT vector.
+    bundles.append(harness.spin_bundle(ALT_ITLB_VECTOR))
+
+    bundles.extend((
+        movl_bundle(harness, address, 8, PSR_IT | PSR_IC),
+        raw_bundle(harness, address + 0x10, "M",
+                   m_system(0x2C, r2=8, r3=CR_IPSR)),
+        movl_bundle(harness, address + 0x20, 7, final[0][1]),
+        raw_bundle(harness, address + 0x30, "M",
+                   m_system(0x2C, r2=7, r3=CR_IIP)),
+        harness.Bundle(address + 0x40, 0x11, harness.nop_m(),
+                       harness.nop_i(), harness.rfi()),
+    ))
+    trace.extend((address + 0x10, address + 0x30))
+    return (harness.Program(
+        name="eight ITR slots and nonoverlapping slot overwrite",
+        bundles=tuple(bundles), terminal_ip=final[-1][1] + 0x10),
+        tuple(trace), address + 0x40)
+
+
+def test_instruction_translation_register_slots(harness: ModuleType,
+                                                qemu: Path) -> str:
+    program, trace, rfi_ip = (
+        build_instruction_translation_register_slot_program(harness))
+    result = harness.run_program(
+        qemu, program, typed_direct_trace_ips=trace,
+        typed_rfi_traces=(rfi_ip,), one_bundle_per_tb=True)
+    require(result.ip == program.terminal_ip and not result.exception_pending,
+            "ITR slot fetch chain stopped at 0x{:x} kind={} iip=0x{:x} "
+            "markers={}".format(result.ip, result.exception_kind,
+                                result.cr_iip,
+                                tuple(result.gr[20:28])))
+    for slot in range(8):
+        require(result.gr[20 + slot] == 0x90 + slot,
+                "ITR slot {} did not execute its mapped marker".format(slot))
+    return ("all eight ITR slots execute in order and slot 3 accepts a "
+            "nonoverlapping replacement without disturbing other slots")
+
+
+def build_ptr_instruction_preserves_data_program(harness: ModuleType):
+    virtual = 0x8000
+    instruction_physical = 0x4000
+    data_physical = 0x2000
+    value = 0xA5A55A5AF00D1234
+    bundles = (
+        movl_bundle(harness, 0x10, 4, 12 << 2),
+        raw_bundle(harness, 0x20, "M",
+                   m_system(0x2C, r2=4, r3=CR_ITIR)),
+        movl_bundle(harness, 0x30, 7, virtual),
+        raw_bundle(harness, 0x40, "M",
+                   m_system(0x2C, r2=7, r3=CR_IFA)),
+        movl_bundle(harness, 0x50, 3, 0),
+        movl_bundle(harness, 0x60, 2, instruction_physical | 0x661),
+        opcode_bundle(harness, 0x70, SPEC_BY_OPCODE["IA64_OP_ITR_I"],
+                      m_system(0x0F, r2=2, r3=3)),
+        movl_bundle(harness, 0x80, 2, data_physical | 0x661),
+        opcode_bundle(harness, 0x90, SPEC_BY_OPCODE["IA64_OP_ITR_D"],
+                      m_system(0x0E, r2=2, r3=3)),
+        opcode_bundle(harness, 0xA0, SPEC_BY_OPCODE["IA64_OP_PTR_I"],
+                      m_system(0x0D, r2=4, r3=7)),
+        raw_bundle(harness, 0xB0, "M", m_serial(0x31)),
+        raw_bundle(harness, 0xC0, "M", m_mask(6, PSR_DT | PSR_IC)),
+        raw_bundle(harness, 0xD0, "M", m_serial(0x31)),
+        movl_bundle(harness, 0xE0, 8, virtual + 0x80),
+        harness.Bundle(0xF0, 0x01, harness.ld8(20, 8),
+                       harness.nop_i(), harness.nop_i()),
+        harness.spin_bundle(0x100),
+    )
+    return harness.Program(
+        name="PTR.I preserves opposite-stream DTR",
+        bundles=bundles, terminal_ip=0x100,
+        data=(harness.DataWord(data_physical + 0x80, value, 8),)), value
+
+
+def build_ptr_data_preserves_instruction_program(harness: ModuleType):
+    virtual = 0x8000
+    instruction_physical = 0x4000
+    data_physical = 0x2000
+    bundles = (
+        movl_bundle(harness, 0x10, 4, 12 << 2),
+        raw_bundle(harness, 0x20, "M",
+                   m_system(0x2C, r2=4, r3=CR_ITIR)),
+        movl_bundle(harness, 0x30, 7, virtual),
+        raw_bundle(harness, 0x40, "M",
+                   m_system(0x2C, r2=7, r3=CR_IFA)),
+        movl_bundle(harness, 0x50, 3, 0),
+        movl_bundle(harness, 0x60, 2, instruction_physical | 0x661),
+        opcode_bundle(harness, 0x70, SPEC_BY_OPCODE["IA64_OP_ITR_I"],
+                      m_system(0x0F, r2=2, r3=3)),
+        # Keep the alternate-ITLB vector executable if stream isolation fails.
+        movl_bundle(harness, 0x80, 7, ALT_ITLB_VECTOR),
+        raw_bundle(harness, 0x90, "M",
+                   m_system(0x2C, r2=7, r3=CR_IFA)),
+        movl_bundle(harness, 0xA0, 3, 1),
+        movl_bundle(harness, 0xB0, 2, 0x661),
+        opcode_bundle(harness, 0xC0, SPEC_BY_OPCODE["IA64_OP_ITR_I"],
+                      m_system(0x0F, r2=2, r3=3)),
+        movl_bundle(harness, 0xD0, 7, virtual),
+        raw_bundle(harness, 0xE0, "M",
+                   m_system(0x2C, r2=7, r3=CR_IFA)),
+        movl_bundle(harness, 0xF0, 3, 0),
+        movl_bundle(harness, 0x100, 2, data_physical | 0x661),
+        opcode_bundle(harness, 0x110, SPEC_BY_OPCODE["IA64_OP_ITR_D"],
+                      m_system(0x0E, r2=2, r3=3)),
+        opcode_bundle(harness, 0x120, SPEC_BY_OPCODE["IA64_OP_PTR_D"],
+                      m_system(0x0C, r2=4, r3=7)),
+        raw_bundle(harness, 0x130, "M", m_serial(0x30)),
+        movl_bundle(harness, 0x140, 8, PSR_IT | PSR_IC),
+        raw_bundle(harness, 0x150, "M",
+                   m_system(0x2C, r2=8, r3=CR_IPSR)),
+        raw_bundle(harness, 0x160, "M",
+                   m_system(0x2C, r2=7, r3=CR_IIP)),
+        harness.Bundle(0x170, 0x11, harness.nop_m(),
+                       harness.nop_i(), harness.rfi()),
+        harness.Bundle(instruction_physical, 0x01, harness.nop_m(),
+                       harness.adds(21, 0x6D, 0), harness.nop_i()),
+        harness.spin_bundle(instruction_physical + 0x10),
+        harness.spin_bundle(ALT_ITLB_VECTOR),
+    )
+    return harness.Program(
+        name="PTR.D preserves opposite-stream ITR", bundles=bundles,
+        terminal_ip=virtual + 0x10)
+
+
+def test_translation_register_stream_isolation(harness: ModuleType,
+                                               qemu: Path) -> str:
+    data_program, value = build_ptr_instruction_preserves_data_program(
+        harness)
+    data = harness.run_program(
+        qemu, data_program,
+        typed_direct_trace_ips=(0x20, 0x40, 0x70, 0x90, 0xA0,
+                                0xB0, 0xC0, 0xD0))
+    require(data.ip == data_program.terminal_ip and data.gr[20] == value,
+            "PTR.I removed or corrupted the opposite-stream DTR mapping")
+
+    instruction_program = build_ptr_data_preserves_instruction_program(
+        harness)
+    instruction = harness.run_program(
+        qemu, instruction_program,
+        typed_direct_trace_ips=(0x20, 0x40, 0x70, 0x90, 0xC0,
+                                0xE0, 0x110, 0x120, 0x130,
+                                0x150, 0x160),
+        typed_rfi_traces=(0x170,), one_bundle_per_tb=True)
+    require(instruction.ip == instruction_program.terminal_ip and
+            instruction.gr[21] == 0x6D,
+            "PTR.D removed or corrupted the opposite-stream ITR mapping")
+    return ("PTR.I preserves a same-address DTR mapping and PTR.D preserves "
+            "a same-address ITR mapping")
 
 
 def test_active_mask_controls(harness: ModuleType, qemu: Path) -> str:
@@ -3186,6 +3489,12 @@ def main() -> int:
         ("reserved and predicate priority", test_reserved_matrix),
         ("translation lifecycle", test_tlb_lifecycle),
         ("instruction translation lifecycle", test_instruction_tlb_lifecycle),
+        ("data translation-register slots",
+         test_data_translation_register_slots),
+        ("instruction translation-register slots",
+         test_instruction_translation_register_slots),
+        ("translation-register stream isolation",
+         test_translation_register_stream_isolation),
         ("active mask controls", test_active_mask_controls),
         ("architectural debug registers", test_architectural_debug_registers),
         ("unaligned translation priority", test_unaligned_translation_priority),

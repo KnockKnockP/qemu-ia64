@@ -1134,7 +1134,11 @@ void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
     ia64_translation_lookup_cache_flush(env);
 }
 
-/* ptr.i / ptr.d: purge a matching pinned instruction/data translation register. */
+/*
+ * ptr.i / ptr.d: purge every overlapping same-stream TR and TC entry.
+ * Intel SDM Vol. 2, Table 4-1 requires the TC purge; limiting PTR to the
+ * pinned bank can leave a stale translation usable after software's purge.
+ */
 void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
                                      vaddr address, uint8_t page_size)
 {
@@ -1148,8 +1152,12 @@ void ia64_purge_translation_register(CPUIA64State *env, bool instruction,
     if (instruction) {
         ia64_invalidate_overlapping_entries(env->memory.itr, IA64_ITR_COUNT,
                                             &probe, false);
+        ia64_invalidate_overlapping_entries(env->memory.itc, IA64_TC_COUNT,
+                                            &probe, false);
     } else {
         ia64_invalidate_overlapping_entries(env->memory.dtr, IA64_DTR_COUNT,
+                                            &probe, false);
+        ia64_invalidate_overlapping_entries(env->memory.dtc, IA64_TC_COUNT,
                                             &probe, false);
     }
     ia64_translation_lookup_cache_flush(env);

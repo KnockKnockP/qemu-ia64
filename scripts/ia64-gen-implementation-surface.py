@@ -96,6 +96,27 @@ class SurfaceError(RuntimeError):
 
 ARCHITECTURAL_SURFACES = (
     (
+        "cpu.mmu.translation-install",
+        "cpu.mmu",
+        "ITR/DTR/ITC/DTC construction and same-stream overlap handling",
+        "target/ia64/mem.c",
+        "bool ia64_install_translation(",
+    ),
+    (
+        "cpu.mmu.translation-lookup",
+        "cpu.mmu",
+        "fully associative ITR/DTR and dynamic translation lookup",
+        "target/ia64/mem.c",
+        "static const IA64TranslationEntry *ia64_lookup_translation(",
+    ),
+    (
+        "cpu.mmu.translation-register-purge",
+        "cpu.mmu",
+        "PTR same-stream translation-register and cache purge",
+        "target/ia64/mem.c",
+        "void ia64_purge_translation_register(",
+    ),
+    (
         "cpu.alat.reset",
         "cpu.speculation",
         "ALAT persistent and transient reset state",

@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 109
+    "row_closing_claims_expected": 113
   },
   "entries": [
     {
@@ -1128,14 +1128,15 @@
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/processor-identification-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/protection-key-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/ia64-conformance/region-register-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/translation-register-tranche.json"},
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-system-tcg",
-      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including exact CPUID, PMC/PMD, IBR/DBR/PKR/RR selector domains, RR field and RID-context behavior, PKR field/uniqueness/access behavior, and exact PAL performance/debug/VM discovery success and invalid-argument calls.",
+      "scope": "Guest-executed IA-64 system, interruption, MMU, and RSE programs, including exact CPUID, PMC/PMD, IBR/DBR/PKR/RR selector domains, RR field and RID-context behavior, PKR field/uniqueness/access behavior, all eight ITR and DTR slots, legal occupied-slot replacement, PTR same-stream TR/TC purge and opposite-stream preservation, and exact PAL performance/debug/VM discovery success and invalid-argument calls.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["MMU-012-PROTECTION-KEY-ACCESS", "MMU-017-RID-CONTEXT-SELECTION", "PAL-008-VM-SUMMARY-PROFILE", "PAL-008-VM-SUPPORTED-PAGE-SIZES", "PAL-012-DEBUG-REGISTER-DISCOVERY", "PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-003-CPUID-FIXED-SELECTOR-DOMAIN", "REG-006-DBR-INDEX-SPACE", "REG-006-IBR-INDEX-SPACE", "REG-006-PKR-INDEX-SPACE", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE", "REG-006-RR-INDEX-SPACE", "REG-007-DBR-FIELD-SEMANTICS", "REG-007-IBR-FIELD-SEMANTICS", "REG-007-PKR-FIELD-SEMANTICS", "REG-007-PKR-KEY-UNIQUENESS", "REG-007-RR-FIELD-SEMANTICS"],
-      "limitations": ["The eighteen cited CPUID, PMU, debug-register, PKR, RR, and PAL rows have atomic contracts; legacy system programs outside those rows still lack per-case metadata, while RR migration closure, RSE key access, exhaustive debug-match/IA-32 behavior, and PMU event counting remain unclaimed."]
+      "closes_normative_rows": ["MMU-005-DTR-SLOT-ASSOCIATIVITY", "MMU-005-ITR-SLOT-ASSOCIATIVITY", "MMU-005-NONOVERLAPPING-TR-SLOT-OVERWRITE", "MMU-006-PTR-STREAM-PURGE", "MMU-012-PROTECTION-KEY-ACCESS", "MMU-017-RID-CONTEXT-SELECTION", "PAL-008-VM-SUMMARY-PROFILE", "PAL-008-VM-SUPPORTED-PAGE-SIZES", "PAL-012-DEBUG-REGISTER-DISCOVERY", "PAL-012-PERF-MON-REGISTER-DISCOVERY", "REG-003-CPUID-FIXED-SELECTOR-DOMAIN", "REG-006-DBR-INDEX-SPACE", "REG-006-IBR-INDEX-SPACE", "REG-006-PKR-INDEX-SPACE", "REG-006-PMC-INDEX-SPACE", "REG-006-PMD-INDEX-SPACE", "REG-006-RR-INDEX-SPACE", "REG-007-DBR-FIELD-SEMANTICS", "REG-007-IBR-FIELD-SEMANTICS", "REG-007-PKR-FIELD-SEMANTICS", "REG-007-PKR-KEY-UNIQUENESS", "REG-007-RR-FIELD-SEMANTICS"],
+      "limitations": ["The twenty-two cited CPUID, PMU, debug-register, PKR, RR, translation-register, and PAL rows have atomic contracts; legacy system programs outside those rows still lack per-case metadata, while same-stream TR overlap requiring Machine Check abort, RR migration closure, RSE key access, exhaustive debug-match/IA-32 behavior, and PMU event counting remain unclaimed."]
     },
     {
       "id": "meson:test-ia64-system-tcg-static",
@@ -1172,6 +1173,26 @@
       "conformance_role": "candidate",
       "closes_normative_rows": [],
       "limitations": ["Round-trip state checks are not yet attributed to individual normative state rows."]
+    },
+    {
+      "id": "meson:test-ia64-translation-register-tranche-static",
+      "kind": "infrastructure",
+      "lane": "manifest-static",
+      "primary_evidence_level": "E0",
+      "evidence_levels": ["E0"],
+      "ci_tiers": ["affected-edit", "required"],
+      "test_registration": "test-ia64-translation-register-tranche-static",
+      "source_paths": [
+        {"repository": "qemu-ia64", "path": "scripts/ia64-validate-translation-register-tranche.py"},
+        {"repository": "qemu-ia64", "path": "tests/ia64-conformance/translation-register-tranche.json"},
+        {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-system-tcg.py"}
+      ],
+      "invocation": "meson test qemu:test-ia64-translation-register-tranche-static",
+      "scope": "Static integrity, citation binding, stable identity, implementation mapping, executable probe-set, and independent-oracle validation for four atomic DTR-slot, ITR-slot, occupied-slot-overwrite, and PTR stream-purge contracts.",
+      "oracle_independence": "implementation-coupled",
+      "conformance_role": "supporting",
+      "closes_normative_rows": [],
+      "limitations": ["Metadata validation supports but does not replace the E2 translation-register runtime results."]
     },
     {
       "id": "meson:test-ia64-vmstate",

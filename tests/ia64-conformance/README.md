@@ -306,3 +306,31 @@ blockers with no test or infrastructure failure. The full configured Meson
 run also passes 216 tests with two expected skips. RR migration remains
 supporting E1 evidence until an attributed fresh-process E2 boundary is added;
 translation-register slots are the next bounded architectural family.
+
+The translation-register checkpoint raises the public gate to 63/63 in
+190.604 seconds of selected-result wall time. `test-ia64-system-tcg` passes
+28 subtests (66.23 seconds in the complete run), and the host MMU/interruption
+unit passes 53 subtests. Independent guests install and reverse-probe all eight
+DTR slots, execute through all eight ITR slots, replace occupied middle slots
+with legal nonoverlapping mappings, and prove that PTR.I and PTR.D purge both
+TR and cached-TR entries only in their selected stream.
+
+Static inspection against Intel Volume 2 section 4.1.1 and Volume 3's ITR/PTR
+instruction descriptions found one production defect: PTR removed overlapping
+translation-register entries but left same-stream translation-cache entries
+usable. The shared purge helper now invalidates the selected stream's TR and
+TC arrays while preserving the opposite stream. Two older host tests had also
+constructed architecturally invalid same-stream TR/TC overlap; they now use a
+legal opposite-stream survivor or explicitly purge the old TR before a TC
+replacement.
+
+Four public atomic contracts raise the catalogue to 142 rows and 113
+row-closing claims. The 2,040-row executed join contains 113
+`implemented-tested`, 1,377 `implemented-untested`, 7
+`advertised-untested`, and 543 `known-unimplemented` rows, leaving 1,384
+blockers with no test or infrastructure failure. The complete configured
+Meson run passes 217 tests with two expected skips in 204.7 seconds. Required
+Machine Check aborts for same-stream TR overlap during insertion or PTC remain
+an explicit unclaimed contract; this checkpoint does not convert that missing
+MCA path into a passing result. All runtime tests, metadata, and validators
+remain self-contained in the public qemu-ia64 repository.

@@ -644,7 +644,7 @@ static void test_instruction_translation_register_lookup(void)
     g_assert_nonnull(strstr(result.message, "instruction translation"));
 }
 
-static void test_translation_cache_preserves_pinned_register(void)
+static void test_opposite_stream_cache_preserves_pinned_register(void)
 {
     CPUIA64State env;
     IA64TranslateResult result;
@@ -655,19 +655,24 @@ static void test_translation_cache_preserves_pinned_register(void)
     uint64_t itir = 0x68;
 
     ia64_cpu_reset_synthetic_itanium2(&env);
-    env.psr |= UINT64_C(0x0000001000000000);
+    env.psr |= IA64_TB_PSR_IT_BIT | IA64_TB_PSR_DT_BIT;
 
     g_assert_true(ia64_install_translation(&env, true, true, 2, base,
                                            tr_translation, itir));
-    g_assert_true(ia64_install_translation(&env, true, false, 0, base,
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
                                            tc_translation, itir));
 
     g_assert_true(env.memory.itr[2].valid);
-    g_assert_true(env.memory.itc[0].valid);
+    g_assert_true(env.memory.dtc[0].valid);
     g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH, 2,
                                          false, &result));
     g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
     g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
+    g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                         IA64_MMU_DATA_CPL0, false,
+                                         &result));
+    g_assert_cmpint(result.status, ==, IA64_TRANSLATE_OK);
+    g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
 }
 
 static void test_translation_lookup_cache_refreshes_after_install(void)
@@ -692,6 +697,8 @@ static void test_translation_lookup_cache_refreshes_after_install(void)
                                          &result));
     g_assert_cmphex(result.paddr, ==, 0x0000000004002c00ULL);
 
+    ia64_purge_translation_register(&env, false, address, 26);
+    g_assert_false(env.memory.dtr[2].valid);
     g_assert_true(ia64_install_translation(&env, false, false, 0, address,
                                            small_translation, small_itir));
     g_assert_true(ia64_translate_address(&env, address, MMU_DATA_LOAD,
@@ -896,6 +903,44 @@ static void test_translation_register_purge_removes_pinned_entry(void)
                                           IA64_MMU_INST_CPL0, false,
                                           &result));
     g_assert_cmpint(result.status, ==, IA64_TRANSLATE_TLB_MISS);
+}
+
+static void test_translation_register_purge_removes_same_stream_cache(void)
+{
+    CPUIA64State env;
+    IA64TranslateResult result;
+    vaddr base = 0xa000000100000000ULL;
+    vaddr address = 0xa000000100002c00ULL;
+    uint64_t instruction_translation = 0x0010000004000661ULL;
+    uint64_t data_translation = 0x0010000008000661ULL;
+    uint64_t itir = 0x68;
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.psr |= IA64_TB_PSR_IT_BIT | IA64_TB_PSR_DT_BIT;
+    env.rr[5] = test_rr(0x401, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, true, false, 0, base,
+                                           instruction_translation, itir));
+    g_assert_true(ia64_install_translation(&env, false, false, 0, base,
+                                           data_translation, itir));
+    g_assert_true(env.memory.itc[0].valid);
+    g_assert_true(env.memory.dtc[0].valid);
+
+    ia64_purge_translation_register(&env, false, address, 26);
+    g_assert_true(env.memory.itc[0].valid);
+    g_assert_false(env.memory.dtc[0].valid);
+    g_assert_true(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                         IA64_MMU_INST_CPL0, false,
+                                         &result));
+    g_assert_false(ia64_translate_address(&env, address, MMU_DATA_LOAD,
+                                          IA64_MMU_DATA_CPL0, false,
+                                          &result));
+
+    ia64_purge_translation_register(&env, true, address, 26);
+    g_assert_false(env.memory.itc[0].valid);
+    g_assert_false(ia64_translate_address(&env, address, MMU_INST_FETCH,
+                                          IA64_MMU_INST_CPL0, false,
+                                          &result));
 }
 
 static void test_demand_data_page_fault_delivery(void)
@@ -2467,8 +2512,8 @@ int main(int argc, char **argv)
                     test_vhpt_backing_debug_match_aborts_without_read);
     g_test_add_func("/ia64-memory/instruction-translation-register",
                     test_instruction_translation_register_lookup);
-    g_test_add_func("/ia64-memory/tc-preserves-pinned-tr",
-                    test_translation_cache_preserves_pinned_register);
+    g_test_add_func("/ia64-memory/opposite-stream-tc-preserves-pinned-tr",
+                    test_opposite_stream_cache_preserves_pinned_register);
     g_test_add_func("/ia64-memory/lookup-cache-refreshes-after-install",
                     test_translation_lookup_cache_refreshes_after_install);
     g_test_add_func("/ia64-memory/region-register-rid-change",
@@ -2485,6 +2530,8 @@ int main(int argc, char **argv)
                     test_host_tlb_flush_span_for_ia64_page);
     g_test_add_func("/ia64-memory/tr-purge-pinned-entry",
                     test_translation_register_purge_removes_pinned_entry);
+    g_test_add_func("/ia64-memory/tr-purge-same-stream-tc",
+                    test_translation_register_purge_removes_same_stream_cache);
     g_test_add_func("/ia64-memory/demand-data-page-fault",
                     test_demand_data_page_fault_delivery);
     g_test_add_func("/ia64-memory/user-store-protection-page-fault",
