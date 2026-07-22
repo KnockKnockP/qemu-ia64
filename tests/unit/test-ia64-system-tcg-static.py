@@ -536,6 +536,8 @@ def check_application_register_plane(root: Path) -> None:
             read_arm.index("ia64_tr_emit_application_privilege") <
             read_arm.index("gen_helper_application_register_read"),
             "MOV_ARGR target/selector/read fault order drifted")
+    require("insn->r2 != IA64_AR_ITC && insn->qp == 0" in read_arm,
+            "qualified MOV_ARGR helper result can escape its predicate arm")
     target_check = section(
         translate,
         "static void ia64_tr_emit_application_target_check(",
@@ -687,6 +689,49 @@ def check_control_register_partition(root: Path) -> None:
     require(system.count(
         "reg >= IA64_CR_IPSR && reg <= IA64_CR_IIB1"
     ) == 2, "CR interruption-access range no longer reaches IIB1")
+    reserved_values = section(
+        system,
+        "static bool ia64_system_reserved_cr_value",
+        "static uint64_t ia64_system_normalize_cr_value",
+    )
+    for token in (
+        "case IA64_CR_DCR:", "case IA64_CR_PTA:",
+        "case IA64_CR_IPSR:", "case IA64_CR_ISR:",
+        "case IA64_CR_IFS:", "case IA64_CR_LID:",
+        "case IA64_CR_IVR:", "case IA64_CR_TPR:",
+        "case IA64_CR_ITV:", "case IA64_CR_PMV:",
+        "case IA64_CR_CMCV:", "case IA64_CR_LRR0:",
+        "case IA64_CR_LRR1:", "ps < 15", "delivery_mode == 1",
+        "delivery_mode == 3", "delivery_mode == 6",
+    ):
+        require(token in reserved_values,
+                "named CR reserved-field contract lost " + token)
+    normalized_values = section(
+        system,
+        "static uint64_t ia64_system_normalize_cr_value",
+        "static uint64_t ia64_system_validate_cr_access",
+    )
+    for token in (
+        "case IA64_CR_IVA:", "~UINT64_C(0x7fff)",
+        "case IA64_CR_IHA:", "~UINT64_C(3)",
+        "case IA64_CR_LID:", "UINT64_C(0x00000000ffff0000)",
+        "case IA64_CR_TPR:", "UINT64_C(0x100f0)",
+        "case IA64_CR_EOI:", "return 0;",
+        "case IA64_CR_ITV:", "case IA64_CR_PMV:",
+        "case IA64_CR_CMCV:", "UINT64_C(0x100ff)",
+        "case IA64_CR_LRR0:", "case IA64_CR_LRR1:",
+        "UINT64_C(0x1a7ff)",
+    ):
+        require(token in normalized_values,
+                "named CR ignored-field contract lost " + token)
+    validator = section(
+        system,
+        "static uint64_t ia64_system_validate_cr_access",
+        "static void ia64_system_validate_cr_legality",
+    )
+    require(validator.index("ia64_system_reserved_cr_value") <
+            validator.index("ia64_system_normalize_cr_value"),
+            "reserved CR fields must fault before ignored fields normalize")
 
 
 def main() -> int:

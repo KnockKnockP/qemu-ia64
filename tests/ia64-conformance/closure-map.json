@@ -569,6 +569,20 @@
       "candidate_tests": ["test-ia64-register-tcg"]
     },
     {
+      "normative_row": "REG-007-CR-FIELD-SEMANTICS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.cr.0", "cpu.register.cr.1", "cpu.register.cr.16", "cpu.register.cr.17", "cpu.register.cr.19", "cpu.register.cr.2", "cpu.register.cr.20", "cpu.register.cr.21", "cpu.register.cr.22", "cpu.register.cr.23", "cpu.register.cr.24", "cpu.register.cr.25", "cpu.register.cr.26", "cpu.register.cr.27", "cpu.register.cr.8"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
+      "normative_row": "REG-007-LOCAL-CR-FIELD-SEMANTICS",
+      "surface_disposition": "implemented",
+      "implementation_rows": ["cpu.register.cr.64", "cpu.register.cr.66", "cpu.register.cr.67", "cpu.register.cr.72", "cpu.register.cr.73", "cpu.register.cr.74", "cpu.register.cr.80", "cpu.register.cr.81"],
+      "inventory_gap": null,
+      "candidate_tests": ["test-ia64-register-tcg"]
+    },
+    {
       "normative_row": "REG-009-GR-BANK-SWITCH",
       "surface_disposition": "implemented",
       "implementation_rows": ["cpu.register.gr.bank-switch"],

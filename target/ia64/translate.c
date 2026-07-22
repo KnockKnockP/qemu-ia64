@@ -12527,9 +12527,17 @@ static void ia64_tr_emit_decoded_application_move(
                 value, tcg_env, tcg_constant_i32(insn->r2));
             ia64_tr_apply_helper_post_contract(ctx, &contract);
             /* AR.ITC is helper-owned time state: each instruction samples
-             * the clock.  It is not an immutable issue-group entry value. */
+             * the clock.  It is not an immutable issue-group entry value.
+             *
+             * A qualified read may branch around the helper and therefore
+             * around the definition of value.  Recording that conditional
+             * definition as an unconditional entry image leaves a later
+             * read with a live TCG temp that has no value on the false arm.
+             * Cache only p0 reads; a qualified read must remain local to its
+             * predicate arm.
+             */
             if (ctx->rewrite_group.ssa.enabled &&
-                insn->r2 != IA64_AR_ITC) {
+                insn->r2 != IA64_AR_ITC && insn->qp == 0) {
                 IA64TrGroupSSA *ssa = &ctx->rewrite_group.ssa;
                 unsigned word = insn->r2 >> 6;
                 uint64_t bit = UINT64_C(1) << (insn->r2 & 63);

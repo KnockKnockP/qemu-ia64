@@ -16,6 +16,20 @@ from typing import Callable, Sequence
 PSR_DFL = 1 << 18
 PSR_DFH = 1 << 19
 PSR_BN = 1 << 44
+U64_MASK = (1 << 64) - 1
+
+
+def bit_mask(*bits_or_ranges: int | range) -> int:
+    mask = 0
+    for item in bits_or_ranges:
+        if isinstance(item, range):
+            for bit in item:
+                mask |= 1 << bit
+        else:
+            mask |= 1 << item
+    return mask
+
+
 GR_VALUES = tuple(range(1, 128))
 FR_INDICES = tuple(range(2, 128))
 GR_ROTATING_SIZES = tuple(range(8, 97, 8))
@@ -87,6 +101,51 @@ CR_ALIAS_EXPECTED_READS = {
     71: 0,
     67: 0,
 }
+CR_FIELD_WRITABLE_INDICES = frozenset(CR_WRITE_VALUES)
+CR_LITERAL_RESERVED_MASKS = {
+    0: bit_mask(range(3, 8), range(15, 64)),
+    8: bit_mask(1, range(9, 15)),
+    16: bit_mask(0, range(6, 13), 16, range(28, 32), range(46, 64)),
+    17: bit_mask(range(24, 32), range(44, 64)),
+    23: bit_mask(range(38, 63)),
+    64: bit_mask(range(0, 16)),
+    66: bit_mask(range(8, 16)),
+    72: bit_mask(range(8, 12), range(13, 16)),
+    73: bit_mask(range(8, 12), range(13, 16)),
+    74: bit_mask(range(8, 12), range(13, 16)),
+    80: bit_mask(11, 14),
+    81: bit_mask(11, 14),
+}
+CR_LITERAL_IGNORED_MASKS = {
+    2: bit_mask(range(0, 15)),
+    25: bit_mask(0, 1),
+    64: bit_mask(range(32, 64)),
+    66: bit_mask(range(0, 4), range(17, 64)),
+    67: U64_MASK,
+    72: bit_mask(12, range(17, 64)),
+    73: bit_mask(12, range(17, 64)),
+    74: bit_mask(12, range(17, 64)),
+    80: bit_mask(12, range(17, 64)),
+    81: bit_mask(12, range(17, 64)),
+}
+CR_FIELD_BASELINES = {8: 15 << 2}
+CR_CONDITIONAL_SINGLETON_BITS = {
+    8: frozenset(range(2, 8)),
+    80: frozenset(range(8, 11)),
+    81: frozenset(range(8, 11)),
+}
+CR_FIELD_IMPLEMENTATION_ROWS = tuple(
+    f"cpu.register.cr.{selector}"
+    for selector in sorted(CR_FIELD_WRITABLE_INDICES)
+)
+CR_SYSTEM_FIELD_IMPLEMENTATION_ROWS = tuple(
+    row for row in CR_FIELD_IMPLEMENTATION_ROWS
+    if int(row.rsplit(".", 1)[1]) < 64
+)
+CR_LOCAL_FIELD_IMPLEMENTATION_ROWS = tuple(
+    row for row in CR_FIELD_IMPLEMENTATION_ROWS
+    if int(row.rsplit(".", 1)[1]) >= 64
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -118,12 +177,18 @@ def validate_contract(root: Path) -> str:
         "REG-010-FR-ROTATION": ["cpu.register.rotation.fr"],
         "REG-010-GR-ROTATION": ["cpu.register.rotation.gr"],
         "REG-010-PR-ROTATION": ["cpu.register.rotation.pr"],
+        "REG-007-CR-FIELD-SEMANTICS": list(
+            CR_SYSTEM_FIELD_IMPLEMENTATION_ROWS
+        ),
+        "REG-007-LOCAL-CR-FIELD-SEMANTICS": list(
+            CR_LOCAL_FIELD_IMPLEMENTATION_ROWS
+        ),
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 13:
-        raise AssertionError("register tranche must contain thirteen cases")
+    if not isinstance(cases, list) or len(cases) != 15:
+        raise AssertionError("register tranche must contain fifteen cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -174,6 +239,20 @@ def validate_contract(root: Path) -> str:
             CR_DEFINED_INDICES - CR_READ_ONLY_INDICES or
             set(CR_ALIAS_EXPECTED_READS) != CR_DEFINED_INDICES):
         raise AssertionError("CR anti-alias oracle does not cover its full file")
+    if CR_FIELD_WRITABLE_INDICES != CR_DEFINED_INDICES - CR_READ_ONLY_INDICES:
+        raise AssertionError("CR field oracle does not cover every writable CR")
+    for selector in CR_FIELD_WRITABLE_INDICES:
+        reserved = CR_LITERAL_RESERVED_MASKS.get(selector, 0)
+        ignored = CR_LITERAL_IGNORED_MASKS.get(selector, 0)
+        if reserved & ignored or (reserved | ignored) & ~U64_MASK:
+            raise AssertionError(
+                f"CR{selector} reserved/ignored bit partition is invalid"
+            )
+    if len(CR_FIELD_IMPLEMENTATION_ROWS) != 23:
+        raise AssertionError("named writable CR inventory is not 23 registers")
+    if (len(CR_SYSTEM_FIELD_IMPLEMENTATION_ROWS) != 15 or
+            len(CR_LOCAL_FIELD_IMPLEMENTATION_ROWS) != 8):
+        raise AssertionError("named writable CR architecture groups drifted")
     if GR_ROTATING_SIZES != tuple(range(8, 97, 8)):
         raise AssertionError("GR rotating-size matrix drift")
     rotating_signatures = {
@@ -185,7 +264,8 @@ def validate_contract(root: Path) -> str:
     return (
         "complete GR/FR/PR/BR indices, 12 GR rotating sizes, 96 FR bases, "
         "48 PR bases, all 128 AR selectors in both units, all 128 CR "
-        "selectors and interruption-access states, and "
+        "selectors, interruption-access states, complete named CR field "
+        "partitions, and "
         "interruption/RFI bank transitions"
     )
 
@@ -876,6 +956,322 @@ def test_control_register_selectors(h: ModuleType, system: ModuleType,
     )
 
 
+def control_register_field_fault_cases() -> tuple[tuple[int, int, str], ...]:
+    cases: list[tuple[int, int, str]] = []
+    for selector in sorted(CR_FIELD_WRITABLE_INDICES):
+        baseline = CR_FIELD_BASELINES.get(selector, 0)
+        reserved = CR_LITERAL_RESERVED_MASKS.get(selector, 0)
+        for bit in range(64):
+            if reserved & (1 << bit):
+                cases.append((
+                    selector, baseline | (1 << bit),
+                    f"CR{selector} reserved bit {bit}",
+                ))
+    cases.extend((
+        (8, 0 << 2, "PTA size 0 below architectural minimum"),
+        (8, 14 << 2, "PTA size 14 below architectural minimum"),
+        (16, 3 << 41, "IPSR reserved RI encoding 3"),
+        (17, 3 << 41, "ISR reserved EI encoding 3"),
+        (23, (1 << 63) | 97, "IFS valid with SOF 97"),
+        (23, (1 << 63) | (1 << 7), "IFS valid with SOL above SOF"),
+        (23, (1 << 63) | (1 << 14), "IFS valid with SOR above SOF"),
+        (23, (1 << 63) | 8 | (1 << 14) | (8 << 18),
+         "IFS valid with RRB.GR outside SOR"),
+        (23, (1 << 63) | (1 << 18),
+         "IFS valid with nonzero RRB.GR and zero SOR"),
+        (23, (1 << 63) | (96 << 25),
+         "IFS valid with RRB.FR 96"),
+        (23, (1 << 63) | (48 << 32),
+         "IFS valid with RRB.PR 48"),
+    ))
+    for selector in (80, 81):
+        for delivery_mode in (1, 3, 6):
+            cases.append((
+                selector, delivery_mode << 8,
+                f"CR{selector} reserved delivery mode {delivery_mode}",
+            ))
+    return tuple(cases)
+
+
+def control_register_field_legal_cases() -> tuple[
+        tuple[int, int, int, str], ...]:
+    cases: list[tuple[int, int, int, str]] = []
+    for selector in sorted(CR_FIELD_WRITABLE_INDICES):
+        baseline = CR_FIELD_BASELINES.get(selector, 0)
+        reserved = CR_LITERAL_RESERVED_MASKS.get(selector, 0)
+        ignored = CR_LITERAL_IGNORED_MASKS.get(selector, 0)
+        conditional = CR_CONDITIONAL_SINGLETON_BITS.get(selector, frozenset())
+        for bit in range(64):
+            if reserved & (1 << bit) or bit in conditional:
+                continue
+            source = baseline | (1 << bit)
+            expected = source & ~ignored & U64_MASK
+            cases.append((
+                selector, source, expected,
+                f"CR{selector} bit {bit} preserved/ignored",
+            ))
+
+    for size in (15, 16, 31, 32, 52):
+        value = size << 2
+        cases.append((8, value, value, f"PTA short-format size {size}"))
+    for size in (15, 16, 31, 32, 52, 61):
+        value = (size << 2) | (1 << 8)
+        cases.append((8, value, value, f"PTA long-format size {size}"))
+
+    valid_ifs_max = (
+        (1 << 63) | 96 | (96 << 7) | (12 << 14) |
+        (95 << 18) | (95 << 25) | (47 << 32)
+    )
+    cases.extend((
+        (23, 1 << 63, 1 << 63, "IFS valid empty frame"),
+        (23, valid_ifs_max, valid_ifs_max, "IFS valid maximum frame"),
+        (21, U64_MASK, U64_MASK,
+         "ITIR selected checked-on-insert full-width value"),
+    ))
+    for selector in (80, 81):
+        for delivery_mode in (0, 2, 4, 5, 7):
+            value = (delivery_mode << 8) | 0x50
+            cases.append((
+                selector, value, value,
+                f"CR{selector} legal delivery mode {delivery_mode}",
+            ))
+    return tuple(cases)
+
+
+def control_register_field_program(h: ModuleType, system: ModuleType):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    bundles: list[object] = []
+    address = entry
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    emit(0x01, h.rsm(h.IA64_PSR_IC), h.nop_i(), h.nop_i())
+    emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+
+    # Predicate qualification precedes reserved-field validation.  The reset
+    # DCR is zero, so the following poisoned write must leave it unchanged.
+    emit(0x01, h.nop_m(), h.adds(8, 0, 0), h.adds(9, 0, 0))
+    emit_movl(29, 1 << 3)
+    emit(0x01, h.nop_m(), h.nop_i(), h.cmp_rr(1, 2, 0, 0, "lt"))
+    bundles.append(system.raw_bundle(
+        h, address, "M", system.m_system(0x2C, r2=29, r3=0, qp=1)
+    ))
+    address += 0x10
+    bundles.append(system.raw_bundle(
+        h, address, "M", system.m_system(0x24, r1=30, r3=0)
+    ))
+    address += 0x10
+    address = append_gr_check(h, bundles, address, 30, 0, failure)
+
+    # Repeat the qualification rule in the local-interrupt register group
+    # without relying on its reset image: establish a legal LID value first,
+    # then prove that a false-qualified reserved bit cannot replace it.
+    emit_movl(29, 0x12340000)
+    bundles.append(system.raw_bundle(
+        h, address, "M", system.m_system(0x2C, r2=29, r3=64)
+    ))
+    address += 0x10
+    emit(0x01, h.srlz_d(), h.nop_i(), h.nop_i())
+    emit_movl(29, 1 << 32)
+    emit(0x01, h.nop_m(), h.nop_i(), h.cmp_rr(1, 2, 0, 0, "lt"))
+    bundles.append(system.raw_bundle(
+        h, address, "M", system.m_system(0x2C, r2=29, r3=64, qp=1)
+    ))
+    address += 0x10
+    bundles.append(system.raw_bundle(
+        h, address, "M", system.m_system(0x24, r1=30, r3=64)
+    ))
+    address += 0x10
+    emit_movl(28, 0x12340000)
+    address = append_gr_pair_check(
+        h, bundles, address, 30, 28, failure
+    )
+
+    expected_nested_isr = (1 << 39) | 0x30
+    fault_cases = control_register_field_fault_cases()
+    for number, (selector, value, _name) in enumerate(fault_cases, 1):
+        continuation = address + 0x60
+        emit_movl(21, continuation)
+        emit_movl(24, expected_nested_isr)
+        emit(0x01, h.nop_m(), h.adds(8, selector, 0),
+             h.adds(20, 0, 0))
+        emit(0x01, h.nop_m(), h.adds(9, number, 0), h.nop_i())
+        emit_movl(29, value)
+        bundles.append(system.raw_bundle(
+            h, address, "M", system.m_system(0x2C, r2=29, r3=selector)
+        ))
+        address += 0x10
+        if address != continuation:
+            raise AssertionError("CR field-fault continuation accounting drift")
+        address = append_gr_check(h, bundles, address, 20, 1, failure)
+
+    legal_cases = control_register_field_legal_cases()
+    for number, (selector, source, expected, _name) in enumerate(
+            legal_cases, 1):
+        emit(0x01, h.nop_m(), h.adds(8, selector, 0),
+             h.adds(9, number, 0))
+        emit_movl(29, source)
+        bundles.append(system.raw_bundle(
+            h, address, "M", system.m_system(0x2C, r2=29, r3=selector)
+        ))
+        address += 0x10
+        emit(0x01, h.srlz_d(), h.nop_i(), h.nop_i())
+        bundles.append(system.raw_bundle(
+            h, address, "M", system.m_system(0x24, r1=30, r3=selector)
+        ))
+        address += 0x10
+        emit_movl(28, expected)
+        address = append_gr_pair_check(
+            h, bundles, address, 30, 28, failure
+        )
+
+    handler = h.IA64_GENERAL_EXCEPTION_VECTOR
+    bundles.append(system.raw_bundle(
+        h, handler, "M", system.m_system(0x24, r1=23, r3=17)
+    ))
+    handler = append_gr_pair_check(
+        h, bundles, handler + 0x10, 23, 24, failure
+    )
+    bundles.append(h.Bundle(
+        handler, 0x01, h.nop_m(), h.mov_grbr(6, 21),
+        h.adds(20, 1, 0),
+    ))
+    handler += 0x10
+    bundles.append(h.Bundle(
+        handler, 0x11, h.nop_m(), h.nop_i(), h.br_ret(6)
+    ))
+
+    return (
+        finish_checked_program(
+            h, "complete named CR literal field matrix", bundles, address,
+            failure=failure, terminal=terminal, entry=entry,
+        ),
+        len(fault_cases), len(legal_cases),
+    )
+
+
+def control_register_nat_field_priority_program(h: ModuleType,
+                                                system: ModuleType):
+    return h.Program(
+        "CR source NaT precedes reserved-field validation",
+        (
+            h.Bundle(0x10, 0x01, h.ssm(h.IA64_PSR_IC),
+                     h.nop_i(), h.nop_i()),
+            h.Bundle(0x20, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()),
+            h.Bundle(0x30, 0x01, h.nop_m(), h.adds(8, 1, 0),
+                     h.adds(9, 0x1000, 0)),
+            h.Bundle(0x40, 0x01, h.mov_m_grar(36, 8),
+                     h.nop_i(), h.nop_i()),
+            h.Bundle(0x50, 0x01, h.ld8_fill(29, 9),
+                     h.nop_i(), h.nop_i()),
+            system.raw_bundle(
+                h, 0x60, "M", system.m_system(0x2C, r2=29, r3=0)
+            ),
+            h.spin_bundle(0x5600),
+        ),
+        0x5600,
+        (h.DataWord(0x1000, 1 << 3, 8),),
+    )
+
+
+def control_register_privilege_field_priority_program(h: ModuleType,
+                                                      system: ModuleType):
+    return h.Program(
+        "CR privilege precedes source NaT and reserved field",
+        system.lower_cpl_prefix(h, 0x80) + (
+            h.Bundle(0x80, 0x01, h.nop_m(), h.adds(8, 1, 0),
+                     h.adds(9, 0x1000, 0)),
+            h.Bundle(0x90, 0x01, h.mov_m_grar(36, 8),
+                     h.nop_i(), h.nop_i()),
+            h.Bundle(0xa0, 0x01, h.ld8_fill(29, 9),
+                     h.nop_i(), h.nop_i()),
+            system.raw_bundle(
+                h, 0xb0, "M", system.m_system(0x2C, r2=29, r3=0)
+            ),
+            h.spin_bundle(h.IA64_GENERAL_EXCEPTION_VECTOR),
+        ),
+        h.IA64_GENERAL_EXCEPTION_VECTOR,
+        (h.DataWord(0x1000, 1 << 3, 8),),
+    )
+
+
+def control_register_ic_field_priority_program(h: ModuleType,
+                                               system: ModuleType):
+    return h.Program(
+        "CR PSR.ic legality precedes privilege and reserved field",
+        system.lower_cpl_prefix(h, 0x80) + (
+            system.movl_bundle(h, 0x80, 29, 1),
+            system.raw_bundle(
+                h, 0x90, "M", system.m_system(0x2C, r2=29, r3=16)
+            ),
+            h.spin_bundle(h.IA64_GENERAL_EXCEPTION_VECTOR),
+        ),
+        h.IA64_GENERAL_EXCEPTION_VECTOR,
+    )
+
+
+def test_control_register_fields(h: ModuleType, system: ModuleType,
+                                 qemu: Path) -> str:
+    program, fault_count, legal_count = control_register_field_program(
+        h, system
+    )
+    result = h.run_program(
+        qemu, program, compact_loader=True, preserve_fault_slot=True
+    )
+    if result.gr[14] != 1:
+        raise AssertionError(
+            "named CR field matrix failed: "
+            f"selector={result.gr[8]} case={result.gr[9]} "
+            f"marker={result.gr[20]} ip=0x{result.ip:x} "
+            f"isr=0x{result.cr_isr:x} exception={result.exception_kind}"
+        )
+
+    nat = h.run_program(
+        qemu, control_register_nat_field_priority_program(h, system),
+        preserve_fault_slot=True,
+    )
+    if (nat.ip != 0x5600 or nat.cr_iip != 0x60 or
+            (nat.cr_isr & 0xffff) != 0x10):
+        raise AssertionError("CR source NaT did not precede reserved fields")
+
+    privilege = h.run_program(
+        qemu, control_register_privilege_field_priority_program(h, system),
+        preserve_fault_slot=True,
+    )
+    if (privilege.ip != h.IA64_GENERAL_EXCEPTION_VECTOR or
+            (privilege.cr_isr & 0xffff) != 0x10 or
+            ((privilege.cr_ipsr >> 32) & 3) != 3 or
+            privilege.cr_iip != 0xb0):
+        raise AssertionError(
+            "CR privilege did not precede source NaT/reserved fields"
+        )
+
+    ic = h.run_program(
+        qemu, control_register_ic_field_priority_program(h, system),
+        preserve_fault_slot=True,
+    )
+    if (ic.ip != h.IA64_GENERAL_EXCEPTION_VECTOR or
+            (ic.cr_isr & 0xffff) != 0 or ic.cr_iip != 0x90):
+        raise AssertionError(
+            "CR PSR.ic legality did not precede privilege/reserved fields"
+        )
+    return (
+        f"{fault_count} reserved-field values and {legal_count} singleton/"
+        "boundary values pass exact fault, preserve, ignore, predicate, NaT, "
+        "privilege, and PSR.ic priority rules across all 23 writable CRs"
+    )
+
+
 def general_register_rotation_program(h: ModuleType, size: int):
     failure = 0x10000
     bundles: list[object] = []
@@ -1284,6 +1680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("interruption and RFI GR banks", lambda: test_interruption_bank_switch(harness, system, args.qemu.resolve())),
         ("complete AR selector space", lambda: test_application_register_selectors(harness, system, args.qemu.resolve())),
         ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),
+        ("complete named CR field semantics", lambda: test_control_register_fields(harness, system, args.qemu.resolve())),
     )
     print("TAP version 13")
     print(f"1..{len(tests)}")
