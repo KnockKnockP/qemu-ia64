@@ -531,6 +531,57 @@
       "execution": {"lane": "isolated-system-guest", "probes": ["test_rse_control_effects"], "result_observations": ["exception kind/vector", "IIP", "ISR", "CFM", "BSP/BSPSTORE/BspLoad"]},
       "oracle": {"independence": "independent", "derivation": "The three illegal predicates are transcribed from M25 pseudocode; the 97-register span is counted independently while skipping addresses whose slot index is 63"},
       "limitations": ["Undefined non-first-in-group placement, memory fault classes and retry, interruption boundaries, CPL1-CPL3 execution, and migration remain separate BND/RSE/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "RSE-006-ALLOC-FRAME-EFFECT-EXACT", "case_id": 32, "normative_token": 83,
+      "normative_row": "RSE-006-ALLOC-FRAME-EFFECT",
+      "implementation_rows": ["cpu.opcode.ia64_op_alloc"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "alloc", "printed_pages": ["3:16", "3:17"], "anchor": "The change of frame size is immediate. The write of GR r1 and subsequent instructions in the same instruction group use the new frame"},
+      "preconditions": ["Execution is at CPL0 with RSC.mode zero", "The backing store used to isolate legal cases is mapped and writable", "AR.PFS contains the legal distinguishable value 85"],
+      "inputs": ["Three hundred thirty-two legal vectors covering every SOF0-96, SOL0-96, encoded SOR0-12, and destination r1-r127 value", "Every unchanged-SOF8 SOL partition and a zero-base SOR transition", "An ALLOC followed in the same group by a write to newly in-frame r127"],
+      "expected_results": ["Every destination receives old AR.PFS with NaT clear", "IFS after a diagnostic COVER exposes the exact SOF/SOL/SOR CFM for every vector", "Allocated overlapping values and NaTs survive repartitioning", "The instruction following ALLOC sees the new SOF96 mapping in the same group"],
+      "allowed_results": ["One exact destination/PFS/NaT and CFM image for every legal vector; undefined newly allocated values are never asserted"],
+      "permitted_state_changes": ["CFM SOF/SOL/SOR", "The selected destination GR and its NaT", "RSE partitions and declared diagnostic backing storage", "The explicitly written new r127"],
+      "required_unchanged_state": ["AR.PFS", "All overlapping allocated value/NaT pairs except the selected destination", "CFM rename bases during legal matrix rows"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "ALLOC is first in each group; the frame change and destination write are visible to later instructions in that group", "restart_action": "No restart occurs for valid fields and mapped backing storage",
+      "applicable_variants": ["SOF 0 through 96", "SOL 0 through 96", "SOR 0 through 96 in multiples of eight", "static and stacked r1-r127", "grow, shrink, and unchanged SOF", "same-group new-frame access", "ordinary and NaT overlapping values"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_alloc_effects"], "result_observations": ["destination value/NaT", "exact CFM through IFS", "overlapping stacked values/NaTs", "same-group r127", "BSP/BSPSTORE"]},
+      "oracle": {"independence": "independent", "derivation": "Legal tuples are generated directly from the published 7-bit SOF/SOL, 4-bit SOR, and 7-bit r1 domains; expected CFM fields are packed arithmetically and exposed through architectural COVER rather than a production ALLOC helper"},
+      "limitations": ["Undefined newly allocated values, non-first-in-group placement, privilege variants, ALAT details, mandatory-store faults/retry, interruption boundaries, and migration remain separate RSE/BND/ALT/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "RSE-006-ALLOC-LEGALITY-EXACT", "case_id": 33, "normative_token": 84,
+      "normative_row": "RSE-006-ALLOC-LEGALITY",
+      "implementation_rows": ["cpu.opcode.ia64_op_alloc"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "alloc", "printed_pages": ["3:16", "3:17"], "anchor": "illegal combinations can be encoded in the instruction"},
+      "preconditions": ["Each fault case enables and serializes PSR.ic", "Illegal fields are tested from a zero frame", "The SOR-change case establishes nonzero GR, FR, and PR rename bases through one WTOP"],
+      "inputs": ["r0 and both low/high out-of-frame stacked destinations", "qp1 and qp63", "SOF97 and SOF127", "low/high SOL greater than SOF", "four SOR-greater-than-SOF boundaries", "A legal SOR change while rename bases are nonzero"],
+      "expected_results": ["Each of thirteen statically illegal partitions raises precise Illegal Operation with ISR zero", "A SOR change with nonzero rename bases raises Reserved Register/Field with ISR code 0x30", "Every rejected ALLOC preserves CFM, all RSE pointers, and its suffix destination"],
+      "allowed_results": ["Exactly thirteen Illegal Operation records and one Reserved Register/Field record at the literal slot-zero IIP"],
+      "permitted_state_changes": ["Architectural interruption collection state and declared observation registers"],
+      "required_unchanged_state": ["CFM", "BSP", "BSPSTORE", "RSE.BspLoad", "AR.PFS", "The planned suffix destination"],
+      "expected_faults": ["Illegal Operation fault", "Reserved Register/Field fault"], "fault_priority": ["target register in new SOF", "SOF/SOL/SOR/qp legality", "SOR-change rename-base restriction", "mandatory backing-store traffic"], "committed_prefix": "Stopped setup commits; ALLOC preflight rejects the operation before frame or backing-store state changes", "restart_action": "The test stops at exact collection; memory fault repair/retry is a separate RSE-007 row",
+      "applicable_variants": ["zero destination", "out-of-frame destination boundaries", "low/high nonzero qp", "low/high field overflow", "rotating-region overflow", "nonzero rename bases"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_alloc_effects"], "result_observations": ["exception kind/vector", "IIP", "ISR code", "CFM", "BSP/BSPSTORE/BspLoad", "suffix register"]},
+      "oracle": {"independence": "independent", "derivation": "The illegal equivalence classes and priority order are transcribed from M34 pseudocode and checked against literal field arithmetic; no production validator is imported"},
+      "limitations": ["Undefined non-first-in-group placement, every cross-product of simultaneously illegal fields, mandatory-store memory faults/retry, privilege variants, interruption boundaries, and migration remain separate BND/RSE/MMU/EXC/SYS rows"]
+    },
+    {
+      "id": "RSE-006-ALLOC-MANDATORY-SPILL-EXACT", "case_id": 34, "normative_token": 85,
+      "normative_row": "RSE-006-ALLOC-MANDATORY-SPILL",
+      "implementation_rows": ["cpu.opcode.ia64_op_alloc"],
+      "citation": {"document_id": "intel-ia64-sdm-v3-r2.3", "section": "alloc", "printed_pages": ["3:16", "3:17"], "anchor": "If insufficient registers are available to allocate the desired frame alloc will stall the processor until enough dirty registers are written to the backing store"},
+      "preconditions": ["Ninety-six real one-local call frames occupy the complete dirty physical register stack", "Each dirty register has a distinct payload and alternating NaT", "The backing store starts at RNAT-relative offset 63 and is mapped writable"],
+      "inputs": ["One legal SOF96/SOL96 ALLOC targeting static r31", "A full physical stack requiring all 96 old dirty registers to be stored before allocation can complete"],
+      "expected_results": ["ALLOC completes with exact SOF96/SOL96 CFM and old AR.PFS in r31 with NaT clear", "BSPSTORE advances to BSP after all 96 mandatory stores", "All payloads occupy exact register backing slots", "The completed RNAT word and partial AR.RNAT image contain the exact alternating NaTs"],
+      "allowed_results": ["One exact 96-register/RNAT backing image and final pointer state"],
+      "permitted_state_changes": ["CFM", "r31 and its NaT", "dirty/clean/invalid RSE partitions", "BSPSTORE", "RSE.BspLoad", "AR.RNAT", "Declared backing-store words"],
+      "required_unchanged_state": ["BSP", "AR.PFS", "Memory outside the declared backing-store span"],
+      "expected_faults": [], "fault_priority": [], "committed_prefix": "Mandatory RSE stores commit in backing-store order before the frame growth and destination become architecturally complete", "restart_action": "No restart occurs for mapped writable backing storage; mandatory-store faults and retry are a separate row",
+      "applicable_variants": ["maximum dirty partition", "maximum requested frame", "RNAT-relative offset 63", "completed and partial RNAT collections", "ordinary and NaT dirty values"],
+      "execution": {"lane": "isolated-system-guest", "probes": ["test_alloc_effects"], "result_observations": ["CFM", "r31 value/NaT", "BSP/BSPSTORE", "96 backing payloads", "completed RNAT word", "partial AR.RNAT"]},
+      "oracle": {"independence": "independent", "derivation": "Backing addresses and RNAT bits are enumerated from the published 63-register collection layout using literal values; the production spill path is not imported"},
+      "limitations": ["Other spill counts and starting offsets are represented by the separately closed dirty BSPSTORE matrix; mandatory-store translation/access faults, restart, interruption boundaries, privilege variants, and migration remain separate RSE/MMU/EXC/SYS rows"]
     }
   ]
 }

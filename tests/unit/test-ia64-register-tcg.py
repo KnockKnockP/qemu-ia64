@@ -217,6 +217,9 @@ RSE_LOADRS_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.18",
     "cpu.register.ar.19",
 )
+RSE_ALLOC_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_alloc",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -302,6 +305,15 @@ def validate_contract(root: Path) -> str:
         "RSE-006-LOADRS-LEGALITY": list(
             RSE_LOADRS_IMPLEMENTATION_ROWS
         ),
+        "RSE-006-ALLOC-FRAME-EFFECT": list(
+            RSE_ALLOC_IMPLEMENTATION_ROWS
+        ),
+        "RSE-006-ALLOC-LEGALITY": list(
+            RSE_ALLOC_IMPLEMENTATION_ROWS
+        ),
+        "RSE-006-ALLOC-MANDATORY-SPILL": list(
+            RSE_ALLOC_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -319,12 +331,15 @@ def validate_contract(root: Path) -> str:
         "RSE-006-CLRRRB-RENAME-EFFECT": ["test_rse_control_effects"],
         "RSE-006-LOADRS-RESTORE-EFFECT": ["test_rse_control_effects"],
         "RSE-006-LOADRS-LEGALITY": ["test_rse_control_effects"],
+        "RSE-006-ALLOC-FRAME-EFFECT": ["test_alloc_effects"],
+        "RSE-006-ALLOC-LEGALITY": ["test_alloc_effects"],
+        "RSE-006-ALLOC-MANDATORY-SPILL": ["test_alloc_effects"],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 31:
-        raise AssertionError("register tranche must contain thirty-one cases")
+    if not isinstance(cases, list) or len(cases) != 34:
+        raise AssertionError("register tranche must contain thirty-four cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -413,6 +428,14 @@ def validate_contract(root: Path) -> str:
         raise AssertionError("UNAT selector effect matrix drifted")
     if GR_ROTATING_SIZES != tuple(range(8, 97, 8)):
         raise AssertionError("GR rotating-size matrix drift")
+    alloc_cases = alloc_legal_effect_cases()
+    if ({case[1] for case in alloc_cases} != set(range(97)) or
+            {case[2] for case in alloc_cases} != set(range(97)) or
+            {case[3] for case in alloc_cases} != set(range(13)) or
+            {case[0] for case in alloc_cases} != set(range(1, 128))):
+        raise AssertionError("ALLOC legal field/destination coverage drift")
+    if len(alloc_illegal_effect_cases()) != 13:
+        raise AssertionError("ALLOC illegal equivalence partition drift")
     rotating_signatures = {
         register: tuple((word >> register) & 1 for word in PR_CODEWORDS)
         for register in PR_ROTATING_INDICES
@@ -424,7 +447,8 @@ def validate_contract(root: Path) -> str:
         "48 PR bases, all 128 AR selectors in both units, all 128 CR "
         "selectors, interruption-access states, complete nine-register AR "
         "and named CR field partitions, 6,208 dirty/RNAT BSPSTORE rebases "
-        "plus exact COVER, CLRRRB, LOADRS, and 96-register FLUSHRS effects, "
+        "plus exact ALLOC, COVER, CLRRRB, LOADRS, and 96-register FLUSHRS "
+        "effects, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -2332,6 +2356,397 @@ def test_rse_control_effects(h: ModuleType, system: ModuleType,
     )
 
 
+def alloc_legal_effect_cases() -> tuple[tuple[int, int, int, int], ...]:
+    """Cover each independently encoded legal ALLOC field value."""
+    cases: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+
+    def add(r1: int, sof: int, sol: int, sor: int) -> None:
+        case = (r1, sof, sol, sor)
+        if case not in seen:
+            seen.add(case)
+            cases.append(case)
+
+    for sof in range(97):
+        add(1, sof, sof // 2, min(sof // 8, 12))
+    for sol in range(97):
+        add(1, 96, sol, 0)
+    for sor in range(13):
+        add(1, 96, 96, sor)
+    for r1 in range(1, 128):
+        add(r1, 96, 96, 0)
+    return tuple(cases)
+
+
+def alloc_legal_matrix_program(h: ModuleType, system: ModuleType,
+                               cases: Sequence[tuple[int, int, int, int]],
+                               shard: int):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    address = entry
+    backing_base = 0x1800
+    pfs_value = 85
+    bundles: list[object] = []
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    emit(0x01, h.rsm(h.IA64_PSR_IC), h.nop_i(), h.nop_i())
+    emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(8, pfs_value, 0), h.nop_i())
+    emit(0x01, h.nop_m(), h.mov_i_grar(64, 8), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(29, backing_base, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+
+    for r1, sof, sol, sor in cases:
+        emit(0x01, h.alloc(r1, sof, sol, sor), h.nop_i(), h.nop_i())
+        address = append_gr_check(
+            h, bundles, address, r1, pfs_value, failure
+        )
+        address = append_tnat_check(
+            h, bundles, address, r1, False, failure
+        )
+
+        # COVER with collection disabled publishes the exact pre-cover CFM
+        # in IFS.  This makes every matrix row observable without importing
+        # the production ALLOC packer into the oracle.
+        emit(0x11, h.nop_m(), h.nop_i(), 0x10000000)
+        emit(0x01, h.mov_crgr(20, 23), h.nop_i(), h.nop_i())
+        emit_movl(
+            28,
+            (1 << 63) | rse_expected_cfm(sof, sol, sor * 8),
+        )
+        address = append_gr_pair_check(
+            h, bundles, address, 20, 28, failure
+        )
+
+        # Empty the covered frame and reset the backing partition so each
+        # vector is independent of all preceding frame sizes.
+        emit(0x01, 0x0c << 27, h.nop_i(), h.nop_i())
+        emit(0x01, h.nop_m(), h.adds(29, backing_base, 0), h.nop_i())
+        emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+
+    return finish_checked_program(
+        h,
+        f"ALLOC complete legal field matrix shard {shard}",
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        entry=entry,
+    )
+
+
+def alloc_preservation_program(h: ModuleType):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    address = entry
+    bundles: list[object] = []
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    emit(0x01, h.nop_m(), h.adds(8, 85, 0), h.nop_i())
+    emit(0x01, h.nop_m(), h.mov_i_grar(64, 8), h.nop_i())
+    emit(0x01, h.alloc(31, 8, 0, 0), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(8, 1, 0), h.adds(9, 0x1000, 0))
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+    emit(0x09, h.ld8_fill(31, 9), h.ld8_fill(32, 9), h.nop_i())
+    for offset in range(1, 8):
+        emit(0x01, h.nop_m(), h.adds(32 + offset, offset, 0), h.nop_i())
+
+    # Repartitioning an unchanged SOF and changing SOR with zero rename bases
+    # cannot change any allocated value or NaT.  Every SOL value for SOF8 is
+    # observed before the final SOR0-to-SOR8 transition.
+    for sol, sor in ((*((sol, 0) for sol in range(9)), (8, 1))):
+        emit(0x01, h.alloc(31, 8, sol, sor), h.nop_i(), h.nop_i())
+        address = append_gr_check(h, bundles, address, 31, 85, failure)
+        address = append_tnat_check(h, bundles, address, 31, False, failure)
+        address = append_gr_check(h, bundles, address, 32, 0x66, failure)
+        address = append_tnat_check(h, bundles, address, 32, True, failure)
+        for offset in range(1, 8):
+            address = append_gr_check(
+                h, bundles, address, 32 + offset, offset, failure
+            )
+
+    # ALLOC is first in this group.  The following slot writes r127 using the
+    # new SOF96 name mapping, proving immediate same-group frame visibility.
+    emit(0x01, h.alloc(31, 96, 96, 0), h.adds(127, 0x77, 0), h.nop_i())
+    address = append_gr_check(h, bundles, address, 31, 85, failure)
+    address = append_tnat_check(h, bundles, address, 31, False, failure)
+    address = append_gr_check(h, bundles, address, 127, 0x77, failure)
+    address = append_gr_check(h, bundles, address, 32, 0x66, failure)
+    address = append_tnat_check(h, bundles, address, 32, True, failure)
+
+    return finish_checked_program(
+        h,
+        "ALLOC value/NaT preservation and same-group new-frame view",
+        bundles,
+        address,
+        failure=failure,
+        terminal=terminal,
+        data=(h.DataWord(0x1000, 0x66, 8),),
+        entry=entry,
+    )
+
+
+def alloc_mandatory_spill_program(h: ModuleType, system: ModuleType):
+    failure = 0x70000
+    terminal = 0x70030
+    entry = 0x10000
+    address = entry
+    bundles: list[object] = []
+    backing_base = 0x19f8
+    final_pointer = bspstore_dirty_expected_bsp(backing_base, 96)
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> None:
+        nonlocal address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+
+    def emit_movl(register: int, value: int) -> None:
+        nonlocal address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+
+    emit_movl(8, 0x5555555555555555)
+    emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(8, 85, 0), h.nop_i())
+    emit(0x01, h.nop_m(), h.mov_i_grar(64, 8), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(29, backing_base, 0), h.nop_i())
+    emit(0x01, h.mov_m_grar(18, 29), h.nop_i(), h.nop_i())
+
+    for dirty in range(1, 97):
+        emit(0x01, h.alloc(31, 1, 1, 0), h.nop_i(), h.nop_i())
+        emit(0x01, h.nop_m(), h.adds(9, 0x1000 + (dirty - 1) * 8, 0),
+             h.nop_i())
+        emit(0x01, h.ld8_fill(32, 9), h.nop_i(), h.nop_i())
+        call_ip = address
+        emit(0x11, h.nop_m(), h.nop_i(),
+             h.br_call(call_ip, call_ip + 0x10, 0))
+
+    # With all 96 physical registers occupied by dirty parent frames, SOF96
+    # can complete only after mandatory stores make the complete frame free.
+    emit(0x01, h.nop_m(), h.adds(8, 85, 0), h.nop_i())
+    emit(0x01, h.nop_m(), h.mov_i_grar(64, 8), h.nop_i())
+    emit(0x01, h.alloc(31, 96, 96, 0), h.nop_i(), h.nop_i())
+    address = append_gr_check(h, bundles, address, 31, 85, failure)
+    address = append_tnat_check(h, bundles, address, 31, False, failure)
+    emit(0x09, h.mov_m_argr(22, 18), h.mov_m_argr(23, 17), h.nop_i())
+    emit(0x01, h.nop_m(), h.adds(28, final_pointer, 0), h.nop_i())
+    address = append_gr_pair_check(h, bundles, address, 22, 28, failure)
+    address = append_gr_pair_check(h, bundles, address, 23, 28, failure)
+
+    backing_address = backing_base
+    for value in range(1, 97):
+        if ((backing_address >> 3) & 0x3f) == 0x3f:
+            backing_address += 8
+        emit(0x01, h.nop_m(), h.adds(10, backing_address, 0), h.nop_i())
+        emit(0x01, h.ld8(20, 10), h.nop_i(), h.nop_i())
+        address = append_gr_check(h, bundles, address, 20, value, failure)
+        backing_address += 8
+
+    emit(0x01, h.nop_m(), h.adds(10, 0x1bf8, 0), h.nop_i())
+    emit(0x01, h.ld8(20, 10), h.nop_i(), h.nop_i())
+    emit_movl(28, 0x5555555555555555)
+    address = append_gr_pair_check(h, bundles, address, 20, 28, failure)
+    emit(0x01, h.mov_m_argr(24, 19), h.nop_i(), h.nop_i())
+    emit_movl(28, 0xaaaaaaaa)
+    address = append_gr_pair_check(h, bundles, address, 24, 28, failure)
+
+    return (
+        finish_checked_program(
+            h,
+            "ALLOC mandatory spill of a complete 96-register dirty stack",
+            bundles,
+            address,
+            failure=failure,
+            terminal=terminal,
+            data=tuple(
+                h.DataWord(0x1000 + (value - 1) * 8, value, 8)
+                for value in range(1, 97)
+            ),
+            entry=entry,
+        ),
+        final_pointer,
+    )
+
+
+def alloc_illegal_effect_cases() -> tuple[
+        tuple[str, int, int, int, int, int], ...]:
+    return (
+        ("r0 destination", 0, 0, 0, 0, 0),
+        ("r32 outside SOF0", 32, 0, 0, 0, 0),
+        ("r127 outside SOF95", 127, 95, 95, 0, 0),
+        ("qp1", 1, 0, 0, 0, 1),
+        ("qp63", 1, 0, 0, 0, 63),
+        ("SOF97", 1, 97, 0, 0, 0),
+        ("SOF127", 1, 127, 0, 0, 0),
+        ("SOL1 above SOF0", 1, 0, 1, 0, 0),
+        ("SOL127 above SOF96", 1, 96, 127, 0, 0),
+        ("SOR8 above SOF7", 1, 7, 0, 1, 0),
+        ("SOR96 above SOF95", 1, 95, 0, 12, 0),
+        ("SOR104 above SOF96", 1, 96, 0, 13, 0),
+        ("SOR120 above SOF96", 1, 96, 0, 15, 0),
+    )
+
+
+def alloc_fault_program(h: ModuleType, label: str, r1: int, sof: int,
+                        sol: int, sor: int, qp: int):
+    fault_ip = 0x30
+    bundles = (
+        h.Bundle(0x10, 0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i()),
+        h.Bundle(0x20, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()),
+        h.Bundle(fault_ip, 0x01, h.alloc(r1, sof, sol, sor, qp),
+                 h.adds(20, 0x77, 0), h.nop_i()),
+        h.spin_bundle(h.IA64_GENERAL_EXCEPTION_VECTOR),
+    )
+    return h.Program(
+        f"ALLOC Illegal Operation: {label}", bundles,
+        h.IA64_GENERAL_EXCEPTION_VECTOR,
+    ), fault_ip
+
+
+def alloc_reserved_fault_program(h: ModuleType):
+    fault_ip = 0x60
+    branch_ip = 0x30
+    expected_cfm = rse_expected_cfm(8, 8, 8, 7, 95, 47)
+    bundles = (
+        h.Bundle(0x10, 0x01, h.alloc(31, 8, 8, 1), h.nop_i(), h.nop_i()),
+        h.Bundle(0x20, 0x03, h.nop_m(),
+                 h.cmp_rr(6, 7, 0, 0, "eq"), h.nop_i()),
+        h.Bundle(branch_ip, 0x11, h.nop_m(), h.nop_i(),
+                 h.br_loop("wtop", branch_ip, branch_ip + 0x10, qp=6)),
+        h.Bundle(0x40, 0x01, h.ssm(h.IA64_PSR_IC), h.nop_i(), h.nop_i()),
+        h.Bundle(0x50, 0x01, h.srlz_i(), h.nop_i(), h.nop_i()),
+        h.Bundle(fault_ip, 0x01, h.alloc(31, 8, 8, 0),
+                 h.adds(20, 0x77, 0), h.nop_i()),
+        h.spin_bundle(h.IA64_GENERAL_EXCEPTION_VECTOR),
+    )
+    return h.Program(
+        "ALLOC Reserved Register/Field on SOR change",
+        bundles,
+        h.IA64_GENERAL_EXCEPTION_VECTOR,
+    ), fault_ip, expected_cfm
+
+
+def test_alloc_effects(h: ModuleType, system: ModuleType, qemu: Path) -> str:
+    cases = alloc_legal_effect_cases()
+    for shard, start in enumerate(range(0, len(cases), 96), 1):
+        selected = cases[start:start + 96]
+        program = alloc_legal_matrix_program(h, system, selected, shard)
+        snapshot = h.run_program(qemu, program, compact_loader=True)
+        if (snapshot.gr[14] != 1 or snapshot.cfm != 0 or
+                snapshot.rse_bsp != 0x1800 or
+                snapshot.rse_bspstore != 0x1800):
+            raise AssertionError(
+                "ALLOC legal shard {} failed: marker={} CFM=0x{:x} "
+                "BSP/BSPSTORE=0x{:x}/0x{:x}".format(
+                    shard, snapshot.gr[14], snapshot.cfm,
+                    snapshot.rse_bsp, snapshot.rse_bspstore,
+                )
+            )
+
+    preserved = h.run_program(
+        qemu, alloc_preservation_program(h), compact_loader=True
+    )
+    if (preserved.gr[14] != 1 or
+            preserved.cfm != rse_expected_cfm(96, 96, 0) or
+            preserved.gr[31] != 85 or preserved.gr[32] != 0x66 or
+            preserved.gr[127] != 0x77):
+        raise AssertionError(
+            "ALLOC preservation failed: marker={} CFM=0x{:x} "
+            "r31/r32/r127=0x{:x}/0x{:x}/0x{:x} NaT=0x{:x}:0x{:x}".format(
+                preserved.gr[14], preserved.cfm, preserved.gr[31],
+                preserved.gr[32], preserved.gr[127],
+                preserved.nat_high, preserved.nat_low,
+            )
+        )
+
+    spill_program, final_pointer = alloc_mandatory_spill_program(h, system)
+    spilled = h.run_program(qemu, spill_program, compact_loader=True)
+    if (spilled.gr[14] != 1 or
+            spilled.cfm != rse_expected_cfm(96, 96, 0) or
+            spilled.rse_bsp != final_pointer or
+            spilled.rse_bspstore != final_pointer or
+            spilled.gr[31] != 85 or (spilled.nat_low & (1 << 31))):
+        raise AssertionError(
+            "ALLOC mandatory spill failed: marker={} CFM=0x{:x} "
+            "BSP/BSPSTORE=0x{:x}/0x{:x} r31=0x{:x} NaT=0x{:x}".format(
+                spilled.gr[14], spilled.cfm, spilled.rse_bsp,
+                spilled.rse_bspstore, spilled.gr[31], spilled.nat_low,
+            )
+        )
+
+    for case in alloc_illegal_effect_cases():
+        label, r1, sof, sol, sor, qp = case
+        program, fault_ip = alloc_fault_program(
+            h, label, r1, sof, sol, sor, qp
+        )
+        faulted = h.run_program(
+            qemu, program, compact_loader=True, preserve_fault_slot=True
+        )
+        if (faulted.ip != h.IA64_GENERAL_EXCEPTION_VECTOR or
+                faulted.exception_kind != "illegal-operation" or
+                faulted.cr_iip != fault_ip or faulted.cr_isr != 0 or
+                faulted.cfm != 0 or faulted.rse_bsp != 0 or
+                faulted.rse_bspstore != 0 or faulted.rse_bspload != 0 or
+                faulted.gr[20] != 0):
+            raise AssertionError(
+                "ALLOC {} fault mismatch: ip=0x{:x} kind={} IIP/ISR="
+                "0x{:x}/0x{:x} CFM=0x{:x} pointers=0x{:x}/0x{:x}/"
+                "0x{:x} suffix={}".format(
+                    label, faulted.ip, faulted.exception_kind,
+                    faulted.cr_iip, faulted.cr_isr, faulted.cfm,
+                    faulted.rse_bsp, faulted.rse_bspstore,
+                    faulted.rse_bspload, faulted.gr[20],
+                )
+            )
+
+    reserved_program, fault_ip, expected_cfm = \
+        alloc_reserved_fault_program(h)
+    reserved = h.run_program(
+        qemu, reserved_program, compact_loader=True,
+        preserve_fault_slot=True,
+    )
+    if (reserved.ip != h.IA64_GENERAL_EXCEPTION_VECTOR or
+            reserved.exception_kind != "general-exception" or
+            reserved.cr_iip != fault_ip or
+            (reserved.cr_isr & 0xffff) != 0x30 or
+            reserved.cfm != expected_cfm or reserved.rse_bsp != 0 or
+            reserved.rse_bspstore != 0 or reserved.rse_bspload != 0 or
+            reserved.gr[20] != 0):
+        raise AssertionError(
+            "ALLOC SOR-change reserved fault mismatch: ip=0x{:x} kind={} "
+            "IIP/ISR=0x{:x}/0x{:x} CFM=0x{:x} pointers=0x{:x}/"
+            "0x{:x}/0x{:x} suffix={}".format(
+                reserved.ip, reserved.exception_kind, reserved.cr_iip,
+                reserved.cr_isr, reserved.cfm, reserved.rse_bsp,
+                reserved.rse_bspstore, reserved.rse_bspload,
+                reserved.gr[20],
+            )
+        )
+
+    return (
+        f"{len(cases)} legal vectors cover SOF0-96, SOL0-96, SOR0-96, "
+        "and r1-r127 with exact CFM/PFS/NaT effects; unchanged-frame "
+        "values, same-group SOF96 visibility, exact 96-register mandatory "
+        "spill traffic, thirteen Illegal Operations, and one rename-base "
+        "Reserved Register/Field fault pass"
+    )
+
+
 def application_register_field_fault_cases() -> tuple[
         tuple[int, int, str], ...]:
     cases: list[tuple[int, int, str]] = []
@@ -3095,6 +3510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("complete named AR field semantics", lambda: test_application_register_fields(harness, system, args.qemu.resolve())),
         ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
         ("RSE control effects", lambda: test_rse_control_effects(harness, system, args.qemu.resolve())),
+        ("ALLOC frame and spill effects", lambda: test_alloc_effects(harness, system, args.qemu.resolve())),
         ("CCV compare-exchange effects", lambda: test_application_register_ccv_effect(harness, system, data_plane, args.qemu.resolve())),
         ("UNAT spill/fill effects", lambda: test_application_register_unat_effect(harness, data_plane, args.qemu.resolve())),
         ("complete CR selector space", lambda: test_control_register_selectors(harness, system, args.qemu.resolve())),
