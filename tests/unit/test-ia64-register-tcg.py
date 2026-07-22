@@ -344,6 +344,21 @@ RSE_SYNCHRONOUS_BACKING_STORE_SWITCH_IMPLEMENTATION_ROWS = (
     "cpu.register.ar.64",
     "cpu.register.scalar.cfm",
 )
+RSE_INTERRUPTED_BACKING_STORE_SWITCH_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_alloc",
+    "cpu.opcode.ia64_op_cover",
+    "cpu.opcode.ia64_op_flushrs",
+    "cpu.opcode.ia64_op_loadrs",
+    "cpu.opcode.ia64_op_rfi",
+    "cpu.register.ar.16",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+    "cpu.register.ar.64",
+    "cpu.register.cr.23",
+    "cpu.register.scalar.cfm",
+    "cpu.register.scalar.psr",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -465,6 +480,9 @@ def validate_contract(root: Path) -> str:
         "RSE-010-SYNCHRONOUS-BACKING-STORE-SWITCH": list(
             RSE_SYNCHRONOUS_BACKING_STORE_SWITCH_IMPLEMENTATION_ROWS
         ),
+        "RSE-010-INTERRUPTED-BACKING-STORE-SWITCH": list(
+            RSE_INTERRUPTED_BACKING_STORE_SWITCH_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -513,12 +531,15 @@ def validate_contract(root: Path) -> str:
         "RSE-010-SYNCHRONOUS-BACKING-STORE-SWITCH": [
             "test_rse_synchronous_context_switch",
         ],
+        "RSE-010-INTERRUPTED-BACKING-STORE-SWITCH": [
+            "test_rse_interrupted_context_switch",
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 43:
-        raise AssertionError("register tranche must contain forty-three cases")
+    if not isinstance(cases, list) or len(cases) != 44:
+        raise AssertionError("register tranche must contain forty-four cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -552,6 +573,8 @@ def validate_contract(root: Path) -> str:
     register_source = Path(__file__).read_text(encoding="utf-8")
     if "def test_rse_synchronous_context_switch(" not in register_source:
         raise AssertionError("missing synchronous backing-store switch probe")
+    if "def test_rse_interrupted_context_switch(" not in register_source:
+        raise AssertionError("missing interrupted backing-store switch probe")
     if len(set(GR_VALUES)) != 127 or GR_VALUES[-1] != 127:
         raise AssertionError("GR matrix does not cover r1-r127 exactly")
     if len(set(FR_INDICES)) != 126 or FR_INDICES[-1] != 127:
@@ -634,7 +657,8 @@ def validate_contract(root: Path) -> str:
         "selectors, interruption-access states, complete nine-register AR "
         "and named CR field partitions, 6,208 dirty/RNAT BSPSTORE rebases "
         "plus exact ALLOC, COVER, CLRRRB, LOADRS, and 96-register FLUSHRS "
-        "effects and ALLOC/FLUSHRS/LOADRS DTC plus thirteen mandatory "
+        "effects, exact synchronous and four-boundary interrupted backing-"
+        "store switches, and ALLOC/FLUSHRS/LOADRS DTC plus thirteen mandatory "
         "RSE protection fault/RFI retries, thirteen protection-to-Data-Debug "
         "priority chains, two PSR.dd one-reference suppression retries, and "
         "six short-VHPT hit/Data-TLB/VHPT-fault paths, "
@@ -2605,6 +2629,326 @@ def test_rse_synchronous_context_switch(
         "the exact synchronous RSC/BSP/PFS/FLUSHRS/lazy/RNAT/INVALA switch "
         "sequence, preserving distinct register payloads plus completed and "
         "partial RNAT state without cross-context aliasing"
+    )
+
+
+def rse_interrupted_context_switch_program(
+        h: ModuleType, system: ModuleType,
+        frame_size: int, start_slot: int):
+    """Switch backing stores in a BREAK handler and return through RFI."""
+    if not 0 <= frame_size <= 96 or not 0 <= start_slot <= 62:
+        raise ValueError("interrupted RSE context boundary is out of range")
+
+    entry = 0x10000
+    failure = 0x50000
+    terminal = 0x50030
+    break_vector = system.BREAK_VECTOR
+    user_base = 0x7000 + start_slot * 8
+    kernel_base = 0x9000 + start_slot * 8
+    kernel_bsp = kernel_base + 8 * (
+        frame_size + (start_slot + frame_size) // 63
+    )
+    load_span = kernel_bsp - kernel_base
+    expected_cfm = rse_expected_cfm(frame_size, frame_size, 0)
+    expected_ifs = (1 << 63) | expected_cfm
+    source_addresses = tuple(0x1000 + index * 8
+                             for index in range(frame_size))
+    values = tuple(0x20 + index for index in range(frame_size))
+    nats = tuple(index % 2 == 0 for index in range(frame_size))
+    old_rnat = sum(1 << bit for bit in range(start_slot)
+                   if bit % 3 == 1)
+    kernel_registers = rse_backing_register_addresses(
+        kernel_base, frame_size
+    )
+    user_registers = rse_backing_register_addresses(user_base, frame_size)
+    user_sentinels = tuple(0x500 + index for index in range(frame_size))
+
+    collection_bits: dict[int, list[tuple[int, bool]]] = {}
+    for address, nat in zip(kernel_registers, nats):
+        collection = (address & ~0x1ff) | 0x1f8
+        collection_bits.setdefault(collection, []).append(
+            (((address >> 3) & 0x3f), nat)
+        )
+    completed_collections = {
+        address: bits for address, bits in collection_bits.items()
+        if address < kernel_bsp
+    }
+    partial_bits = tuple(
+        item for address, bits in collection_bits.items()
+        if address >= kernel_bsp for item in bits
+    )
+
+    bundles: list[object] = []
+    address = entry
+    check_index = 0
+
+    def emit(template: int, slot0: int, slot1: int, slot2: int) -> int:
+        nonlocal address
+        emitted = address
+        bundles.append(h.Bundle(address, template, slot0, slot1, slot2))
+        address += 0x10
+        return emitted
+
+    def emit_movl(register: int, value: int) -> int:
+        nonlocal address
+        emitted = address
+        bundles.append(system.movl_bundle(h, address, register, value))
+        address += 0x10
+        return emitted
+
+    def check(register: int, expected: int) -> None:
+        nonlocal address, check_index
+        check_index += 1
+        emit(0x01, h.nop_m(), h.adds(15, check_index, 0), h.nop_i())
+        if -128 <= expected <= 127:
+            address = append_gr_check(
+                h, bundles, address, register, expected, failure
+            )
+        else:
+            emit_movl(28, expected)
+            address = append_gr_pair_check(
+                h, bundles, address, register, 28, failure
+            )
+
+    def check_nat(register: int, expected: bool) -> None:
+        nonlocal address, check_index
+        check_index += 1
+        emit(0x01, h.nop_m(), h.adds(15, check_index, 0), h.nop_i())
+        address = append_tnat_check(
+            h, bundles, address, register, expected, failure
+        )
+
+    def check_extracted(register: int, position: int, length: int,
+                        expected: int) -> None:
+        if length <= 0:
+            return
+        emit(0x01, h.nop_m(),
+             h.extr(11, register, position, length), h.nop_i())
+        check(11, expected)
+
+    # Establish an interrupted context with a complete frame, a disjoint
+    # backing store, literal values, and an alternating NaT image.
+    emit_movl(8, user_base)
+    emit(0x01, h.mov_m_grar(18, 8), h.nop_i(), h.nop_i())
+    emit_movl(8, old_rnat)
+    emit(0x01, h.mov_m_grar(19, 8), h.nop_i(), h.nop_i())
+    emit(0x01, h.alloc(31, frame_size, frame_size, 0),
+         h.nop_i(), h.nop_i())
+    # Select UNAT per load: 96 sources wrap its 64 address-selected bits, so
+    # an aggregate image must not accidentally add duplicate selectors.
+    for register, source, nat in zip(range(32, 32 + frame_size),
+                                     source_addresses, nats):
+        emit_movl(8, (1 << ((source >> 3) & 0x3f)) if nat else 0)
+        emit(0x01, h.mov_m_grar(36, 8), h.nop_i(), h.nop_i())
+        emit(0x01, h.nop_m(), h.adds(9, source, 0), h.nop_i())
+        emit(0x01, h.ld8_fill(register, 9), h.nop_i(), h.nop_i())
+
+    emit_movl(8, h.IA64_PSR_IC)
+    emit(0x01, h.mov_gr_to_psr_l(8), h.nop_i(), h.nop_i())
+    emit(0x01, h.srlz_i(), h.nop_i(), h.nop_i())
+    break_ip = emit(0x01, system.break_m(0x31), h.nop_i(), h.nop_i())
+    continuation = address
+
+    # The returning context must regain every logical value/NaT.  It must
+    # also observe the exact kernel backing image while the original backing
+    # store remains untouched.
+    emit(0x01, h.mov_m_argr(26, 19), h.nop_i(), h.nop_i())
+    check(22, 1)
+    for register, value, nat in zip(range(32, 32 + frame_size),
+                                    values, nats):
+        check_nat(register, nat)
+        if not nat:
+            check(register, value)
+    for backing, value in zip(kernel_registers, values):
+        emit_movl(8, backing)
+        emit(0x01, h.ld8(10, 8), h.nop_i(), h.nop_i())
+        check(10, value)
+    for backing, sentinel in zip(user_registers, user_sentinels):
+        emit_movl(8, backing)
+        emit(0x01, h.ld8(10, 8), h.nop_i(), h.nop_i())
+        check(10, sentinel)
+    for collection, bits in sorted(completed_collections.items()):
+        first = min(bit for bit, _ in bits)
+        last = max(bit for bit, _ in bits)
+        expected = sum(1 << (bit - first) for bit, nat in bits if nat)
+        emit_movl(8, collection)
+        emit(0x01, h.ld8(10, 8), h.nop_i(), h.nop_i())
+        check_extracted(10, first, last - first + 1, expected)
+    if partial_bits:
+        first = min(bit for bit, _ in partial_bits)
+        last = max(bit for bit, _ in partial_bits)
+        expected = sum(1 << (bit - first)
+                       for bit, nat in partial_bits if nat)
+        check_extracted(25, first, last - first + 1, expected)
+    if start_slot:
+        check_extracted(26, 0, start_slot, old_rnat)
+
+    bundles.append(h.Bundle(
+        address, 0x01, h.nop_m(), h.adds(14, 1, 0), h.nop_i()
+    ))
+    address += 0x10
+    bundles.append(h.Bundle(
+        address, 0x11, h.nop_m(), h.nop_i(),
+        h.br_cond(address, terminal),
+    ))
+    bundles.append(h.Bundle(
+        failure, 0x01, h.nop_m(), h.adds(14, 0, 0), h.nop_i()
+    ))
+    bundles.append(h.Bundle(
+        failure + 0x10, 0x11, h.nop_m(), h.nop_i(),
+        h.br_cond(failure + 0x10, terminal),
+    ))
+    bundles.append(h.spin_bundle(terminal))
+
+    # Execute Intel SDM 6.11.1 exactly in the interruption handler.
+    handler = break_vector
+
+    def handler_emit(template: int, slot0: int,
+                     slot1: int, slot2: int) -> int:
+        nonlocal handler
+        emitted = handler
+        bundles.append(h.Bundle(handler, template, slot0, slot1, slot2))
+        handler += 0x10
+        return emitted
+
+    def handler_movl(register: int, value: int) -> int:
+        nonlocal handler
+        emitted = handler
+        bundles.append(system.movl_bundle(h, handler, register, value))
+        handler += 0x10
+        return emitted
+
+    handler_emit(0x09, h.mov_m_argr(16, 16),
+                 h.mov_m_argr(27, 17), h.mov_pfs_to_gr(17))
+    cover_ip = handler_emit(
+        0x11, h.nop_m(), h.nop_i(), 0x10000000
+    )
+    handler_emit(0x01, h.mov_crgr(18, h.IA64_CR_IFS),
+                 h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.mov_m_grar(16, 0), h.nop_i(), h.nop_i())
+    handler_emit(0x09, h.mov_m_argr(19, 18),
+                 h.mov_m_argr(20, 19), h.nop_i())
+    handler_movl(8, kernel_base)
+    handler_emit(0x01, h.mov_m_grar(18, 8), h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.mov_m_argr(21, 17), h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.mov_m_grar(16, 0), h.nop_i(), h.nop_i())
+
+    # Force an externally visible kernel-backing image, then execute all
+    # eight return steps from SDM 6.11.2, including the exact loadrs span.
+    flushrs_ip = handler_emit(
+        0x01, 0x0c << 27, h.nop_i(), h.nop_i()
+    )
+    handler_emit(0x01, h.mov_m_argr(25, 19), h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.alloc(31, 0, 0, 0), h.nop_i(), h.nop_i())
+    handler_movl(23, load_span << 16)
+    handler_emit(0x01, h.mov_m_grar(16, 23), h.nop_i(), h.nop_i())
+    loadrs_ip = handler_emit(
+        0x01, 0x0a << 27, h.nop_i(), h.nop_i()
+    )
+    handler_emit(0x01, h.mov_m_grar(18, 19), h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.mov_m_grar(19, 20), h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.nop_m(), h.mov_gr_to_pfs(17), h.nop_i())
+    handler_emit(0x01, h.mov_grcr(h.IA64_CR_IFS, 18),
+                 h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.mov_m_grar(16, 16), h.nop_i(), h.nop_i())
+    handler_movl(24, continuation)
+    handler_emit(0x01, h.mov_grcr(h.IA64_CR_IIP, 24),
+                 h.nop_i(), h.nop_i())
+    handler_emit(0x01, h.nop_m(), h.adds(22, 1, 0), h.nop_i())
+    rfi_ip = handler_emit(0x11, h.nop_m(), h.nop_i(), h.rfi())
+
+    data: list[object] = [
+        *(h.DataWord(source, value, 8)
+          for source, value in zip(source_addresses, values)),
+        *(h.DataWord(backing, 0xdead0000 + index, 8)
+          for index, backing in enumerate(kernel_registers)),
+        *(h.DataWord(backing, sentinel, 8)
+          for backing, sentinel in zip(user_registers, user_sentinels)),
+        *(h.DataWord(collection, 0, 8)
+          for collection in completed_collections),
+    ]
+    return (
+        h.Program(
+            "interrupted RSE switch SOF {} BSP slot {}".format(
+                frame_size, start_slot
+            ),
+            tuple(bundles), terminal, tuple(data), entry=entry,
+        ),
+        (break_ip, cover_ip, flushrs_ip, loadrs_ip),
+        rfi_ip,
+        expected_cfm,
+        expected_ifs,
+        user_base,
+        kernel_bsp,
+        old_rnat,
+        values,
+        nats,
+    )
+
+
+def test_rse_interrupted_context_switch(
+        h: ModuleType, system: ModuleType, qemu: Path) -> str:
+    boundaries = ((0, 5), (1, 62), (63, 0), (96, 5))
+    for frame_size, start_slot in boundaries:
+        (program, direct_trace_ips, rfi_ip, expected_cfm, expected_ifs,
+         user_base, kernel_bsp, old_rnat, values, nats) = (
+            rse_interrupted_context_switch_program(
+                h, system, frame_size, start_slot
+            )
+        )
+        snapshot = h.run_program(
+            qemu,
+            program,
+            compact_loader=True,
+            typed_direct_trace_ips=direct_trace_ips,
+            typed_rfi_traces=(rfi_ip,),
+            one_bundle_per_tb=True,
+        )
+        if snapshot.gr[14] != 1 or snapshot.ip != program.terminal_ip:
+            raise AssertionError(
+                "interrupted backing-store switch failed for SOF {}/slot {}: "
+                "ip=0x{:x} marker={} check={}".format(
+                    frame_size, start_slot, snapshot.ip, snapshot.gr[14],
+                    snapshot.gr[15],
+                )
+            )
+        if (snapshot.cfm != expected_cfm or snapshot.rse_base != 0 or
+                snapshot.rse_bsp != user_base or
+                snapshot.rse_bspstore != user_base or
+                snapshot.rse_bspload != user_base):
+            raise AssertionError(
+                "interrupted context restored the wrong frame/RSE image for "
+                "SOF {}/slot {}: CFM=0x{:x} RSE={}/0x{:x}/0x{:x}/0x{:x}"
+                .format(
+                    frame_size, start_slot, snapshot.cfm,
+                    snapshot.rse_base, snapshot.rse_bsp,
+                    snapshot.rse_bspstore, snapshot.rse_bspload,
+                )
+            )
+        if (snapshot.gr[16] != 0 or snapshot.gr[17] != 0 or
+                snapshot.gr[18] != expected_ifs or
+                snapshot.gr[19] != user_base or
+                snapshot.gr[20] != old_rnat or
+                snapshot.gr[21] != kernel_bsp or
+                snapshot.gr[22] != 1 or snapshot.gr[27] != user_base):
+            raise AssertionError(
+                "interrupted switch did not preserve its exact eight-step "
+                "context record for SOF {}/slot {}".format(
+                    frame_size, start_slot
+                )
+            )
+        for register, value, nat in zip(
+                range(32, 32 + frame_size), values, nats):
+            if not nat and snapshot.gr[register] != value:
+                raise AssertionError(
+                    "interrupted switch lost r{} for SOF {}/slot {}"
+                    .format(register, frame_size, start_slot)
+                )
+    return (
+        "four exact BREAK-handler switches cover empty, immediate-RNAT, "
+        "63-register collection, and maximum 96-register frames through "
+        "the SDM 6.11.1/6.11.2 RSC/PFS/COVER/IFS/BSPSTORE/RNAT/LOADRS/RFI "
+        "sequence, preserving disjoint backing images, values, and NaTs"
     )
 
 
@@ -5656,6 +6000,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("BSPSTORE/BSP rebase effects", lambda: test_application_register_bspstore_rebase(harness, system, args.qemu.resolve())),
         ("RSE control effects", lambda: test_rse_control_effects(harness, system, args.qemu.resolve())),
         ("RSE synchronous backing-store switch", lambda: test_rse_synchronous_context_switch(harness, system, data_plane, args.qemu.resolve())),
+        ("RSE interrupted backing-store switch", lambda: test_rse_interrupted_context_switch(harness, system, args.qemu.resolve())),
         ("RSE mandatory fault/retry", lambda: test_rse_mandatory_fault_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory protection fault/retry", lambda: test_rse_mandatory_protection_fault_retry(harness, system, args.qemu.resolve())),
         ("RSE mandatory Data Debug priority/retry", lambda: test_rse_mandatory_data_debug_priority_retry(harness, system, args.qemu.resolve())),

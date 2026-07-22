@@ -114,18 +114,27 @@ exact spilled word, restored value and NaT, terminal CFM, BOF, BSP, BSPSTORE,
 and backing-store load pointer. A descendant CHK.A must recover rather than
 falsely hit the parent tag after physical-stack wrap, while Intel's permitted
 earlier pessimistic eviction remains valid.
+The register tranche also executes Intel Volume 2 sections 6.11.1 and 6.11.2
+as one interrupted-context oracle. Four BREAK handlers cover an empty frame,
+an immediate RNAT slot, one complete RNAT collection, and the maximum
+96-register frame with both completed and partial collections. Each handler
+saves the interrupted RSE record, uses a disjoint equal-offset backing store,
+executes the exact COVER/FLUSHRS/LOADRS switch-away and return sequences, and
+returns through typed RFI. The continuation verifies every defined backing
+word and RNAT bit, every logical value and NaT, the restored CFM/BOF/RSE
+pointers, and that the interrupted backing memory was never modified.
 Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
 matrices execute. On the 2026-07-22 default four-worker public gate after the
-physical-stack/RSE checkpoint, `test-ia64-system-tcg` took 47.41 seconds,
-`test-ia64-full-tcg` 49.09 seconds, and `test-ia64-register-tcg` 45.49
-seconds. The established data-plane shard passed 637 subtests in 173.36
-seconds, checkpoint 28 passed 42 in 11.99 seconds, checkpoint 29 passed 206
-in 56.06 seconds, and checkpoint 30 passed 96 in 36.01 seconds; all 53
-selected tests passed in 193.328 seconds of report wall time. The former
+interrupted-context RSE checkpoint, `test-ia64-system-tcg` took 47.53 seconds,
+`test-ia64-full-tcg` 49.26 seconds, and `test-ia64-register-tcg` 47.87
+seconds. The established data-plane shard passed 637 subtests in 173.32
+seconds, checkpoint 28 passed 42 in 11.92 seconds, checkpoint 29 passed 206
+in 56.25 seconds, and checkpoint 30 passed 96 in 36.23 seconds; all 53
+selected tests passed in 193.407 seconds of report wall time. The former
 single 180-second registration limit was an infrastructure timeout once the
 combined inventory reached 679 programs, not a semantic hang. The current
 981-program inventory remains deliberately split by evidence ownership. The

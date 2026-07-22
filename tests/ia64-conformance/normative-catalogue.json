@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 29,
+  "catalogue_revision": 30,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2575,6 +2575,26 @@
       "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE before the next word; either walker fault preserves that exact prefix.",
       "restart_rule": "The handler observes the issuing IIP, original mandatory-reference IFA, ISR.rs and access direction, exact short-format IHA and RR-derived ITIR, and IFS.v zero; after installing the missing entry or backing translation, RFI retries from the exact poisoned prefix.",
       "permitted_results": ["FLUSHRS and LOADRS each complete directly through one valid short-format VHPT hit", "FLUSHRS and LOADRS each raise and repair one Data TLB fault for an invalid short-format entry without replay", "FLUSHRS and LOADRS each raise and repair one VHPT Translation fault for missing VHPT-backing translation without replay"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-010-INTERRUPTED-BACKING-STORE-SWITCH",
+      "requirement_ids": ["RSE-010", "RSE-005", "RSE-006", "RSE-009", "RSE-016"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "6.11.1", "printed_pages": ["2:148"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "To switch from the backing store of an interrupted context to a new backing store"},
+      "operation": {"kind": "interrupted-rse-backing-store-switch", "selector": "empty, immediate-RNAT, complete-collection, and maximum-frame boundaries over two disjoint backing stores", "encoding": "BREAK interruption; save RSC/BSP/PFS; COVER; save IFS; enter enforced-lazy mode; save BSPSTORE/RNAT; install the kernel BSPSTORE; observe BSP; FLUSHRS; zero ALLOC; exact LOADRS; restore BSPSTORE/RNAT/PFS/IFS/RSC; typed RFI"},
+      "legal_inputs": ["CPL0 execution with PSR.ic enabled, RSC.mode zero, and a complete SOF=SOL frame", "The interrupted and handler backing stores are aligned, mapped, disjoint, and have equal 512-byte offsets", "Frame/offset pairs (0,5), (1,62), (63,0), and (96,5) select zero traffic, an immediate RNAT word, one complete RNAT collection, and the maximum implemented frame", "Alternating register NaTs and literal data words are established before the interruption"],
+      "privilege": {"levels": [0], "rule": "The architectural sequence is valid for an interrupted context; this exact oracle executes at CPL0 so CR.IFS, CR.IIP, and all application-register operations are legal"},
+      "state_read": ["Interrupted RSC, BSP, PFS, BSPSTORE, RNAT, CFM, stacked values, and stacked NaTs", "COVER-produced IFS", "Handler-context BSP after BSPSTORE replacement", "Completed and partial handler-backing RNAT images"],
+      "state_written": ["Disjoint handler backing-store register and RNAT words", "Saved interrupted RSC/BSP/PFS/IFS/BSPSTORE/RNAT record", "Temporary handler BSPSTORE/BSP/load-pointer and LOADRS state", "Restored interrupted CFM, physical mapping, values, NaTs, BSP, BSPSTORE, and load pointer"],
+      "predication": {"applies": false, "rule": "BREAK, COVER, FLUSHRS, LOADRS, and RFI are unpredicated; the selected ALLOC and register moves use p0"},
+      "nat_behavior": "COVER makes every current-frame NaT dirty. FLUSHRS places completed collections in handler memory and retains the partial collection in RNAT; LOADRS reconstructs that image before the saved interrupted BSPSTORE and RNAT are restored and RFI makes the frame current again.",
+      "possible_faults": ["The intentional BREAK interruption only; all handler and RSE memory references are mapped and accessible"],
+      "fault_priority": ["BREAK interruption state", "complete-frame COVER", "BSPSTORE replacement and dirty-span derivation", "FLUSHRS backing-store stores", "LOADRS legality and loads", "saved control-state restoration", "RFI frame restoration", "continuation execution"],
+      "committed_prefix": "The handler saves the interruption context before replacing BSPSTORE; FLUSHRS commits the covered frame only to the handler backing store, LOADRS reconstitutes the exact span, and the original backing store remains untouched until its mapping is restored.",
+      "restart_rule": "The handler replaces CR.IIP with the aligned post-BREAK continuation only after restoring PFS, IFS, RSC, BSPSTORE, and RNAT; typed RFI restores the saved CFM and original physical phase exactly once.",
+      "permitted_results": ["All four handlers execute the exact eight-step switch-away and eight-step return sequences and reach their declared continuation", "The handler backing store contains every exact register word and each defined completed/partial RNAT bit while the interrupted backing store remains unchanged", "Every non-NaT value and every stacked NaT state returns in the original logical register", "Final CFM and RSE.BOF match the interrupted frame; BSP, BSPSTORE, and BspLoad all equal the interrupted base"],
       "required_evidence": "E2"
     },
     {
