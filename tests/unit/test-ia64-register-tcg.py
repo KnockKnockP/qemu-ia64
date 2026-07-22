@@ -407,6 +407,9 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-DATA-NESTED-RETRY": list(
             RSE_MANDATORY_DATA_NESTED_IMPLEMENTATION_ROWS
         ),
+        "RSE-013-DEFERRED-DTC-FAULT-MIGRATION": list(
+            RSE_MANDATORY_DTC_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -443,12 +446,15 @@ def validate_contract(root: Path) -> str:
         "RSE-007-MANDATORY-DATA-NESTED-RETRY": [
             "test_rse_mandatory_data_nested_tlb_retry",
         ],
+        "RSE-013-DEFERRED-DTC-FAULT-MIGRATION": [
+            "test_rse_mandatory_fault_retry",
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 39:
-        raise AssertionError("register tranche must contain thirty-nine cases")
+    if not isinstance(cases, list) or len(cases) != 40:
+        raise AssertionError("register tranche must contain forty cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -562,6 +568,7 @@ def validate_contract(root: Path) -> str:
         "priority chains, two PSR.dd one-reference suppression retries, and "
         "six short-VHPT hit/Data-TLB/VHPT-fault paths, "
         "four mandatory-RSE Data-Nested outer-handler retries, "
+        "three fresh-process deferred-DTC-fault RSE migrations, "
         "exact PFS call/return metadata, CCV effects across twenty cmpxchg "
         "cases, all 64 UNAT spill/fill selectors, and "
         "interruption/RFI bank transitions"
@@ -3474,11 +3481,76 @@ def test_rse_mandatory_fault_retry(h: ModuleType, system: ModuleType,
             )
         )
 
+    # A deferred mandatory fault is not complete merely because its handler
+    # repaired the translation.  Persist the handler-visible RFI boundary,
+    # restore it in a fresh QEMU process, and require the retry to preserve the
+    # already committed (and now poisoned) prefix.  Comparing against the
+    # independently checked non-migrated executions above also detects lost
+    # RSE pointers, translation state, interruption state, or suffix traffic.
+    migration_cases = (
+        (
+            "FLUSHRS", flush_program, flush_rfi, flushed,
+            (flush_ip, 0x8000, write_isr, 0, 0x8000),
+        ),
+        (
+            "LOADRS", load_program, load_rfi, loaded,
+            (load_ip, 0x7ff8, read_isr, 0, 0x8000),
+        ),
+        (
+            "ALLOC", alloc_program, alloc_rfi, allocated,
+            (alloc_ip, 0x8000, write_isr, 0, 0x8000),
+        ),
+    )
+    for label, program, handler_rfi, baseline, captured_fault in \
+            migration_cases:
+        migrated = h.run_savevm_migration(
+            qemu,
+            program,
+            checkpoint_ip=handler_rfi,
+            preserve_fault_slot=True,
+            compact_loader=True,
+        )
+        restored_differences = h.successful_snapshot_differences(
+            migrated.checkpoint, migrated.restored
+        )
+        if restored_differences:
+            raise AssertionError(
+                "{} deferred-fault restore changed its architectural "
+                "checkpoint:\n  {}".format(
+                    label, "\n  ".join(restored_differences[:16])
+                )
+            )
+        if (migrated.checkpoint.ip != handler_rfi or
+                migrated.checkpoint.gr[20:25] != captured_fault):
+            raise AssertionError(
+                "{} migration checkpoint lost its repaired-fault boundary: "
+                "IP=0x{:x} captures={}".format(
+                    label, migrated.checkpoint.ip,
+                    tuple(hex(value)
+                          for value in migrated.checkpoint.gr[20:25]),
+                )
+            )
+        h._require_typed_rfi_trace(
+            migrated.destination_trace, handler_rfi
+        )
+        final_differences = h.successful_snapshot_differences(
+            baseline, migrated.final
+        )
+        if final_differences:
+            raise AssertionError(
+                "{} fresh-process RFI retry diverged from its exact "
+                "non-migrated result:\n  {}".format(
+                    label, "\n  ".join(final_differences[:16])
+                )
+            )
+
     return (
         "ALLOC, FLUSHRS, and LOADRS each cross a 4 KiB RSE translation "
         "boundary, expose exact IIP/IFA/ISR.rs and committed BSPSTORE "
         "prefix state, install the missing DTC entry in the physical "
-        "handler, and RFI-retry without replaying poisoned committed words"
+        "handler, RFI-retry without replaying poisoned committed words, "
+        "and reproduce the exact result after fresh-process migration at "
+        "the repaired deferred-fault boundary"
     )
 
 

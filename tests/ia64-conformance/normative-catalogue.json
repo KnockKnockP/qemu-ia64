@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 11,
+  "catalogue_revision": 12,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2235,6 +2235,26 @@
       "committed_prefix": "Every successful mandatory register or RNAT word advances BSPSTORE before the next word; either walker fault preserves that exact prefix.",
       "restart_rule": "The handler observes the issuing IIP, original mandatory-reference IFA, ISR.rs and access direction, exact short-format IHA and RR-derived ITIR, and IFS.v zero; after installing the missing entry or backing translation, RFI retries from the exact poisoned prefix.",
       "permitted_results": ["FLUSHRS and LOADRS each complete directly through one valid short-format VHPT hit", "FLUSHRS and LOADRS each raise and repair one Data TLB fault for an invalid short-format entry without replay", "FLUSHRS and LOADRS each raise and repair one VHPT Translation fault for missing VHPT-backing translation without replay"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-013-DEFERRED-DTC-FAULT-MIGRATION",
+      "requirement_ids": ["RSE-013", "RSE-004", "RSE-005", "RSE-007", "RSE-009"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "6.6", "printed_pages": ["2:144", "2:145", "2:146"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "Mandatory RSE stores occur in the context of alloc and flushrs instructions only. Any faults raised by these instructions are delivered on the issuing instruction. Faults raised by mandatory RSE loads caused by a loadrs are delivered on the issuing instruction."},
+      "operation": {"kind": "deferred-mandatory-rse-fault-migration", "selector": "ALLOC and FLUSHRS mandatory stores plus a LOADRS mandatory load after an Alternate Data TLB handler has repaired the missing DTC page and poisoned the committed prefix, stopped at the handler RFI", "encoding": "legal first-in-group ALLOC, FLUSHRS, or LOADRS, exact physical fault repair, a two-process save/load boundary at the RFI bundle, and architectural retry in the destination process"},
+      "legal_inputs": ["PSR.ic and PSR.rt enabled and serialized at the issuing instruction", "One 4 KiB identity DTC page admits an exact mandatory prefix and the adjacent page is absent", "The physical handler has captured IIP, IFA, ISR, IFS, and BSPSTORE, installed the missing DTC entry, serialized the repair, and poisoned every committed prefix word", "The source CPU is stopped at the handler RFI with no partially issued guest instruction"],
+      "privilege": {"levels": [0], "rule": "The mandatory reference and physical interruption handler execute at CPL0 with RSC.pl zero; migration does not change guest privilege"},
+      "state_read": ["dirty stacked-register values and NaTs or LOADRS backing image", "committed poisoned backing-store prefix", "BSP, BSPSTORE, RSE.BspLoad, and RNAT state", "repaired DTC entry", "IIP, IFA, ISR, IFS, IPSR, and handler RFI position"],
+      "state_written": ["a fresh destination-process CPU and memory image bit-equivalent at the architectural checkpoint", "remaining mandatory backing-store suffix after RFI retry", "exact final ALLOC frame or FLUSHRS/LOADRS backing image and RSE pointers"],
+      "predication": {"applies": false, "rule": "The selected ALLOC uses p0; FLUSHRS and LOADRS are unpredicated"},
+      "nat_behavior": "The ALLOC and FLUSHRS store prefixes include an RNAT collection word, while the LOADRS fault occurs on an RNAT load after two register words. Handler poisoning makes any destination-side prefix replay observable.",
+      "possible_faults": ["One source-process Alternate Data TLB fault with ISR.rs one and exact read/write classification; no new fault is permitted solely because of migration"],
+      "fault_priority": ["instruction legality and complete-frame preconditions", "mandatory RSE translation and source fault delivery", "physical handler repair and serialization", "migration at the architectural RFI boundary", "destination RFI restart", "remaining mandatory backing-store access", "instruction completion"],
+      "committed_prefix": "The save/load boundary must preserve the exact BSPSTORE/RSE.BspLoad fault prefix, poisoned register and RNAT words, repaired DTC entry, interruption image, and instruction-final noncommit state. The destination may commit only the untouched suffix and final instruction effects.",
+      "restart_rule": "A fresh QEMU process loads the stopped handler image, executes the same RFI bundle through the typed RFI path, retries the issuing ALLOC, FLUSHRS, or LOADRS from its migrated architectural prefix, and must reach the exact independently checked non-migrated terminal image without replay.",
+      "permitted_results": ["For each of ALLOC, FLUSHRS, and LOADRS, source checkpoint and fresh-process restored checkpoint are bit-exact apart from nonarchitectural current-slot diagnostics", "Each destination executes the handler RFI, preserves all poisoned committed words, completes the suffix once, and equals the corresponding non-migrated terminal snapshot across registers, NaTs, interruption state, translation state, memory observations, and RSE pointers"],
       "required_evidence": "E2"
     }
   ]

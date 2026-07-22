@@ -6141,7 +6141,8 @@ def run_ri_restart(qemu: Path, program: Program, start_slot: int, *,
 
 def run_savevm_migration(qemu: Path, program: Program,
                           checkpoint_ip: int,
-                          preserve_fault_slot: bool = False) -> MigrationResult:
+                          preserve_fault_slot: bool = False,
+                          compact_loader: bool = False) -> MigrationResult:
     qemu_img_name = "qemu-img.exe" if qemu.suffix.lower() == ".exe" else "qemu-img"
     qemu_img = qemu.with_name(qemu_img_name)
     if not qemu_img.is_file():
@@ -6175,6 +6176,7 @@ def run_savevm_migration(qemu: Path, program: Program,
         disk_path = temporary / "migration-state.qcow2"
         source_trace_path = temporary / "source-op.log"
         destination_trace_path = temporary / "destination-op.log"
+        loader_image: Optional[tempfile.TemporaryDirectory] = None
         try:
             image = subprocess.run(
                 [str(qemu_img), "create", "-f", "qcow2",
@@ -6216,7 +6218,12 @@ def run_savevm_migration(qemu: Path, program: Program,
                 "if=none,id=typed-migration-state,file={},format=qcow2"
                 .format(disk_path),
             ]
-            common_arguments.extend(_loader_arguments(program))
+            if compact_loader:
+                loader_arguments, loader_image = \
+                    _compact_loader_arguments(program)
+                common_arguments.extend(loader_arguments)
+            else:
+                common_arguments.extend(_loader_arguments(program))
 
             source_monitor_port = _free_tcp_port()
             gdb_port = _free_tcp_port()
@@ -6377,6 +6384,8 @@ def run_savevm_migration(qemu: Path, program: Program,
                 except Exception as cleanup_exc:
                     if failure is None:
                         failure = cleanup_exc
+            if loader_image is not None:
+                loader_image.cleanup()
 
         if failure is not None:
             detail = "{}".format(failure)
