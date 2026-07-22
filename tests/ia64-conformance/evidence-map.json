@@ -5,7 +5,7 @@
   "policy": {
     "classification_does_not_imply_pass": true,
     "row_closure_requires_normative_claim": true,
-    "row_closing_claims_expected": 63
+    "row_closing_claims_expected": 64
   },
   "entries": [
     {
@@ -381,11 +381,11 @@
         {"repository": "qemu-ia64", "path": "tests/unit/test-ia64-full-tcg.py"}
       ],
       "invocation": "meson test qemu:test-ia64-full-tcg",
-      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots.",
+      "scope": "Broad guest-executed IA-64 core instruction and state programs, including exact independent PFS call capture and return restoration matrices over direct, long, indirect, predicated, suppressed, clean-frame, incomplete-frame, trap, SoftMMU fill-fault/retry, and fresh-process continuation paths; BR.RET-origin and valid-IFS-RFI-origin current-frame first-register and post-prefix RNAT faults additionally migrate at their handler RFI, restore exact interruption/RSE state, retain poisoned committed words, execute typed RFI, and equal the direct terminal snapshots. The RFI-origin pair also distinguishes one-time valid-IFS restoration from IFS.v-zero continuation and requires the pre-source-IC-zero IIPA retention rule.",
       "oracle_independence": "independent",
       "conformance_role": "row-closing",
-      "closes_normative_rows": ["REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
-      "limitations": ["Only the two explicitly enumerated PFS rows and current-frame fill-fault migration row are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
+      "closes_normative_rows": ["REG-008-PFS-CALL-EFFECT", "REG-008-PFS-RETURN-EFFECT", "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION", "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION"],
+      "limitations": ["Only the two explicitly enumerated PFS rows and two current-frame fill-fault migration rows are row-closing claims; other broad legacy cases still lack row IDs, printed citations, and full fault/retry metadata."]
     },
     {
       "id": "meson:test-ia64-full-tcg-static",

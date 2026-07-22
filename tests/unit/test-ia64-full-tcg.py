@@ -59,6 +59,7 @@ IA64_CR_IFA = 20
 IA64_CR_ITIR = 21
 IA64_CR_IIPA = 22
 IA64_CR_IFS = 23
+IA64_IFS_VALID_BIT = 1 << 63
 IA64_GDB_IP_REGNUM = 128
 IA64_GDB_PSR_REGNUM = 129
 MONITOR_CONNECT_TIMEOUT = 5.0
@@ -2589,6 +2590,180 @@ def typed_return_rnat_fill_fault_program() \
             ),
         ),
         restored_pfs,
+        backing,
+        poison,
+    )
+
+
+def typed_rfi_register_fill_fault_program() \
+        -> Tuple[Program, int, Tuple[int, ...], int]:
+    """Fault the first mandatory register load started by a valid-IFS RFI."""
+    config_address = 0x1800
+    backing_start = 0x8000
+    backing_end = 0x8020
+    fault_address = 0x8018
+    replacement = 0x5e5
+    restored_cfm = 4 | (4 << 7)
+    restored_ifs = IA64_IFS_VALID_BIT | restored_cfm
+    backing = _typed_return_backing_values()
+
+    return (
+        Program(
+            name="typed RFI first-register SoftMMU fault/RFI resume",
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(15, 1, 0),
+                       adds(9, config_address, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9),
+                       shl_imm(15, 15, 15), adds(14, 0x100, 0)),
+                Bundle(0x30, 0x01, nop_m(),
+                       adds(2, backing_end - backing_start, 15),
+                       adds(3, fault_address - backing_start, 15)),
+                Bundle(0x40, 0x01, nop_m(), adds(4, replacement, 0),
+                       adds(13, 1, 0)),
+                Bundle(0x50, 0x01, mov_m_grar(18, 2),
+                       nop_i(), nop_i()),
+                Bundle(0x60, 0x01, mov_grcr(IA64_CR_IFS, 10),
+                       shl_imm(13, 13, 27), nop_i()),
+                Bundle(0x70, 0x01, nop_m(),
+                       dep_imm(13, 1, 13, 13, 1), nop_i()),
+                Bundle(0x80, 0x01, mov_grcr(IA64_CR_IIP, 14),
+                       nop_i(), nop_i()),
+                Bundle(0x90, 0x01, mov_grcr(IA64_CR_IPSR, 13),
+                       nop_i(), nop_i()),
+                Bundle(0xa0, 0x01, srlz_i(), nop_i(), nop_i()),
+                Bundle(0xb0, 0x11, nop_m(), nop_i(), rfi()),
+                spin_bundle(0xc0),
+                Bundle(0x100, 0x01, ld8(25, 3), mov_argr(22, 66),
+                       mov_pfs_to_gr(23)),
+                spin_bundle(0x110),
+
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR, 0x01,
+                       mov_crgr(7, IA64_CR_IPSR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x10, 0x01,
+                       mov_crgr(5, IA64_CR_IFS), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x20, 0x01,
+                       mov_crgr(6, IA64_CR_ISR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x30, 0x01,
+                       nop_m(), adds(12, 0, 7),
+                       dep_imm(7, 0, 7, 27, 1)),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x40, 0x01,
+                       mov_grcr(IA64_CR_IPSR, 7), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x50, 0x01,
+                       st8(4, 3), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60, 0x11,
+                       nop_m(), nop_i(), rfi()),
+            ),
+            terminal_ip=0x110,
+            data=(
+                DataWord(config_address, restored_ifs, 8),
+                *(DataWord(backing_start + index * 8, value, 8)
+                  for index, value in enumerate(backing)),
+            ),
+        ),
+        restored_cfm,
+        backing,
+        replacement,
+    )
+
+
+def typed_rfi_rnat_fill_fault_program() \
+        -> Tuple[Program, int, Tuple[int, ...], Tuple[int, ...]]:
+    """Fault the post-prefix RNAT load started by a valid-IFS RFI."""
+    config_address = 0x1800
+    page_base = 0x8000
+    backing_start = 0x7ff0
+    rnat_address = 0x7ff8
+    backing_end = 0x8018
+    restored_cfm = 4 | (4 << 7)
+    restored_ifs = IA64_IFS_VALID_BIT | restored_cfm
+    backing = _typed_return_backing_values()
+    poison = (0x944, 0xa55, 0xb66)
+    translation = page_base | 0x661
+    itir = 12 << 2
+
+    return (
+        Program(
+            name="typed RFI RNAT SoftMMU prefix fault/RFI resume",
+            bundles=(
+                Bundle(0x10, 0x01, nop_m(), adds(15, 1, 0),
+                       adds(9, config_address, 0)),
+                Bundle(0x20, 0x01, ld8(10, 9),
+                       shl_imm(15, 15, 15), adds(14, 0x200, 0)),
+                Bundle(0x30, 0x01, nop_m(),
+                       adds(2, backing_end - page_base, 15),
+                       adds(3, 0x10, 15)),
+                Bundle(0x40, 0x01, nop_m(), adds(4, 8, 15),
+                       adds(5, 0, 15)),
+                Bundle(0x50, 0x01, nop_m(), adds(6, poison[0], 0),
+                       adds(7, poison[1], 0)),
+                Bundle(0x60, 0x01, nop_m(), adds(8, poison[2], 0),
+                       adds(12, itir, 0)),
+                Bundle(0x70, 0x01, nop_m(),
+                       adds(13, translation - page_base, 15), nop_i()),
+                Bundle(0x80, 0x01, mov_m_grar(18, 2),
+                       nop_i(), nop_i()),
+                Bundle(0x90, 0x01, mov_grcr(IA64_CR_IFA, 15),
+                       adds(2, rnat_address - page_base, 15),
+                       adds(9, 1, 0)),
+                Bundle(0xa0, 0x01, mov_grcr(IA64_CR_ITIR, 12),
+                       shl_imm(9, 9, 62), nop_i()),
+                Bundle(0xb0, 0x0b, itc_d(13), nop_m(), nop_i()),
+                Bundle(0xc0, 0x01, srlz_d(), nop_i(), nop_i()),
+                Bundle(0xd0, 0x01, mov_grcr(IA64_CR_IFS, 10),
+                       adds(13, 1, 0), nop_i()),
+                Bundle(0xe0, 0x01, nop_m(), shl_imm(13, 13, 27), nop_i()),
+                Bundle(0xf0, 0x01, nop_m(),
+                       dep_imm(13, 1, 13, 13, 1), nop_i()),
+                Bundle(0x100, 0x01, mov_grcr(IA64_CR_IIP, 14),
+                       nop_i(), nop_i()),
+                Bundle(0x110, 0x01, mov_grcr(IA64_CR_IPSR, 13),
+                       nop_i(), nop_i()),
+                Bundle(0x120, 0x01, srlz_i(), nop_i(), nop_i()),
+                Bundle(0x130, 0x11, nop_m(), nop_i(), rfi()),
+                spin_bundle(0x140),
+                Bundle(0x200, 0x01, ld8(25, 3), mov_argr(22, 66),
+                       mov_pfs_to_gr(23)),
+                Bundle(0x210, 0x01, ld8(26, 4),
+                       predicate_test("tnat", 6, 7, relation="z",
+                                      update="normal", r3=32),
+                       nop_i()),
+                Bundle(0x220, 0x01, ld8(27, 5), nop_i(), nop_i()),
+                Bundle(0x230, 0x01, ld8(28, 2), nop_i(), nop_i()),
+                spin_bundle(0x240),
+
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR, 0x01,
+                       mov_crgr(1, IA64_CR_IPSR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x10, 0x01,
+                       mov_crgr(10, IA64_CR_IFS), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x20, 0x01,
+                       mov_crgr(11, IA64_CR_ISR), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x30, 0x01,
+                       nop_m(), adds(12, 0, 1),
+                       dep_imm(1, 0, 1, 27, 1)),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x40, 0x01,
+                       mov_grcr(IA64_CR_IPSR, 1), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x50, 0x01,
+                       st8(6, 3), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60, 0x01,
+                       st8(7, 4), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x70, 0x01,
+                       st8(8, 5), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x80, 0x01,
+                       st8(9, 2), nop_i(), nop_i()),
+                Bundle(IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90, 0x11,
+                       nop_m(), nop_i(), rfi()),
+            ),
+            terminal_ip=0x240,
+            data=(
+                DataWord(config_address, restored_ifs, 8),
+                DataWord(backing_start, backing[0], 8),
+                DataWord(rnat_address, 0, 8),
+                DataWord(page_base, backing[1], 8),
+                DataWord(page_base + 8, backing[2], 8),
+                DataWord(page_base + 16, backing[3], 8),
+            ),
+        ),
+        restored_cfm,
         backing,
         poison,
     )
@@ -10176,6 +10351,288 @@ def test_typed_return_branches(qemu: Path) -> str:
     )
 
 
+def test_rfi_current_frame_fill(qemu: Path) -> str:
+    """Valid-IFS RFI must restore, fault, expose, and resume one frame."""
+    fill_fault_isr = IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR
+
+    register_program, restored_cfm, backing, replacement = \
+        typed_rfi_register_fill_fault_program()
+    register = run_program(
+        qemu,
+        register_program,
+        typed_rfi_traces=(
+            0xb0,
+            IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60,
+        ),
+        one_bundle_per_tb=True,
+    )
+    _require(
+        register.ip == register_program.terminal_ip and
+        register.exception_pending and
+        register.exception_kind == "alternate-data-tlb-miss" and
+        register.exception_vector == IA64_ALTERNATE_DATA_TLB_VECTOR,
+        "valid-IFS RFI first-register fault did not resume to its terminal: "
+        "IP=0x{:x} EXC={}/0x{:x}".format(
+            register.ip, register.exception_kind, register.exception_vector
+        ),
+    )
+    _require(
+        register.exception_source == 0x100 and
+        register.exception_address == 0x8018 and
+        register.cr_iip == 0x100 and register.cr_ifa == 0x8018 and
+        register.cr_iipa == 0 and register.cr_isr == fill_fault_isr,
+        "valid-IFS RFI first-register fault lacks exact target/source/ISR: "
+        "EXC=0x{:x}/0x{:x} IIP=0x{:x} IFA=0x{:x} IIPA=0x{:x} "
+        "ISR=0x{:x}".format(
+            register.exception_source, register.exception_address,
+            register.cr_iip, register.cr_ifa, register.cr_iipa,
+            register.cr_isr
+        ),
+    )
+    _require(
+        register.gr[5] == 0 and register.gr[6] == fill_fault_isr and
+        register.gr[12] == (IA64_PSR_IC | IA64_PSR_RT) and
+        register.cr_ipsr == IA64_PSR_IC and
+        (register.psr & (IA64_PSR_IC | IA64_PSR_RT)) == IA64_PSR_IC,
+        "valid-IFS RFI handler did not expose IFS.v=0 continuation or "
+        "clear only saved RT: IFS/ISR/IPSR=0x{:x}/0x{:x}/0x{:x} "
+        "CR.IPSR=0x{:x} PSR=0x{:x}".format(
+            register.gr[5], register.gr[6], register.gr[12],
+            register.cr_ipsr, register.psr
+        ),
+    )
+    _require(
+        register.cfm == restored_cfm and register.gr[22] == 0 and
+        register.gr[23] == 0 and
+        register.rse_base == 92 and register.rse_bsp == 0x8000 and
+        register.rse_bspstore == 0x8000 and
+        register.rse_bspload == 0x8000,
+        "valid-IFS RFI did not retain its restored frame/PFS or finish the "
+        "exact backing span: CFM=0x{:x} EC=0x{:x} PFS=0x{:x} "
+        "RSE={}/0x{:x}/0x{:x}/0x{:x}".format(
+            register.cfm, register.gr[22], register.gr[23],
+            register.rse_base, register.rse_bsp, register.rse_bspstore,
+            register.rse_bspload
+        ),
+    )
+    _require(
+        register.gr[32:36] == backing[:3] + (replacement,) and
+        register.gr[25] == replacement,
+        "valid-IFS RFI first-register read committed before fault or did "
+        "not retry: frame={} memory=0x{:x}".format(
+            tuple("0x{:x}".format(value) for value in register.gr[32:36]),
+            register.gr[25]
+        ),
+    )
+
+    register_migration = run_savevm_migration(
+        qemu,
+        register_program,
+        checkpoint_ip=IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60,
+        preserve_fault_slot=True,
+    )
+    register_checkpoint_differences = successful_snapshot_differences(
+        register_migration.checkpoint, register_migration.restored
+    )
+    _require(
+        not register_checkpoint_differences,
+        "fresh-process valid-IFS first-register checkpoint changed:\n  " +
+        "\n  ".join(register_checkpoint_differences[:16]),
+    )
+    _require(
+        register_migration.checkpoint.ip ==
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60 and
+        register_migration.checkpoint.gr[5] == 0 and
+        register_migration.checkpoint.gr[6] == fill_fault_isr and
+        register_migration.checkpoint.gr[12] ==
+        (IA64_PSR_IC | IA64_PSR_RT) and
+        register_migration.checkpoint.cr_iip == 0x100 and
+        register_migration.checkpoint.cr_ifa == 0x8018 and
+        register_migration.checkpoint.cr_isr == fill_fault_isr and
+        register_migration.checkpoint.cr_iipa == 0 and
+        register_migration.checkpoint.cr_ipsr == IA64_PSR_IC and
+        register_migration.checkpoint.cfm == restored_cfm and
+        register_migration.checkpoint.rse_base == 92 and
+        register_migration.checkpoint.rse_bsp == 0x8000 and
+        register_migration.checkpoint.rse_bspstore == 0x8020 and
+        register_migration.checkpoint.rse_bspload == 0x8020,
+        "valid-IFS first-register migration checkpoint lost exact "
+        "continuation state: IP=0x{:x} IFS/ISR/IPSR=0x{:x}/0x{:x}/0x{:x} "
+        "IIP/IFA/ISR/IIPA/IPSR=0x{:x}/0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+        "CFM=0x{:x} RSE={}/0x{:x}/0x{:x}/0x{:x}".format(
+            register_migration.checkpoint.ip,
+            register_migration.checkpoint.gr[5],
+            register_migration.checkpoint.gr[6],
+            register_migration.checkpoint.gr[12],
+            register_migration.checkpoint.cr_iip,
+            register_migration.checkpoint.cr_ifa,
+            register_migration.checkpoint.cr_isr,
+            register_migration.checkpoint.cr_iipa,
+            register_migration.checkpoint.cr_ipsr,
+            register_migration.checkpoint.cfm,
+            register_migration.checkpoint.rse_base,
+            register_migration.checkpoint.rse_bsp,
+            register_migration.checkpoint.rse_bspstore,
+            register_migration.checkpoint.rse_bspload,
+        ),
+    )
+    _require_typed_rfi_trace(
+        register_migration.destination_trace,
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x60,
+    )
+    register_final_differences = successful_snapshot_differences(
+        register, register_migration.final
+    )
+    _require(
+        not register_final_differences,
+        "valid-IFS first-register migrated result diverged from direct "
+        "execution:\n  " + "\n  ".join(register_final_differences[:16]),
+    )
+
+    rnat_program, restored_cfm, backing, poison = \
+        typed_rfi_rnat_fill_fault_program()
+    rnat = run_program(
+        qemu,
+        rnat_program,
+        typed_rfi_traces=(
+            0x130,
+            IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90,
+        ),
+        one_bundle_per_tb=True,
+    )
+    _require(
+        rnat.ip == rnat_program.terminal_ip and
+        rnat.exception_pending and
+        rnat.exception_kind == "alternate-data-tlb-miss" and
+        rnat.exception_vector == IA64_ALTERNATE_DATA_TLB_VECTOR,
+        "valid-IFS RFI RNAT fault did not resume to its terminal: "
+        "IP=0x{:x} EXC={}/0x{:x}".format(
+            rnat.ip, rnat.exception_kind, rnat.exception_vector
+        ),
+    )
+    _require(
+        rnat.exception_source == 0x200 and
+        rnat.exception_address == 0x7ff8 and
+        rnat.cr_iip == 0x200 and rnat.cr_ifa == 0x7ff8 and
+        rnat.cr_iipa == 0 and rnat.cr_isr == fill_fault_isr,
+        "valid-IFS RFI RNAT fault lacks exact target/source/ISR: "
+        "EXC=0x{:x}/0x{:x} IIP=0x{:x} IFA=0x{:x} IIPA=0x{:x} "
+        "ISR=0x{:x}".format(
+            rnat.exception_source, rnat.exception_address,
+            rnat.cr_iip, rnat.cr_ifa, rnat.cr_iipa, rnat.cr_isr
+        ),
+    )
+    _require(
+        rnat.gr[10] == 0 and rnat.gr[11] == fill_fault_isr and
+        rnat.gr[12] == (IA64_PSR_IC | IA64_PSR_RT) and
+        rnat.cr_ipsr == IA64_PSR_IC and
+        (rnat.psr & (IA64_PSR_IC | IA64_PSR_RT)) == IA64_PSR_IC,
+        "valid-IFS RFI RNAT handler did not expose IFS.v=0 continuation: "
+        "IFS/ISR/IPSR=0x{:x}/0x{:x}/0x{:x} CR.IPSR=0x{:x} PSR=0x{:x}"
+        .format(
+            rnat.gr[10], rnat.gr[11], rnat.gr[12], rnat.cr_ipsr, rnat.psr
+        ),
+    )
+    _require(
+        rnat.cfm == restored_cfm and rnat.gr[22] == 0 and rnat.gr[23] == 0 and
+        rnat.rse_base == 92 and rnat.rse_bsp == 0x7ff0 and
+        rnat.rse_bspstore == 0x7ff0 and rnat.rse_bspload == 0x7ff0 and
+        rnat.rse_rnat == (1 << 62),
+        "valid-IFS RFI RNAT path lost its restored frame or backing span: "
+        "CFM=0x{:x} EC=0x{:x} PFS=0x{:x} "
+        "RSE={}/0x{:x}/0x{:x}/0x{:x}/0x{:x}".format(
+            rnat.cfm, rnat.gr[22], rnat.gr[23], rnat.rse_base,
+            rnat.rse_bsp, rnat.rse_bspstore, rnat.rse_bspload,
+            rnat.rse_rnat
+        ),
+    )
+    _require(
+        rnat.gr[32:36] == backing and
+        (rnat.pr & ((1 << 6) | (1 << 7))) == (1 << 7) and
+        rnat.gr[25:29] == poison + (1 << 62,),
+        "valid-IFS RFI RNAT resume lost prefix idempotence/NaT: frame={} "
+        "PR=0x{:x} poison={}".format(
+            tuple("0x{:x}".format(value) for value in rnat.gr[32:36]),
+            rnat.pr,
+            tuple("0x{:x}".format(value) for value in rnat.gr[25:29]),
+        ),
+    )
+
+    rnat_migration = run_savevm_migration(
+        qemu,
+        rnat_program,
+        checkpoint_ip=IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90,
+        preserve_fault_slot=True,
+    )
+    rnat_checkpoint_differences = successful_snapshot_differences(
+        rnat_migration.checkpoint, rnat_migration.restored
+    )
+    _require(
+        not rnat_checkpoint_differences,
+        "fresh-process valid-IFS RNAT checkpoint changed:\n  " +
+        "\n  ".join(rnat_checkpoint_differences[:16]),
+    )
+    _require(
+        rnat_migration.checkpoint.ip ==
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90 and
+        rnat_migration.checkpoint.gr[10] == 0 and
+        rnat_migration.checkpoint.gr[11] == fill_fault_isr and
+        rnat_migration.checkpoint.gr[12] ==
+        (IA64_PSR_IC | IA64_PSR_RT) and
+        rnat_migration.checkpoint.cr_iip == 0x200 and
+        rnat_migration.checkpoint.cr_ifa == 0x7ff8 and
+        rnat_migration.checkpoint.cr_isr == fill_fault_isr and
+        rnat_migration.checkpoint.cr_iipa == 0 and
+        rnat_migration.checkpoint.cr_ipsr == IA64_PSR_IC and
+        rnat_migration.checkpoint.cfm == restored_cfm and
+        rnat_migration.checkpoint.rse_base == 92 and
+        rnat_migration.checkpoint.rse_bsp == 0x7ff0 and
+        rnat_migration.checkpoint.rse_bspstore == 0x8000 and
+        rnat_migration.checkpoint.rse_bspload == 0x8000 and
+        rnat_migration.checkpoint.rse_rnat == 0,
+        "valid-IFS RNAT migration checkpoint lost exact prefix state: "
+        "IP=0x{:x} IFS/ISR/IPSR=0x{:x}/0x{:x}/0x{:x} "
+        "IIP/IFA/ISR/IIPA/IPSR=0x{:x}/0x{:x}/0x{:x}/0x{:x}/0x{:x} "
+        "CFM=0x{:x} RSE={}/0x{:x}/0x{:x}/0x{:x}/0x{:x}".format(
+            rnat_migration.checkpoint.ip,
+            rnat_migration.checkpoint.gr[10],
+            rnat_migration.checkpoint.gr[11],
+            rnat_migration.checkpoint.gr[12],
+            rnat_migration.checkpoint.cr_iip,
+            rnat_migration.checkpoint.cr_ifa,
+            rnat_migration.checkpoint.cr_isr,
+            rnat_migration.checkpoint.cr_iipa,
+            rnat_migration.checkpoint.cr_ipsr,
+            rnat_migration.checkpoint.cfm,
+            rnat_migration.checkpoint.rse_base,
+            rnat_migration.checkpoint.rse_bsp,
+            rnat_migration.checkpoint.rse_bspstore,
+            rnat_migration.checkpoint.rse_bspload,
+            rnat_migration.checkpoint.rse_rnat,
+        ),
+    )
+    _require_typed_rfi_trace(
+        rnat_migration.destination_trace,
+        IA64_ALTERNATE_DATA_TLB_VECTOR + 0x90,
+    )
+    rnat_final_differences = successful_snapshot_differences(
+        rnat, rnat_migration.final
+    )
+    _require(
+        not rnat_final_differences,
+        "valid-IFS RNAT migrated result diverged from direct execution:\n  " +
+        "\n  ".join(rnat_final_differences[:16]),
+    )
+
+    return (
+        "two valid-IFS typed RFI programs restore SOL4 current frames, "
+        "fault at both physically reachable 4 KiB SoftMMU boundaries, "
+        "expose invalid IFS plus exact R/RS/IR restart state, retry the "
+        "faulting register/RNAT without replaying the committed prefix, and "
+        "finish identically after fresh-process save/load"
+    )
+
+
 def test_predicate_test_conformance(qemu: Path) -> str:
     matrix_program, observations = predicate_test_conformance_program()
     matrix = run_program(
@@ -10998,7 +11455,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     qemu = args.qemu.expanduser().resolve()
 
     print("TAP version 13")
-    print("1..34")
+    print("1..35")
     if not qemu.is_file():
         print("not ok 1 - core integer equality")
         print("not ok 2 - NaT architectural golden")
@@ -11025,15 +11482,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("not ok 23 - typed call branches")
         print("not ok 24 - typed AR.PFS register moves")
         print("not ok 25 - typed return branches")
-        print("not ok 26 - timer external interrupt and typed RFI")
-        print("not ok 27 - nested self-IPI and ordered EOI")
-        print("not ok 28 - same-TB empty-to-active ALAT transition")
-        print("not ok 29 - helper-owned application-read SSA")
-        print("not ok 30 - stopped predicate handoff")
-        print("not ok 31 - plugin, icount and replay runtime")
-        print("not ok 32 - emitted NaT lattice accounting")
-        print("not ok 33 - family-wide generated-code density")
-        print("not ok 34 - exact helper contracts")
+        print("not ok 26 - RFI current-frame fill and migration")
+        print("not ok 27 - timer external interrupt and typed RFI")
+        print("not ok 28 - nested self-IPI and ordered EOI")
+        print("not ok 29 - same-TB empty-to-active ALAT transition")
+        print("not ok 30 - helper-owned application-read SSA")
+        print("not ok 31 - stopped predicate handoff")
+        print("not ok 32 - plugin, icount and replay runtime")
+        print("not ok 33 - emitted NaT lattice accounting")
+        print("not ok 34 - family-wide generated-code density")
+        print("not ok 35 - exact helper contracts")
         print("# QEMU executable does not exist: {}".format(qemu))
         return 1
 
@@ -11074,6 +11532,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ("typed call branches", test_typed_call_branches),
         ("typed AR.PFS register moves", test_pfs_register_moves),
         ("typed return branches", test_typed_return_branches),
+        ("RFI current-frame fill and migration",
+         test_rfi_current_frame_fill),
         ("timer external interrupt and typed RFI",
          test_timer_external_interrupt_rfi),
         ("nested self-IPI and ordered EOI", test_nested_self_ipi),

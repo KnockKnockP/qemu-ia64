@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 13,
+  "catalogue_revision": 14,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -2275,6 +2275,26 @@
       "committed_prefix": "The save/load boundary must preserve the exact BSPSTORE/RSE.BspLoad fault prefix, poisoned register and RNAT words, repaired DTC entry, interruption image, and instruction-final noncommit state. The destination may commit only the untouched suffix and final instruction effects.",
       "restart_rule": "A fresh QEMU process loads the stopped handler image, executes the same RFI bundle through the typed RFI path, retries the issuing ALLOC, FLUSHRS, or LOADRS from its migrated architectural prefix, and must reach the exact independently checked non-migrated terminal image without replay.",
       "permitted_results": ["For each of ALLOC, FLUSHRS, and LOADRS, source checkpoint and fresh-process restored checkpoint are bit-exact apart from nonarchitectural current-slot diagnostics", "Each destination executes the handler RFI, preserves all poisoned committed words, completes the suffix once, and equals the corresponding non-migrated terminal snapshot across registers, NaTs, interruption state, translation state, memory observations, and RSE pointers"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION",
+      "requirement_ids": ["RSE-013", "RSE-008", "RSE-009", "RSE-016"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.rse",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: System Architecture", "section": "3.3.5.6", "printed_pages": ["2:40", "2:144", "2:145", "2:146"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "execution of an rfi instruction with PSR.ic equal to 0, but which sets PSR.ic to 1 does not update IIPA"},
+      "operation": {"kind": "rfi-current-frame-fill-fault-migration", "selector": "valid-IFS RFI restoration of a four-register incomplete SOF4 frame, faulting either before the first register load or on the RNAT load after three committed register words", "encoding": "legal typed RFI with a valid four-register IFS and target IPSR selecting IC plus RT, IR Alternate Data TLB handler with IFS.v zero repair, two-process save/load at the handler RFI, and destination current-frame completion"},
+      "legal_inputs": ["Execution begins at CPL0 with PSR.ic zero so the test can construct CR.IIP, CR.IPSR, and valid CR.IFS directly", "CR.IPSR selects PSR.ic and PSR.rt while CR.IFS selects a four-register SOF4 frame absent from the physical stacked-register file", "The backing span contains four literal register values and one RNAT collection across a 4 KiB boundary", "The source stops after the IR fault handler clears only saved PSR.rt and repairs the failed word or RNAT, before executing the second RFI"],
+      "privilege": {"levels": [0], "rule": "Both RFIs, target-side mandatory fills, and the physical interruption handler execute at CPL0"},
+      "state_read": ["valid IFS, target IIP and IPSR, current CFM, EC, and PFS", "BSP, BSPSTORE, RSE.BspLoad, and RNAT state", "literal backing register and RNAT words", "IIP, IIPA, IFA, ISR, IFS, and IPSR at the IR fault", "source architectural checkpoint at the handler RFI"],
+      "state_written": ["restored target CFM and physical stacked-register values and NaTs while EC and PFS remain unchanged", "committed current-frame fill prefix and remaining suffix", "IR interruption state on the target instruction with IIPA unchanged by the IC-zero source RFI", "handler replacement or poison backing words", "fresh destination-process checkpoint and terminal state"],
+      "predication": {"applies": false, "rule": "RFI is unpredicated"},
+      "nat_behavior": "The RNAT fault occurs after three register values commit but before their NaTs can be consumed. The handler supplies a literal RNAT with bit 62 set; destination retry must retain the committed values, set only r32 NaT, and leave poisoned source words unread.",
+      "possible_faults": ["IR Alternate Data TLB fault with ISR.r, ISR.rs, and ISR.ir set on a current-frame register or RNAT load"],
+      "fault_priority": ["RFI privilege, target IPSR, and valid-IFS restoration", "incomplete current frame with RSE.CFLE", "mandatory current-frame translation", "IR fault delivery on the RFI target instruction", "handler repair and migration at the second RFI", "destination IFS.v-zero RFI continuation", "remaining mandatory fills", "target instruction execution"],
+      "committed_prefix": "A first-register fault commits no current-frame load. An RNAT fault commits exactly the three higher-addressed register values while leaving the RNAT and final lower-addressed register uncommitted; handler poisoning distinguishes exact continuation from replay.",
+      "restart_rule": "The source RFI restores the valid IFS exactly once. Interruption delivery exposes IFS.v zero and clears RSE.CFLE so the handler can run. A fresh destination executes the handler RFI without restoring the frame a second time and completes only the uncommitted suffix.",
+      "permitted_results": ["The first-register and post-prefix RNAT checkpoints each restore bit-exactly apart from nonarchitectural current-slot diagnostics", "Both destinations execute the handler RFI through typed lowering and exactly equal their independently checked non-migrated terminal snapshots", "IIP names the aligned RFI target, IIPA retains its prior zero value because pre-source-RFI PSR.ic was zero, IFA names the failed word, ISR has R/RS/IR set, replacement data is consumed once, and poisoned committed words remain unchanged"],
       "required_evidence": "E2"
     }
   ]

@@ -314,6 +314,22 @@ RSE_CURRENT_FRAME_FILL_MIGRATION_IMPLEMENTATION_ROWS = (
     "cpu.register.scalar.cfm",
     "cpu.register.scalar.psr",
 )
+RSE_RFI_CURRENT_FRAME_FILL_MIGRATION_IMPLEMENTATION_ROWS = (
+    "cpu.opcode.ia64_op_rfi",
+    "cpu.register.ar.17",
+    "cpu.register.ar.18",
+    "cpu.register.ar.19",
+    "cpu.register.ar.64",
+    "cpu.register.ar.66",
+    "cpu.register.cr.16",
+    "cpu.register.cr.17",
+    "cpu.register.cr.19",
+    "cpu.register.cr.20",
+    "cpu.register.cr.22",
+    "cpu.register.cr.23",
+    "cpu.register.scalar.cfm",
+    "cpu.register.scalar.psr",
+)
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -429,6 +445,9 @@ def validate_contract(root: Path) -> str:
         "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION": list(
             RSE_CURRENT_FRAME_FILL_MIGRATION_IMPLEMENTATION_ROWS
         ),
+        "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION": list(
+            RSE_RFI_CURRENT_FRAME_FILL_MIGRATION_IMPLEMENTATION_ROWS
+        ),
     }
     expected_effect_probes = {
         "REG-008-BSPSTORE-BSP-REBASE-EFFECT": [
@@ -471,12 +490,15 @@ def validate_contract(root: Path) -> str:
         "RSE-013-CURRENT-FRAME-FILL-FAULT-MIGRATION": [
             "test_typed_return_branches",
         ],
+        "RSE-013-RFI-CURRENT-FRAME-FILL-FAULT-MIGRATION": [
+            "test_rfi_current_frame_fill",
+        ],
     }
     if document.get("schema") != "vibtanium.ia64.register-semantic-tranche" or document.get("schema_version") != 1:
         raise AssertionError("register tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 41:
-        raise AssertionError("register tranche must contain forty-one cases")
+    if not isinstance(cases, list) or len(cases) != 42:
+        raise AssertionError("register tranche must contain forty-two cases")
     for case in cases:
         row = case.get("normative_row")
         if row in expected_groups:
@@ -500,7 +522,11 @@ def validate_contract(root: Path) -> str:
     full_source = (
         root / "tests/unit/test-ia64-full-tcg.py"
     ).read_text(encoding="utf-8")
-    for probe in ("test_typed_call_branches", "test_typed_return_branches"):
+    for probe in (
+        "test_typed_call_branches",
+        "test_typed_return_branches",
+        "test_rfi_current_frame_fill",
+    ):
         if f"def {probe}(" not in full_source:
             raise AssertionError(f"missing full-TCG PFS effect probe: {probe}")
     if len(set(GR_VALUES)) != 127 or GR_VALUES[-1] != 127:
