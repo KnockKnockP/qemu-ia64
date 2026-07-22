@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 from pathlib import Path
 import struct
 import sys
@@ -97,6 +98,22 @@ def self_test(module: ModuleType, protocol: dict) -> None:
         raise ValidationError("repair/retry accepted a different retry IP")
 
 
+def validate_required_gate(root: Path) -> None:
+    closure_path = root / "tests/ia64-conformance/closure-map.json"
+    gate_path = root / "scripts/ia64-run-required-conformance.sh"
+    closure = json.loads(closure_path.read_text(encoding="utf-8"))
+    gate = gate_path.read_text(encoding="utf-8")
+    missing = [
+        name for name in closure["infrastructure_tests"]
+        if f"qemu:{name}" not in gate
+    ]
+    if missing:
+        raise ValidationError(
+            "required gate omits closure infrastructure tests: "
+            + ", ".join(sorted(missing))
+        )
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -115,10 +132,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         root / "tests/ia64-conformance/runner-protocol.json"
     )
     self_test(module, protocol)
+    validate_required_gate(root)
     print(
         "IA-64 conformance runner protocol verified: "
         "3 record types; 13 failure classes; IVT, short-VHPT, and "
-        "repair/retry builders"
+        "repair/retry builders; required gate covers closure infrastructure"
     )
     return 0
 

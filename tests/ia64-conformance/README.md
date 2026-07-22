@@ -334,3 +334,18 @@ Machine Check aborts for same-stream TR overlap during insertion or PTC remain
 an explicit unclaimed contract; this checkpoint does not convert that missing
 MCA path into a passing result. All runtime tests, metadata, and validators
 remain self-contained in the public qemu-ia64 repository.
+
+The following non-closing foundation checkpoint adds side-effect-free
+production preflights for the remaining overlap contract. They identify
+same-stream ITC/ITR range overlap with a TR and local PTC range overlap with
+either TR bank, including RID selection, while preserving all translation
+state for the eventual PALE_CHECK save. Two E1 matrices raise the host
+MMU/interruption unit to 55 passing subtests. No catalogue row is closed until
+an E2 oracle observes PSR.mc handling, the serialization deadline, the PAL
+min-state image, and the SAL/OS_MCA handoff.
+
+This audit also found that the required-gate script omitted the already
+registered region-register and translation-register static validators. The
+gate now derives a checked invariant from the closure infrastructure list and
+passes the intended 63/63 in 203.8 seconds. The complete configured suite has
+219 registrations and passes 217 with two expected skips in 214.9 seconds.

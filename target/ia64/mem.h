@@ -107,6 +107,11 @@ bool ia64_install_translation(CPUIA64State *env, bool instruction,
                               vaddr virtual_address,
                               uint64_t translation_format,
                               uint64_t itir);
+bool ia64_translation_insert_would_machine_check(
+    const CPUIA64State *env, bool instruction, vaddr virtual_address,
+    uint64_t itir);
+bool ia64_translation_cache_purge_would_machine_check(
+    const CPUIA64State *env, vaddr address, uint8_t page_size);
 void ia64_purge_translation_cache(CPUIA64State *env, vaddr address,
                                   uint8_t page_size, bool all_rids);
 void ia64_purge_translation_register(CPUIA64State *env, bool instruction,

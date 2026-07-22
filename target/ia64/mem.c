@@ -928,29 +928,113 @@ static IA64TranslateStatus ia64_key_access_status(
     return IA64_TRANSLATE_OK;
 }
 
+static bool ia64_translation_entries_overlap(
+    const IA64TranslationEntry *left, const IA64TranslationEntry *right)
+{
+    uint64_t left_end = left->vaddr_base +
+                        (UINT64_C(1) << left->page_size);
+    uint64_t right_end = right->vaddr_base +
+                         (UINT64_C(1) << right->page_size);
+
+    return left->vaddr_base < right_end && right->vaddr_base < left_end;
+}
+
 static void ia64_invalidate_overlapping_entries(IA64TranslationEntry *entries,
                                                 unsigned count,
                                                 const IA64TranslationEntry *entry,
                                                 bool all_rids)
 {
-    uint64_t start = entry->vaddr_base;
-    uint64_t end = start + (UINT64_C(1) << entry->page_size);
 
     for (unsigned i = 0; i < count; i++) {
         IA64TranslationEntry *existing = &entries[i];
-        uint64_t existing_start;
-        uint64_t existing_end;
 
         if (!existing->valid || (!all_rids && existing->rid != entry->rid)) {
             continue;
         }
 
-        existing_start = existing->vaddr_base;
-        existing_end = existing_start + (UINT64_C(1) << existing->page_size);
-        if (start < existing_end && existing_start < end) {
+        if (ia64_translation_entries_overlap(existing, entry)) {
             existing->valid = false;
         }
     }
+}
+
+static bool ia64_has_overlapping_entry(const IA64TranslationEntry *entries,
+                                       unsigned count,
+                                       const IA64TranslationEntry *entry)
+{
+    for (unsigned i = 0; i < count; i++) {
+        const IA64TranslationEntry *existing = &entries[i];
+
+        if (!existing->valid || existing->rid != entry->rid) {
+            continue;
+        }
+
+        if (ia64_translation_entries_overlap(existing, entry)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static IA64TranslationEntry ia64_translation_overlap_probe(
+    const CPUIA64State *env, vaddr address, uint8_t page_size)
+{
+    uint8_t region = ia64_va_region(address);
+
+    return (IA64TranslationEntry) {
+        .valid = true,
+        .vaddr_base = ia64_page_base(address, page_size),
+        .page_size = page_size,
+        .rid = ia64_region_id(env->rr[region]),
+    };
+}
+
+/*
+ * Intel SDM Vol. 2, Table 4-1: an architectural itc/itr operation that
+ * overlaps a same-stream translation register must cause a Machine Check.
+ * Keep this as a side-effect-free preflight: the Machine Check path must see
+ * the original TR/TC state, and delivery may be deferred until serialization.
+ */
+bool ia64_translation_insert_would_machine_check(
+    const CPUIA64State *env, bool instruction, vaddr virtual_address,
+    uint64_t itir)
+{
+    uint8_t page_size;
+    IA64TranslationEntry probe;
+    const IA64TranslationEntry *tr;
+
+    if (!env) {
+        return false;
+    }
+    page_size = (itir >> 2) & 0x3f;
+    if (!ia64_page_size_supported(page_size)) {
+        return false;
+    }
+    probe = ia64_translation_overlap_probe(env, virtual_address, page_size);
+    tr = instruction ? env->memory.itr : env->memory.dtr;
+    return ia64_has_overlapping_entry(tr, IA64_ITR_COUNT, &probe);
+}
+
+/*
+ * ptc.l and the locally initiated forms of ptc.g/ptc.ga purge both streams.
+ * An overlap with either local TR bank is therefore a Machine Check.  The RID
+ * selected by the purge address participates in the comparison; a remote
+ * global-purge transaction has a distinct, non-MCA rule and does not use this
+ * local preflight.
+ */
+bool ia64_translation_cache_purge_would_machine_check(
+    const CPUIA64State *env, vaddr address, uint8_t page_size)
+{
+    IA64TranslationEntry probe;
+
+    if (!env || !ia64_purge_page_size_supported(page_size)) {
+        return false;
+    }
+    probe = ia64_translation_overlap_probe(env, address, page_size);
+    return ia64_has_overlapping_entry(env->memory.itr, IA64_ITR_COUNT,
+                                      &probe) ||
+           ia64_has_overlapping_entry(env->memory.dtr, IA64_DTR_COUNT,
+                                      &probe);
 }
 
 bool ia64_install_translation(CPUIA64State *env, bool instruction,

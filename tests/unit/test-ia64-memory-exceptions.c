@@ -675,6 +675,82 @@ static void test_opposite_stream_cache_preserves_pinned_register(void)
     g_assert_cmphex(result.paddr, ==, 0x0000000008002c00ULL);
 }
 
+static void test_translation_insert_machine_check_preflight(void)
+{
+    CPUIA64State env;
+    vaddr instruction_base = UINT64_C(0xa000000100000000);
+    vaddr data_base = UINT64_C(0xa000000108000000);
+    uint64_t instruction_translation = UINT64_C(0x0010000004000661);
+    uint64_t data_translation = UINT64_C(0x0010000008000661);
+    uint64_t large_itir = UINT64_C(0x68);
+    uint64_t small_itir = UINT64_C(0x40);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rr[5] = test_rr(0x220, 26, false);
+
+    g_assert_true(ia64_install_translation(&env, true, true, 2,
+                                           instruction_base,
+                                           instruction_translation,
+                                           large_itir));
+    g_assert_true(ia64_install_translation(&env, false, true, 3,
+                                           data_base, data_translation,
+                                           large_itir));
+
+    /* Same-stream partial or full TR overlap is the MCA condition. */
+    g_assert_true(ia64_translation_insert_would_machine_check(
+        &env, true, instruction_base + 0x12000, small_itir));
+    g_assert_true(ia64_translation_insert_would_machine_check(
+        &env, false, data_base, large_itir));
+
+    /* The opposite stream, a disjoint range, and another RID are not. */
+    g_assert_false(ia64_translation_insert_would_machine_check(
+        &env, false, instruction_base + 0x12000, small_itir));
+    g_assert_false(ia64_translation_insert_would_machine_check(
+        &env, true, instruction_base + (UINT64_C(1) << 26), small_itir));
+    env.rr[5] = test_rr(0x221, 26, false);
+    g_assert_false(ia64_translation_insert_would_machine_check(
+        &env, true, instruction_base, large_itir));
+
+    /* Preflight is observational: neither TR bank may be changed. */
+    g_assert_true(env.memory.itr[2].valid);
+    g_assert_true(env.memory.dtr[3].valid);
+    g_assert_cmphex(env.memory.itr[2].raw, ==, instruction_translation);
+    g_assert_cmphex(env.memory.dtr[3].raw, ==, data_translation);
+}
+
+static void test_translation_cache_purge_machine_check_preflight(void)
+{
+    CPUIA64State env;
+    vaddr instruction_base = UINT64_C(0xa000000100000000);
+    vaddr data_base = UINT64_C(0xa000000108000000);
+    uint64_t instruction_translation = UINT64_C(0x0010000004000661);
+    uint64_t data_translation = UINT64_C(0x0010000008000661);
+    uint64_t itir = UINT64_C(0x68);
+
+    ia64_cpu_reset_synthetic_itanium2(&env);
+    env.rr[5] = test_rr(0x330, 26, false);
+    g_assert_true(ia64_install_translation(&env, true, true, 2,
+                                           instruction_base,
+                                           instruction_translation, itir));
+    g_assert_true(ia64_install_translation(&env, false, true, 3,
+                                           data_base, data_translation,
+                                           itir));
+
+    /* A local PTC searches both streams and any TR overlap is an MCA. */
+    g_assert_true(ia64_translation_cache_purge_would_machine_check(
+        &env, instruction_base + 0x2000, 16));
+    g_assert_true(ia64_translation_cache_purge_would_machine_check(
+        &env, data_base, 26));
+    g_assert_false(ia64_translation_cache_purge_would_machine_check(
+        &env, data_base + (UINT64_C(1) << 26), 16));
+
+    env.rr[5] = test_rr(0x331, 26, false);
+    g_assert_false(ia64_translation_cache_purge_would_machine_check(
+        &env, instruction_base, 26));
+    g_assert_true(env.memory.itr[2].valid);
+    g_assert_true(env.memory.dtr[3].valid);
+}
+
 static void test_translation_lookup_cache_refreshes_after_install(void)
 {
     CPUIA64State env;
@@ -2514,6 +2590,10 @@ int main(int argc, char **argv)
                     test_instruction_translation_register_lookup);
     g_test_add_func("/ia64-memory/opposite-stream-tc-preserves-pinned-tr",
                     test_opposite_stream_cache_preserves_pinned_register);
+    g_test_add_func("/ia64-memory/translation-insert-mca-preflight",
+                    test_translation_insert_machine_check_preflight);
+    g_test_add_func("/ia64-memory/translation-cache-purge-mca-preflight",
+                    test_translation_cache_purge_machine_check_preflight);
     g_test_add_func("/ia64-memory/lookup-cache-refreshes-after-install",
                     test_translation_lookup_cache_refreshes_after_install);
     g_test_add_func("/ia64-memory/region-register-rid-change",
