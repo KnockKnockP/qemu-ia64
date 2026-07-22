@@ -109,6 +109,14 @@ INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS = tuple(
     if "_ld" in row
 )
 
+INTEGER_SPECULATION_SUCCESS_IMPLEMENTATION_ROWS = tuple(sorted((
+    "cpu.opcode.ia64_op_chk_a",
+    "cpu.opcode.ia64_op_chk_s",
+    *("cpu.opcode.ia64_op_ld{}{}".format(width, suffix)
+      for width in (1, 2, 4, 8)
+      for suffix in ("a", "c_clr", "c_nc", "s", "sa")),
+)))
+
 
 def validate_contract(root: Path) -> str:
     path = root / "tests/ia64-conformance/speculation-semantic-tranche.json"
@@ -118,8 +126,8 @@ def validate_contract(root: Path) -> str:
             document.get("schema_version") != 1):
         raise AssertionError("speculation tranche schema/version drift")
     cases = document.get("cases")
-    if not isinstance(cases, list) or len(cases) != 8:
-        raise AssertionError("speculation tranche must contain eight atomic cases")
+    if not isinstance(cases, list) or len(cases) != 9:
+        raise AssertionError("speculation tranche must contain nine atomic cases")
     by_row = {case.get("normative_row"): case for case in cases}
     if set(by_row) != {
             "ALT-001-INTEGER-ALWAYS-DEFER-PSR-IC",
@@ -129,7 +137,8 @@ def validate_contract(root: Path) -> str:
             "ALT-002-INTEGER-NO-RECOVERY-PROTECTION",
             "ALT-002-INTEGER-NO-RECOVERY-VHPT",
             "ALT-001-INTEGER-RECOVERY-DCR-DM",
-            "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG"}:
+            "ALT-001-INTEGER-RECOVERY-DCR-PROTECTION-DEBUG",
+            "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES"}:
         raise AssertionError("speculation tranche normative rows drifted")
     deferred = by_row["ALT-001-INTEGER-NATPAGE-DEFERRAL"]
     if deferred.get("implementation_rows") != list(
@@ -152,6 +161,15 @@ def validate_contract(root: Path) -> str:
     if software_defer.get("execution", {}).get("probes") != [
             "integer_speculative_software_defer_case"]:
         raise AssertionError("PSR.ed execution probe drifted")
+    success = by_row[
+        "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES"]
+    if success.get("implementation_rows") != list(
+            INTEGER_SPECULATION_SUCCESS_IMPLEMENTATION_ROWS):
+        raise AssertionError("successful speculation implementation rows drifted")
+    if success.get("execution", {}).get("probes") != [
+            "successful_integer_speculative_load_case",
+            "successful_integer_check_load_case"]:
+        raise AssertionError("successful speculation execution probes drifted")
     immediate = by_row["ALT-002-INTEGER-NO-RECOVERY-FAULTS"]
     if immediate.get("implementation_rows") != list(
             INTEGER_SPECULATIVE_LOAD_IMPLEMENTATION_ROWS):
@@ -197,6 +215,7 @@ def validate_contract(root: Path) -> str:
     always_defer_variants = set(always_defer.get("applicable_variants", []))
     software_defer_variants = set(
         software_defer.get("applicable_variants", []))
+    success_variants = set(success.get("applicable_variants", []))
     immediate_variants = set(immediate.get("applicable_variants", []))
     protection_variants = set(protection.get("applicable_variants", []))
     vhpt_variants = set(vhpt.get("applicable_variants", []))
@@ -219,6 +238,12 @@ def validate_contract(root: Path) -> str:
             raise AssertionError(
                 "PSR.ed row misses width {} variants".format(width)
             )
+        for suffix in ("s", "a", "sa", "c.clr", "c.clr.acq", "c.nc"):
+            if "ld{}.{}".format(width, suffix) not in success_variants:
+                raise AssertionError(
+                    "successful speculation row misses ld{}.{}".format(
+                        width, suffix)
+                )
         if "ld{}.s".format(width) not in immediate_variants or \
                 "ld{}.sa".format(width) not in immediate_variants:
             raise AssertionError(
@@ -245,8 +270,9 @@ def validate_contract(root: Path) -> str:
                 "DCR protection/debug row misses width {} variants".format(
                     width)
             )
-    return ("eight exact ALT rows cover PSR.ed software deferral, PSR.ic=0 "
-            "always-defer, deferred NaTPage, and no-recovery "
+    return ("nine exact ALT rows cover non-faulting speculation attributes, "
+            "PSR.ed software deferral, PSR.ic=0 always-defer, deferred "
+            "NaTPage, and no-recovery "
             "translation, alignment, protection, debug, VHPT-translation, "
             "Data-TLB, and the complete recovery-model DCR deferral-bit "
             "behavior for every applicable integer width")
@@ -2491,6 +2517,212 @@ def integer_speculative_software_defer_case(
     )
 
 
+def _successful_speculation_fixture(
+        width: int, attribute: str) -> Tuple[int, int, int, List[object]]:
+    """Return address, physical backing, next IP, and class-specific setup."""
+    if width not in (1, 2, 4, 8):
+        raise ValueError("successful speculation requires ld1/2/4/8")
+    if attribute not in ("speculative", "limited", "non-speculative"):
+        raise ValueError("unknown speculation attribute " + attribute)
+    virtual = 0x8000
+    physical = 0x2000
+    entry = 0x10000
+    load_address = physical if attribute == "limited" else virtual
+    bundles: List[object] = [
+        _movl_bundle(entry, 7, load_address),
+        _movl_bundle(entry + 0x10, 8, load_address),
+        _movl_bundle(entry + 0x20, 20, 0x6A00000000000000 | width),
+        _movl_bundle(entry + 0x30, 22, 0x6B00000000000000 | width),
+    ]
+    address = entry + 0x40
+    if attribute == "limited":
+        bundles.extend((
+            H.Bundle(address, 0x01, H.ssm(H.IA64_PSR_IC),
+                     H.nop_i(), H.nop_i()),
+            H.Bundle(address + 0x10, 0x01, H.srlz_i(),
+                     H.nop_i(), H.nop_i()),
+        ))
+        address += 0x20
+    else:
+        memory_attribute = 0 if attribute == "speculative" else 4
+        bundles.append(_movl_bundle(
+            address, 2, _mapped_pte(physical, memory_attribute)))
+        address = _append_dtc_install(bundles, address + 0x10)
+    return load_address, physical, address, bundles
+
+
+def successful_integer_speculative_load_case(
+        width: int, memory_class: str, attribute: str) -> RuntimeCase:
+    """Exercise every Table 4-14 integer result across speculation classes."""
+    if memory_class not in ("s", "a", "sa"):
+        raise ValueError("successful load case requires .s, .a, or .sa")
+    load_address, physical, load_ip, bundles = \
+        _successful_speculation_fixture(width, attribute)
+    load_raw = integer_load(
+        width, memory_class, r1=20, r3=7,
+        update="imm", imm=width,
+    )
+    bundles.append(H.Bundle(
+        load_ip, 0x01, load_raw, H.nop_i(), H.nop_i()))
+    check_ip = load_ip + 0x10
+    recovery = check_ip + 0x20
+    check_raw = (_chk_s_branch(check_ip, recovery, reg=20)
+                 if memory_class == "s" else
+                 _chk_a_branch(check_ip, recovery, reg=20))
+    terminal = check_ip + 0x40
+    bundles.extend((
+        H.Bundle(check_ip, 0x01, check_raw, H.nop_i(), H.nop_i()),
+        _marker_bundle(check_ip + 0x10, 30, 1, terminal),
+        _marker_bundle(recovery, 30, 2, terminal),
+        H.spin_bundle(terminal),
+    ))
+    label = "LD{}.{} {} result".format(
+        width, memory_class.upper(), attribute)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=0x10000,
+    )
+
+    returns_value = (attribute == "speculative" or
+                     (attribute == "limited" and memory_class == "a"))
+    returns_zero = attribute == "non-speculative" and memory_class == "a"
+    fails_control = (memory_class in ("s", "sa") and
+                     attribute != "speculative")
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        H._require(snapshot.ip == terminal and
+                   snapshot.gr[7] == load_address + width,
+                   label + " did not reach terminal with the exact update")
+        mask = ((1 << (width * 8)) - 1
+                if width != 8 else (1 << 64) - 1)
+        if returns_value:
+            H._require(snapshot.gr[20] ==
+                       (0x8877665544332211 & mask) and
+                       not (snapshot.nat_low & (1 << 20)),
+                       label + " did not return the exact memory value")
+        elif returns_zero:
+            H._require(snapshot.gr[20] == 0 and
+                       not (snapshot.nat_low & (1 << 20)),
+                       label + " did not return advanced-load failure zero")
+        else:
+            H._require(snapshot.nat_low & (1 << 20),
+                       label + " did not return a deferred NaT token")
+        if memory_class == "s":
+            expected_marker = 2 if fails_control else 1
+            H._require(snapshot.gr[30] == expected_marker,
+                       label + " CHK.S selected the wrong edge")
+        elif fails_control or returns_zero:
+            H._require(snapshot.gr[30] == 2,
+                       label + " unexpectedly exposed an ALAT entry")
+        else:
+            H._require(snapshot.gr[30] in (1, 2),
+                       label + " produced an impossible CHK.A edge")
+        expected_psr = H.IA64_PSR_IC
+        if attribute != "limited":
+            expected_psr |= H.IA64_PSR_DT
+        H._require((snapshot.psr & expected_psr) == expected_psr,
+                   label + " lost its class-selecting PSR controls")
+        return (label + " matched Table 4-14 value/NaT/update semantics; "
+                "CHK.A accepted the architecture-permitted hit or miss")
+
+    opcode = "IA64_OP_LD{}{}".format(width, memory_class.upper())
+    return RuntimeCase(
+        label, program, (load_ip, check_ip), verify,
+        (opcode, "IA64_OP_CHK_S" if memory_class == "s" else
+         "IA64_OP_CHK_A"),
+    )
+
+
+def successful_integer_check_load_case(
+        width: int, check_class: str, attribute: str,
+        initial_entry: str) -> RuntimeCase:
+    """Exercise exact-match and clean-miss Table 4-17 check-load behavior."""
+    if check_class not in ("c.clr", "c.clr.acq", "c.nc"):
+        raise ValueError("unknown integer check-load class " + check_class)
+    if initial_entry not in ("hit", "miss"):
+        raise ValueError("check-load initial entry must be hit or miss")
+    if attribute == "non-speculative" and initial_entry == "hit":
+        raise ValueError("non-speculative ALAT-hit behavior is undefined")
+    load_address, physical, address, bundles = \
+        _successful_speculation_fixture(width, attribute)
+    traced: List[int] = []
+    if initial_entry == "hit":
+        advanced_ip = address
+        address = _append_m(
+            bundles, address,
+            integer_load(width, "a", r1=20, r3=7), traced,
+        )
+        bundles.append(H.Bundle(
+            address, 0x03, H.nop_m(), H.adds(22, 0, 20), H.nop_i()))
+        address += 0x10
+    else:
+        advanced_ip = None
+    check_ip = address
+    address = _append_m(
+        bundles, address,
+        integer_load(
+            width, check_class, r1=20, r3=8,
+            update="imm", imm=width,
+        ), traced,
+    )
+    branch_ip = address
+    recovery = branch_ip + 0x20
+    terminal = branch_ip + 0x40
+    bundles.extend((
+        H.Bundle(branch_ip, 0x01,
+                 _chk_a_branch(branch_ip, recovery, reg=20),
+                 H.nop_i(), H.nop_i()),
+        _marker_bundle(branch_ip + 0x10, 30, 1, terminal),
+        _marker_bundle(recovery, 30, 2, terminal),
+        H.spin_bundle(terminal),
+    ))
+    traced.append(branch_ip)
+    label = "LD{}.{} {} {}".format(
+        width, check_class.upper(), attribute, initial_entry)
+    program = H.Program(
+        name=label, bundles=tuple(bundles), terminal_ip=terminal,
+        data=(H.DataWord(physical, 0x8877665544332211, 8),),
+        entry=0x10000,
+    )
+
+    def verify(snapshot) -> str:
+        _no_exception(snapshot, label)
+        mask = ((1 << (width * 8)) - 1
+                if width != 8 else (1 << 64) - 1)
+        expected = 0x8877665544332211 & mask
+        H._require(snapshot.ip == terminal and
+                   snapshot.gr[20] == expected and
+                   not (snapshot.nat_low & (1 << 20)) and
+                   snapshot.gr[8] == load_address + width,
+                   label + " lost exact value, NaT, update, or terminal")
+        if initial_entry == "hit":
+            H._require(snapshot.gr[22] == expected,
+                       label + " did not establish the exact advanced value")
+        guaranteed_absent = (
+            initial_entry == "miss" and
+            (check_class != "c.nc" or attribute == "non-speculative")
+        )
+        if guaranteed_absent:
+            H._require(snapshot.gr[30] == 2,
+                       label + " allocated a forbidden ALAT entry")
+        else:
+            H._require(snapshot.gr[30] in (1, 2),
+                       label + " produced an impossible CHK.A edge")
+        return (label + " returned the exact value and update; its following "
+                "CHK.A matched mandatory absence or permitted ALAT optionality")
+
+    opcodes = ["IA64_OP_LD{}C_{}".format(
+        width, "NC" if check_class == "c.nc" else "CLR"),
+        "IA64_OP_CHK_A"]
+    if advanced_ip is not None:
+        opcodes.insert(0, "IA64_OP_LD{}A".format(width))
+    return RuntimeCase(
+        label, program, tuple(traced), verify, tuple(opcodes),
+    )
+
+
 def integer_speculative_protection_fault_case(
         width: int, memory_class: str, condition: str) -> RuntimeCase:
     if width not in (1, 2, 4, 8) or memory_class not in ("s", "sa"):
@@ -3454,6 +3686,19 @@ def runtime_cases() -> Tuple[RuntimeCase, ...]:
           for width in (1, 2, 4, 8)
           if condition != "unaligned" or width != 1
           for memory_class in ("s", "sa")),
+        *(successful_integer_speculative_load_case(
+              width, memory_class, attribute)
+          for attribute in ("speculative", "limited", "non-speculative")
+          for width in (1, 2, 4, 8)
+          for memory_class in ("s", "a", "sa")),
+        *(successful_integer_check_load_case(
+              width, check_class, attribute, initial_entry)
+          for attribute in ("speculative", "limited", "non-speculative")
+          for width in (1, 2, 4, 8)
+          for check_class in ("c.clr", "c.clr.acq", "c.nc")
+          for initial_entry in ("hit", "miss")
+          if not (attribute == "non-speculative" and
+                  initial_entry == "hit")),
         fp_speculative_nat_page_defer_case(),
         *(reserved_width_illegal_case(opcode) for opcode in (
             "IA64_OP_LD1FILL", "IA64_OP_LD2FILL", "IA64_OP_LD4FILL",

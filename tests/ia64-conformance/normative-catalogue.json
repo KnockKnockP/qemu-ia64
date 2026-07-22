@@ -2,7 +2,7 @@
   "$comment": "SPDX-License-Identifier: GPL-2.0-or-later",
   "schema": "vibtanium.ia64.normative-catalogue",
   "schema_version": 1,
-  "catalogue_revision": 23,
+  "catalogue_revision": 24,
   "catalogue_policy": {
     "authority": "Intel Itanium Architecture Software Developer's Manual, Revision 2.3",
     "derivation": "manually-authored-from-cited-specification",
@@ -172,6 +172,26 @@
       "committed_prefix": "Only earlier instructions commit; the faulting load commits no destination, NaT, base update, ALAT, or memory effect",
       "restart_rule": "CR.IHA and CR.ITIR describe walker backing repair while CR.IFA retains the original address and CR.IIP/IPSR.ri identify the exact faulting M slot.",
       "permitted_results": ["All eight invalid-entry width/class probes reach Data TLB vector 0x0800 with exact R|SP, IHA=0x40, ITIR.ps=12, and no load effects", "All eight missing-backing width/class probes reach VHPT Translation vector 0x0000 with the same exact original and walker state and no load effects"],
+      "required_evidence": "E2"
+    },
+    {
+      "id": "ALT-003-INTEGER-NONFAULTING-SPECULATION-ATTRIBUTES",
+      "requirement_ids": ["ALT-003", "ALT-001", "MEM-001", "MEM-003", "MEM-005", "MMU-015"],
+      "profiles": ["vibtanium-strict-up", "vibtanium-default-up"],
+      "interface_kind": "cpu.speculation",
+      "specification": {"document_id": "intel-ia64-sdm-v2-r2.3", "title": "Intel Itanium Architecture Software Developer's Manual, Volume 2: System Architecture", "revision": "2.3", "volume": 2, "part": "Part 1: Addressing and Protection", "section": "4.4.10", "printed_pages": ["2:79", "2:80", "2:86", "2:87", "2:88"], "manual_file": "itanium-architecture-software-developer-rev-2-3-vol-2-manual.pdf", "anchor": "ALAT Behavior on Non-faulting Advanced/Check Loads"},
+      "operation": {"kind": "integer-nonfaulting-speculation-attributes", "selector": "ld1/2/4/8.s/a/sa plus ld1/2/4/8.c.clr/c.clr.acq/c.nc across speculative, limited, and non-speculative classes", "encoding": "M10 immediate-update control-speculative, advanced, speculative-advanced, clear, acquire-clear, and no-clear loads followed by M20 CHK.S or M22 CHK.A"},
+      "legal_inputs": ["PSR.ic=1 and PSR.ed=0 with no exception condition", "Translated WB, physical WBL, and translated UC select the three architectural speculation classes", "Every check-load hit setup has an exact same-register/address/size advanced-load entry; every miss setup starts from an empty ALAT", "Non-speculative check-load hits are excluded because their behavior is undefined", "Distinct legal destination and base registers with a width-sized immediate update"],
+      "privilege": {"levels": [0], "rule": "All selected instructions are application-level; CPL0 is used only to install test-owned translations and serialize class-selecting PSR controls."},
+      "state_read": ["WB, WBL, or UC speculation class", "load/check base and destination value/NaT", "exact-match or clean-miss ALAT state", "PSR.ic, PSR.dt, and PSR.ed"],
+      "state_written": ["table-selected destination value, zero, or NaT", "exact width-sized post-increment", "permitted ALAT allocation, lookup, replacement, or removal", "CHK.S or CHK.A control-flow marker"],
+      "predication": {"applies": true, "rule": "All selected operations use p0; false qualification remains a separate ALT-006 row."},
+      "nat_behavior": "Speculative .s and .sa return the exact value with clear NaT. Limited/non-speculative .s and .sa return NaT. Advanced .a returns the exact value on speculative/limited pages and zero with clear NaT on a non-speculative page. Every check load returns the exact value with clear NaT.",
+      "possible_faults": ["No delivered fault"],
+      "fault_priority": ["predicate and operand legality", "memory-attribute speculation class", "Table 4-14 load response or Table 4-17 ALAT response", "destination/NaT and post-increment retirement", "checked observation"],
+      "committed_prefix": "Each load commits exactly its table-selected destination/NaT result and one post-increment; ALAT effects remain within the architecture's explicit pessimistic-lookup and replacement freedom",
+      "restart_rule": "No interruption restart occurs. CHK.S distinguishes control-speculation value from NaT, while CHK.A may fail pessimistically even after a conforming allocation.",
+      "permitted_results": ["All 36 width/load/class combinations match Table 4-14 exact value, zero, or NaT and update results", "All 60 exact-hit/clean-miss check-load combinations return the exact value and update", "Clear clean misses and non-speculative misses leave no entry; all other checks permit either CHK.A edge where Intel permits pessimistic failure"],
       "required_evidence": "E2"
     },
     {

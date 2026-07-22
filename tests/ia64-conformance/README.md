@@ -29,7 +29,7 @@ Each register row names one of 20 bank/scalar coverage groups so table-driven
 tests can close complete architectural index spaces without creating one test
 executable per register.
 
-The first eight exact speculation contracts live in
+The first nine exact speculation contracts live in
 `speculation-semantic-tranche.json`. Their public data-plane registration
 covers all four integer widths through NaTPage deferral, base updates, NaT
 state, and checked recovery without requiring the architecturally
@@ -70,19 +70,27 @@ deferral precedes address, translation, protection, debug, alignment, and
 data access; retires the exact update; purges the corresponding `.sa` ALAT
 entry; clears `PSR.ed`; takes checked recovery; and lets the following
 same-form safe load return its exact WB value normally.
+The ninth adds the complete 96-program non-faulting integer matrix from
+Volume 2 Tables 4-13, 4-14, and 4-17. Thirty-six `.s`/`.a`/`.sa` cases cross
+all widths with speculative WB, limited WBL, and non-speculative UC; sixty
+`.c.clr`/`.c.clr.acq`/`.c.nc` cases cover every defined exact-hit and clean-
+miss class. Exact values, advanced-load zero, NaT, post-increments, mandatory
+entry absence, and the architecture-permitted pessimistic ALAT-check outcomes
+are checked without assuming that a conforming implementation must report a
+hit.
 Other data-plane cases remain
 candidate evidence until they receive equally atomic contracts and complete
 variant matrices.
 
 The long-running tests are intentionally quiet while their internal TAP
-matrices execute. On the 2026-07-22 serialized public gate after the PSR.ed
-checkpoint, `test-ia64-system-tcg` took 47.09 seconds,
-`test-ia64-full-tcg` 48.48 seconds, and `test-ia64-register-tcg` 45.58
-seconds. The expanded data-plane registration passed 541 subtests in 147.12
-seconds, and all 50 selected tests passed in 395.6 seconds. A preceding fully
-parallel run completed all tests but lost one system-TCG QEMU to the fixed
-five-second HMP startup bound; that suite passed in isolation and in the
-serialized gate. The
+matrices execute. On the 2026-07-22 serialized public gate after the
+non-faulting speculation-attribute checkpoint, `test-ia64-system-tcg` took
+47.05 seconds, `test-ia64-full-tcg` 48.39 seconds, and
+`test-ia64-register-tcg` 45.56 seconds. The expanded data-plane registration
+passed 637 subtests in 172.87 seconds, and all 50 selected tests passed in
+423.4 seconds. The serialized lane avoids the fixed five-second HMP-startup
+contention seen under unrestricted host parallelism without weakening any
+per-test timeout. The
 RSE suites include five fresh-process
 save/load/RFI continuations across mandatory-instruction and current-frame
 fill faults. With parallel execution Meson may pause near the end of the

@@ -84,6 +84,7 @@ def integer_load(width: int, kind: str, *, r1: int = 20, r2: int = 21,
         "fill": 0x18,
         "c.clr": 0x20,
         "c.nc": 0x24,
+        "c.clr.acq": 0x28,
     }
     if width not in WIDTH_CODE or kind not in bases:
         raise ValueError("unknown integer-load width/type")
