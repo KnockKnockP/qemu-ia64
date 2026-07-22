@@ -504,6 +504,7 @@ def check_application_register_plane(root: Path) -> None:
     """Lock target legality and legality/NaT/value/privilege ordering."""
     translate = (root / "target/ia64/translate.c").read_text(encoding="utf-8")
     system = (root / "target/ia64/system-plane.c").read_text(encoding="utf-8")
+    insn = (root / "target/ia64/insn.c").read_text(encoding="utf-8")
     ar_legality = section(
         system,
         "static void ia64_system_validate_ar_legality(",
@@ -629,6 +630,44 @@ def check_application_register_plane(root: Path) -> None:
             writer.index("ia64_system_preserve_ar_write_sources") <
             writer.index("ia64_write_application_register"),
             "AR writer no longer orders reserved value before privilege")
+    rsc_fields = section(
+        system,
+        "static bool ia64_system_reserved_rsc(",
+        "static bool ia64_system_reserved_fpsr(",
+    )
+    for token in ("UINT64_C(0x1f)", "UINT64_C(0x3fff)",
+                  "IA64_RSC_LOADRS_SHIFT", "value & ~implemented"):
+        require(token in rsc_fields,
+                "RSC reserved-field contract lost " + token)
+    fpsr_fields = section(
+        system,
+        "static bool ia64_system_reserved_fpsr(",
+        "static bool ia64_system_reserved_cr_value(",
+    )
+    for token in ("value >> 58", "value >> 12", "value >> 47",
+                  "value >> 34", "value >> 21", "value >> 8"):
+        require(token in fpsr_fields,
+                "FPSR reserved-field contract lost " + token)
+    pfs_fields = section(
+        system,
+        "static bool ia64_system_reserved_pfs(",
+        "static bool ia64_system_reserved_rsc(",
+    )
+    for token in ("sof > IA64_RSE_PHYS_STACKED_REGS", "sol > sof",
+                  "sor > sof", "rrb_gr >= sor", "rrb_fr >= 96",
+                  "rrb_pr >= 48", "UINT64_C(0x3fff) << 38",
+                  "UINT64_C(0xf) << 58"):
+        require(token in pfs_fields,
+                "PFS reserved-field contract lost " + token)
+    ar_writer = section(
+        insn,
+        "void ia64_write_application_register(",
+        "static const char *ia64_cr_trace_name(",
+    )
+    for token in ("value & ~7ULL", "ia64_rse_write_rnat(env, value)",
+                  "env->nat.unat = value", "value & UINT64_C(0x3f)"):
+        require(token in ar_writer,
+                "named AR ignored/preserve contract lost " + token)
     preserve = section(
         system,
         "static void ia64_system_preserve_ar_write_sources(",
